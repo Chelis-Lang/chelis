@@ -154,69 +154,42 @@ fn consumed_shrink_over_cast_shape_expand_keeps_rank_two() {
     );
 }
 
-/// These two programs compiled before chelis#1277's expand/insert split and
-/// refuse now. That is a capability regression, and it is recorded as one
-/// rather than adjusted away.
+/// The two runtime-bound programs agree between `chelis eval` and compiled C.
 ///
-/// The program is unchanged in meaning: its consumer is a rank-2 `shrink`, so
-/// the operand is rank 2 under either spelling. What changed is the route. The
-/// deferred `expand` route reached C emission with a const node whose second
-/// axis carried a source; the fixed `insert` route reaches it with an
-/// anonymous dimension that `declared_shape_sources` yields no source for, and
-/// the emitter refuses loudly rather than guessing.
+/// They did not always. Under chelis#1277's expand/insert split they began
+/// refusing at C emission with chelis#1482's typed receipt, because the fixed
+/// route reached the emitter with a `const` node whose second axis carried no
+/// declared dim source, and this file recorded that as a capability
+/// regression. chelis#1548 removed the `const`: `relu` had been lowering to
+/// `Const(0)` plus `MaxElem`, and it now lowers to a dedicated `RiscOp::Relu`,
+/// so these programs have no unsourced const left to trip over and build
+/// again. They are the parity tests this file said they would return as.
 ///
-/// That refusal is chelis#1482, an already tracked gap with its own row in the
-/// runtime-extent oracle (`shrink.elementwise_const.build`, recorded at
-/// `typed_unsupported(#1482)`). The split does not introduce it; it makes it
-/// reachable from source that previously routed around it, so whoever flipped
-/// `expand`'s meaning would have met it. These tests assert the receipt so the
-/// day it is fixed they fail and come back as parity tests.
-fn assert_typed_refusal(source: &str, stem: &str) {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join(format!("{stem}.ch"));
-    fs::write(&path, source).expect("write source");
-    let out_dir = dir.path().join("out");
-    fs::create_dir_all(&out_dir).expect("create output dir");
-    let output = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .current_dir(dir.path())
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().expect("UTF-8 source path"),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().expect("UTF-8 output path"),
-        ])
-        .output()
-        .expect("build C");
-    assert!(
-        !output.status.success(),
-        "chelis#1482 still refuses this shape; a success here means it was fixed, \
-         so restore the C-parity assertion: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unimplemented chelis#1482")
-            && stderr.contains("output-axis extent sources"),
-        "the refusal must be chelis#1482's typed receipt, not another failure: \
-         {stderr}"
-    );
-}
-
+/// **chelis#1482 is not fixed**, and nothing here should be read as saying so.
+/// Only this witness stopped reproducing. Replacing `relu` with `sigmoid`,
+/// `silu`, or `gelu`, each of which still synthesizes a const, refuses with
+/// the same receipt on the same shrink result. The gap keeps its own oracle
+/// row, `shrink.elementwise_const.build`, recorded at `typed_unsupported`.
 #[test]
-fn consumed_shrink_with_runtime_end_refuses_c_emission_on_chelis_1482() {
+fn consumed_shrink_with_runtime_end_agrees_between_eval_and_c() {
     let source = runtime_bound_source("cast(0, int64)", "k");
-    assert_typed_refusal(&source, "shrink_expand_runtime_end");
+    let eval = eval_stdout(&source, "shrink_expand_runtime_end");
+    let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_end");
+    assert_eq!(
+        compiled, eval,
+        "a runtime end bound must give the compiled lane the same result as eval"
+    );
 }
 
 #[test]
-fn consumed_shrink_with_runtime_start_refuses_c_emission_on_chelis_1482() {
+fn consumed_shrink_with_runtime_start_agrees_between_eval_and_c() {
     let source = runtime_bound_source("cast(k - k, int64)", "cast(2, int64)");
-    assert_typed_refusal(&source, "shrink_expand_runtime_start");
+    let eval = eval_stdout(&source, "shrink_expand_runtime_start");
+    let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_start");
+    assert_eq!(
+        compiled, eval,
+        "a runtime start bound must give the compiled lane the same result as eval"
+    );
 }
 
 #[test]

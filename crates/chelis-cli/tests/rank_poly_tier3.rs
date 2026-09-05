@@ -2194,7 +2194,7 @@ fn form3_scalar_param_expand_size_rejected() {
          out = f(to_tensor([1.0, 2.0]), 3i64)\n";
     let stderr = build_expecting_failure(source, "issue_384_scalar_param_expand");
     assert!(
-        stderr.contains("expand")
+        stderr.contains("insert")
             && stderr.contains("no tensor in scope carries it")
             && stderr.contains("chelis#469"),
         "expected the Form-3 sourceless-size reject diagnostic citing #469, got: {stderr}"
@@ -2203,7 +2203,7 @@ fn form3_scalar_param_expand_size_rejected() {
     // ICE the sourceless symbol previously triggered downstream.
     assert!(
         !stderr.contains("internal compiler error"),
-        "sourceless Form-3 expand size must reject cleanly, not ICE: {stderr}"
+        "sourceless Form-3 insert size must reject cleanly, not ICE: {stderr}"
     );
 }
 
@@ -2218,10 +2218,10 @@ fn form3_scalar_param_expand_size_rejected_in_eval() {
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_397_eval_reject");
     assert!(
-        stderr.contains("expand")
+        stderr.contains("insert")
             && stderr.contains("no tensor in scope carries it")
             && stderr.contains("chelis#469"),
-        "eval must reject the sourceless Form-3 expand size with the same \
+        "eval must reject the sourceless Form-3 insert size with the same \
          #469 diagnostic as the backend, got: {stderr}"
     );
 }

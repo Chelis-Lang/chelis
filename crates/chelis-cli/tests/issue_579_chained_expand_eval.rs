@@ -653,7 +653,7 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
 }
 
 /// Negative parity for the chained case: an out-of-bounds insert axis on a
-/// genuinely rank-1 operand must fail eval with the targeted expand
+/// genuinely rank-1 operand must fail eval with the targeted insert
 /// diagnostic, never the #579 rank-monomorphization ICE and never a silent
 /// wrong-shape success.
 #[test]
@@ -663,8 +663,8 @@ fn issue_579_out_of_bounds_insert_axis_fails_eval_with_targeted_reason() {
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_579_axis_oob");
     assert!(
-        stderr.contains("expand") && stderr.contains("out of bounds"),
-        "out-of-bounds insert axis must fail with the targeted expand reason, got: {stderr}"
+        stderr.contains("insert") && stderr.contains("out of bounds"),
+        "out-of-bounds insert axis must fail with the targeted insert reason, got: {stderr}"
     );
     assert!(
         !stderr.contains("internal compiler error"),

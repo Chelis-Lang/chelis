@@ -293,13 +293,13 @@ fn issue_369_bare_scalar_expand_size_still_rejects() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "a bare-scalar `expand` size must be rejected, not silently \
+        "a bare-scalar `insert` size must be rejected, not silently \
          defaulted; stdout={stdout} stderr={stderr}",
     );
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("expand") && combined.contains("symbolic dimension"),
-        "rejection must name the sourceless symbolic `expand` size \
+        combined.contains("insert") && combined.contains("symbolic dimension"),
+        "rejection must name the sourceless symbolic `insert` size \
          (§4.7.2 / chelis#469), not some unrelated failure; got \
          stdout={stdout} stderr={stderr}",
     );

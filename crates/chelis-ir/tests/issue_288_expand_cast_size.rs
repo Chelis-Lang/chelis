@@ -140,7 +140,7 @@ fn assert_form3_reject_before_lowering(src: &str, label: &str) {
         .err()
         .unwrap_or_else(|| panic!("{label}: sourceless inline expand size must reject at check"));
     assert!(
-        err.contains("expand")
+        err.contains("insert")
             && err.contains("no tensor in scope carries it")
             && err.contains("chelis#469"),
         "{label}: expected the Form-3 sourceless-size reject citing #469, got: {err}"
