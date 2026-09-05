@@ -284,13 +284,13 @@ fn expand_error_inline_size_still_fires_form3_gate_once() {
     // (not skipped, not doubled), and never an ICE.
     let msgs = reject_messages(
         "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = \
-         expand(b, 0, add(t.1, cast(1, int64)))\n",
+         insert(b, 0, add(t.1, cast(1, int64)))\n",
         "3c: expand Error size",
     );
     let form3: Vec<_> = msgs
         .iter()
         .filter(|m| {
-            m.contains("expand")
+            m.contains("insert")
                 && m.contains("no tensor in scope carries it")
                 && m.contains("chelis#469")
         })

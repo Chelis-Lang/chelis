@@ -1972,11 +1972,11 @@ fn host_runtime_expand_inserts_new_leading_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(10.0, f32), cast(100.0, f32)])
-y = expand(b, cast(0, int32), cast(3, int64))
+y = insert(b, cast(0, int32), cast(3, int64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
-        .expect("expand should evaluate under host runtime");
+        .expect("insert should evaluate under host runtime");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![3, 2]);
     // Three replicas of [10, 100].
     assert_eq!(
@@ -1991,11 +1991,11 @@ fn host_runtime_expand_inserts_trailing_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = expand(b, cast(1, int32), cast(2, int64))
+y = insert(b, cast(1, int32), cast(2, int64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
-        .expect("expand at trailing axis should evaluate");
+        .expect("insert at trailing axis should evaluate");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
     // [1, 2] expanded along new last axis with count 2 -> [[1,1],[2,2]].
     assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 1.0, 2.0, 2.0]);
@@ -2013,15 +2013,15 @@ fn host_runtime_expand_singleton_input_inserts_not_replicates() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(7.0, f32)])
-y = expand(b, cast(0, int32), cast(4, int64))
+y = insert(b, cast(0, int32), cast(4, int64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
-        .expect("expand([1], 0, 4) should evaluate under host runtime");
+        .expect("insert([1], 0, 4) should evaluate under host runtime");
     assert_eq!(
         first_tensor_shape(&outcome, "y"),
         vec![4, 1],
-        "INSERT semantics: rank-1 [1] expand at axis 0 with count 4 must produce rank-2 [4, 1]",
+        "INSERT semantics: rank-1 [1] insert at axis 0 with count 4 must produce rank-2 [4, 1]",
     );
     assert_eq!(first_tensor_data(&outcome, "y"), vec![7.0, 7.0, 7.0, 7.0]);
 }
@@ -2035,13 +2035,13 @@ fn host_runtime_expand_negative_count_errors() {
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 negative_count = sub(shape(b, cast(0, int32)), cast(3, int64))
-y = expand(b, cast(0, int32), negative_count)
+y = insert(b, cast(0, int32), negative_count)
 "#,
     );
     let err = evaluate_host_program(&checked, &UnordMap::new())
-        .expect_err("expand with negative count must fail");
+        .expect_err("insert with negative count must fail");
     assert!(
-        err.contains("expand") && err.contains("extent") && err.contains("-1"),
+        err.contains("insert") && err.contains("extent") && err.contains("-1"),
         "expected exact negative-extent diagnostic, got: {err}"
     );
 }

@@ -11719,7 +11719,7 @@ fn infer_app_expr_host_type(
         }
         return Some(HostTypeTerm::Tensor(reduced));
     }
-    if name == "expand"
+    if (name == "expand" || name == "insert")
         && let (Some(input), Some(axis_expr), Some(size_expr)) =
             (kids.get(1), kids.get(2), kids.get(3))
         && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)
@@ -12894,8 +12894,8 @@ fn infer_builtin_host_type_from_arg_tys(
 
     match name {
         "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "count"
-        | "argmax_reduce" | "argmin_reduce" | "reshape" | "expand" | "pad" | "shrink"
-        | "stride" | "permute" | "split" | "sort" | "tensor_to_scalar" | "to_list" => {
+        | "argmax_reduce" | "argmin_reduce" | "reshape" | "expand" | "insert" | "pad"
+        | "shrink" | "stride" | "permute" | "split" | "sort" | "tensor_to_scalar" | "to_list" => {
             require_first("a tensor", is_tensor)?;
             if name == "to_list"
                 && matches!(
@@ -13075,7 +13075,9 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         // type and was emitted as `void* k = /* unsupported builtin
         // expand */ 0`, then mistyped as a scalar at the consuming
         // tensor-helper callsite (`(float)(void* k)`, issue #300).
-        "reshape" | "expand" | "pad" | "shrink" | "stride" | "permute" => match arg_tys.first() {
+        "reshape" | "expand" | "insert" | "pad" | "shrink" | "stride" | "permute" => match arg_tys
+            .first()
+        {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
             _ => Some(fresh_host_inference()),
         },
@@ -14850,7 +14852,7 @@ def bad[b](box: Box[b]) -> bool =
         let mut lines = vec![
             format!("module FrontEndPerformance.{module}N{operations}"),
             "def bc(c: f32) -> tensor[8, f32] = \
-             reshape(expand(to_tensor([c]), 0, 8i64), [8i64])"
+             reshape(insert(to_tensor([c]), 0, 8i64), [8i64])"
                 .to_string(),
         ];
         if flat {
@@ -17229,7 +17231,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     #[test]
     fn manifested_host_lane_overrides_legacy_tensor_root_classification() {
         let checked = surf_check(
-            "x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)\n\
+            "x = insert(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)\n\
              y = mul(x, x)\n",
         );
         let realizability = chelis_effects::realizability::infer_realizability(

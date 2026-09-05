@@ -618,7 +618,7 @@ def predict(
   w: tensor[64, 1, f32],
   b: tensor[1, f32]
 ) -> tensor[batch, 1, f32] =
-  add(matmul(x, w), expand(b, 0, batch))
+  add(matmul(x, w), insert(b, 0, batch))
 "#,
     );
     let missing = checked

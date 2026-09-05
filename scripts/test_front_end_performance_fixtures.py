@@ -30,7 +30,7 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(
             by_name["nested_n2.ch"],
             """module FrontEndPerformance.NestedN2
-def bc(c: f32) -> tensor[8, f32] = reshape(expand(to_tensor([c]), 0, 8i64), [8i64])
+def bc(c: f32) -> tensor[8, f32] = reshape(insert(to_tensor([c]), 0, 8i64), [8i64])
 def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = if gte(i, 5i64) then s else st(mul(add(mul(add(s, bc(cast(1.0, f32))), bc(cast(0.5, f32))), bc(cast(1.0, f32))), bc(cast(0.5, f32))), add(i, 1i64))
 r = index(to_list(st(bc(cast(1.0, f32)), 0i64)), 0i64)
 """,
@@ -38,7 +38,7 @@ r = index(to_list(st(bc(cast(1.0, f32)), 0i64)), 0i64)
         self.assertEqual(
             by_name["flat_n2.ch"],
             """module FrontEndPerformance.FlatN2
-def bc(c: f32) -> tensor[8, f32] = reshape(expand(to_tensor([c]), 0, 8i64), [8i64])
+def bc(c: f32) -> tensor[8, f32] = reshape(insert(to_tensor([c]), 0, 8i64), [8i64])
 def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = if gte(i, 5i64) then s else {
   t0 = mul(add(s, bc(cast(1.0, f32))), bc(cast(0.5, f32)))
   t1 = mul(add(t0, bc(cast(1.0, f32))), bc(cast(0.5, f32)))

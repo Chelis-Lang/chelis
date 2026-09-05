@@ -84,13 +84,30 @@ fn extracted_dispatched_names() -> UnordSet<String> {
             && let Some(end_q) = rest.find('"')
         {
             let name = &rest[..end_q];
-            let after = rest[end_q + 1..].trim_start();
+            let mut after = rest[end_q + 1..].trim_start();
+            // An or-pattern arm, `"expand" | "insert" => {`, dispatches every
+            // name in it. Walk the alternatives so a shared arm is not read as
+            // no arm at all for any of them.
+            let mut names = vec![name.to_string()];
+            while let Some(tail) = after.strip_prefix('|') {
+                let tail = tail.trim_start();
+                let Some(rest_alt) = tail.strip_prefix('"') else {
+                    break;
+                };
+                let Some(end_alt) = rest_alt.find('"') else {
+                    break;
+                };
+                names.push(rest_alt[..end_alt].to_string());
+                after = rest_alt[end_alt + 1..].trim_start();
+            }
             if after.starts_with("=>")
-                && name
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                && names
+                    .iter()
+                    .all(|n| n.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
             {
-                out.insert(name.to_string());
+                for n in names {
+                    out.insert(n);
+                }
             }
         }
     }

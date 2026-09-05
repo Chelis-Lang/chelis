@@ -82,8 +82,16 @@ pub(super) fn infer_app(
     // check before the procedural arm. Dispatch it here (the
     // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
     // which reaches `check_expand_signature` with the scheme intact.
-    if matches!(func_name.as_deref(), Some("expand")) && kids.len() >= 5 {
-        return infer_expand_app(list, env, vg, subst, adt_reg, errors, product);
+    if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
+        && kids.len() >= 5
+    {
+        // `&'static str`, not the borrow, so the callee outlives `func_name`.
+        let callee = if callee == "insert" {
+            "insert"
+        } else {
+            "expand"
+        };
+        return infer_expand_app(callee, list, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -224,7 +232,7 @@ pub(super) fn infer_app(
             // keep flowing through ordinary inference into the
             // compile-time-constant rejection. The 4-arg anchored form routes
             // through `infer_expand_app` instead and never reaches this loop.
-            let is_expand = matches!(func_name.as_deref(), Some("expand"));
+            let is_expand = matches!(func_name.as_deref(), Some("expand") | Some("insert"));
             let is_expand_size = is_expand && index == 2;
             let is_expand_inserted_name = is_expand
                 && index == 1
@@ -278,7 +286,7 @@ pub(super) fn infer_app(
     // size dtype would otherwise surface as the scheme unification's bare
     // `precision mismatch` pair. Pre-check the resolved size type here so
     // the rejection names the fix, mirroring shrink/pad/stride/reshape.
-    if matches!(func_name.as_deref(), Some("expand"))
+    if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
         && arg_tys.len() >= 3
         && let Type::Prim(p) = subst.apply(&arg_tys[2])
         && p != Prim::Int64
@@ -290,7 +298,8 @@ pub(super) fn infer_app(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "expand expects an int64 size (write Ni64 or cast(N, int64)), got {}",
+                        "{callee} expects an int64 size (write Ni64 or cast(N, int64)), \
+                         got {}",
                         Type::Prim(p)
                     ),
                 ),

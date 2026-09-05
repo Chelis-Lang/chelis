@@ -3623,6 +3623,7 @@ fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
                 | "reshape"
                 | "permute"
                 | "expand"
+                | "insert"
                 | "pad"
                 | "shrink"
                 | "stride"
@@ -9160,7 +9161,7 @@ impl LowerCtx {
                     self.current_span_id.clone(),
                 )
             }
-            "expand" if args.len() >= 2 => {
+            "expand" | "insert" if args.len() >= 2 => {
                 let x = self.lower_expr_node(&args[0], "expand input");
                 // chelis#339 named-axis expand (spec §4.5.3): when the axis
                 // argument is a dimension NAME, the insertion point is

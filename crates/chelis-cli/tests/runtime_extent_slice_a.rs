@@ -69,7 +69,7 @@ fn compile_and_run_c(build_dir: &Path, stem: &str) -> std::process::Output {
 
 #[test]
 fn zero_extent_is_check_clean_and_evaluates_to_empty_tensor() {
-    let source = "out = expand(scalar_to_tensor(1.0f32), 0, 0i64)\n";
+    let source = "out = insert(scalar_to_tensor(1.0f32), 0, 0i64)\n";
     let report = check(source);
     assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
     assert!(errors(&report).is_empty(), "{report}");
@@ -129,31 +129,67 @@ fn zero_extent_is_check_clean_and_evaluates_to_empty_tensor() {
 
 #[test]
 fn negative_extent_remains_a_static_type_error() {
-    let report = check("out = expand(scalar_to_tensor(1.0f32), 0, -1i64)\n");
+    let report = check("out = insert(scalar_to_tensor(1.0f32), 0, -1i64)\n");
     let joined = errors(&report).join("\n");
     assert!(
-        joined.contains("expand") && joined.contains("-1"),
+        joined.contains("insert") && joined.contains("-1"),
         "{report}"
     );
 }
 
+/// A declared result one rank too high is refused, through the outer
+/// unification rather than through the operation's own rank diagnostic.
+///
+/// `expand` has two legal result shapes, so it records a deferred obligation
+/// and the ascription rejects it through the deferred-constraint path, whose
+/// message names the callee. `insert` has one legal shape and nothing to
+/// defer, so it builds that shape from the operand and axis alone and the
+/// disagreement surfaces here as the generic let-binding mismatch. Same
+/// verdict, same kind, same severity, less specific text; the pull request
+/// body carries the row.
+///
+/// The exact text is the assertion because a looser `contains("rank")` needle
+/// is satisfied by both messages and would not distinguish the two routes.
+/// `insert`'s own rank diagnostic is reachable where a declared result is
+/// threaded as an expected result, which
+/// `insert_def_body_wrong_rank_names_the_callee` pins.
 #[test]
-fn shape_sourced_expand_rejects_wrong_rank_ascription() {
+fn shape_sourced_insert_rejects_wrong_rank_ascription() {
     let source = "def bad(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = {\n\
-        \x20 step1: tensor[c, h, w, f32] = expand(g, 1, shape(x, cast(2, int32)))\n\
+        \x20 step1: tensor[c, h, w, f32] = insert(g, 1, shape(x, cast(2, int32)))\n\
         \x20 step1\n\
         }\n";
     let report = check(source);
     let joined = errors(&report).join("\n");
     assert!(
-        joined.contains("expand") && joined.contains("rank"),
+        joined.contains("tensor rank mismatch: 2 dims vs 3 dims"),
         "wrong-rank ascription must reject at check: {report}"
+    );
+}
+
+/// Where the declared result reaches the call as an expected result, `insert`
+/// rejects a wrong rank with its own diagnostic and names itself.
+///
+/// A `def` body is that route: `expr_function.rs` threads the declared return
+/// type down to the application, and `app_post.rs` seeds it for both
+/// spellings. Unseeded, `insert` would build its one shape and hand the
+/// disagreement to the return-type unification, which names no operation, and
+/// the `plus one` arm in `check_expand_signature` would be reachable from no
+/// program at all.
+#[test]
+fn insert_def_body_wrong_rank_names_the_callee() {
+    let source = "def bad(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = insert(g, 1, shape(x, cast(2, int32)))\n";
+    let report = check(source);
+    let joined = errors(&report).join("\n");
+    assert!(
+        joined.contains("insert output rank 3 must equal input rank 1 plus one"),
+        "a wrong-rank def body must reject with insert's own rank diagnostic: {report}"
     );
 }
 
 #[test]
 fn bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice() {
-    let source = "def f(b: tensor[f32], c: tensor[k, f32]) -> tensor[k, f32] = expand(b, 0, k)\n\
+    let source = "def f(b: tensor[f32], c: tensor[k, f32]) -> tensor[k, f32] = insert(b, 0, k)\n\
         out = f(scalar_to_tensor(2.0f32), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
     let report = check(source);
     assert!(errors(&report).is_empty(), "{report}");
@@ -221,14 +257,14 @@ fn bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice() {
 
 #[test]
 fn stale_extent_guidance_is_removed_but_axis_guidance_stays_int32() {
-    let extent = check("def bad(b: tensor[f32], k: int64) -> tensor[k, f32] = expand(b, 0, k)\n");
+    let extent = check("def bad(b: tensor[f32], k: int64) -> tensor[k, f32] = insert(b, 0, k)\n");
     let extent_errors = errors(&extent).join("\n");
     assert!(!extent_errors.contains("Form-3"), "{extent_errors}");
     assert!(!extent_errors.contains("cast(N, int32)"), "{extent_errors}");
     assert!(extent_errors.contains("int64"), "{extent_errors}");
 
     let axis = check(
-        "def bad(x: tensor[2, f32], axis: int32) -> tensor[2, 2, f32] = expand(x, axis, 2i64)\n",
+        "def bad(x: tensor[2, f32], axis: int32) -> tensor[2, 2, f32] = insert(x, axis, 2i64)\n",
     );
     let axis_errors = errors(&axis).join("\n");
     assert!(axis_errors.contains("int32"), "{axis_errors}");

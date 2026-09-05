@@ -92,7 +92,7 @@ fn otherwise_unconsumed_expand_rejects_axis_beyond_trailing_position() {
             matches!(error.kind, CheckErrorKind::DimensionMismatch)
                 && error
                     .message
-                    .contains("expand insert axis 2 is out of bounds for rank 1 tensor")
+                    .contains("expand axis 2 is out of bounds for rank 1 tensor")
         }),
         "an axis beyond the sole trailing insertion position must fail:\n{}",
         summary(&errors)

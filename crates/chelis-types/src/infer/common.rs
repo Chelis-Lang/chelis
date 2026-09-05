@@ -2163,8 +2163,8 @@ pub(super) fn check_rank_body_discipline(
                          `{name}`: it is not name-trackable at symbolic rank, so against a spread \
                          `..r` there are no named axes left to catch a transposition or reshape \
                          (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
-                         (elementwise) operations, named-axis reductions, and named-axis expand \
-                         only."
+                         (elementwise) operations, named-axis reductions, and the named-axis \
+                         `expand` and `insert` forms only."
                     ),
                     vec![format!(
                         "remove the `{name}` call from the rank-polymorphic body, or use \

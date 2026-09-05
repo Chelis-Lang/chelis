@@ -83,6 +83,7 @@ pub(super) fn infer_reduction_app(
 /// exprs.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expand_app(
+    callee: &'static str,
     list: &deep::List,
     env: &mut Env,
     vg: &mut VarGen,
@@ -98,7 +99,7 @@ pub(super) fn infer_expand_app(
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
                 format!(
-                    "expand expects (tensor, axis, size) or the named-axis form \
+                    "{callee} expects (tensor, axis, size) or the named-axis form \
                  (tensor, name, size, anchor), got {} arguments",
                     kids.len() - 1
                 ),
@@ -160,7 +161,7 @@ pub(super) fn infer_expand_app(
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!(
-                            "expand expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
+                            "{callee} expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
                         ),
                     ),
                     vec![],
@@ -187,6 +188,7 @@ pub(super) fn infer_expand_app(
         .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
+        callee,
         &kids[1..],
         &arg_tys,
         &result_ty,

@@ -34,7 +34,7 @@ def _header(shape: str, operations: int, width: int) -> list[str]:
     return [
         f"module FrontEndPerformance.{shape}N{operations}",
         f"def bc(c: f32) -> tensor[{width}, f32] = "
-        f"reshape(expand(to_tensor([c]), 0, {width}i64), [{width}i64])",
+        f"reshape(insert(to_tensor([c]), 0, {width}i64), [{width}i64])",
     ]
 
 

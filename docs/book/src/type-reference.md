@@ -132,7 +132,7 @@ different rank.
 
 ```chelis-surf-fragment
 -- tensor[batch, hidden, f32] + tensor[hidden, f32] is a type error.
-biased = add(linear, expand(b, 0, batch))
+biased = add(linear, insert(b, 0, batch))
 ```
 
 `expand`, `reshape`, and `permute` are the explicit tools for changing rank and shape.

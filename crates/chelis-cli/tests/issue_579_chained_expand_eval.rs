@@ -52,7 +52,7 @@ use tempfile::tempdir;
 /// the batch axis of rank-2 `x`. The #579 discriminator case (passed even at
 /// 0.12.0); pinned so the working baseline is explicit.
 const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
-    \x20 gb: tensor[a, n, f32] = expand(g, 0, shape(x, cast(0, int32)))\n\
+    \x20 gb: tensor[a, n, f32] = insert(g, 0, shape(x, cast(0, int32)))\n\
     \x20 mul(x, gb)\n\
     }\n\
     xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
@@ -68,7 +68,7 @@ const BN1D_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f
 /// let-bound tests below fail on a pre-#596 compiler.
 const BN1D_LET_BOUND_SOURCE: &str = "def bn1d_scale(x: &tensor[a, n, f32], g: &tensor[n, f32]) -> tensor[a, n, f32] = {\n\
     \x20 a_dim = cast(shape(x, cast(0, int32)), int64)\n\
-    \x20 gb: tensor[a, n, f32] = expand(g, 0, a_dim)\n\
+    \x20 gb: tensor[a, n, f32] = insert(g, 0, a_dim)\n\
     \x20 mul(x, gb)\n\
     }\n\
     xs = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
@@ -117,9 +117,9 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
     format!(
         "def broadcast_to_achw(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = {{\n\
         {lets}\
-        \x20 step1: tensor[c, h, f32] = expand(g, 1, {h_size})\n\
-        \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, {w_size})\n\
-        \x20 step3: tensor[a, c, h, w, f32] = expand(step2, 0, {a_size})\n\
+        \x20 step1: tensor[c, h, f32] = insert(g, 1, {h_size})\n\
+        \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, {w_size})\n\
+        \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, {a_size})\n\
         \x20 step3\n\
         }}\n\
         def bn2d_affine(x: &tensor[a, c, h, w, f32], g: &tensor[c, f32], b: &tensor[c, f32]) -> tensor[a, c, h, w, f32] = {{\n\
@@ -141,7 +141,7 @@ fn chained_achw_source(shape: &[usize; 4], spelling: ExtentSpelling) -> String {
 /// `BN1D_LET_BOUND_SOURCE`), and it was ALREADY check-rejected at v0.12.0 by
 /// the #494 source-tracking predicate. Pinned so the reject stays loud,
 /// cites #469, and never regresses into the issue's `rank mismatch` ICE.
-const SOURCELESS_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = expand(g, 0, a_dim)\n\
+const SOURCELESS_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], a_dim: int64) -> tensor[a, n, f32] = insert(g, 0, a_dim)\n\
     out = bcast_1d_to_2d(to_tensor([1.0, 2.0, 3.0]), cast(2, int64))\n";
 
 /// The sourceless chained rank-1 -> rank-4 spelling: school's PRE-0.12-bump
@@ -150,9 +150,9 @@ const SOURCELESS_1D_SOURCE: &str = "def bcast_1d_to_2d[a, n](g: tensor[n, f32], 
 /// #494 check reject. Already check-rejected at v0.12.0; pinned for the same
 /// loud-reject / no-ICE invariant through the eval lane.
 const SOURCELESS_ACHW_SOURCE: &str = "def broadcast_to_achw[c, h, w, a](v: &tensor[c, f32], h_dim: int64, w_dim: int64, a_dim: int64) -> tensor[a, c, h, w, f32] = {\n\
-    \x20 step1: tensor[c, h, f32] = expand(v, 1, h_dim)\n\
-    \x20 step2: tensor[c, h, w, f32] = expand(step1, 2, w_dim)\n\
-    \x20 step3: tensor[a, c, h, w, f32] = expand(step2, 0, a_dim)\n\
+    \x20 step1: tensor[c, h, f32] = insert(v, 1, h_dim)\n\
+    \x20 step2: tensor[c, h, w, f32] = insert(step1, 2, w_dim)\n\
+    \x20 step3: tensor[a, c, h, w, f32] = insert(step2, 0, a_dim)\n\
     \x20 step3\n\
     }\n\
     out = broadcast_to_achw(to_tensor([1.0, 2.0]), cast(3, int64), cast(4, int64), cast(5, int64))\n";
@@ -640,7 +640,7 @@ fn issue_579_sourceless_expand_rejects_in_eval_without_rank_ice() {
 #[test]
 fn issue_579_wrong_axis_broadcast_rejected_at_check() {
     let source = "def bad(x: &tensor[2, 3, f32], g: &tensor[3, f32]) -> tensor[2, 3, f32] = {\n\
-        \x20 gb: tensor[3, 2, f32] = expand(g, 1, shape(x, cast(0, int32)))\n\
+        \x20 gb: tensor[3, 2, f32] = insert(g, 1, shape(x, cast(0, int32)))\n\
         \x20 mul(x, gb)\n\
         }\n\
         out = bad(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([10.0, 20.0, 30.0]))\n";
@@ -653,18 +653,18 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
 }
 
 /// Negative parity for the chained case: an out-of-bounds insert axis on a
-/// genuinely rank-1 operand must fail eval with the targeted expand
+/// genuinely rank-1 operand must fail eval with the targeted insert
 /// diagnostic, never the #579 rank-monomorphization ICE and never a silent
 /// wrong-shape success.
 #[test]
 fn issue_579_out_of_bounds_insert_axis_fails_eval_with_targeted_reason() {
-    let source = "def bad(g: &tensor[3, f32]) -> tensor[3, 2, 2, f32] = expand(g, 3, 2i64)\n\
+    let source = "def bad(g: &tensor[3, f32]) -> tensor[3, 2, 2, f32] = insert(g, 3, 2i64)\n\
         out = bad(to_tensor([1.0, 2.0, 3.0]))\n";
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_579_axis_oob");
     assert!(
-        stderr.contains("expand") && stderr.contains("out of bounds"),
-        "out-of-bounds insert axis must fail with the targeted expand reason, got: {stderr}"
+        stderr.contains("insert") && stderr.contains("out of bounds"),
+        "out-of-bounds insert axis must fail with the targeted insert reason, got: {stderr}"
     );
     assert!(
         !stderr.contains("internal compiler error"),

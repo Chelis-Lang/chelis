@@ -169,7 +169,7 @@ fn linear_forward_accepts_all_float_dtypes() {
         let src = format!(
             r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
-  bias = expand(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)
@@ -448,7 +448,7 @@ fn linear_forward_rejects_mismatched_input_weight_precision() {
         &path,
         r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {
-  bias = expand(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)

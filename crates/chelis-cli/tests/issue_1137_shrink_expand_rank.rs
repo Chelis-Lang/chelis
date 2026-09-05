@@ -12,7 +12,7 @@ fn source(expand_size: &str, consume: bool) -> String {
     format!(
         "module Repro.ShrinkExpandRank\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = expand(x, cast(0, int32), {expand_size})\n\
+         e = insert(x, cast(0, int32), {expand_size})\n\
          s = shrink(e, [[cast(0, int64), cast(1, int64)], [cast(0, int64), cast(2, int64)]])\n\
          out = {tail}\n"
     )
@@ -22,7 +22,7 @@ fn runtime_bound_source(start: &str, end: &str) -> String {
     format!(
         "module Repro.ShrinkExpandRuntimeBound\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = expand(x, cast(0, int32), cast(2, int64))\n\
+         e = insert(x, cast(0, int32), cast(2, int64))\n\
          k = shape(x, cast(0, int32))\n\
          s = shrink(e, [[cast(0, int64), cast(1, int64)], [{start}, {end}]])\n\
          out = relu(s)\n"
@@ -33,7 +33,7 @@ fn runtime_bound_movement_consumer_source(consumer: &str) -> String {
     format!(
         "module Repro.ShrinkExpandMovementConsumer\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = expand(x, cast(0, int32), cast(2, int64))\n\
+         e = insert(x, cast(0, int32), cast(2, int64))\n\
          k = shape(x, cast(0, int32))\n\
          s = shrink(e, [[cast(0, int64), cast(1, int64)], [cast(k - k, int64), k]])\n\
          out = {consumer}\n"
@@ -154,20 +154,42 @@ fn consumed_shrink_over_cast_shape_expand_keeps_rank_two() {
     );
 }
 
+/// The two runtime-bound programs agree between `chelis eval` and compiled C.
+///
+/// They did not always. Under chelis#1277's expand/insert split they began
+/// refusing at C emission with chelis#1482's typed receipt, because the fixed
+/// route reached the emitter with a `const` node whose second axis carried no
+/// declared dim source, and this file recorded that as a capability
+/// regression. chelis#1548 removed the `const`: `relu` had been lowering to
+/// `Const(0)` plus `MaxElem`, and it now lowers to a dedicated `RiscOp::Relu`,
+/// so these programs have no unsourced const left to trip over and build
+/// again. They are the parity tests this file said they would return as.
+///
+/// **chelis#1482 is not fixed**, and nothing here should be read as saying so.
+/// Only this witness stopped reproducing. Replacing `relu` with `sigmoid`,
+/// `silu`, or `gelu`, each of which still synthesizes a const, refuses with
+/// the same receipt on the same shrink result. The gap keeps its own oracle
+/// row, `shrink.elementwise_const.build`, recorded at `typed_unsupported`.
 #[test]
-fn consumed_shrink_with_runtime_end_declares_its_fresh_extent() {
+fn consumed_shrink_with_runtime_end_agrees_between_eval_and_c() {
     let source = runtime_bound_source("cast(0, int64)", "k");
     let eval = eval_stdout(&source, "shrink_expand_runtime_end");
     let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_end");
-    assert_eq!(compiled, eval, "runtime-end shrink must retain C parity");
+    assert_eq!(
+        compiled, eval,
+        "a runtime end bound must give the compiled lane the same result as eval"
+    );
 }
 
 #[test]
-fn consumed_shrink_with_runtime_start_declares_its_fresh_extent() {
+fn consumed_shrink_with_runtime_start_agrees_between_eval_and_c() {
     let source = runtime_bound_source("cast(k - k, int64)", "cast(2, int64)");
     let eval = eval_stdout(&source, "shrink_expand_runtime_start");
     let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_start");
-    assert_eq!(compiled, eval, "runtime-start shrink must retain C parity");
+    assert_eq!(
+        compiled, eval,
+        "a runtime start bound must give the compiled lane the same result as eval"
+    );
 }
 
 #[test]

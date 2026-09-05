@@ -433,7 +433,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
 #[test]
 fn issue_319_expand_precision_poly_verb_lowers() {
     let src = "sig broadcast: tensor[s, p] -> tensor[s, c, p]\n\
-               def broadcast(b) = expand(b, cast(1, int32), cast(2, int64))\n\
+               def broadcast(b) = insert(b, cast(1, int32), cast(2, int64))\n\
                out = broadcast(to_tensor([1.0, 2.0]))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
         panic!(

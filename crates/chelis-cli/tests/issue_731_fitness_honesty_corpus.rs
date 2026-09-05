@@ -113,7 +113,7 @@ fn surf_known_bad_programs_score_below_one() {
              sig f: tensor[n, f32] -> tensor[u, f32]\n\
              def f(x) = {\n\
                s = stride(x, 2i64)\n\
-               e = expand(x, 0i32, 2i64)\n\
+               e = insert(x, 0i32, 2i64)\n\
                add(s, e)\n\
              }\n\
              out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n"

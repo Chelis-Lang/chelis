@@ -959,7 +959,7 @@ fn file_fed_pipeline_with_an_alias_binding_runs_to_completion() {
          \x20 to_tensor(map(fn (l) -> unwrap(to_float(l)), read_lines(path)))\n\
          rho_base = rlf({rho:?})\n\
          rec = rlf({rec:?})\n\
-         one990 = reshape(expand(to_tensor([1.0f32]), 0, 990i64), [990i64])\n\
+         one990 = reshape(insert(to_tensor([1.0f32]), 0, 990i64), [990i64])\n\
          rho = rho_base\n\
          lgd = sub(one990, rec)\n\
          sqrt_1m = sqrt(sub(one990, rho))\n\

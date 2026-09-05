@@ -55,8 +55,10 @@ windowed_mean = reduce_window_mean(pool_grid, [2i64, 2i64], [2i64, 2i64])
 
 - `reshape(x, shape)` reinterprets the layout; the product of dimensions must match.
 - `permute(x, axes)` reorders dimensions by a permutation.
-- `expand(x, axis, size)` adds a dimension explicitly. This is the tool that replaces
-  broadcasting.
+- `insert(x, axis, size)` adds a dimension explicitly, raising the rank by one.
+  This is the tool that replaces broadcasting.
+- `expand(x, axis, size)` broadcasts an existing size-1 dimension to `size`,
+  leaving the rank alone.
 - `pad(x, padding, fill)`, `shrink(x, bounds)` add or slice boundary elements.
 - `concat(tensors, axis)`, `split(x, axis, sizes)` join and divide along an axis.
 - `gather(table, indices, axis)`, `scatter(base, indices, updates, axis, mode)` index and

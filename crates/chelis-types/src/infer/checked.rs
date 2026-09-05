@@ -303,6 +303,9 @@ pub(super) enum DeferredShapeRule {
         name: String,
     },
     Expand {
+        /// `expand` or `insert`. The replay must reach the same route arm the
+        /// original call did, and the two differ in their result forms.
+        builtin: &'static str,
         source_ordinal: SourceOrdinal,
         axis_is_dim_name: bool,
         size_class: SizeClass,
@@ -590,11 +593,13 @@ impl InferenceProduct {
                     errors,
                 ),
                 DeferredShapeRule::Expand {
+                    builtin,
                     source_ordinal,
                     axis_is_dim_name,
                     size_class,
                     env,
                 } => check_expand_signature(
+                    builtin,
                     &check.arg_exprs,
                     &check.arg_tys,
                     &check.result_ty,
@@ -646,7 +651,7 @@ impl InferenceProduct {
             let operation = match check.rule {
                 DeferredShapeRule::Matmul => "matmul".to_string(),
                 DeferredShapeRule::Reduction { name } => name,
-                DeferredShapeRule::Expand { .. } => "expand".to_string(),
+                DeferredShapeRule::Expand { builtin, .. } => (*builtin).to_string(),
                 DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
                 DeferredShapeRule::Conv2d => "conv2d".to_string(),
                 DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),

@@ -26,9 +26,19 @@ pub(super) fn finish_unified_app(
     // [04-TENSOR-EXPAND]: an expected tensor fixes whether positional expand
     // replaces an existing axis (same rank) or inserts one (rank + 1).
     // Without expected context, `check_expand_signature` records a deferred
-    // two-shape obligation that ordinary consumers can resolve. Seed only the
-    // direct expand body; other operations retain ordinary bottom-up inference.
-    if func_name.as_deref() == Some("expand")
+    // two-shape obligation that ordinary consumers can resolve.
+    //
+    // `insert` has one legal shape and needs no such disambiguation, but it
+    // needs the same seed for a different reason. Unseeded, the result is
+    // still a variable when `check_expand_signature` runs, so the call takes
+    // the `Type::Var(_) if inserts_only` arm, builds its one shape from the
+    // operand and axis alone, and any disagreement with the declared result
+    // surfaces later as a generic ascription mismatch naming no operation.
+    // Seeded, the call reaches the rank and precision arms that name the
+    // callee, and for an agreeing result both arms build the same shape.
+    // Both spellings and no other operation: everything else retains
+    // ordinary bottom-up inference.
+    if matches!(func_name.as_deref(), Some("expand") | Some("insert"))
         && let Some(expected) = expected_result
     {
         if let Err(error) = unify(&result_ty, expected, subst) {
@@ -162,7 +172,9 @@ pub(super) fn finish_unified_app(
                     errors,
                 );
             }
-            "expand" => {
+            name @ ("expand" | "insert") => {
+                // `&'static str`, not the borrow: the deferred rule outlives `fname`.
+                let callee = if name == "insert" { "insert" } else { "expand" };
                 checked_route_observed = true;
                 // chelis#339: the axis slot is a dim NAME (the
                 // named-axis insert form) only when it is not bound in
@@ -184,6 +196,7 @@ pub(super) fn finish_unified_app(
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Expand {
+                            builtin: callee,
                             source_ordinal: product.source_ordinal_for_list(list),
                             axis_is_dim_name,
                             size_class,
@@ -196,6 +209,7 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty = check_expand_signature(
+                    callee,
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
