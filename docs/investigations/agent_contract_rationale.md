@@ -208,5 +208,4 @@ its conformance evidence named a commit a later autosquash had removed, so those
 had never run on any ancestor of the candidate, and the diff between the two heads
 touched exactly the files they read. What hid it is that the hosted checks did not look
 wrong. The conformance job skipped while its workflow still reported success, so the
-page showed green for tests that never ran. Read the job, not the workflow, and re-take
-evidence after any rebase or amend.
+page showed green for tests that never ran. Read the job, not the workflow.
