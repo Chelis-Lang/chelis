@@ -166,6 +166,80 @@ fn a_duplicated_type_stamp_gives_one_answer_on_both_lanes() {
     );
 }
 
+/// The same duplicated stamp on the DAG/TENSOR lowering lane, in the
+/// explicit-broadcast form. `lower.rs::binder_float_literal_source_default`
+/// reads the stamp through its own copy of the predicate, so the scalar row
+/// above measures only the host join.
+const DUPLICATED_TYPE_STAMP_TENSOR: &str = "(module {surf_path: \"Bind.Main\"}\n\
+     bind.main\n\
+     (export {} main)\n\
+     (defsig {dtype_bounds: {p: numeric}} addk\n\
+       (t-fn {} (t-tensor {} (d-lit {} 1) (t-var {} p)) (t-tensor {} (d-lit {} 1) (t-var {} p))))\n\
+     (def {} addk\n\
+       (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 1) (t-var {} p))}))\n\
+         (app {} (var {} add) (var {} x)\n\
+           (app {} (var {} expand)\n\
+             (app {} (var {} scalar_to_tensor)\n\
+               (cast {}\n\
+                 (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 16777217.0)\n\
+                 (t-var {} p)))\n\
+             (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} int32)} 0) (t-prim {} int32))\n\
+             (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} int64)} 1) (t-prim {} int64))))))\n\
+     (defsig {} main (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} int64))))\n\
+     (def {} main\n\
+       (fn {} (params {})\n\
+         (app {} (var {} addk)\n\
+           (app {} (var {} to_tensor)\n\
+             (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 0) (var {} Nil)))))))\n";
+
+/// Round 5 P1 on the tensor lane, regression test.
+///
+/// The scalar row above proves the host join; this one proves `lower.rs`,
+/// which reads the same stamp through a separate predicate and had made the
+/// same exactly-one choice. The two lanes reach the f32 source differently, so
+/// the assertion here is the VALUE rather than a plan line: the tensor lane
+/// finalizes the literal at f32 directly and emits no `f64 -> f32` narrow.
+///
+/// Proved red on f86f479e6, where `chelis check` accepts this unit, `chelis
+/// eval` prints `[16777216]`, and the compiled C prints `[16777217]`.
+#[test]
+fn a_duplicated_type_stamp_gives_one_answer_on_the_tensor_lane() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    let unit = root.join("dup_tensor.dp");
+    fs::write(&unit, DUPLICATED_TYPE_STAMP_TENSOR).expect("write fixture");
+
+    let expected = "main = tensor(shape=[1], data=[16777216])";
+    let interpreted = text(&run(root, &["eval", "--file", "dup_tensor.dp"]));
+    assert!(
+        interpreted.contains(expected),
+        "eval must apply the f32 narrow: {interpreted}"
+    );
+
+    let out_dir = root.join("dup-tensor-out");
+    success(&run(
+        root,
+        &[
+            "build",
+            unit.to_str().expect("utf8"),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().expect("utf8"),
+        ],
+    ));
+    let status = common::link_generated(&out_dir, "dup_tensor.c", "dup_tensor");
+    assert!(status.success(), "link failed: {status}");
+    let native = std::process::Command::new(out_dir.join("dup_tensor"))
+        .output()
+        .expect("compiled binary should run");
+    let native = String::from_utf8_lossy(&native.stdout).to_string();
+    assert!(
+        native.contains(expected),
+        "compiled C must agree with eval, not return 16777217: {native}"
+    );
+}
+
 #[test]
 fn scalar_and_tensor_binders_compute_at_each_instantiation() {
     for family in ["Float", "Numeric"] {
