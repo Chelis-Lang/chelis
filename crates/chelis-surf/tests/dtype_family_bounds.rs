@@ -257,3 +257,23 @@ fn a_binder_typed_literal_is_valid_only_under_its_adopting_cast() {
     resugar_program(&deep)
         .expect_err("a direct ascription must not masquerade as cast-literal adoption");
 }
+
+#[test]
+fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
+    let deep = deep_parse_strict(
+        "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-var {} p) (t-var {} p)))\n\
+         (def {} scale\n\
+           (fn {} (params {} (x {type: (t-var {} p)}))\n\
+             (cast {}\n\
+               (app {} (var {} neg)\n\
+                 (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1))\n\
+               (t-var {} p))))",
+    )
+    .expect("the exact unary-minus literal source parses");
+    let recovered = resugar_program(&deep).expect("the adopting cast relation is representable");
+    assert!(
+        format_program(&recovered).contains("cast(-0.1, p)"),
+        "{}",
+        format_program(&recovered)
+    );
+}

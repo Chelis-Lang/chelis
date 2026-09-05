@@ -3,7 +3,10 @@
 //! Every Deep node is a 3-tuple: (tag {} children...)
 //! where {} is an inline metadata map.
 
-use chelis_deep::{DTYPE_BOUNDS_KEY, DeepTag, DtypeFamily, encode_dtype_bounds};
+use chelis_deep::{
+    Atom as DeepAtom, DTYPE_BOUNDS_KEY, DeepTag, DtypeFamily, LiteralSource,
+    classify_literal_source, encode_dtype_bounds,
+};
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
@@ -1877,56 +1880,21 @@ impl DesugarCtx {
                     Expr::List(items, _) => {
                         self.desugar_list_as_tensor_literal(items, prec, local_fn_params)
                     }
-                    Expr::Lit(lit, span)
-                        if scalar_literal_adopts_binder_target(lit, binder_bound) =>
-                    {
-                        attach_span_metadata(
-                            adopted_scalar_literal_at_binder(lit, prec, /* negate = */ false),
-                            *span,
-                        )
+                    other => {
+                        let ordinary = self.desugar_expr_with_scope(other, local_fn_params);
+                        let adopted = classify_literal_source(&ordinary).and_then(|source| {
+                            if scalar_literal_source_adopts_binder_target(source, binder_bound) {
+                                adopted_scalar_literal_source_at_binder(source, prec)
+                            } else if scalar_literal_source_adopts_cast_target(source, prec) {
+                                adopted_scalar_literal_source(source, prec)
+                            } else {
+                                None
+                            }
+                        });
+                        adopted
+                            .map(|literal| attach_span_metadata(literal, expr_span(other)))
+                            .unwrap_or(ordinary)
                     }
-                    Expr::Unary(UnaryOp::Neg, neg_inner, span)
-                        if binder_bound.is_some()
-                            && matches!(
-                                neg_inner.as_ref(),
-                                Expr::Lit(lit, _)
-                                    if scalar_literal_adopts_binder_target(lit, binder_bound)
-                            ) =>
-                    {
-                        let Expr::Lit(lit, _) = neg_inner.as_ref() else {
-                            unreachable!("guarded by the matches! above");
-                        };
-                        attach_span_metadata(
-                            adopted_scalar_literal_at_binder(lit, prec, /* negate = */ true),
-                            *span,
-                        )
-                    }
-                    Expr::Lit(lit, span) if scalar_literal_adopts_cast_target(lit, prec) => {
-                        attach_span_metadata(
-                            adopted_scalar_literal(lit, prec, /* negate = */ false),
-                            *span,
-                        )
-                    }
-                    // Mirror of the RT-2 P2 sign-fold in
-                    // `desugar_tensor_literal_item`: the parser turns
-                    // `-1.1` into `Unary(Neg, Lit(Float(1.1)))`. Fold
-                    // the sign into the adopted literal so `cast(-1.1,
-                    // f64)` binds `-1.1` at f64.
-                    Expr::Unary(UnaryOp::Neg, neg_inner, span)
-                        if matches!(
-                            neg_inner.as_ref(),
-                            Expr::Lit(lit, _) if scalar_literal_adopts_cast_target(lit, prec)
-                        ) =>
-                    {
-                        let Expr::Lit(lit, _) = neg_inner.as_ref() else {
-                            unreachable!("guarded by the matches! above");
-                        };
-                        attach_span_metadata(
-                            adopted_scalar_literal(lit, prec, /* negate = */ true),
-                            *span,
-                        )
-                    }
-                    other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
                 // Every declared binder is a `t-var`; only a bound permits
                 // literal adoption. The checker rejects unbounded targets.
@@ -2279,13 +2247,19 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
 /// [02-P10b] binder-target literal adoption. Float literals require `Float`
 /// or `Numeric`; integer literals also admit `Int`. Unbounded binders cannot
 /// adopt and remain checker-rejected cast targets under [04-DTYPE-2].
-fn scalar_literal_adopts_binder_target(lit: &Literal, bound: Option<DtypeFamily>) -> bool {
+fn scalar_literal_source_adopts_binder_target(
+    source: LiteralSource<'_>,
+    bound: Option<DtypeFamily>,
+) -> bool {
     let Some(bound) = bound else {
         return false;
     };
-    match lit {
-        Literal::Float(_) => matches!(bound, DtypeFamily::Float | DtypeFamily::Numeric),
-        Literal::Int(_) => matches!(
+    if !scalar_literal_source_is_unsuffixed(source) {
+        return false;
+    }
+    match source.numeric_atom() {
+        Some(DeepAtom::Float(_)) => matches!(bound, DtypeFamily::Float | DtypeFamily::Numeric),
+        Some(DeepAtom::Int(_)) => matches!(
             bound,
             DtypeFamily::Float | DtypeFamily::Int | DtypeFamily::Numeric
         ),
@@ -2293,50 +2267,51 @@ fn scalar_literal_adopts_binder_target(lit: &Literal, bound: Option<DtypeFamily>
     }
 }
 
-/// Binder-target twin of [`adopted_scalar_literal`], stamped with `t-var`.
-fn adopted_scalar_literal_at_binder(lit: &Literal, binder: &str, negate: bool) -> deep::Expr {
+/// Binder-target twin of [`adopted_scalar_literal_source`], stamped with `t-var`.
+fn adopted_scalar_literal_source_at_binder(
+    source: LiteralSource<'_>,
+    binder: &str,
+) -> Option<deep::Expr> {
     let ty = node(DeepTag::TVar, vec![sym(binder)]);
-    match lit {
-        Literal::Int(n) => {
-            let value = if negate { fold_unary_minus_int(*n) } else { *n };
+    match source.folded_numeric_atom()? {
+        DeepAtom::Int(value) => {
             // `literal_source: integer` describes a concrete float target;
             // the binder's family and instantiation own this literal instead.
-            node_meta(
+            Some(node_meta(
                 DeepTag::Lit,
                 numeric_literal_meta(ty, "unsuffixed"),
-                vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
-            )
+                vec![deep::Expr::Atom(DeepAtom::Int(value), sp())],
+            ))
         }
-        Literal::Float(f) => {
-            let value = if negate { -*f } else { *f };
-            node_meta(
-                DeepTag::Lit,
-                numeric_literal_meta(ty, "unsuffixed"),
-                vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
-            )
-        }
-        _ => unreachable!("guarded by scalar_literal_adopts_binder_target"),
+        DeepAtom::Float(value) => Some(node_meta(
+            DeepTag::Lit,
+            numeric_literal_meta(ty, "unsuffixed"),
+            vec![deep::Expr::Atom(DeepAtom::Float(value), sp())],
+        )),
+        _ => None,
     }
 }
 
-fn scalar_literal_adopts_cast_target(lit: &Literal, prec: &str) -> bool {
+fn scalar_literal_source_adopts_cast_target(source: LiteralSource<'_>, prec: &str) -> bool {
+    if !scalar_literal_source_is_unsuffixed(source) {
+        return false;
+    }
     let float_target = matches!(prec, "f32" | "f64" | "bf16" | "f16");
     let int_target = matches!(prec, "int8" | "int16" | "int32" | "int64");
-    match lit {
-        Literal::Float(_) => float_target,
-        Literal::Int(_) => float_target || int_target,
+    match source.numeric_atom() {
+        Some(DeepAtom::Float(_)) => float_target,
+        Some(DeepAtom::Int(_)) => float_target || int_target,
         _ => false,
     }
 }
 
 /// Build the adopted-literal Deep node for a scalar literal under
 /// `cast(literal, p)`. Mirrors `desugar_tensor_literal_item`'s lit
-/// construction (including the RT-2 P2 sign fold via `negate`). Only
-/// called for literals admitted by `scalar_literal_adopts_cast_target`.
-fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr {
-    match lit {
-        Literal::Int(n) => {
-            let value = if negate { fold_unary_minus_int(*n) } else { *n };
+/// construction. The shared Deep literal-source classifier owns both the
+/// direct and unary-minus source shapes. Only called for an admitted source.
+fn adopted_scalar_literal_source(source: LiteralSource<'_>, prec: &str) -> Option<deep::Expr> {
+    match source.folded_numeric_atom()? {
+        DeepAtom::Int(value) => {
             let float_typed = matches!(prec, "f32" | "f64" | "bf16" | "f16");
             let ty = node(DeepTag::TPrim, vec![sym(prec)]);
             let meta = if float_typed {
@@ -2344,25 +2319,58 @@ fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr
             } else {
                 numeric_literal_meta(ty, "unsuffixed")
             };
-            node_meta(
+            Some(node_meta(
                 DeepTag::Lit,
                 meta,
-                vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
-            )
+                vec![deep::Expr::Atom(DeepAtom::Int(value), sp())],
+            ))
         }
-        Literal::Float(f) => {
-            let value = if negate { -*f } else { *f };
-            node_meta(
-                DeepTag::Lit,
-                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec)]), "unsuffixed"),
-                vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
-            )
-        }
-        other => unreachable!(
-            "adopted_scalar_literal called for non-numeric literal {other:?}; \
-             scalar_literal_adopts_cast_target must gate callers"
-        ),
+        DeepAtom::Float(value) => Some(node_meta(
+            DeepTag::Lit,
+            numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec)]), "unsuffixed"),
+            vec![deep::Expr::Atom(DeepAtom::Float(value), sp())],
+        )),
+        _ => None,
     }
+}
+
+fn scalar_literal_source_is_unsuffixed(source: LiteralSource<'_>) -> bool {
+    let style = source.metadata().entries.iter().find_map(|(key, value)| {
+        (key == "surf_literal_style")
+            .then_some(value)
+            .and_then(|value| match value {
+                deep::Expr::Atom(DeepAtom::Str(style), _) => Some(style.as_str()),
+                _ => None,
+            })
+    });
+    match style {
+        Some("unsuffixed") => true,
+        Some(_) => false,
+        None => literal_source_primitive(source).is_some_and(|primitive| {
+            matches!(
+                (source.numeric_atom(), primitive),
+                (Some(DeepAtom::Int(_)), "int32") | (Some(DeepAtom::Float(_)), "f32")
+            )
+        }),
+    }
+}
+
+fn literal_source_primitive<'a>(source: LiteralSource<'a>) -> Option<&'a str> {
+    let ty = source
+        .metadata()
+        .entries
+        .iter()
+        .find_map(|(key, value)| (key == "type").then_some(value))?;
+    let deep::Expr::Node(node, _) = ty else {
+        return None;
+    };
+    if node.tag() != DeepTag::TPrim {
+        return None;
+    }
+    let [deep::Expr::Atom(DeepAtom::Name(name), _)] = node.children_slice() else {
+        return None;
+    };
+    Some(name)
 }
 
 fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {

@@ -71,6 +71,14 @@ fn bounded_binder_cast_adopts_matching_numeric_literals_at_both_ingresses() {
             "standalone signature binder",
             "sig scale[p: Float]: p -> p\ndef scale(x) = cast(0.1, p)\n",
         ),
+        (
+            "negative float under Float",
+            "def scale[p: Float](x: p) -> p = cast(-0.1, p)\n",
+        ),
+        (
+            "negative suffixed float under Float",
+            "def scale[p: Float](x: p) -> p = cast(-0.1f64, p)\n",
+        ),
     ] {
         assert_both_accept(&surf(source), label);
     }
@@ -78,11 +86,38 @@ fn bounded_binder_cast_adopts_matching_numeric_literals_at_both_ingresses() {
 
 #[test]
 fn unbounded_binder_cannot_name_a_cast_dtype() {
-    for source in [
-        "def scale[p](x: p) -> p = cast(0.1, p)\n",
-        "sig scale: p -> p\ndef scale(x) = cast(0.1, p)\n",
+    for (label, source) in [
+        (
+            "positive unsuffixed",
+            "def scale[p](x: p) -> p = cast(0.1, p)\n",
+        ),
+        (
+            "negative unsuffixed",
+            "def scale[p](x: p) -> p = cast(-0.1, p)\n",
+        ),
+        (
+            "positive suffixed",
+            "def scale[p](x: p) -> p = cast(0.1f64, p)\n",
+        ),
+        (
+            "negative suffixed",
+            "def scale[p](x: p) -> p = cast(-0.1f64, p)\n",
+        ),
+        (
+            "direct boolean",
+            "def identity[p](x: p) -> p = cast(true, p)\n",
+        ),
+        (
+            "direct string",
+            "def identity[p](x: p) -> p = cast(\"text\", p)\n",
+        ),
+        ("direct unit", "def identity[p](x: p) -> p = cast((), p)\n"),
+        (
+            "standalone signature",
+            "sig scale: p -> p\ndef scale(x) = cast(0.1, p)\n",
+        ),
     ] {
-        assert_both_reject_with(&surf(source), "[04-DTYPE-1]", "unbounded binder cast");
+        assert_both_reject_with(&surf(source), "[04-DTYPE-1]", label);
     }
 }
 

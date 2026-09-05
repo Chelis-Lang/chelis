@@ -7,7 +7,10 @@
 //! code.
 
 use chelis_deep::ast::{Atom, Expr as DeepExpr, MetaMap};
-use chelis_deep::{DeepTag, DtypeFamily, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
+use chelis_deep::{
+    DeepTag, DtypeFamily, LiteralSourceShape, LiteralSuffix, Span, cast_mode_of,
+    classify_literal_source, decode_dtype_bounds,
+};
 use chelis_unord::UnordMap;
 use chelis_vocab::{EffectKind, EffectKindInput};
 use std::collections::BTreeMap;
@@ -3726,12 +3729,12 @@ fn decode_resugar_dtype_bounds(meta: &MetaMap) -> Result<Vec<(String, DtypeFamil
     })
 }
 
-fn binder_family_accepts_literal(family: DtypeFamily, value: Option<&DeepExpr>) -> bool {
+fn binder_family_accepts_literal(family: DtypeFamily, value: &Atom) -> bool {
     match value {
-        Some(DeepExpr::Atom(Atom::Float(_), _)) => {
+        Atom::Float(_) => {
             matches!(family, DtypeFamily::Float | DtypeFamily::Numeric)
         }
-        Some(DeepExpr::Atom(Atom::Int(_), _)) => matches!(
+        Atom::Int(_) => matches!(
             family,
             DtypeFamily::Float | DtypeFamily::Int | DtypeFamily::Numeric
         ),
@@ -3776,8 +3779,13 @@ fn validate_binder_literal_adoption(
             let family = dtype_bounds
                 .iter()
                 .find_map(|(name, family)| (name == binder).then_some(*family));
-            let compatible = family
-                .is_some_and(|family| binder_family_accepts_literal(family, node.children.first()));
+            let compatible = family.is_some_and(|family| {
+                classify_literal_source(expr).is_some_and(|source| {
+                    source
+                        .numeric_atom()
+                        .is_some_and(|atom| binder_family_accepts_literal(family, atom))
+                })
+            });
             if adopting_binder != Some(binder) || !compatible {
                 return Err(ResugarError::InvalidBinderLiteralAdoption {
                     binder: binder.to_string(),
@@ -3786,6 +3794,18 @@ fn validate_binder_literal_adoption(
         }
 
         validate_binder_literal_metadata(&node.meta.entries, declared_binders, dtype_bounds)?;
+
+        if adopting_binder.is_some()
+            && let Some(source) = classify_literal_source(expr)
+            && source.shape() == LiteralSourceShape::UnaryMinus
+        {
+            return validate_binder_literal_adoption(
+                source.literal(),
+                declared_binders,
+                dtype_bounds,
+                adopting_binder,
+            );
+        }
 
         if node.tag == DeepTag::Cast
             && node.children.len() >= 2
@@ -3796,8 +3816,7 @@ fn validate_binder_literal_adoption(
                     binder: binder.to_string(),
                 });
             }
-            let direct_literal =
-                node_ref(&node.children[0]).is_ok_and(|operand| operand.tag == DeepTag::Lit);
+            let direct_literal = classify_literal_source(&node.children[0]).is_some();
             validate_binder_literal_adoption(
                 &node.children[0],
                 declared_binders,

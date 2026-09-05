@@ -52,6 +52,7 @@ fn validate(
     if let Some((tag, meta, kids)) = stamped_parts(expr) {
         if tag == DeepTag::Cast {
             let binder = kids.get(1).and_then(exact_tvar);
+            let literal_source = kids.first().and_then(chelis_deep::classify_literal_source);
             let adoption = binder.and_then(|name| {
                 scope
                     .bounds
@@ -60,7 +61,7 @@ fn validate(
             });
             if let Some(name) = binder
                 && adoption.is_none()
-                && kids.first().is_some_and(is_literal)
+                && literal_source.is_some()
             {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
@@ -83,6 +84,18 @@ fn validate(
             return;
         }
 
+        // Surf's negative numeral is the exact Deep `neg(lit)` source form.
+        // Preserve the adopting cast relation through that one structural
+        // wrapper so its literal stamp is judged by the same classifier as a
+        // positive source. Computed and nested negation are not classified.
+        if adopting.is_some()
+            && let Some(source) = chelis_deep::classify_literal_source(expr)
+            && source.shape() == chelis_deep::LiteralSourceShape::UnaryMinus
+        {
+            validate(source.literal(), declaration, scope, adopting, errors);
+            return;
+        }
+
         if tag == DeepTag::Lit {
             for binder in meta
                 .entries
@@ -100,7 +113,9 @@ fn validate(
                     continue;
                 }
                 let allowed = adopting.is_some_and(|(target, family)| {
-                    target == binder && atom_admitted(kids.first(), family)
+                    target == binder
+                        && chelis_deep::classify_literal_source(expr)
+                            .is_some_and(|source| atom_admitted(source, family))
                 });
                 if !allowed {
                     errors.push(CheckError::new(
@@ -145,10 +160,6 @@ fn validate(
     }
 }
 
-fn is_literal(expr: &deep::Expr) -> bool {
-    stamped_parts(expr).is_some_and(|(tag, _, _)| tag == DeepTag::Lit)
-}
-
 fn exact_tvar(expr: &deep::Expr) -> Option<&str> {
     let (DeepTag::TVar, _, kids) = stamped_parts(expr)? else {
         return None;
@@ -156,12 +167,12 @@ fn exact_tvar(expr: &deep::Expr) -> Option<&str> {
     (kids.len() == 1).then(|| kids.first().and_then(symbol_name))?
 }
 
-fn atom_admitted(atom: Option<&deep::Expr>, family: DtypeFamily) -> bool {
-    match atom {
-        Some(deep::Expr::Atom(deep::Atom::Float(_), _)) => {
+fn atom_admitted(source: chelis_deep::LiteralSource<'_>, family: DtypeFamily) -> bool {
+    match source.numeric_atom() {
+        Some(deep::Atom::Float(_)) => {
             matches!(family, DtypeFamily::Float | DtypeFamily::Numeric)
         }
-        Some(deep::Expr::Atom(deep::Atom::Int(_), _)) => true,
+        Some(deep::Atom::Int(_)) => true,
         _ => false,
     }
 }

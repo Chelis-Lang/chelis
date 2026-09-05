@@ -9,6 +9,7 @@ pub mod authoring;
 pub mod dtype_bounds;
 pub mod effect_kind;
 pub mod lexer;
+pub mod literal_source;
 pub mod node;
 pub mod parser;
 pub mod path;
@@ -27,6 +28,7 @@ pub use dtype_bounds::{
 };
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
+pub use literal_source::{LiteralSource, LiteralSourceShape, classify_literal_source};
 pub use parser::{
     StampOrParseError, parse_and_stamp, parse_and_stamp_file, parse_and_stamp_runtime_exprs,
     parse_and_stamp_tagged, parse_and_stamp_type, parse_raw_str,

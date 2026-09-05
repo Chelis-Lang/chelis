@@ -197,7 +197,12 @@ fn undeclared_cast_target_remains_unknown() {
 
 #[test]
 fn unbounded_binder_is_not_a_dtype_target() {
-    for (name, literal) in [("unsuffixed", "0.1"), ("suffixed", "0.1f64")] {
+    for (name, literal) in [
+        ("positive-unsuffixed", "0.1"),
+        ("negative-unsuffixed", "-0.1"),
+        ("positive-suffixed", "0.1f64"),
+        ("negative-suffixed", "-0.1f64"),
+    ] {
         let source = format!(
             "module Bind.Main\nexport (main)\ndef scale[p](x: p) -> p = mul(x, cast({literal}, p))\ndef main() -> f64 = scale(3.0f64)\n"
         );
