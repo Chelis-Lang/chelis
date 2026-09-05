@@ -47,6 +47,11 @@ pub struct CEmitter {
         chelis_ir::ownership::LocalGuardSite,
         chelis_ir::ownership::LocalGuardClaim,
     >,
+    /// Claim names this function actually declares as C variables. A local
+    /// guard compares against the claim BY NAME, so a claim that resolved to
+    /// a literal and was never declared has nothing to compare against and
+    /// gets no guard rather than an undeclared identifier.
+    declared_dim_names: chelis_unord::UnordSet<String>,
     /// Node descriptors whose exclusive runtime write lease remains live
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
@@ -197,6 +202,7 @@ impl CEmitter {
             memory_plan,
             runtime_dim_sites,
             local_dim_guard_sites,
+            declared_dim_names: chelis_unord::UnordSet::new(),
             write_nodes: chelis_unord::UnordSet::new(),
         };
 
@@ -1514,6 +1520,7 @@ impl CEmitter {
             // the wrong tensor in its context line.
             guarded.insert((binding.name.clone(), canonical_slot, *canonical_axis as i32));
             declared_from.insert(binding.name.clone(), (canonical_slot, *canonical_axis));
+            self.declared_dim_names.insert(binding.name.clone());
         }
 
         for binding in dag.symbolic_bindings_interface() {
@@ -6747,6 +6754,7 @@ impl CEmitter {
     fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
         if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
             let name = name.clone();
+            self.declared_dim_names.insert(name.clone());
             self.line(&format!("int64_t {name} = {extent_expr};"));
             return;
         }
@@ -6761,6 +6769,14 @@ impl CEmitter {
         let Some((name, op)) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
             return;
         };
+        // A claim that resolved to a literal in this function was never
+        // declared as a variable, so there is nothing to compare against and
+        // emitting the guard would reference an undeclared identifier.
+        // Measured on `rank_poly_tier3`'s grad/vmap program, where the claim
+        // `c` allocates as the literal 3.
+        if !self.declared_dim_names.contains(&name) {
+            return;
+        }
         let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
         self.line(&format!("if (({extent_expr}) != {name}) {{"));
         self.indent += 1;

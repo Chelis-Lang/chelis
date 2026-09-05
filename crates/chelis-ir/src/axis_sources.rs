@@ -1058,30 +1058,21 @@ fn is_member(op: &RiscOp, axis: usize, claim: &DimClaim, source: &AxisSource) ->
 /// is scope carried on the dimension; the alternative traps correct programs,
 /// which is the one thing this slice must not ship.
 fn root_reach(dag: &Dag) -> Vec<u128> {
-    let sinks: Vec<NodeId>;
-    let results = if dag.roots().is_empty() {
-        let mut consumed = vec![false; dag.len()];
-        for node in dag.nodes() {
-            for input in node.inputs.iter().chain(node.shape_deps.iter()) {
-                if let Some(slot) = consumed.get_mut(input.0) {
-                    *slot = true;
-                }
-            }
-        }
-        sinks = dag
-            .nodes()
-            .iter()
-            .filter(|node| !consumed[node.id.0] && !matches!(node.op, RiscOp::Load { .. }))
-            .map(|node| node.id)
-            .collect();
-        &sinks[..]
-    } else {
-        dag.roots()
-    };
-    // No result to scope by, or more results than the bit-set holds: one
-    // scope, which is the behavior every caller had before scoping existed.
-    // Widening a class rather than splitting it keeps the derivation
-    // conservative - it can then only guard more, never silently guard less.
+    // A DAG that declares no results carries no result-scoping information,
+    // so it is ONE scope - the behavior every caller had before scoping
+    // existed. Widening a class rather than splitting it is the conservative
+    // direction: the derivation can then only guard more, never silently
+    // guard less.
+    //
+    // Measured, and it is why there is no sink-based fallback here: every
+    // kernel the C emitter lowers carries an explicit root, including the
+    // merged `__global__` one this scoping exists for
+    // (`named_axis__global__tensor_2`: one root, eight `Load`s, twelve
+    // nodes), and the eval lane passes its roots explicitly. Inventing
+    // "results" from sinks for a graph that declares none only reaches
+    // hand-built fixtures, where it split classes the fixture meant as one
+    // signature.
+    let results = dag.roots();
     if results.is_empty() || results.len() > 128 {
         return vec![u128::MAX; dag.len()];
     }

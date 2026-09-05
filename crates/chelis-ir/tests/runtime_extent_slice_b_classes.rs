@@ -375,7 +375,20 @@ fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    dag.add_root(expanded);
+    // The declaring `Load` is joined into the result rather than left
+    // dangling, so both witnesses share one scope. C2.4 scopes a claim by the
+    // results it reaches, and a witness no result reaches forms no class -
+    // section 4.7's "regardless of data use" case, which this derivation
+    // cannot honour and which C2.4 records as a residual owned by B2b. The
+    // `Expand`'s inputs are untouched, so the absent bound slot this row
+    // exists for is unchanged.
+    let joined = dag.add_node(
+        RiscOp::Add,
+        vec![expanded, declaring],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(joined);
 
     // Derivation is total on this graph rather than panicking.
     let classes = derive_runtime_dim_classes(&dag);
@@ -747,8 +760,18 @@ fn classes_survive_vectorize_axis0_as_the_same_set_in_the_same_order() {
     let mut dag = Dag::new();
     let x = f32_load(&mut dag, "x", vec![named("n")]);
     let y = f32_load(&mut dag, "y", vec![named("n")]);
-    dag.add_root(x);
-    dag.add_root(y);
+    // ONE result reaching both witnesses, not one root each. C2.4 scopes a
+    // claim by the results it reaches, so two roots are two signatures and
+    // two claims sharing a spelling; joining them is what a single signature
+    // with two parameters looks like in the DAG. The property this row names
+    // is unchanged.
+    let joined = dag.add_node(
+        RiscOp::Add,
+        vec![x, y],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(joined);
     let before = derive_runtime_dim_classes(&dag);
     let batched = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3))
         .expect("vectorize a two-Load graph");
@@ -766,8 +789,18 @@ fn classes_survive_bind_symbolic_dims_unchanged() {
     let mut dag = Dag::new();
     let x = f32_load(&mut dag, "x", vec![named("n")]);
     let y = f32_load(&mut dag, "y", vec![named("n")]);
-    dag.add_root(x);
-    dag.add_root(y);
+    // ONE result reaching both witnesses, not one root each. C2.4 scopes a
+    // claim by the results it reaches, so two roots are two signatures and
+    // two claims sharing a spelling; joining them is what a single signature
+    // with two parameters looks like in the DAG. The property this row names
+    // is unchanged.
+    let joined = dag.add_node(
+        RiscOp::Add,
+        vec![x, y],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(joined);
     let before = derive_runtime_dim_classes(&dag);
     let bound = chelis_ir::dag::bind_symbolic_dims(
         &dag,
@@ -1030,8 +1063,18 @@ fn the_same_claim_on_a_live_local_intermediate_keeps_its_guard() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    dag.add_root(x);
-    dag.add_root(live);
+    // ONE result reaching both witnesses, not one root each. C2.4 scopes a
+    // claim by the results it reaches, so two roots are two signatures and
+    // two claims sharing a spelling; joining them is what a single signature
+    // with two parameters looks like in the DAG. The property this row names
+    // is unchanged.
+    let joined = dag.add_node(
+        RiscOp::Add,
+        vec![live, x],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(joined);
     let pruned = chelis_ir::optimize::dead_code_eliminate(&dag);
     let classes = derive_runtime_dim_classes(&pruned);
     assert_eq!(
