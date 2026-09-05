@@ -47,6 +47,14 @@ fn binder_program(bounds: &str, literal_meta: &str, literal: &str) -> Vec<Expr> 
     ))
 }
 
+fn forged_local_neg_program() -> Vec<Expr> {
+    deep(
+        "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
+         (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
+           (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n",
+    )
+}
+
 #[test]
 fn bounded_binder_casts_accept_matching_literals() {
     for (family, literal) in [
@@ -127,4 +135,27 @@ fn adoption_does_not_cross_binders_or_computed_operands() {
         Some("[04-DTYPE-1]"),
         "undeclared binder",
     );
+    assert_both(
+        &forged_local_neg_program(),
+        Some("[04-INF-6]"),
+        "a local callable named neg is not unary syntax",
+    );
+}
+
+#[test]
+fn adopted_integer_literals_fit_every_family_member() {
+    for (family, literal, expected) in [
+        ("Int", "127", None),
+        ("Int", "-128", None),
+        ("Numeric", "127", None),
+        ("Numeric", "-128", None),
+        ("Int", "128", Some("§5.6")),
+        ("Int", "-129", Some("§5.6")),
+        ("Numeric", "128", Some("§5.6")),
+        ("Numeric", "-129", Some("§5.6")),
+        ("Float", "10000000000.0", None),
+    ] {
+        let source = format!("def f[p: {family}](x: p) -> p = cast({literal}, p)\n");
+        assert_both(&surf(&source), expected, &source);
+    }
 }

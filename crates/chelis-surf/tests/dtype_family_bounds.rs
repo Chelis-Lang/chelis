@@ -241,8 +241,15 @@ fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
 
 #[test]
 fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
-    let deep = binder_deep(
-        "(cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))",
+    let deep = desugar_program(
+        &surf_parse("def scale[p: Float](x: p) -> p = cast(-0.1, p)").expect("Surf"),
+    );
+    let printed = print_canonical(&deep);
+    assert!(
+        printed.contains("surf_literal_style: \"unsuffixed\", type: (t-var {} p)} -0.1)")
+            && !printed.contains("} neg)"),
+        "Surf unary syntax must become an unambiguous signed literal: {}",
+        printed
     );
     let recovered = resugar_program(&deep).expect("the adopting cast relation is representable");
     assert!(
@@ -250,6 +257,17 @@ fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
         "{}",
         format_program(&recovered)
     );
+
+    for source in [
+        "def concrete(x: f64) -> f64 = cast(-0.1f64, f64)",
+        "def bounded[p: Float](x: p) -> p = cast(-0.1f64, p)",
+    ] {
+        let printed = deep_text(source);
+        assert!(
+            printed.contains("} neg)") && printed.contains("} 0.1)"),
+            "a suffixed negative keeps the ordinary unary application: {printed}"
+        );
+    }
 }
 
 #[test]
@@ -269,6 +287,12 @@ fn unrepresentable_binder_literal_provenance_fails_resugaring() {
     let mut programs = vec![
         deep_parse_strict("(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} scale (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))").expect("Deep fixture"),
         binder_deep("(lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)"),
+        deep_parse_strict(
+            "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
+             (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
+               (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))",
+        )
+        .expect("forged local neg Deep fixture"),
     ];
     for marker in [
         "surf_literal_style: \"explicit\", ",

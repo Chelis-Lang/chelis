@@ -153,6 +153,32 @@ fn integer_literals_adopt_every_compatible_family() {
 }
 
 #[test]
+fn adopted_integer_literals_must_fit_every_family_member() {
+    for (family, literal) in [
+        ("Int", "128"),
+        ("Int", "-129"),
+        ("Numeric", "128"),
+        ("Numeric", "-129"),
+    ] {
+        reject(
+            &format!(
+                "module Bind.Main\nexport (main)\ndef value[p: {family}](x: p) -> p = cast({literal}, p)\ndef main() -> int64 = value(0i64)\n"
+            ),
+            "§5.6",
+        );
+    }
+}
+
+#[test]
+fn float_family_literal_finalization_remains_total() {
+    let source = "module Bind.Main\nexport (main)\n\
+                  def value[p: Float](x: p) -> p = cast(10000000000.0, p)\n\
+                  def main() -> f16 = value(0.0f16)\n";
+    let (_dir, root) = package("float_range", source);
+    success(&run(&root, &["check", "src/main.ch"]));
+}
+
+#[test]
 fn ascription_is_not_literal_adoption() {
     reject(
         "module Bind.Main\nexport (main)\ndef scale[p: Float](x: p) -> p = mul(x, (0.1 : p))\ndef main() -> f64 = scale(3.0f64)\n",

@@ -2,13 +2,15 @@
 
 use crate::{Atom, DeepTag, DtypeFamily, Expr, MetaMap};
 
-/// The two exact Deep shapes produced for a Surf scalar literal.
+/// Whether a numeric atom is valid at every applicable member of a family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiteralSourceShape {
-    /// A direct `(lit ...)` node.
-    Direct,
-    /// The canonical unary-minus spelling `(app (var neg) (lit ...))`.
-    UnaryMinus,
+pub enum LiteralFamilyFit {
+    /// The atom kind and value are valid across the family.
+    Fits,
+    /// The atom kind does not adopt this family.
+    IncompatibleKind,
+    /// An integer atom is outside at least one active signed member's range.
+    IntegerOutOfRange,
 }
 
 /// A structurally validated scalar literal source.
@@ -17,7 +19,6 @@ pub struct LiteralSource<'a> {
     literal: &'a Expr,
     metadata: &'a MetaMap,
     numeric_atom: Option<&'a Atom>,
-    shape: LiteralSourceShape,
 }
 
 impl<'a> LiteralSource<'a> {
@@ -26,50 +27,56 @@ impl<'a> LiteralSource<'a> {
         self.metadata
     }
 
-    /// The numeric atom; unary minus remains represented by [`Self::shape`].
+    /// The numeric atom, including its sign.
     pub fn numeric_atom(self) -> Option<&'a Atom> {
         self.numeric_atom
     }
 
-    /// Whether the source was direct or carried by canonical unary minus.
-    pub fn shape(self) -> LiteralSourceShape {
-        self.shape
-    }
-
-    /// Materialize the signed atom; unrepresentable integer negation fails.
-    pub fn folded_numeric_atom(self) -> Option<Atom> {
-        match (self.shape, self.numeric_atom?) {
-            (LiteralSourceShape::Direct, atom) => Some(atom.clone()),
-            (LiteralSourceShape::UnaryMinus, Atom::Int(value)) => {
-                value.checked_neg().map(Atom::Int)
-            }
-            (LiteralSourceShape::UnaryMinus, Atom::Float(value)) => Some(Atom::Float(-value)),
-            (LiteralSourceShape::UnaryMinus, _) => None,
-        }
-    }
-
     /// Whether this source atom can bind at a dtype-family-bounded target.
     pub fn admitted_by(self, family: DtypeFamily) -> bool {
+        self.has_exact_unsuffixed_style() && self.family_fit(family) == LiteralFamilyFit::Fits
+    }
+
+    /// Whether exactly one producer marker identifies an unsuffixed literal.
+    pub fn has_exact_unsuffixed_style(self) -> bool {
         let mut styles = self
             .metadata
             .entries
             .iter()
             .filter_map(|(key, value)| (key == "surf_literal_style").then_some(value));
-        let exact_unsuffixed = matches!(
+        matches!(
             styles.next(),
             Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"
-        ) && styles.next().is_none();
-        exact_unsuffixed && self.numeric_atom_admitted_by(family)
+        ) && styles.next().is_none()
     }
 
-    /// Whether the atom kind is compatible with a dtype family.
-    pub fn numeric_atom_admitted_by(self, family: DtypeFamily) -> bool {
+    /// Classify kind and family-wide value validity independently of provenance.
+    pub fn family_fit(self, family: DtypeFamily) -> LiteralFamilyFit {
         match self.numeric_atom {
-            Some(Atom::Float(_)) => matches!(family, DtypeFamily::Float | DtypeFamily::Numeric),
-            Some(Atom::Int(_)) => true,
-            _ => false,
+            Some(Atom::Float(_)) if matches!(family, DtypeFamily::Float | DtypeFamily::Numeric) => {
+                LiteralFamilyFit::Fits
+            }
+            Some(Atom::Int(_)) if family == DtypeFamily::Float => LiteralFamilyFit::Fits,
+            Some(Atom::Int(value))
+                if active_signed_integer_ranges()
+                    .into_iter()
+                    .all(|(min, max)| *value >= min && *value <= max) =>
+            {
+                LiteralFamilyFit::Fits
+            }
+            Some(Atom::Int(_)) => LiteralFamilyFit::IntegerOutOfRange,
+            _ => LiteralFamilyFit::IncompatibleKind,
         }
     }
+}
+
+fn active_signed_integer_ranges() -> [(i64, i64); 4] {
+    [
+        (i8::MIN as i64, i8::MAX as i64),
+        (i16::MIN as i64, i16::MAX as i64),
+        (i32::MIN as i64, i32::MAX as i64),
+        (i64::MIN, i64::MAX),
+    ]
 }
 
 /// A binder-sensitive literal relation found in a Deep expression.
@@ -88,33 +95,13 @@ pub enum BinderLiteralUse<'a> {
     },
 }
 
-/// Classify a direct `lit` or one exact `app(var neg, numeric-lit)` wrapper.
+/// Classify one direct `lit`; callable applications carry no syntax provenance.
 pub fn classify_literal_source(expr: &Expr) -> Option<LiteralSource<'_>> {
-    if let Some((literal, metadata, numeric_atom)) = direct_literal(expr) {
-        return Some(LiteralSource {
-            literal,
-            metadata,
-            numeric_atom,
-            shape: LiteralSourceShape::Direct,
-        });
-    }
-
-    let (DeepTag::App, _, children) = node_parts(expr)? else {
-        return None;
-    };
-    let [callee, operand] = children else {
-        return None;
-    };
-    if exact_var_name(callee) != Some("neg") {
-        return None;
-    }
-    let (literal, metadata, numeric_atom) = direct_literal(operand)?;
-    numeric_atom?;
+    let (literal, metadata, numeric_atom) = direct_literal(expr)?;
     Some(LiteralSource {
         literal,
         metadata,
         numeric_atom,
-        shape: LiteralSourceShape::UnaryMinus,
     })
 }
 
@@ -198,16 +185,6 @@ fn direct_literal(expr: &Expr) -> Option<(&Expr, &MetaMap, Option<&Atom>)> {
         _ => None,
     };
     Some((expr, metadata, numeric_atom))
-}
-
-fn exact_var_name(expr: &Expr) -> Option<&str> {
-    let (DeepTag::Var, _, children) = node_parts(expr)? else {
-        return None;
-    };
-    let [Expr::Atom(Atom::Name(name), _)] = children else {
-        return None;
-    };
-    Some(name)
 }
 
 /// Name carried by an exact, non-hole `t-var` node.

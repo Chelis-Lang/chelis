@@ -29,7 +29,7 @@ pub use dtype_bounds::{
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
 pub use literal_source::{
-    BinderLiteralUse, LiteralSource, LiteralSourceShape, classify_literal_source,
+    BinderLiteralUse, LiteralFamilyFit, LiteralSource, classify_literal_source,
     exact_type_variable_name, visit_binder_literal_uses,
 };
 pub use parser::{
