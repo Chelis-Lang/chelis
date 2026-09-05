@@ -318,6 +318,10 @@ fn c_run_result(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
 
 /// A LITERAL claim of 4 over a read that yields 5, chelis#1377's shape.
 ///
+/// `insert` since S2a: `b` is rank 0, so this is the rank-RAISING form, which
+/// that change gave its own name. The IR node and every guard row here are
+/// unchanged by the spelling.
+///
 /// The extent this guards is an interface value - an input tensor's axis,
 /// read by the `expand` size - so `spec/04-type-system.md` section 4.7 places
 /// the guard at the ENTRY of the function that reads it. That is `f`, not the
@@ -343,7 +347,7 @@ fn guard_order_source(claim: u32, trap_first: bool) -> String {
         (widen, trap)
     };
     format!(
-        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = expand(b, 0, shape(x, 0))\n\
+        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = insert(b, 0, shape(x, 0))\n\
          x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32])\n\
          xb = to_tensor([1.0f32, 2.0f32])\n\
          seed = sum(to_tensor([1.0f32]), 0)\n\

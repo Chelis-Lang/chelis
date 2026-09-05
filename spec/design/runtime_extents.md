@@ -911,7 +911,7 @@ reproducer's callee reads `shape(...)` in its `expand` size, which is
 `HostOnly` too (`builtins.rs:1260`; `realizability.rs:466-476`;
 `lower.rs:2749`), so the callee is Host under both the manifest's and the
 lowerer's classification. A claim-free `Universal`-only binding such as
-`x = expand(scalar_to_tensor(cast(1.0, f32)), 0, 2i64)` does manifest a
+`x = insert(scalar_to_tensor(cast(1.0, f32)), 0, 2i64)` does manifest a
 `Lane::Tensor` root, so through the CLI the DAG evaluator serves claim-free
 tensor bindings only, and host-lane application is the primary eval path for
 user tensor code that carries a claim. The CLI supplies no input bindings for
