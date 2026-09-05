@@ -6,6 +6,14 @@ use chelis_deep::{Atom, BinderLiteralUse, LiteralFamilyFit, visit_binder_literal
 /// P10b / spec/04 §5.6 permits binder adoption only at the direct
 /// `cast(literal, p)` operand. [04-INF-6] rejects it elsewhere, while
 /// [04-DTYPE-1] rejects an unbounded target on this literal-source path.
+///
+/// The integer range rule takes BOTH atoms together, and the diagnostic names
+/// both for that reason. §5.6 says the range checks apply "at `p`" and offers
+/// `cast(3000000000, int64)` as the escape hatch the position exists to
+/// preserve, so a reader who follows that citation alone can conclude the
+/// family-wide rule contradicts it. It does not: under [04-INF-6] `p` denotes
+/// every admissible instantiation of the binder, so "at `p`" already means at
+/// every member of the family. The citation was incomplete rather than wrong.
 pub(super) fn validate_binder_literal_adoption_in_program(
     items: &[(Option<String>, &deep::Expr)],
     signatures: &UnordMap<String, DeclaredSigMetadata>,
@@ -55,9 +63,10 @@ pub(super) fn validate_binder_literal_adoption_in_program(
                             CheckErrorKind::TypeMismatch,
                             format!(
                                 "literal {value} in `{name}` cannot bind to `{binder}: {}`: \
-                                 spec/04-type-system.md §5.6 requires an adopted integer \
-                                 literal to fit every member of its dtype family, including \
-                                 int8 [-128, 127]",
+                                 spec/04-type-system.md §5.6 applies the adopted literal's \
+                                 range checks at `{binder}`, and [04-INF-6] makes `{binder}` \
+                                 denote every admissible instantiation, so the literal must \
+                                 fit every member of the family, including int8 [-128, 127]",
                                 family.surf_name()
                             ),
                             vec![

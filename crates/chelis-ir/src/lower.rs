@@ -4485,7 +4485,17 @@ fn binder_float_literal_source_default(
         let value = values.next()?;
         values.next().is_none().then_some(value)
     };
-    let binder = single("type").and_then(extract_scalar_precision_var_name)?;
+    // Round 5 P1: the DAG lane's twin of the host predicate reads the FIRST
+    // `type` entry for the same reason its sibling does. See the note on
+    // `binder_float_literal_keeps_f32_source` in `host.rs`: the checker and the
+    // interpreter both take the first entry, so a lowering reader that demands
+    // exactly one is stricter than the readers that decide acceptance and
+    // silently changes the answer when they disagree. `surf_literal_style`
+    // keeps `single`, because the checker rejects a duplicate of that key.
+    let binder = meta
+        .iter()
+        .find_map(|(candidate, value)| (candidate == "type").then_some(value))
+        .and_then(extract_scalar_precision_var_name)?;
     let exact_unsuffixed = matches!(
         single("surf_literal_style"),
         Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"

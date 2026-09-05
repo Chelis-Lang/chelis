@@ -89,6 +89,83 @@ fn assert_native(name: &str, source: &str, expected: &str) {
     );
 }
 
+/// The round-5 P1 witness, in Deep. Its resugared Surf is character-for-character
+/// the scalar witness this suite already documents; the only difference is that
+/// the `lit` carries its `type` stamp TWICE.
+const DUPLICATED_TYPE_STAMP: &str = "(module {surf_path: \"Bind.Main\"}\n\
+     bind.main\n\
+     (export {} main)\n\
+     (defsig {dtype_bounds: {p: numeric}} addk (t-fn {} (t-var {} p) (t-var {} p)))\n\
+     (def {} addk\n\
+       (fn {} (params {} (x {type: (t-var {} p)}))\n\
+         (app {} (var {} add) (var {} x)\n\
+           (cast {}\n\
+             (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 16777217.0)\n\
+             (t-var {} p)))))\n\
+     (defsig {} main (t-fn {} (t-prim {} int64)))\n\
+     (def {} main (fn {} (params {}) (app {} (var {} addk) (lit {type: (t-prim {} int64)} 0)))))\n";
+
+/// Round 5 P1, regression test. One accepted program, one answer, both lanes.
+///
+/// The host-specialization join required EXACTLY ONE `type` metadata entry,
+/// which made it stricter than the two readers that decide whether a program is
+/// accepted at all: the checker's `visit_binder_literal_uses` and the
+/// interpreter's `lit_meta_type_var_name` both take the FIRST entry. So this
+/// program type-checked, evaluated with the f32 narrow applied, and compiled
+/// WITHOUT it, giving `16777216` from `chelis eval` and `16777217` from the
+/// compiled C. All three readers now take the first entry.
+///
+/// Failing closed in the lowering lane instead would have traded a wrong value
+/// for a lane split, with C rejecting what the checker and eval accept. Whether
+/// a duplicated `type` key should be malformed Deep at the ingress under
+/// [04-TOT-3] is a well-formedness question for its own slice.
+///
+/// `surf_literal_style` deliberately keeps its exactly-one requirement: the
+/// checker consumes the same predicate and rejects a duplicate of that key, so
+/// strictness there has a rejecting counterpart and cannot fail open.
+#[test]
+fn a_duplicated_type_stamp_gives_one_answer_on_both_lanes() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    let unit = root.join("dup_type.dp");
+    fs::write(&unit, DUPLICATED_TYPE_STAMP).expect("write fixture");
+
+    let interpreted = text(&run(root, &["eval", "--file", "dup_type.dp"]));
+    assert!(
+        interpreted.contains("main = 16777216"),
+        "eval must apply the f32 narrow: {interpreted}"
+    );
+
+    let out_dir = root.join("dup-out");
+    success(&run(
+        root,
+        &[
+            "build",
+            unit.to_str().expect("utf8"),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().expect("utf8"),
+        ],
+    ));
+    let emitted = fs::read_to_string(out_dir.join("dup_type.c")).expect("emitted C");
+    assert!(
+        emitted.contains("f64 -> f32"),
+        "the emitted C must carry the f32 narrow plan"
+    );
+
+    let status = common::link_generated(&out_dir, "dup_type.c", "dup_type");
+    assert!(status.success(), "link failed: {status}");
+    let native = std::process::Command::new(out_dir.join("dup_type"))
+        .output()
+        .expect("compiled binary should run");
+    let native = String::from_utf8_lossy(&native.stdout).to_string();
+    assert!(
+        native.contains("main = 16777216"),
+        "compiled C must agree with eval, not return 16777217: {native}"
+    );
+}
+
 #[test]
 fn scalar_and_tensor_binders_compute_at_each_instantiation() {
     for family in ["Float", "Numeric"] {

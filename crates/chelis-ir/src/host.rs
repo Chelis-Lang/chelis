@@ -11831,15 +11831,28 @@ fn binder_float_literal_keeps_f32_source(operand: &Expr, target: &HostTypeTerm) 
     {
         return false;
     }
-    let mut types = source
+    // Round 5 P1: read the FIRST `type` entry, which is what the checker
+    // (`visit_binder_literal_uses`, via `.find`) and the interpreter
+    // (`lit_meta_type_var_name`) both do. Requiring exactly one made this
+    // predicate STRICTER than the readers that decide whether the program is
+    // accepted at all, so a `lit` carrying two `type` stamps type-checked,
+    // evaluated with the narrow applied, and compiled without it: one accepted
+    // program with two answers depending on which lane read it.
+    //
+    // `surf_literal_style` keeps its exactly-one requirement, and the
+    // asymmetry is deliberate rather than an oversight: the checker consumes
+    // `has_exact_unsuffixed_style` and REJECTS a duplicated style key, so
+    // strictness there has a rejecting counterpart and cannot fail open. There
+    // is no equivalent checker guard on `type`. Whether a duplicated `type`
+    // key should be malformed Deep at the ingress under [04-TOT-3] is a
+    // well-formedness question for its own slice; until it is answered, the
+    // lanes must at least agree.
+    let binder_typed = source
         .metadata()
         .entries
         .iter()
-        .filter_map(|(key, value)| (key == "type").then_some(value));
-    let binder_typed = matches!(
-        (types.next(), types.next()),
-        (Some(ty), None) if chelis_deep::exact_type_variable_name(ty).is_some()
-    );
+        .find_map(|(key, value)| (key == "type").then_some(value))
+        .is_some_and(|ty| chelis_deep::exact_type_variable_name(ty).is_some());
     binder_typed
         && matches!(
             target,
