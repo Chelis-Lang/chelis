@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Fifty-nine are Rust and seven are C or Objective-C headers. A completeness
+Sixty are Rust and seven are C or Objective-C headers. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "2fe680f97f0cc6657b7b3292a3c1b8fc59b752c26634b790e50a2e1334c7d260"
+FREEZE_SHA256 = "a9361d654a821c124d0c1bc96568c988711a51ff02aa6e42e9e498a7f121872d"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -115,6 +115,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-backend-metal/src/lib.rs",
     "crates/chelis-ir/src/analysis.rs",
     "crates/chelis-ir/src/axis_sources.rs",
+    "crates/chelis-ir/src/capacity_key.rs",
     "crates/chelis-ir/src/dag.rs",
     "crates/chelis-ir/src/eval.rs",
     "crates/chelis-ir/src/fuse.rs",
@@ -161,13 +162,23 @@ INVENTORY_SOURCES: tuple[str, ...] = (
 # and binding mirrors, Phase 3 the host field seal, Phase 4 the typed lanes.
 DELETION_PHASE_BY_KIND: dict[str, int] = {
     "dtype-contract": 1,
+    "legacy-capacity-key-use": 1,
     "normalized-key-arithmetic": 1,
+    "saturating-capacity-fold": 1,
     "width-arithmetic": 1,
     "fixed-rank-metadata": 2,
     "narrow-metadata": 2,
     "backend-element-spelling": 4,
     "load-store-template": 4,
 }
+
+CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
+
+
+def owner_module_final_form(kind: str, path: str) -> bool:
+    """Whether one scan hit is final by the exact-capacity owner boundary."""
+
+    return kind == "normalized-key-arithmetic" and path == CAPACITY_KEY_OWNER
 
 
 class OracleFailure(RuntimeError):
@@ -408,6 +419,8 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     seen: dict[str, InventoryRow] = {}
     for row in scan_sources(root):
         kind = row["kind"]
+        if owner_module_final_form(kind, row["path"]):
+            continue
         derived = InventoryRow(
             kind=kind,
             path=row["path"],
@@ -532,6 +545,9 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             },
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
+            "owner_module_final_forms": {
+                CAPACITY_KEY_OWNER: ["normalized-key-arithmetic"],
+            },
             "command": PHASE0_COMMAND,
             "mutations": mutation_manifest(probes),
         },
@@ -769,6 +785,32 @@ def mutate_normalized_key_arithmetic(source: str) -> str:
         """#[allow(dead_code)]
 fn runtime_representation_phase0_saturating_fold(concrete: usize, value: usize) -> usize {
     concrete.saturating_mul(value)
+}""",
+    )
+
+
+def mutate_capacity_owner_saturation(source: str) -> str:
+    """Saturation never becomes final inside the exact-capacity owner."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_capacity_owner_saturation",
+        """#[allow(dead_code)]
+fn runtime_representation_capacity_owner_saturation(value: usize) -> usize {
+    value.saturating_mul(2)
+}""",
+    )
+
+
+def mutate_capacity_owner_legacy_key(source: str) -> str:
+    """The exact owner may not recover capacity through the legacy carrier."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_capacity_owner_legacy_key",
+        """#[allow(dead_code)]
+fn runtime_representation_capacity_owner_legacy_key(value: &crate::dag::DimExpr) {
+    let _ = value.normalized_key();
 }""",
     )
 
@@ -1190,6 +1232,16 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
         _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
         _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_normalized_key_arithmetic),
+        _probe(
+            "saturating-capacity-fold",
+            CAPACITY_KEY_OWNER,
+            mutate_capacity_owner_saturation,
+        ),
+        _probe(
+            "legacy-capacity-key-use",
+            CAPACITY_KEY_OWNER,
+            mutate_capacity_owner_legacy_key,
+        ),
         _probe("raw-element-pointer", "crates/chelis-runtime/src/ieee_narrow.rs", mutate_raw_element_pointer),
         _probe("width-arithmetic", "crates/chelis-runtime/src/format_shortest.rs", mutate_width_arithmetic),
         _probe(

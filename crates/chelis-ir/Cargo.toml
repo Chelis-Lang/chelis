@@ -12,6 +12,7 @@ chelis-deep.workspace = true
 chelis-effects.workspace = true
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
+num-bigint = "0.4"
 serde.workspace = true
 stacker.workspace = true
 thiserror.workspace = true

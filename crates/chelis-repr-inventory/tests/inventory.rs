@@ -13,7 +13,6 @@ use chelis_repr_inventory::{
 
 const RUNTIME: &str = "crates/chelis-runtime/src/lib.rs";
 const BACKEND: &str = "crates/chelis-backend-c/src/emit.rs";
-const IR: &str = "crates/chelis-ir/src/dag.rs";
 const HEADER: &str = "crates/chelis-runtime/include/chelis_runtime.h";
 
 fn identities(path: &str, source: &str) -> Vec<(String, String)> {
@@ -200,10 +199,10 @@ fn the_dtype_contract_covers_variants_and_element_bindings() {
 #[test]
 fn saturating_capacity_folds_and_key_consumers_are_both_seams() {
     let fold = kinds(
-        IR,
+        "crates/chelis-ir/src/capacity_key.rs",
         "fn push(c: &mut usize, v: usize) { *c = c.saturating_mul(v); }",
     );
-    assert_eq!(fold, vec!["normalized-key-arithmetic".to_string()]);
+    assert_eq!(fold, vec!["saturating-capacity-fold".to_string()]);
 
     // Phase 1's exit requires every reuse consumer to move to the exact key,
     // so a consumer outside the IR is equally a seam.
@@ -215,6 +214,38 @@ fn saturating_capacity_folds_and_key_consumers_are_both_seams() {
 
     // A saturating fold outside the IR is ordinary arithmetic.
     assert!(kinds(RUNTIME, "fn f(a: usize) -> usize { a.saturating_mul(2) }").is_empty());
+}
+
+#[test]
+fn checked_capacity_folds_are_distinct_from_saturation() {
+    assert_eq!(
+        kinds(
+            "crates/chelis-ir/src/capacity_key.rs",
+            "fn f(a: usize, b: usize) -> Option<usize> { a.checked_mul(b) }",
+        ),
+        vec!["normalized-key-arithmetic".to_string()]
+    );
+    assert_eq!(
+        kinds(
+            "crates/chelis-ir/src/capacity_key.rs",
+            "fn f(a: usize, b: usize) -> usize { a.saturating_mul(b) }",
+        ),
+        vec!["saturating-capacity-fold".to_string()]
+    );
+}
+
+#[test]
+fn exact_capacity_owner_rejects_the_legacy_key_carrier() {
+    for source in [
+        "fn f(value: &crate::dag::DimExpr) { let _ = value; }",
+        "fn f(value: &Legacy) { let _ = value.normalized_key(); }",
+    ] {
+        assert_eq!(
+            kinds("crates/chelis-ir/src/capacity_key.rs", source),
+            vec!["legacy-capacity-key-use".to_string()],
+            "{source}"
+        );
+    }
 }
 
 #[test]

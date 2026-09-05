@@ -49,10 +49,12 @@ pub const SEAM_KINDS: &[&str] = &[
     "direct-data-access",
     "dtype-contract",
     "fixed-rank-metadata",
+    "legacy-capacity-key-use",
     "load-store-template",
     "narrow-metadata",
     "normalized-key-arithmetic",
     "raw-element-pointer",
+    "saturating-capacity-fold",
     "width-arithmetic",
 ];
 
@@ -449,6 +451,9 @@ struct RustSeamScanner {
     class: SourceClass,
     /// The capacity module owns [#888]'s unchecked products.
     defines_capacity_keys: bool,
+    /// The exact-capacity owner admits checked/exact arithmetic but never a
+    /// saturating fold.
+    exact_capacity_owner: bool,
     owners: Vec<String>,
     rows: Vec<SeamRow>,
     error: Option<ScanError>,
@@ -815,7 +820,23 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         // seam.
         let is_fold =
             CAPACITY_FOLDS.contains(&method.as_str()) && matches!(self.class, SourceClass::Ir);
-        if is_fold || method == "normalized_key" {
+        if self.exact_capacity_owner && method == "normalized_key" {
+            self.push(
+                "legacy-capacity-key-use",
+                call.to_token_stream().to_string(),
+            );
+        } else if is_fold
+            && self.exact_capacity_owner
+            && matches!(
+                method.as_str(),
+                "saturating_add" | "saturating_mul" | "saturating_pow"
+            )
+        {
+            self.push(
+                "saturating-capacity-fold",
+                call.to_token_stream().to_string(),
+            );
+        } else if is_fold || method == "normalized_key" {
             self.push(
                 "normalized-key-arithmetic",
                 call.to_token_stream().to_string(),
@@ -825,6 +846,20 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
             self.push("width-arithmetic", call.to_token_stream().to_string());
         }
         visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if self.exact_capacity_owner
+            && path.segments.iter().any(|segment| {
+                matches!(segment.ident.to_string().as_str(), "DimExpr" | "DimExprKey")
+            })
+        {
+            self.push(
+                "legacy-capacity-key-use",
+                path.to_token_stream().to_string(),
+            );
+        }
+        visit::visit_path(self, path);
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -1110,7 +1145,8 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
         .map_err(|error| ScanError::new(format!("cannot parse Rust source `{path}`: {error}")))?;
     let mut scanner = RustSeamScanner {
         class,
-        defines_capacity_keys: path.ends_with("/dag.rs"),
+        defines_capacity_keys: path.ends_with("/dag.rs") || path.ends_with("/capacity_key.rs"),
+        exact_capacity_owner: path.ends_with("/capacity_key.rs"),
         owners: Vec::new(),
         rows: Vec::new(),
         error: None,

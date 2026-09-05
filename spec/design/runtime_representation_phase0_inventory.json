@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "2fe680f97f0cc6657b7b3292a3c1b8fc59b752c26634b790e50a2e1334c7d260",
+  "freeze_sha256": "a9361d654a821c124d0c1bc96568c988711a51ff02aa6e42e9e498a7f121872d",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2834,7 +2834,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 66,
+        "registered_sources": 67,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",
@@ -2853,6 +2853,11 @@
       },
       "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
       "expected_success": "every hit is exact active debt from the frozen foundation",
+      "owner_module_final_forms": {
+        "crates/chelis-ir/src/capacity_key.rs": [
+          "normalized-key-arithmetic"
+        ]
+      },
       "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
       "mutations": [
         {
@@ -2956,6 +2961,30 @@
           "expected_kind": "normalized-key-arithmetic",
           "path": "crates/chelis-ir/src/dag.rs",
           "implementation_sha256": "2fe7caf5f79f8c5f18515a211073875bb84938c86347e4c263f43004ea69d1c4",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_capacity_owner_saturation",
+          "expected_kind": "saturating-capacity-fold",
+          "path": "crates/chelis-ir/src/capacity_key.rs",
+          "implementation_sha256": "1fbfb148c80bfe1048052c9668db73598f585cc0deed9296b1f0666b4ea4bf88",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_capacity_owner_legacy_key",
+          "expected_kind": "legacy-capacity-key-use",
+          "path": "crates/chelis-ir/src/capacity_key.rs",
+          "implementation_sha256": "494c72cf4de0abe630ffa08743f136fb1d273ada41bd605d76c97a243003c603",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"

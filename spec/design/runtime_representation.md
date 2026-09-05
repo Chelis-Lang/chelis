@@ -202,18 +202,18 @@ Neither may use a saturating or wrapping integer.
 
 ### C2.1 Compiler capacity keys
 
-`CapacityKey` is a canonical tree over the complete multiplication/division
-vocabulary:
+`CapacityKey` is an opaque proof carrier backed by a canonical tree over the
+complete multiplication/division vocabulary:
 
 ```rust
-pub enum CapacityKey {
-    Literal(BigUint),
-    Symbol(DimSymbol),
-    Product(Vec<CapacityKey>),
-    ExactQuotient {
-        dividend: Box<CapacityKey>,
-        divisor: Box<CapacityKey>,
-    },
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CapacityKey { /* private canonical tree and validity domain */ }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotProvenEqual { /* private reason */ }
+
+impl CapacityKey {
+    pub fn prove_equal(&self, other: &Self) -> Result<(), NotProvenEqual>;
 }
 ```
 
@@ -223,6 +223,13 @@ happens to carry that expression. `DimExpr`, `RtDim`, and `InputAxis` are
 carrier spellings, not key variants. Phase 1 consumes whichever carrier
 [#1277] has landed; it must not translate an `RtDim`/`InputAxis` edge back into
 `DimExpr` or recover it by name.
+
+The canonical tree, its source-identity atoms, its validity domain, and every
+constructor are private to `chelis-ir`. Backends may receive and compare the
+opaque proof carrier only through `prove_equal`; they cannot forge a literal or
+symbol, invoke normalization, recover a source by string spelling, or project
+the key into `u64`, `i64`, or `usize`. A crate-private literal accessor may
+borrow the exact `BigUint` only when the complete key is a total literal.
 
 Product-only regions flatten, sort, fold arbitrary-precision literals, and
 remove multiplicative identities. They may collapse a zero product only when
@@ -248,6 +255,12 @@ the reuse site. Unproved predicates return `NotProvenEqual`; they are never
 assumed from a successful value seen on another execution. The key and its
 proof arithmetic are never projected to `u64`, `i64`, or `usize`. Equality is
 therefore exact over both value and validity domain.
+
+Phase 1's first implementation slice does not add such a discharge surface.
+It records the intrinsic validity obligations of an exact quotient and returns
+`NotProvenEqual` while any remain. Only static literal evaluation can discharge
+them in that slice. This is a conservative loss of reuse, never permission to
+drop or assume an obligation.
 
 The set is deliberately closed against equality learned only by passing a
 [#1277] runtime guard. A passed guard establishes a fact for that execution

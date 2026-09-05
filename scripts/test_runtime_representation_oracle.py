@@ -159,6 +159,32 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
         self.assertIn(extra.identity, caught.exception.details)
 
+    def test_only_checked_key_arithmetic_is_final_inside_the_capacity_owner(self) -> None:
+        exact = oracle.InventoryRow(
+            kind="normalized-key-arithmetic",
+            path=oracle.CAPACITY_KEY_OWNER,
+            owner="canonicalize_product",
+            deletion_phase=None,
+        )
+        saturated = oracle.InventoryRow(
+            kind="saturating-capacity-fold",
+            path=oracle.CAPACITY_KEY_OWNER,
+            owner="bad_fold",
+            deletion_phase=1,
+        )
+        sibling = oracle.InventoryRow(
+            kind="normalized-key-arithmetic",
+            path="crates/chelis-ir/src/dag.rs",
+            owner="normalized_key",
+            deletion_phase=1,
+        )
+        self.assertTrue(oracle.owner_module_final_form(exact.kind, exact.path))
+        self.assertFalse(oracle.owner_module_final_form(saturated.kind, saturated.path))
+        self.assertFalse(oracle.owner_module_final_form(sibling.kind, sibling.path))
+        self.assertFalse(
+            oracle.owner_module_final_form("legacy-capacity-key-use", oracle.CAPACITY_KEY_OWNER)
+        )
+
 
 class MutationContractTests(unittest.TestCase):
     def test_every_seam_kind_in_the_ledger_has_a_mutation(self) -> None:
@@ -406,5 +432,5 @@ class RedTeamRegressionTests(unittest.TestCase):
         rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
         headers = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn("Fifty-nine are Rust and seven are C or Objective-C headers", source)
-        self.assertEqual((rust, headers), (59, 7))
+        self.assertIn("Sixty are Rust and seven are C or Objective-C headers", source)
+        self.assertEqual((rust, headers), (60, 7))

@@ -375,6 +375,15 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::check_axis_sources(self.dag, stage)
     }
 
+    /// The checked extent source for each output axis of `node`.
+    ///
+    /// Kept crate-private so the exact-capacity owner can consume typed
+    /// provenance without exposing the raw DAG or a backend normalization
+    /// seam.
+    pub(crate) fn output_axis_sources(self, node: NodeId) -> Vec<crate::AxisSource> {
+        crate::axis_sources::output_axis_sources(self.dag, node)
+    }
+
     /// The exact verified ownership directive attached to `node`.
     ///
     /// Every retained DAG node has exactly one directive; backends use this
