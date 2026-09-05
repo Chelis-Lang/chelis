@@ -5181,3 +5181,81 @@ int main() {{
         "and produce the claimed shape: {out}"
     );
 }
+
+/// A `Name` claim the checker RESOLVED to a literal, over a member whose
+/// extent is a runtime read, still owes its guard - compared against that
+/// literal.
+///
+/// C2.4's literal proof is about the axis SOURCE: a member whose extent is a
+/// literal performs no runtime read, so there is nothing to observe and
+/// nothing to compare. A resolved CLAIM over a runtime read is a different
+/// thing. Section 4.7 owes the comparison between the claimed extent and the
+/// value actually observed, and the entry path already emits exactly that for
+/// a `Literal` claim (chelis#1377); the local path must not skip it merely
+/// because no lane allocated a C variable for the name.
+///
+/// EVIDENTIARY STATUS: regression test. The first repair of round 2's item 4
+/// keyed the site on whether the claim had a C declaration, which is an
+/// implementation convenience and not the rule; under it this row emits no
+/// guard at all. Measured on `rank_poly_tier3`'s widen/grad/vmap program,
+/// where the claim `c` resolves to 3 and the dropped comparison was
+/// available as `!= 3`.
+#[test]
+fn a_name_claim_resolved_to_a_literal_still_guards_its_runtime_read() {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let resolved = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), Some(4))],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], resolved(), None);
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Named("s".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, strided],
+        resolved(),
+        None,
+    );
+    dag.add_root(out);
+
+    let src = codegen(&dag, "resolved_local").expect("codegen").c_source;
+    // The discriminating assertion is the CONTEXT line's operand, not a bare
+    // `!= 4` anywhere in the file: the input preamble's static-dim check and
+    // chelis#616's `emit_static_dim_guard` both compare against 4 too, so a
+    // looser assertion would pass on either of them and say nothing about
+    // this guard. Only the local [04-NUM-9] line prints the claim's canonical
+    // value as its first argument.
+    assert!(
+        src.contains(r#"extent `n`: claimed = %lld, node 3 axis 0 = %lld\n", (long long)(4),"#),
+        "the runtime read is compared against the literal the claim resolved to: {src}"
+    );
+    assert!(
+        src.contains("chelis_numeric_trap(\"numeric trap: domain in expand at int64\")"),
+        "rendered [04-NUM-9] at the operation introducing the extent: {src}"
+    );
+}

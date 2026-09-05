@@ -103,7 +103,9 @@ use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
-use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding, SymbolicDimOccurrence};
+use crate::dag::{
+    Dag, DagNode, DimInfo, NodeId, RiscOp, SymbolicDimBinding, SymbolicDimOccurrence,
+};
 use crate::host::{
     ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
     ConcreteHostProgram, HostFunctionOrigin, HostFunctionSpecialization, HostTensorHelper,
@@ -129,9 +131,25 @@ pub use ir::{HostSiteId, HostSiteKind};
 /// output axis carrying the claim.
 pub type LocalGuardSite = (usize, usize);
 
-/// What a local guard compares against: the claim's binder name, and the
-/// operation [04-NUM-9]'s `<op>` slot names.
-pub type LocalGuardClaim = (String, &'static str);
+/// What a local guard reports and what it compares against.
+///
+/// `operand` is the class's canonical VALUE, which is the claim's binder name
+/// where the lane declares one and the literal the checker resolved the claim
+/// to otherwise. Keying the comparison on the resolved value rather than on
+/// whether a C variable happens to exist keeps the derivation the authority:
+/// a claim resolved to a literal over a RUNTIME read still owes the
+/// comparison `spec/04-type-system.md` section 4.7 requires between the
+/// claimed extent and the value actually observed, and the entry path already
+/// emits exactly that for a `Literal` claim (chelis#1377).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalGuardClaim {
+    /// The claim as reported in the guard's context line.
+    pub claim: String,
+    /// The C expression the observed extent is compared against.
+    pub operand: String,
+    /// The operation [04-NUM-9]'s `<op>` slot names.
+    pub op: &'static str,
+}
 
 /// Immutable cursor over the exact verified DAG payload. The raw [`Dag`]
 /// remains private so a backend can inspect only the payload whose ownership
@@ -225,11 +243,33 @@ impl<'a> VerifiedDagView<'a> {
             let crate::axis_sources::DimClaim::Name(name) = &class.claim else {
                 continue;
             };
+            // The class's canonical VALUE. C2.4 makes a literal claim its own
+            // canonical value; a `Name` the checker resolved to a literal is
+            // the same situation reached by a different spelling, so the
+            // comparison is against that literal rather than against a
+            // variable no lane declares.
+            let resolved = class.members.iter().find_map(|member| {
+                match self
+                    .dag
+                    .get(member.node)?
+                    .output_type
+                    .dims
+                    .get(member.axis)?
+                {
+                    DimInfo::Named(_, Some(value)) | DimInfo::Lit(value) => Some(value.to_string()),
+                    DimInfo::Named(_, None) => None,
+                }
+            });
             for member in &class.members {
                 if !matches!(
                     member.source,
                     crate::axis_sources::AxisSource::InputAxis { .. }
                 ) {
+                    // C2.4's literal proof is about the axis SOURCE, not about
+                    // the claim: a member whose extent is a literal performs no
+                    // runtime read, so there is nothing to observe and nothing
+                    // to compare. A resolved claim over a runtime read is a
+                    // different thing and still owes its guard.
                     continue;
                 }
                 let Some(node) = self.dag.get(member.node) else {
@@ -240,7 +280,11 @@ impl<'a> VerifiedDagView<'a> {
                 // this lane uses.
                 sites.push((
                     (member.node.0, member.axis),
-                    (name.clone(), crate::grad::risc_op_name(&node.op)),
+                    LocalGuardClaim {
+                        claim: name.clone(),
+                        operand: resolved.clone().unwrap_or_else(|| name.clone()),
+                        op: crate::grad::risc_op_name(&node.op),
+                    },
                 ));
             }
         }

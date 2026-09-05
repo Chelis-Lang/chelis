@@ -6766,22 +6766,24 @@ impl CEmitter {
         // an extent under [05-DIM-1]. Section 4.7's required context - the
         // disagreeing names, the axis and each observed value - is its own
         // `fprintf`, so the trap line stays exactly one line.
-        let Some((name, op)) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
+        // The comparison operand is the class's CANONICAL VALUE, supplied by
+        // the derivation: the binder name where a lane declares one, the
+        // literal the checker resolved the claim to otherwise. The emitter
+        // consults no declaration table, so a claim resolved to a literal over
+        // a RUNTIME read still gets the comparison section 4.7 owes between
+        // the claimed extent and the value observed - the same comparison the
+        // entry path emits for a `Literal` claim (chelis#1377). Keying it on
+        // whether a C variable happened to be allocated narrowed a required
+        // check to an implementation convenience.
+        let Some(site) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        // A claim that resolved to a literal in this function was never
-        // declared as a variable, so there is nothing to compare against and
-        // emitting the guard would reference an undeclared identifier.
-        // Measured on `rank_poly_tier3`'s grad/vmap program, where the claim
-        // `c` allocates as the literal 3.
-        if !self.declared_dim_names.contains(&name) {
-            return;
-        }
+        let (name, operand, op) = (site.claim, site.operand, site.op);
         let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
-        self.line(&format!("if (({extent_expr}) != {name}) {{"));
+        self.line(&format!("if (({extent_expr}) != {operand}) {{"));
         self.indent += 1;
         self.line(&format!(
-            "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({name}), (long long)({extent_expr}));"
+            "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
         ));
         self.line(&format!(
             "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"

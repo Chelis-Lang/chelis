@@ -367,7 +367,19 @@ the defect class this slice removes.
   inserts is a member whatever slot its `InputAxis` names, so a same-tensor
   read under a foreign claim ([#1376]) is guarded, while a same-tensor read
   under a proved identity costs no guard because C1.2's static proof leaves
-  no claim. A literal claim is the class's canonical value itself. A literal
+  no claim. A literal claim is the class's canonical value itself, and so is a
+  binder name the checker RESOLVED to a literal: a guard compares the observed
+  extent against that value rather than against a variable no lane need
+  declare. The proof that removes a guard is about the axis SOURCE, not about
+  the claim - a member whose extent is a literal performs no runtime read, so
+  there is nothing to observe and nothing to compare, and `is_member` already
+  excludes it. A resolved claim over a RUNTIME read is the opposite case and
+  still owes the comparison `spec/04` section 4.7 requires between the claimed
+  extent and the value actually observed; the entry path emits exactly that
+  for a `Literal` claim ([#1377]) and the local path emits it against the
+  resolved literal. An interface member's resolved size is a claim about what
+  the caller must pass and never a proof, which is why [#1377]'s input axis is
+  guarded rather than exempted. A literal
   claim on an anonymous runtime extent (`-> tensor[8, f32]` over `expand(b,
   0, mul(shape(x, 0), 2i64))`) is therefore a class whose canonical value is
   the literal and whose one member is the scalar-sourced set axis, and a
