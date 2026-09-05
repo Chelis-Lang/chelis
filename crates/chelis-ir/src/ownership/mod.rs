@@ -127,6 +127,24 @@ mod verify;
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
 
+/// Whether a class member's own output dim carries an extent the checker
+/// already resolved.
+///
+/// For a LOCAL member that is the compiler's own proof: the extent is produced
+/// inside this function and the resolved size is what it was produced to be.
+/// For an INTERFACE member it is a claim about what the caller must pass and
+/// proves nothing, which is why `chelis#1377`'s input axis is guarded rather
+/// than exempted. `placement` is a property of the whole CLASS, so its
+/// `Local` verdict does not establish that a given member is local; callers
+/// pair this with `member_load_axis` to ask that per member.
+fn member_dim_is_statically_resolved(dag: &Dag, member: &crate::axis_sources::ClassMember) -> bool {
+    matches!(
+        dag.get(member.node)
+            .and_then(|node| node.output_type.dims.get(member.axis)),
+        Some(DimInfo::Named(_, Some(_))) | Some(DimInfo::Lit(_))
+    )
+}
+
 /// A local guard's position: the node that introduces the extent, and the
 /// output axis carrying the claim.
 pub type LocalGuardSite = (usize, usize);
@@ -261,6 +279,38 @@ impl<'a> VerifiedDagView<'a> {
                 }
             });
             for member in &class.members {
+                // C2.7 puts "does this site owe a guard" in the derivation
+                // rather than in an emitter: today only the C emitter reads
+                // local sites, so a second answer here would be a LATENT
+                // divergence rather than a live one, and the point of putting
+                // it here is that it cannot become live.
+                //
+                // A LOCAL member's extent is produced by the compiler inside
+                // this function, so a resolved static size on its own dim is
+                // the checker's proof and the comparison would be a value
+                // against the literal it was produced from - a self-check
+                // that can only catch a compiler bug, which C2.4 already
+                // declines for a literal claim matching a literal size. This
+                // keys on PROVENANCE, the same axis section 4.7 uses to place
+                // a guard at entry or at the introducing operation: an
+                // INTERFACE member's resolved size is a caller claim and is
+                // guarded (chelis#1377), never exempted.
+                // Narrowed to LOCAL members. `placement` is a property of the
+                // whole class - `Entry` only when every member is an
+                // interface value - so one local member makes a MIXED class
+                // Local, and applying the proof to every member of it would
+                // exempt an interface member whose resolved size is a caller
+                // claim. Measured: the caller's obligation on such a member
+                // survives on the ABI static-dim check, because b2.4's
+                // narrowing of that check is built from `entry_dim_classes()`
+                // alone and never fires for a member of a Local class. The
+                // predicate is narrowed anyway, so the comment and the code
+                // say the same thing.
+                if crate::axis_sources::member_load_axis(self.dag, member).is_none()
+                    && member_dim_is_statically_resolved(self.dag, member)
+                {
+                    continue;
+                }
                 if !matches!(
                     member.source,
                     crate::axis_sources::AxisSource::InputAxis { .. }

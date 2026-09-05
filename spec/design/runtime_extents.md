@@ -367,19 +367,29 @@ the defect class this slice removes.
   inserts is a member whatever slot its `InputAxis` names, so a same-tensor
   read under a foreign claim ([#1376]) is guarded, while a same-tensor read
   under a proved identity costs no guard because C1.2's static proof leaves
-  no claim. A literal claim is the class's canonical value itself, and so is a
-  binder name the checker RESOLVED to a literal: a guard compares the observed
-  extent against that value rather than against a variable no lane need
-  declare. The proof that removes a guard is about the axis SOURCE, not about
-  the claim - a member whose extent is a literal performs no runtime read, so
-  there is nothing to observe and nothing to compare, and `is_member` already
-  excludes it. A resolved claim over a RUNTIME read is the opposite case and
-  still owes the comparison `spec/04` section 4.7 requires between the claimed
-  extent and the value actually observed; the entry path emits exactly that
-  for a `Literal` claim ([#1377]) and the local path emits it against the
-  resolved literal. An interface member's resolved size is a claim about what
-  the caller must pass and never a proof, which is why [#1377]'s input axis is
-  guarded rather than exempted. A literal
+  no claim. A literal claim is the class's canonical value itself. Whether a
+  member owes a guard turns on PROVENANCE, the same axis section 4.7 uses to
+  place a guard at entry or at the introducing operation. A LOCAL member's
+  extent is produced by the compiler inside this function, so a resolved
+  static size on its own dim is the checker's proof: comparing the produced
+  value against the literal it was produced from can only catch a compiler
+  bug, and C2.4 already declines that for a literal claim matching a literal
+  size. An INTERFACE member's resolved size is a claim about what the caller
+  must pass and proves nothing, which is why [#1377]'s input axis is guarded
+  rather than exempted. That decision lives in the derivation and not in an
+  emitter: only the C emitter reads local sites today, so a second answer
+  elsewhere would be a latent divergence rather than a live one, and C2.7's
+  point is that it cannot become one.
+
+  A local site whose claim is neither resolved nor declared would have nothing
+  to compare against. Measured over 481 programs lifted from `crates/*/tests`:
+  319 emit C, all 319 compile under `clang -O2 -fsyntax-only`, and none
+  reports an undeclared identifier. The derivation's own reason is that a
+  `Name` class needs two members, and a class with no interface witness and no
+  op-declared witness has no site to declare from - so the case is unreachable
+  by construction rather than merely unobserved, and if it were ever reached
+  the emitter would name an undeclared identifier and fail the build loudly
+  rather than emit a wrong guard. A literal
   claim on an anonymous runtime extent (`-> tensor[8, f32]` over `expand(b,
   0, mul(shape(x, 0), 2i64))`) is therefore a class whose canonical value is
   the literal and whose one member is the scalar-sourced set axis, and a
