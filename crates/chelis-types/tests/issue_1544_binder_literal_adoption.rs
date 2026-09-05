@@ -4,10 +4,6 @@ use chelis_deep::{Expr, parse_and_stamp_file};
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::{check_ir_program, check_typed_program};
 
-fn surf(source: &str) -> Vec<Expr> {
-    desugar_program(&parse_str(source).expect("Surf"))
-}
-
 fn deep(source: &str) -> Vec<Expr> {
     parse_and_stamp_file(source).expect("Deep")
 }
@@ -39,21 +35,29 @@ fn assert_both(program: &[Expr], expected: Option<&str>, label: &str) {
     }
 }
 
-fn binder_program(bounds: &str, literal_meta: &str, literal: &str) -> Vec<Expr> {
-    deep(&format!(
+fn assert_surf(source: &str, expected: Option<&str>) {
+    assert_both(
+        &desugar_program(&parse_str(source).expect("Surf")),
+        expected,
+        source,
+    );
+}
+
+fn assert_deep(source: &str, expected: &str, label: &str) {
+    assert_both(&deep(source), Some(expected), label);
+}
+
+fn binder_program(bounds: &str, literal_meta: &str, literal: &str) -> String {
+    format!(
         "(defsig {{dtype_bounds: {{p: {bounds}}}}} scale (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
          (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}}))\n\
            (cast {{}} (lit {{{literal_meta}type: (t-var {{}} p)}} {literal}) (t-var {{}} p))))\n"
-    ))
-}
-
-fn forged_local_neg_program() -> Vec<Expr> {
-    deep(
-        "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
-         (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
-           (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n",
     )
 }
+
+const FORGED_LOCAL_NEG: &str = "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
+     (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
+       (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n";
 
 #[test]
 fn bounded_binder_casts_accept_matching_literals() {
@@ -67,49 +71,39 @@ fn bounded_binder_casts_accept_matching_literals() {
         ("Float", "-0.1f64"),
     ] {
         let source = format!("def f[p: {family}](x: p) -> p = cast({literal}, p)\n");
-        assert_both(&surf(&source), None, &source);
+        assert_surf(&source, None);
     }
-    assert_both(
-        &surf("sig f[p: Float]: p -> p\ndef f(x) = cast(0.1, p)\n"),
-        None,
-        "standalone signature",
-    );
+    assert_surf("sig f[p: Float]: p -> p\ndef f(x) = cast(0.1, p)\n", None);
 }
 
 #[test]
 fn unbounded_binders_reject_every_literal_polarity_and_kind() {
     for literal in ["0.1", "-0.1", "0.1f64", "-0.1f64", "true", "\"text\"", "()"] {
         let source = format!("def f[p](x: p) -> p = cast({literal}, p)\n");
-        assert_both(&surf(&source), Some("[04-DTYPE-1]"), literal);
+        assert_surf(&source, Some("[04-DTYPE-1]"));
     }
-    assert_both(
-        &surf("sig f: p -> p\ndef f(x) = cast(0.1, p)\n"),
+    assert_surf(
+        "sig f: p -> p\ndef f(x) = cast(0.1, p)\n",
         Some("[04-DTYPE-1]"),
-        "standalone signature",
     );
 }
 
 #[test]
 fn only_the_exact_adopting_relation_can_stamp_a_binder_literal() {
-    assert_both(
-        &surf("def f[p: Float](x: p) -> p = (0.1 : p)\n"),
+    assert_surf(
+        "def f[p: Float](x: p) -> p = (0.1 : p)\n",
         Some("[04-INF-6]"),
-        "ascription",
     );
     for (label, marker) in [
         ("explicit", "surf_literal_style: \"explicit\", "),
         ("malformed", "surf_literal_style: 1, "),
         ("missing", ""),
     ] {
-        assert_both(
-            &binder_program("float", marker, "0.1"),
-            Some("[04-INF-6]"),
-            label,
-        );
+        assert_deep(&binder_program("float", marker, "0.1"), "[04-INF-6]", label);
     }
-    assert_both(
+    assert_deep(
         &binder_program("int", "surf_literal_style: \"unsuffixed\", ", "1.9"),
-        Some("[04-INF-6]"),
+        "[04-INF-6]",
         "float under Int",
     );
 }
@@ -126,36 +120,37 @@ fn adoption_does_not_cross_binders_or_computed_operands() {
             "(defsig {dtype_bounds: {p: float}} f (t-fn {} (t-var {} p) (t-var {} p)))\n(def {} f (fn {} (params {} (x {type: (t-var {} p)})) (cast {} (app {} (var {} add) (var {} x) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n",
         ),
     ] {
-        assert_both(&deep(source), Some("[04-INF-6]"), label);
+        assert_deep(source, "[04-INF-6]", label);
     }
-    assert_both(
-        &deep(
-            "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))\n",
-        ),
-        Some("[04-DTYPE-1]"),
+    assert_deep(
+        "(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))\n",
+        "[04-DTYPE-1]",
         "undeclared binder",
     );
-    assert_both(
-        &forged_local_neg_program(),
-        Some("[04-INF-6]"),
+    assert_deep(
+        FORGED_LOCAL_NEG,
+        "[04-INF-6]",
         "a local callable named neg is not unary syntax",
     );
 }
 
 #[test]
 fn adopted_integer_literals_fit_every_family_member() {
-    for (family, literal, expected) in [
-        ("Int", "127", None),
-        ("Int", "-128", None),
-        ("Numeric", "127", None),
-        ("Numeric", "-128", None),
-        ("Int", "128", Some("§5.6")),
-        ("Int", "-129", Some("§5.6")),
-        ("Numeric", "128", Some("§5.6")),
-        ("Numeric", "-129", Some("§5.6")),
-        ("Float", "10000000000.0", None),
-    ] {
-        let source = format!("def f[p: {family}](x: p) -> p = cast({literal}, p)\n");
-        assert_both(&surf(&source), expected, &source);
+    for family in ["Int", "Numeric"] {
+        for (literal, expected) in [
+            ("127", None),
+            ("-128", None),
+            ("128", Some("§5.6")),
+            ("-129", Some("§5.6")),
+        ] {
+            assert_surf(
+                &format!("def f[p: {family}](x: p) -> p = cast({literal}, p)\n"),
+                expected,
+            );
+        }
     }
+    assert_surf(
+        "def f[p: Float](x: p) -> p = cast(10000000000.0, p)\n",
+        None,
+    );
 }

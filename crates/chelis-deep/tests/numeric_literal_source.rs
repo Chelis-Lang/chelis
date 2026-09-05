@@ -1,3 +1,4 @@
+use LiteralFamilyFit::{Fits, IntegerOutOfRange};
 use chelis_deep::{
     Atom, DtypeFamily, Expr, LiteralFamilyFit, classify_literal_source, parser::parse_str,
 };
@@ -26,23 +27,11 @@ fn both_numeric_polarities_share_one_classification() {
 #[test]
 fn family_fit_covers_every_active_integer_width_and_total_float_finalization() {
     for (deep, family, expected) in [
-        ("(lit {} -128)", DtypeFamily::Int, LiteralFamilyFit::Fits),
-        ("(lit {} 127)", DtypeFamily::Numeric, LiteralFamilyFit::Fits),
-        (
-            "(lit {} -129)",
-            DtypeFamily::Int,
-            LiteralFamilyFit::IntegerOutOfRange,
-        ),
-        (
-            "(lit {} 128)",
-            DtypeFamily::Numeric,
-            LiteralFamilyFit::IntegerOutOfRange,
-        ),
-        (
-            "(lit {} 10000000000.0)",
-            DtypeFamily::Float,
-            LiteralFamilyFit::Fits,
-        ),
+        ("(lit {} -128)", DtypeFamily::Int, Fits),
+        ("(lit {} 127)", DtypeFamily::Numeric, Fits),
+        ("(lit {} -129)", DtypeFamily::Int, IntegerOutOfRange),
+        ("(lit {} 128)", DtypeFamily::Numeric, IntegerOutOfRange),
+        ("(lit {} 10000000000.0)", DtypeFamily::Float, Fits),
     ] {
         let expression = expr(deep);
         assert_eq!(

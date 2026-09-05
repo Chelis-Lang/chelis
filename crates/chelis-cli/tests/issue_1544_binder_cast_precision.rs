@@ -1,7 +1,7 @@
 //! CLI coverage for binder-target literal adoption (#1544/#1553).
 
 use assert_cmd::Command;
-use std::{fs, path::Path, process::Command as StdCommand};
+use std::{fs, path::Path};
 use tempfile::{TempDir, tempdir};
 
 #[path = "common/mod.rs"]
@@ -27,14 +27,11 @@ fn package(name: &str, source: &str) -> (TempDir, std::path::PathBuf) {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().join(name);
     fs::create_dir_all(root.join("src")).expect("src");
-    fs::write(
-        root.join("reef.toml"),
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Bind\"\n",
-            chelis_compiler_api::COMPILER_VERSION
-        ),
-    )
-    .expect("manifest");
+    let manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Bind\"\n",
+        chelis_compiler_api::COMPILER_VERSION
+    );
+    fs::write(root.join("reef.toml"), manifest).expect("manifest");
     fs::write(root.join("src/main.ch"), source).expect("source");
     (dir, root)
 }
@@ -85,18 +82,7 @@ fn reject(source: &str, citation: &str) {
 fn assert_native(name: &str, source: &str, expected: &str) {
     let (_dir, root) = package(name, source);
     let interpreted = eval(&root);
-    let built = run(
-        &root,
-        &["build", "src/main.ch", "--target", "c", "--output", "out"],
-    );
-    success(&built);
-    let linked = common::link_generated(&root.join("out"), "main.c", name);
-    assert!(linked.success(), "{linked}");
-    let output = StdCommand::new(root.join("out").join(name))
-        .output()
-        .expect("native");
-    success(&output);
-    let native = String::from_utf8_lossy(&output.stdout);
+    let native = common::build_and_run(source, name);
     assert!(
         interpreted.contains(expected) && native.contains(expected),
         "expected {expected:?}; eval={interpreted:?}; native={native:?}"
@@ -109,8 +95,9 @@ fn scalar_and_tensor_binders_compute_at_each_instantiation() {
         let source = SCALAR.replace("Float", family);
         let (_dir, root) = package(family, &source);
         let output = eval(&root);
-        assert!(output.contains("at_f32 = 0.3"));
-        assert!(output.contains(&format!("at_f64 = {EXACT_F64}")));
+        for expected in ["at_f32 = 0.3".to_string(), format!("at_f64 = {EXACT_F64}")] {
+            assert!(output.contains(&expected), "{output}");
+        }
     }
     let (_dir, root) = package("tensor", TENSOR);
     let output = eval(&root);
@@ -121,9 +108,11 @@ fn scalar_and_tensor_binders_compute_at_each_instantiation() {
 #[test]
 fn native_scalar_and_tensor_match_eval_exactly() {
     assert_native("scalar", SCALAR, &format!("at_f64 = {EXACT_F64}"));
-    let expected =
-        format!("at_f64 = tensor(shape=[3], data=[{EXACT_F64}, {EXACT_F64}, {EXACT_F64}])");
-    assert_native("tensor", TENSOR_NATIVE, &expected);
+    assert_native(
+        "tensor",
+        TENSOR_NATIVE,
+        &format!("at_f64 = tensor(shape=[3], data=[{EXACT_F64}, {EXACT_F64}, {EXACT_F64}])"),
+    );
 }
 
 #[test]
@@ -157,18 +146,15 @@ fn integer_literals_adopt_every_compatible_family() {
 
 #[test]
 fn adopted_integer_literals_must_fit_every_family_member() {
-    for (family, literal) in [
-        ("Int", "128"),
-        ("Int", "-129"),
-        ("Numeric", "128"),
-        ("Numeric", "-129"),
-    ] {
-        reject(
-            &format!(
-                "module Bind.Main\nexport (main)\ndef value[p: {family}](x: p) -> p = cast({literal}, p)\ndef main() -> int64 = value(0i64)\n"
-            ),
-            "§5.6",
-        );
+    for family in ["Int", "Numeric"] {
+        for literal in ["128", "-129"] {
+            reject(
+                &format!(
+                    "module Bind.Main\nexport (main)\ndef value[p: {family}](x: p) -> p = cast({literal}, p)\ndef main() -> int64 = value(0i64)\n"
+                ),
+                "§5.6",
+            );
+        }
     }
 }
 

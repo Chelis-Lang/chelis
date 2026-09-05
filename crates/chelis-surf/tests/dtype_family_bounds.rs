@@ -248,15 +248,12 @@ fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
     assert!(
         printed.contains("surf_literal_style: \"unsuffixed\", type: (t-var {} p)} -0.1)")
             && !printed.contains("} neg)"),
-        "Surf unary syntax must become an unambiguous signed literal: {}",
-        printed
+        "Surf unary syntax must become an unambiguous signed literal: {printed}"
     );
-    let recovered = resugar_program(&deep).expect("the adopting cast relation is representable");
-    assert!(
-        format_program(&recovered).contains("cast(-0.1, p)"),
-        "{}",
-        format_program(&recovered)
+    let recovered = format_program(
+        &resugar_program(&deep).expect("the adopting cast relation is representable"),
     );
+    assert!(recovered.contains("cast(-0.1, p)"), "{recovered}");
 
     for source in [
         "def concrete(x: f64) -> f64 = cast(-0.1f64, f64)",
@@ -284,7 +281,7 @@ fn a_local_neg_call_is_not_a_negative_literal_source() {
 
 #[test]
 fn unrepresentable_binder_literal_provenance_fails_resugaring() {
-    let mut programs = vec![
+    for deep in [
         deep_parse_strict("(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} scale (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))").expect("Deep fixture"),
         binder_deep("(lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)"),
         deep_parse_strict(
@@ -293,17 +290,17 @@ fn unrepresentable_binder_literal_provenance_fails_resugaring() {
                (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))",
         )
         .expect("forged local neg Deep fixture"),
-    ];
+    ] {
+        resugar_program(&deep).expect_err("unrepresentable binder provenance");
+    }
     for marker in [
         "surf_literal_style: \"explicit\", ",
         "surf_literal_style: 1, ",
         "",
     ] {
-        programs.push(binder_deep(&format!(
+        let deep = binder_deep(&format!(
             "(cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))"
-        )));
-    }
-    for deep in programs {
+        ));
         resugar_program(&deep).expect_err("unrepresentable binder provenance");
     }
 }
