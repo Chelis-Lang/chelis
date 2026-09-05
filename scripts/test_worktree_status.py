@@ -433,6 +433,38 @@ class ProcessMatchingTests(unittest.TestCase):
         found = status.match_gate_processes(procs, Path(PROBED), lambda pid: OTHER)
         self.assertEqual(found, [])
 
+    def test_a_shell_that_merely_names_the_gate_script_is_not_a_gate(self):
+        """Found by running the probe from a shell whose command line named
+        `scripts/gate.py` while doing something else: the free worktree
+        reported BUSY. An agent's shell does this routinely, so the match
+        requires an actual Python interpreter."""
+        procs = [
+            _proc(70, 1, f"/bin/bash -c cd {PROBED} && echo about scripts/gate.py"),
+            _proc(71, 1, f"/usr/bin/vim {PROBED}/scripts/gate.py"),
+            _proc(72, 1, f"tail -f {PROBED}/scripts/gate.py"),
+        ]
+        found = status.match_gate_processes(procs, Path(PROBED), lambda pid: PROBED)
+        self.assertEqual(found, [])
+
+    def test_every_interpreter_spelling_still_matches(self):
+        """The positive twin: a venv, uv-managed or Devenv interpreter can be
+        spelled several ways and each is still a gate run."""
+        for argv0 in ("python", "python3", "python3.11", f"{PROBED}/.venv/bin/python3"):
+            with self.subTest(argv0=argv0):
+                procs = [_proc(80, 1, f"{argv0} {PROBED}/scripts/gate.py --local")]
+                found = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
+                self.assertEqual([p.pid for p in found], [80])
+
+    def test_the_launching_shell_is_no_longer_reported_as_a_second_gate(self):
+        """A real gate run has both a shell and an interpreter naming the
+        script. Reporting both was noise; the interpreter is the run."""
+        procs = [
+            _proc(90, 1, f"/bin/bash -c cd {PROBED} && python3 scripts/gate.py --local"),
+            _proc(91, 90, f"python3 {PROBED}/scripts/gate.py --local"),
+        ]
+        found = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
+        self.assertEqual([p.pid for p in found], [91])
+
     def test_sibling_checkout_never_matches(self):
         """`<repo>-165` contains `<repo>`; the boundary matcher reused from
         reap_orphans is what stops it matching."""

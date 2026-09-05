@@ -181,6 +181,13 @@ GIT_OPERATION_MARKERS = (
 # that set, which would put every gate run into the reaper's SIGKILL list.
 GATE_SCRIPT_MARKER = "scripts/gate.py"
 
+# The command-line mention alone is not enough, and the difference is not
+# theoretical: an agent's own shell command line routinely names
+# `scripts/gate.py` while running something else entirely, and matching it
+# reports a free worktree BUSY. Requiring the process to be a Python
+# interpreter keeps the gate itself and drops the shell that merely names it.
+PYTHON_BASENAME_PREFIX = "python"
+
 
 class GitQueryError(RuntimeError):
     """A git query failed, was not runnable, or timed out."""
@@ -578,7 +585,12 @@ def match_gate_processes(
 ) -> list[reap.ProcInfo]:
     """Live `scripts/gate.py` processes scoped to this worktree.
 
-    Scoping reuses `reap_orphans`' boundary-aware matcher so a sibling
+    A match must be a Python interpreter AND name the gate script. The mention
+    alone also catches the shell that launched the gate, and any shell whose
+    command line happens to name the script while doing something else, which
+    reports a free worktree BUSY.
+
+    Scoping then reuses `reap_orphans`' boundary-aware matcher so a sibling
     checkout never matches, and falls back to the working directory when the
     command line spells a relative path (`python3 scripts/gate.py --local`).
     """
@@ -587,6 +599,8 @@ def match_gate_processes(
     found: list[reap.ProcInfo] = []
     for proc in procs:
         if proc.pid == own_pid:
+            continue
+        if not proc.basename.startswith(PYTHON_BASENAME_PREFIX):
             continue
         if GATE_SCRIPT_MARKER not in proc.command:
             continue
