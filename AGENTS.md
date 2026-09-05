@@ -1008,6 +1008,31 @@ output. That failure looks like a code regression and is not one.
   report over silence or an overstated completion claim, and deduplicate repeated reports
   that race with a resume nudge.
 
+### Fan-Out Budget
+
+A fleet's running cost is the sum of its live contexts plus a shared usage window, and
+nothing reports either total. Meter both at the spawn, which is where the decision is
+actually made.
+
+- At most five subagents may be live at once under one orchestrator. A wider fan-out
+  needs the user's explicit approval and a stated reason. This is a separate budget
+  from the CPU one in
+  [Build Concurrency And Process Hygiene](#build-concurrency-and-process-hygiene): a
+  fan-out the workstation can schedule comfortably can still exhaust a usage window in
+  minutes.
+- Every spawn names the model tier it runs on and says in one clause why that tier
+  fits the work. Reserve the expensive tier for judgement whose errors are costly to
+  detect, and give mechanical work the cheap tier: waiting on CI, polling, mirroring
+  bytes between files, transcribing a result. A standing instruction to economize is
+  not a substitute. The tier is named per spawn, or it was never chosen.
+- Every brief states a context budget and a report-length budget, both as numbers. An
+  agent that will exceed its context budget says so and returns what it has rather
+  than continuing silently, and a report over its length budget is a defect in the
+  report rather than evidence that the budget was too small.
+- An orchestrator states its own context size in the message that announces a spawn,
+  so the fleet's live total is visible to the user without anyone having to ask for
+  it.
+
 ## Style Gate
 
 `chelis build`, `chelis check`, `chelis validate`, and
