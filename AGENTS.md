@@ -581,6 +581,16 @@ When a public surface has an implicit invariant, make it explicit and test it.
   documentation edits and throwaway probes. Keep its branch, target, and scratch state
   task-owned, and give it its own environment per
   [Build Toolchain](#build-toolchain); never copy or symlink the primary `.venv`.
+- A worktree isolates the working tree and the index, and nothing else. The stash
+  stack, `.git/info/exclude`, the hooks directory, and the reflog are per repository,
+  so every worktree on a clone shares one copy of each, and a write to any of them is
+  a write to every sibling's state. Having worked out that a worktree's `.git` is a
+  file pointing at the shared directory is not the same as acting on it.
+- Do not run `git stash` in a shared clone. The stack is one stack for the whole
+  repository: `push` with a pathspec that matches nothing is a silent no-op, the
+  paired `pop` then takes whatever a peer session left on top, and `pop` says nothing
+  about whose work it just applied to your tree. To discard your own changes use
+  `git checkout -- <paths>`. To park them, copy the files to task-owned scratch space.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
