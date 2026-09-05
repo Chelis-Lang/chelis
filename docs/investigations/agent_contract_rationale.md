@@ -202,10 +202,11 @@ two whole runs of the machine's time. A run that takes nearly the whole budget o
 target has no margin at all on a cold one, so the detached form is the default rather
 than the fallback.
 
-The pull request that added this section committed the same defect while describing it.
-Its conformance evidence was taken on a commit that a later autosquash removed from the
-branch, so the tests had never run on any ancestor of the candidate, and the diff
-between the two heads touched exactly the files those tests read. What made it hard to
-see is that the hosted checks did not look wrong: the conformance job skipped while the
-workflow still reported success, so the pull request page showed green for tests that
-never ran. Read the job, not the workflow.
+A history rewrite silently invalidates every evidence claim already recorded on the
+branch. The pull request that added this section demonstrated that while describing it:
+its conformance evidence named a commit a later autosquash had removed, so those tests
+had never run on any ancestor of the candidate, and the diff between the two heads
+touched exactly the files they read. What hid it is that the hosted checks did not look
+wrong. The conformance job skipped while its workflow still reported success, so the
+page showed green for tests that never ran. Read the job, not the workflow, and re-take
+evidence after any rebase or amend.
