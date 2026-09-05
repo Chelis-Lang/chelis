@@ -107,6 +107,45 @@ sig f: tensor[n, f32] -> tensor[n, f32]\n\
 def f(x) = relu(x)\n\
 out = f(to_tensor([cast(1.0, f32), cast(-2.0, f32)]))\n";
 
+/// The chelis#597 reproducer: a positional `expand` over a unit axis.
+///
+/// `spec/05-risc-primitives.md` §2.4 gives `expand` the size-1 broadcast that
+/// leaves the rank alone. Before chelis#1277's S2b, lowering rewrote every
+/// surface `expand` into the rank-increasing form and overwrote the type the
+/// checker had stamped, so no program could reach the same-rank node the
+/// verifier, both evaluators and the C emitter all implement.
+const SAME_RANK_BROADCAST: &str = "module Repro.Expand597\n\
+def broadcast(x: tensor[2, 1, f32]) -> tensor[2, 3, f32] = expand(&x, 1, 3i64)\n\
+out = broadcast(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
+
+/// A zero broadcast extent. `spec/04-type-system.md` §4.7.2 makes a static
+/// NEGATIVE size a type error and says nothing against zero, so zero is legal
+/// and declares an empty axis.
+const ZERO_BROADCAST: &str = "module Repro.ExpandZero\n\
+def empty(x: tensor[2, 1, f32]) -> tensor[2, 0, f32] = expand(&x, 1, 0i64)\n\
+out = empty(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
+
+/// A literal operand extent that refutes the claim statically.
+const STATIC_NON_UNIT_SOURCE: &str = "module Repro.ExpandStaticNonUnit\n\
+def bad(x: tensor[2, 4, f32]) -> tensor[2, 3, f32] = expand(&x, 1, 3i64)\n";
+
+/// A symbolic operand extent that refutes the claim at run time. The checker
+/// admits it, because `spec/05-risc-primitives.md` §2.4.1 makes only a LITERAL
+/// non-unit extent a type error and sends every other spelling to the runtime
+/// extent guard.
+const RUNTIME_NON_UNIT_SOURCE: &str = "module Repro.ExpandRuntimeNonUnit\n\
+sig broadcast: tensor[n, f32] -> tensor[3, f32]\n\
+def broadcast(x) = expand(&x, 0, 3i64)\n\
+out = broadcast(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";
+
+/// The same program over an operand whose extent DOES satisfy the claim. It is
+/// the control that says the guard fires on the disagreement rather than on
+/// the symbolic spelling.
+const RUNTIME_UNIT_SOURCE: &str = "module Repro.ExpandRuntimeUnit\n\
+sig broadcast: tensor[n, f32] -> tensor[3, f32]\n\
+def broadcast(x) = expand(&x, 0, 3i64)\n\
+out = broadcast(to_tensor([cast(5.0, f32)]))\n";
+
 fn fixture(dir: &TempDir, name: &str, source: &str) -> std::path::PathBuf {
     let path = dir.path().join(name);
     fs::write(&path, source).expect("fixture");
@@ -525,5 +564,265 @@ fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
             .count(),
         8,
         "and each renders [04-NUM-9] naming the operation"
+    );
+}
+
+// ===========================================================================
+// S2b: `expand` as the same-rank broadcast, and the unit-extent claim.
+//
+// These rows reuse the fixtures and helpers above, `domain_trap_line`
+// included, so the [04-NUM-9] spelling this slice asserts cannot drift from
+// the one Slice B's own rows assert.
+// ===========================================================================
+
+fn check(path: &Path) -> std::process::Output {
+    Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", "--allow-style-violations", path.to_str().unwrap()])
+        .output()
+        .expect("check")
+}
+
+/// Oracle row `expand.positional.replacement.c` (chelis#597).
+///
+/// The compiled kernel takes the C emitter's same-rank arm, which reads index
+/// 0 at the broadcast axis, and produces the same values the evaluator does.
+/// Before chelis#1277's S2b no surface program could reach that arm: lowering
+/// rewrote every `expand` into the rank-increasing form and overwrote the
+/// checker's stamped type, so the arm compiled into every binary and executed
+/// for nothing a user could write.
+///
+/// This is a regression row, and the base is the whole of that history: on
+/// `main` the same source lowers to a rank-3 node and the C output has three
+/// dimensions.
+#[test]
+fn issue_597_positional_same_rank_replacement_executes_on_c() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "broadcast.ch", SAME_RANK_BROADCAST);
+    let out_dir = dir.path().join("broadcast-out");
+
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "a same-rank broadcast must build: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let linked = common::link_generated(&out_dir, "broadcast.c", "broadcast");
+    assert!(linked.success(), "the generated broadcast must link");
+    let compiled = std::process::Command::new(out_dir.join("broadcast"))
+        .output()
+        .expect("compiled broadcast");
+    assert!(
+        compiled.status.success(),
+        "the compiled broadcast failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let evaluated = eval(&path);
+    assert!(
+        evaluated.status.success(),
+        "eval of the broadcast failed: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    let compiled_stdout = String::from_utf8_lossy(&compiled.stdout);
+    assert_eq!(
+        compiled_stdout,
+        String::from_utf8_lossy(&evaluated.stdout),
+        "compiled C and eval must agree byte for byte"
+    );
+    assert!(
+        compiled_stdout.contains("shape=[2, 3]"),
+        "the rank is unchanged and the unit axis carries the broadcast width: \
+         {compiled_stdout}"
+    );
+    assert!(
+        compiled_stdout.contains("data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0]"),
+        "each row repeats across the broadcast axis: {compiled_stdout}"
+    );
+}
+
+/// Oracle row `expand.positional.replacement.eval`.
+///
+/// The eval half of the row above, kept separate because the two lanes are
+/// separate corpus rows and because this one names the shape the insertion
+/// form would have produced, so a silent return to it fails here rather than
+/// only in the byte comparison.
+#[test]
+fn a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "broadcast.ch", SAME_RANK_BROADCAST);
+    let evaluated = eval(&path);
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).to_string();
+    assert!(
+        evaluated.status.success(),
+        "eval of the broadcast failed: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert!(
+        stdout.contains("shape=[2, 3]"),
+        "the broadcast sets the unit axis and leaves the rank alone: {stdout}"
+    );
+    assert!(
+        !stdout.contains("shape=[2, 3, 1]") && !stdout.contains("shape=[2, 1, 3]"),
+        "no rank-3 shape may appear: the insertion form is `insert`'s and this \
+         program does not use it: {stdout}"
+    );
+    let values = common::parse_tensor_data(&stdout, "out");
+    assert_eq!(values, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0], "{stdout}");
+}
+
+/// Oracle row `expand.positional.replacement.non_unit_source_static`.
+///
+/// `spec/05-risc-primitives.md` §2.4.1: "A literal operand extent at `axis`
+/// other than 1 is a type error." The checker did not enforce the unit extent
+/// at all before S2b; the IR verifier did, so the checker was the lenient
+/// side and a program refuted by the language's own rule reached lowering.
+#[test]
+fn a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "static_non_unit.ch", STATIC_NON_UNIT_SOURCE);
+    let checked = check(&path);
+    let stdout = String::from_utf8_lossy(&checked.stdout).to_string();
+    assert!(
+        !checked.status.success(),
+        "a literal non-unit operand extent must be refused at check: {stdout}"
+    );
+    assert!(
+        stdout.contains("DimensionMismatch"),
+        "the refusal is a dimension error: {stdout}"
+    );
+    assert!(
+        stdout.contains("extent at axis 1 to be 1") && stdout.contains("got 4"),
+        "the diagnostic names the axis and the extent observed there, not only \
+         that something disagreed: {stdout}"
+    );
+
+    // The control that fixes how narrow the rule is: the same shapes with the
+    // operation that ADDS an axis are accepted, so the rejection is about the
+    // claim rather than about the extents.
+    let ok = fixture(
+        &dir,
+        "insert_non_unit.ch",
+        "module Repro.InsertNonUnit\n\
+         def fine(x: tensor[2, 4, f32]) -> tensor[3, 2, 4, f32] = insert(&x, 0, 3i64)\n",
+    );
+    assert!(
+        check(&ok).status.success(),
+        "`insert` over the same operand is unaffected: {}",
+        String::from_utf8_lossy(&check(&ok).stdout)
+    );
+}
+
+/// Oracle row `expand.positional.replacement_zero.eval`.
+///
+/// C1.5 of `spec/design/runtime_extents.md`: zero is legal, a static negative
+/// is a type error. A zero broadcast declares an empty axis rather than
+/// refusing or silently producing one element.
+#[test]
+fn a_zero_positional_replacement_declares_an_empty_axis_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "zero.ch", ZERO_BROADCAST);
+    let evaluated = eval(&path);
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).to_string();
+    assert!(
+        evaluated.status.success(),
+        "a zero broadcast extent is legal: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert!(
+        stdout.contains("shape=[2, 0]"),
+        "the broadcast axis is empty and the rank is unchanged: {stdout}"
+    );
+    assert!(
+        stdout.contains("data=[]"),
+        "an empty axis carries no elements: {stdout}"
+    );
+}
+
+/// Oracle row `expand.positional.replacement_zero.c`.
+#[test]
+fn a_zero_positional_replacement_declares_an_empty_axis_on_c() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "zero.ch", ZERO_BROADCAST);
+    let out_dir = dir.path().join("zero-out");
+
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "a zero broadcast extent must build: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let linked = common::link_generated(&out_dir, "zero.c", "zero");
+    assert!(linked.success(), "the generated zero program must link");
+    let compiled = std::process::Command::new(out_dir.join("zero"))
+        .output()
+        .expect("compiled zero program");
+    assert!(
+        compiled.status.success(),
+        "the compiled zero program failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let compiled_stdout = String::from_utf8_lossy(&compiled.stdout);
+    assert_eq!(
+        compiled_stdout,
+        String::from_utf8_lossy(&eval(&path).stdout),
+        "compiled C and eval must agree byte for byte on an empty axis"
+    );
+    assert!(
+        compiled_stdout.contains("shape=[2, 0]"),
+        "the compiled kernel declares the empty axis too: {compiled_stdout}"
+    );
+}
+
+/// Oracle row `expand.positional.replacement.non_unit_source_traps.eval`.
+///
+/// The claim's runtime extent guard on the lane a `chelis eval` of a user
+/// program actually reaches. That lane is the HOST interpreter, not the DAG
+/// evaluator: `eval_compiled` finds zero `Lane::Tensor` roots for a program of
+/// this shape and every root falls to the host, which is why the host
+/// interpreter checks the claim itself rather than relying on the derived
+/// equality classes the compiled lanes read.
+///
+/// The trap renders as `spec/04-type-system.md` [04-NUM-9] requires, at
+/// `int64` because the guarded result is an extent under [05-DIM-1] and not a
+/// tensor element. The [05-UNS-1] envelope around it is the host lane's
+/// existing root-realization wrapper (chelis#912) and is not this row's
+/// subject.
+#[test]
+fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // The control first: the guard must not fire on the symbolic SPELLING.
+    let ok = fixture(&dir, "runtime_unit.ch", RUNTIME_UNIT_SOURCE);
+    let accepted = eval(&ok);
+    let ok_stdout = String::from_utf8_lossy(&accepted.stdout).to_string();
+    assert!(
+        accepted.status.success(),
+        "a symbolic operand extent that satisfies the claim executes: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(
+        ok_stdout.contains("shape=[3]") && ok_stdout.contains("data=[5.0, 5.0, 5.0]"),
+        "the satisfied claim broadcasts exactly: {ok_stdout}"
+    );
+
+    let path = fixture(&dir, "runtime_non_unit.ch", RUNTIME_NON_UNIT_SOURCE);
+    let evaluated = eval(&path);
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(
+        !evaluated.status.success(),
+        "a runtime operand extent of 2 refutes the claim and must trap: {}",
+        String::from_utf8_lossy(&evaluated.stdout)
+    );
+    assert!(
+        stderr.contains(&domain_trap_line("expand")),
+        "the trap line is the [04-NUM-9] rendering verbatim, at the extent's \
+         own dtype: {stderr}"
+    );
+    assert!(
+        stderr.contains("axis 0 is 1") && stderr.contains("observed 2"),
+        "the accompanying context names the axis and the value observed, which \
+         §4.7 requires on separate lines from the trap: {stderr}"
     );
 }

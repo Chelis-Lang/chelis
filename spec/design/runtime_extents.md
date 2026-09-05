@@ -522,6 +522,19 @@ the defect class this slice removes.
   target keeps binding to its class's canonical value exactly as it does
   today. Best-effort identity recognition may survive only as refinement
   whose failure result is a fresh extent plus a guard.
+- **C2.8 The deferral mechanism leaves in one cut, not in pieces.** S2b's
+  single result shape per operation removes the only root producer of a
+  deferred tensor, and the exact consequence was measured rather than
+  estimated: `cargo clippy -p chelis-types` on the non-test build then reports
+  exactly one dead item, `Subst::record_deferred_expand_constraint`. Everything
+  else stays live, because the settlement runs unconditionally and now finds no
+  obligation. That recorder's only surviving callers are sixteen `unify.rs`
+  tests, ten of them the `hash_order_*` rows [#1341]'s Phase A oracle runs, so
+  deleting the method would drag the removal slice's test cut into S2b. It is
+  `#[cfg(test)]` instead: the production build carries no unreachable recording
+  path, the dead-code lint speaks up if one reappears, and the recorder, both
+  stores, `mod deferred_order`, `builtins.rs`'s `TensorSettlement` field and
+  those sixteen tests leave together in the removal slice as one cut.
 
 ### C3 Positional expand uses one normative protocol
 
