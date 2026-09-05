@@ -11,6 +11,16 @@ pub enum OwnershipError {
         supplied: usize,
         declared: usize,
     },
+    #[error(
+        "call argument {argument} to `{callee}` in `{unit}` has checked type `{actual}`, expected `{expected}`"
+    )]
+    CallArgumentType {
+        unit: String,
+        callee: String,
+        argument: usize,
+        expected: String,
+        actual: String,
+    },
     #[error("ownership lowering in `{unit}` names unknown callee `{callee}`")]
     UnknownCallee { unit: String, callee: String },
     #[error("ownership lowering in `{unit}` references unbound name `{name}`")]
@@ -37,6 +47,37 @@ pub enum OwnershipError {
     },
     #[error("missing block b{block} in `{unit}`")]
     MissingBlock { unit: String, block: u32 },
+    #[error("direct call in `{caller}` names missing ownership unit u{unit}")]
+    MissingUnit { caller: String, unit: u32 },
+    #[error("direct call in `{caller}` targets non-function ownership unit u{unit}")]
+    NonFunctionCallee { caller: String, unit: u32 },
+    #[error("direct call in `{caller}` does not match ownership signature of u{unit}")]
+    DirectCallSchema { caller: String, unit: u32 },
+    #[error(
+        "direct call argument {argument} in `{caller}` has class `{actual}`, callable u{unit} requires `{expected}`"
+    )]
+    DirectCallArgumentClass {
+        caller: String,
+        unit: u32,
+        argument: usize,
+        expected: String,
+        actual: String,
+    },
+    #[error("function `{unit}` b{block} returns with `{actual}`, expected `move`")]
+    FunctionReturnMode {
+        unit: String,
+        block: u32,
+        actual: &'static str,
+    },
+    #[error(
+        "function `{unit}` b{block} returns class `{actual}`, another reachable return has `{expected}`"
+    )]
+    FunctionReturnClass {
+        unit: String,
+        block: u32,
+        expected: String,
+        actual: String,
+    },
     #[error("unreachable block b{block} in `{unit}`")]
     UnreachableBlock { unit: String, block: u32 },
     #[error("owner %{owner} in `{unit}` has no {missing}")]
@@ -125,6 +166,24 @@ pub enum OwnershipError {
         owner: u32,
         block: u32,
     },
+    #[error("heap owner %{owner} is discarded in `{unit}` b{block}")]
+    HeapDiscard {
+        unit: String,
+        owner: u32,
+        block: u32,
+    },
+    #[error("last-use scheduling for `{unit}` defers {feature} to the next milestone")]
+    LastUseSchedulingDeferred { unit: String, feature: &'static str },
+    #[error("owner %{owner} in `{unit}` has a noncanonical terminal: {detail}")]
+    NonCanonicalTerminal {
+        unit: String,
+        owner: u32,
+        detail: String,
+    },
+    #[error("owner %{owner} in `{unit}` retains a provisional scope-exit terminal")]
+    StaleProvisionalTerminal { unit: String, owner: u32 },
+    #[error("owner %{owner} in `{unit}` is both moved across edge e{edge} and terminated there")]
+    CarriedOwnerDropped { unit: String, owner: u32, edge: u32 },
     #[error("root sink `{root}` appears outside the roots unit `{unit}`")]
     RootSinkOutsideRoots { unit: String, root: String },
     #[error("branch condition %{owner} is not bool in `{unit}` b{block}")]

@@ -7,12 +7,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::DeepTag;
-use chelis_deep::ast::Expr;
+use chelis_deep::ast::{Atom, Expr};
 use chelis_types::CheckedProgram;
 use chelis_types::manifest::RootManifest;
-use chelis_types::types::Lane;
+use chelis_types::types::{Lane, Prim};
 
-use crate::dag::RiscOp;
+use crate::dag::{DimInfo, RiscOp, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
     ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostDisplayRoot,
@@ -23,9 +23,10 @@ use crate::host_type_state::ConcreteHostType;
 use super::classify::{ClassifyError, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteBuilder, HostSiteId, HostSiteKind,
-    Op, Operand, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin, OwnershipProgram, ParamMode,
-    Terminator, Unit, UnitKind,
+    ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, EdgeId, HostSiteAction,
+    HostSiteBuilder, HostSiteId, HostSiteKind, Op, OpId, Operand, Operation, OperationRole,
+    OperationSchema, OwnerId, OwnerInfo, OwnerOrigin, OwnershipProgram, ParamMode, ScheduleState,
+    Terminator, Unit, UnitId, UnitKind,
 };
 
 const ROOTS_UNIT: &str = "roots";
@@ -34,12 +35,329 @@ const ROOTS_UNIT: &str = "roots";
 struct ParamSpec {
     mode: ParamMode,
     ty: ConcreteHostType,
+    type_pattern: FormalTypePattern,
     callback_modes: Option<Vec<ParamMode>>,
+}
+
+struct DeclaredParam<'a> {
+    mode: ParamMode,
+    callback_modes: Option<Vec<ParamMode>>,
+    checked_type: &'a Expr,
 }
 
 #[derive(Clone)]
 struct Signature {
     params: Vec<ParamSpec>,
+}
+
+#[derive(Clone)]
+enum FormalTypePattern {
+    Exact,
+    Function(Vec<Self>, Box<Self>),
+    Adt(Vec<Self>),
+    List(Box<Self>),
+    Dict(Box<Self>, Box<Self>),
+    Tuple(Vec<Self>),
+    Tensor(Vec<FormalDimension>),
+    Option(Box<Self>),
+}
+
+#[derive(Clone)]
+enum FormalDimension {
+    Quantified(String),
+    Nominal,
+}
+
+impl FormalTypePattern {
+    fn from_checked(formal: &ConcreteHostType, checked: &Expr) -> Self {
+        let Some((tag, children)) = tag_and_children(checked) else {
+            return Self::nominal(formal);
+        };
+        if tag == DeepTag::TRef {
+            return children
+                .first()
+                .map(|inner| Self::from_checked(formal, inner))
+                .unwrap_or_else(|| Self::nominal(formal));
+        }
+        match (formal, tag) {
+            (ConcreteHostType::Function(params, ret), DeepTag::TFn) => {
+                let Some((checked_ret, checked_params)) = children.split_last() else {
+                    return Self::nominal(formal);
+                };
+                if params.len() != checked_params.len() {
+                    return Self::nominal(formal);
+                }
+                Self::Function(
+                    params
+                        .iter()
+                        .zip(checked_params)
+                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .collect(),
+                    Box::new(Self::from_checked(ret, checked_ret)),
+                )
+            }
+            (ConcreteHostType::Adt(_, args), DeepTag::TAdt) => {
+                let Some(checked_args) = children.get(1..) else {
+                    return Self::nominal(formal);
+                };
+                if args.len() != checked_args.len() {
+                    return Self::nominal(formal);
+                }
+                Self::Adt(
+                    args.iter()
+                        .zip(checked_args)
+                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .collect(),
+                )
+            }
+            (ConcreteHostType::List(inner), DeepTag::TAdt)
+            | (ConcreteHostType::Option(inner), DeepTag::TAdt) => children
+                .get(1)
+                .map(|checked| {
+                    let inner = Box::new(Self::from_checked(inner, checked));
+                    if matches!(formal, ConcreteHostType::List(_)) {
+                        Self::List(inner)
+                    } else {
+                        Self::Option(inner)
+                    }
+                })
+                .unwrap_or_else(|| Self::nominal(formal)),
+            (ConcreteHostType::Dict(key, value), DeepTag::TAdt) => {
+                match (children.get(1), children.get(2)) {
+                    (Some(checked_key), Some(checked_value)) => Self::Dict(
+                        Box::new(Self::from_checked(key, checked_key)),
+                        Box::new(Self::from_checked(value, checked_value)),
+                    ),
+                    _ => Self::nominal(formal),
+                }
+            }
+            (ConcreteHostType::Tuple(items), DeepTag::TTuple) if items.len() == children.len() => {
+                Self::Tuple(
+                    items
+                        .iter()
+                        .zip(children)
+                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .collect(),
+                )
+            }
+            (ConcreteHostType::Tensor(tensor), DeepTag::TTensor) => {
+                let Some((_, checked_dims)) = children.split_last() else {
+                    return Self::nominal(formal);
+                };
+                if tensor.dims.len() != checked_dims.len() {
+                    return Self::nominal(formal);
+                }
+                Self::Tensor(
+                    checked_dims
+                        .iter()
+                        .map(|dimension| {
+                            dimension_variable_key(dimension)
+                                .map(FormalDimension::Quantified)
+                                .unwrap_or(FormalDimension::Nominal)
+                        })
+                        .collect(),
+                )
+            }
+            _ => Self::nominal(formal),
+        }
+    }
+
+    fn nominal(formal: &ConcreteHostType) -> Self {
+        match formal {
+            ConcreteHostType::Function(params, ret) => Self::Function(
+                params.iter().map(Self::nominal).collect(),
+                Box::new(Self::nominal(ret)),
+            ),
+            ConcreteHostType::Adt(_, args) => Self::Adt(args.iter().map(Self::nominal).collect()),
+            ConcreteHostType::List(inner) => Self::List(Box::new(Self::nominal(inner))),
+            ConcreteHostType::Dict(key, value) => {
+                Self::Dict(Box::new(Self::nominal(key)), Box::new(Self::nominal(value)))
+            }
+            ConcreteHostType::Tuple(items) => {
+                Self::Tuple(items.iter().map(Self::nominal).collect())
+            }
+            ConcreteHostType::Tensor(tensor) => {
+                Self::Tensor(vec![FormalDimension::Nominal; tensor.dims.len()])
+            }
+            ConcreteHostType::Option(inner) => Self::Option(Box::new(Self::nominal(inner))),
+            ConcreteHostType::Scalar(_) | ConcreteHostType::MappedFile | ConcreteHostType::Unit => {
+                Self::Exact
+            }
+        }
+    }
+}
+
+fn dimension_variable_key(expr: &Expr) -> Option<String> {
+    let (DeepTag::DVar, children) = tag_and_children(expr)? else {
+        return None;
+    };
+    match children.first().map(strip_meta) {
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct CallTypeInstantiation {
+    dimensions: BTreeMap<String, DimInfo>,
+}
+
+struct DirectCallArgument<'a> {
+    function: &'a str,
+    index: usize,
+    expr: &'a ConcreteHostExpr,
+    pattern: &'a FormalTypePattern,
+    formal: &'a ConcreteHostType,
+    checked_slot: &'a ConcreteHostType,
+}
+
+impl CallTypeInstantiation {
+    /// Check one checker-owned call slot against the resolved callable formal.
+    /// A direct callable may retain universally quantified dimension names in
+    /// its body signature even though the call site has instantiated them to
+    /// literals or other named dimensions ([04-TY] section 4.4). All other
+    /// structure, including scalar precision and tensor rank, stays exact.
+    fn admits(
+        &mut self,
+        pattern: &FormalTypePattern,
+        formal: &ConcreteHostType,
+        actual: &ConcreteHostType,
+    ) -> bool {
+        match (pattern, formal, actual) {
+            (FormalTypePattern::Exact, _, _) => formal == actual,
+            (
+                FormalTypePattern::Function(pattern_params, pattern_ret),
+                ConcreteHostType::Function(formal_params, formal_ret),
+                ConcreteHostType::Function(actual_params, actual_ret),
+            ) => {
+                pattern_params.len() == formal_params.len()
+                    && formal_params.len() == actual_params.len()
+                    && pattern_params
+                        .iter()
+                        .zip(formal_params)
+                        .zip(actual_params)
+                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+                    && self.admits(pattern_ret, formal_ret, actual_ret)
+            }
+            (
+                FormalTypePattern::Adt(pattern_args),
+                ConcreteHostType::Adt(formal_name, formal_args),
+                ConcreteHostType::Adt(actual_name, actual_args),
+            ) => {
+                formal_name == actual_name
+                    && pattern_args.len() == formal_args.len()
+                    && formal_args.len() == actual_args.len()
+                    && pattern_args
+                        .iter()
+                        .zip(formal_args)
+                        .zip(actual_args)
+                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+            }
+            (
+                FormalTypePattern::List(pattern),
+                ConcreteHostType::List(formal),
+                ConcreteHostType::List(actual),
+            )
+            | (
+                FormalTypePattern::Option(pattern),
+                ConcreteHostType::Option(formal),
+                ConcreteHostType::Option(actual),
+            ) => self.admits(pattern, formal, actual),
+            (
+                FormalTypePattern::Dict(key_pattern, value_pattern),
+                ConcreteHostType::Dict(formal_key, formal_value),
+                ConcreteHostType::Dict(actual_key, actual_value),
+            ) => {
+                self.admits(key_pattern, formal_key, actual_key)
+                    && self.admits(value_pattern, formal_value, actual_value)
+            }
+            (
+                FormalTypePattern::Tuple(patterns),
+                ConcreteHostType::Tuple(formal),
+                ConcreteHostType::Tuple(actual),
+            ) => {
+                patterns.len() == formal.len()
+                    && formal.len() == actual.len()
+                    && patterns
+                        .iter()
+                        .zip(formal)
+                        .zip(actual)
+                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+            }
+            (
+                FormalTypePattern::Tensor(dimensions),
+                ConcreteHostType::Tensor(formal),
+                ConcreteHostType::Tensor(actual),
+            ) => self.admits_tensor(dimensions, formal, actual),
+            _ => false,
+        }
+    }
+
+    fn admits_tensor(
+        &mut self,
+        dimensions: &[FormalDimension],
+        formal: &TensorType,
+        actual: &TensorType,
+    ) -> bool {
+        formal.precision == actual.precision
+            && dimensions.len() == formal.dims.len()
+            && formal.dims.len() == actual.dims.len()
+            && dimensions
+                .iter()
+                .zip(&formal.dims)
+                .zip(&actual.dims)
+                .all(|((pattern, formal), actual)| self.admits_dimension(pattern, formal, actual))
+    }
+
+    fn admits_dimension(
+        &mut self,
+        pattern: &FormalDimension,
+        formal: &DimInfo,
+        actual: &DimInfo,
+    ) -> bool {
+        match pattern {
+            FormalDimension::Quantified(key) => {
+                if formal == actual {
+                    return true;
+                }
+                match self.dimensions.get(key) {
+                    Some(bound) => dimensions_compatible(bound, actual),
+                    None => {
+                        self.dimensions.insert(key.clone(), actual.clone());
+                        true
+                    }
+                }
+            }
+            FormalDimension::Nominal => nominal_dimension_accepts(formal, actual),
+        }
+    }
+}
+
+fn nominal_dimension_accepts(formal: &DimInfo, actual: &DimInfo) -> bool {
+    match (formal, actual) {
+        (DimInfo::Named(name, None), _) if name.is_empty() || name == "*" => true,
+        (DimInfo::Named(formal, None), DimInfo::Named(actual, _)) => formal == actual,
+        (DimInfo::Named(_, None), DimInfo::Lit(_)) => true,
+        _ => dimensions_compatible(formal, actual),
+    }
+}
+
+fn dimensions_compatible(left: &DimInfo, right: &DimInfo) -> bool {
+    match (left, right) {
+        (DimInfo::Lit(left), DimInfo::Lit(right)) => left == right,
+        (DimInfo::Named(left, left_size), DimInfo::Named(right, right_size)) => {
+            left == right
+                && match (left_size, right_size) {
+                    (Some(left), Some(right)) => left == right,
+                    _ => true,
+                }
+        }
+        (DimInfo::Lit(left), DimInfo::Named(_, Some(right)))
+        | (DimInfo::Named(_, Some(left)), DimInfo::Lit(right)) => left == right,
+        (DimInfo::Lit(_), DimInfo::Named(_, None)) | (DimInfo::Named(_, None), DimInfo::Lit(_)) => {
+            true
+        }
+    }
 }
 
 pub(super) fn lower(
@@ -63,6 +381,12 @@ pub(super) fn lower(
             .iter()
             .map(|function| function.name.clone())
             .collect(),
+        function_units: host
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(index, function)| (function.name.clone(), UnitId((index + 1) as u32)))
+            .collect(),
     };
     let mut units = vec![lower_roots(&ctx, manifest, root_bindings, sites, 0)?];
     for (index, function) in host.functions.iter().enumerate() {
@@ -77,18 +401,23 @@ fn build_signatures(
 ) -> Result<BTreeMap<String, Signature>, OwnershipError> {
     let mut signatures = BTreeMap::new();
     for function in &host.functions {
-        let modes = declared_param_modes(checked, &function.name, function.params.len())
+        let declarations = declared_params(checked, &function.name, function.params.len())
             .ok_or_else(|| OwnershipError::MissingSignature {
                 function: function.name.clone(),
             })?;
         let params = function
             .params
             .iter()
-            .zip(modes)
-            .map(|(param, (mode, callback_modes))| ParamSpec {
-                mode,
+            .zip(declarations)
+            .map(|(param, declared)| ParamSpec {
+                mode: declared.mode,
                 ty: param.ty.clone(),
-                callback_modes,
+                type_pattern: if function.origin == HostFunctionOrigin::Authored {
+                    FormalTypePattern::from_checked(&param.ty, declared.checked_type)
+                } else {
+                    FormalTypePattern::nominal(&param.ty)
+                },
+                callback_modes: declared.callback_modes,
             })
             .collect();
         signatures.insert(function.name.clone(), Signature { params });
@@ -96,13 +425,14 @@ fn build_signatures(
     Ok(signatures)
 }
 
-/// Read owned/borrowed parameter modes from the checked function type. A
-/// monomorphized host specialization uses the authored generic signature.
-fn declared_param_modes(
-    checked: &CheckedProgram,
+/// Read ownership modes and dimension-variable provenance from the checked
+/// function type. A monomorphized host specialization uses the authored
+/// generic signature.
+fn declared_params<'a>(
+    checked: &'a CheckedProgram,
     name: &str,
     arity: usize,
-) -> Option<Vec<(ParamMode, Option<Vec<ParamMode>>)>> {
+) -> Option<Vec<DeclaredParam<'a>>> {
     let generic_name = match name.split_once("__mono_") {
         Some((generic, _)) => generic,
         None => name,
@@ -115,7 +445,17 @@ fn declared_param_modes(
     if params.len() != arity {
         return None;
     }
-    params.into_iter().map(param_mode_of).collect()
+    params
+        .into_iter()
+        .map(|param| {
+            let (mode, callback_modes) = param_mode_of(param)?;
+            Some(DeclaredParam {
+                mode,
+                callback_modes,
+                checked_type: param,
+            })
+        })
+        .collect()
 }
 
 fn strip_meta(expr: &Expr) -> &Expr {
@@ -165,6 +505,7 @@ struct Context<'a> {
     signatures: BTreeMap<String, Signature>,
     global_names: BTreeSet<String>,
     function_names: BTreeSet<String>,
+    function_units: BTreeMap<String, UnitId>,
 }
 
 #[derive(Clone, Copy)]
@@ -189,7 +530,7 @@ struct Scope {
 struct BlockBuilder {
     id: BlockId,
     params: Vec<BlockParam>,
-    ops: Vec<Op>,
+    ops: Vec<Operation>,
     terminator: Option<Terminator>,
 }
 
@@ -208,6 +549,9 @@ struct UnitLowerer<'a, 'sites> {
     owner_depth: BTreeMap<OwnerId, usize>,
     callback_modes: BTreeMap<OwnerId, Vec<ParamMode>>,
     next_owner: u32,
+    next_operation: u32,
+    next_edge: u32,
+    recorded_edges: BTreeSet<EdgeId>,
     current: BlockId,
     scopes: Vec<Scope>,
     moved: BTreeSet<OwnerId>,
@@ -235,6 +579,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             owner_depth: BTreeMap::new(),
             callback_modes: BTreeMap::new(),
             next_owner: 0,
+            next_operation: 0,
+            next_edge: 0,
+            recorded_edges: BTreeSet::new(),
             current: BlockId(0),
             scopes: Vec::new(),
             moved: BTreeSet::new(),
@@ -277,8 +624,20 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     }
 
     fn emit(&mut self, op: Op) {
+        self.emit_with_role(op, OperationRole::Semantic);
+    }
+
+    fn emit_scope_exit(&mut self, op: Op) {
+        self.emit_with_role(op, OperationRole::ProvisionalScopeExit);
+    }
+
+    fn emit_with_role(&mut self, op: Op, role: OperationRole) {
         let block = self.current;
-        let operation = self.blocks[block.0 as usize].ops.len();
+        let operation = OpId(self.next_operation);
+        self.next_operation = self
+            .next_operation
+            .checked_add(1)
+            .expect("ownership operation census exceeds u32");
         let site = self
             .active_site
             .expect("every ownership operation is emitted inside a host site");
@@ -290,25 +649,46 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 operation,
             },
         );
-        self.blocks[block.0 as usize].ops.push(op);
+        self.blocks[block.0 as usize].ops.push(Operation {
+            id: operation,
+            role,
+            kind: op,
+        });
     }
 
     fn record_edge(&mut self, kind: HostSiteKind, target: BlockId) {
+        let edge = self.blocks[self.current.0 as usize]
+            .terminator
+            .as_ref()
+            .into_iter()
+            .flat_map(Terminator::edges)
+            .find(|edge| edge.target == target && !self.recorded_edges.contains(&edge.id))
+            .map(|edge| edge.id)
+            .expect("recorded control edge must exist on the current terminator");
+        self.recorded_edges.insert(edge);
         let site = self.sites.add(self.unit_index, kind);
         self.sites.record(
             site,
             HostSiteAction::ControlEdge {
                 unit: self.unit_index,
+                edge,
                 source: self.current,
                 target,
             },
         );
     }
 
-    fn set_terminator(&mut self, terminator: Terminator) -> Result<(), OwnershipError> {
+    fn set_terminator(&mut self, mut terminator: Terminator) -> Result<(), OwnershipError> {
         let index = self.current.0 as usize;
         if self.blocks[index].terminator.is_some() {
             return Err(self.invariant(format!("block b{} terminated twice", self.current.0)));
+        }
+        for edge in terminator.edges_mut() {
+            edge.id = EdgeId(self.next_edge);
+            self.next_edge = self
+                .next_edge
+                .checked_add(1)
+                .expect("ownership edge census exceeds u32");
         }
         self.blocks[index].terminator = Some(terminator);
         let site = self
@@ -548,16 +928,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 continue;
             }
             if self.info(owner)?.class.is_heap() {
-                self.emit(Op::Drop {
+                self.emit_scope_exit(Op::Drop {
                     owner: Operand::move_(owner),
                 });
             } else {
-                self.emit(Op::Apply {
-                    dest: None,
-                    label: "discard".to_string(),
-                    schema: OperationSchema::new(vec![super::ir::OwnershipUse::Move], None),
-                    args: vec![Operand::move_(owner)],
-                });
+                self.emit_scope_exit(Op::Discard { owner });
             }
             self.moved.insert(owner);
         }
@@ -586,7 +961,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         }
     }
 
-    fn finish(self, kind: UnitKind, entry: BlockId) -> Result<Unit, OwnershipError> {
+    fn finish(
+        self,
+        kind: UnitKind,
+        callable_body: Option<CallableBody>,
+        entry: BlockId,
+    ) -> Result<Unit, OwnershipError> {
         let mut blocks = Vec::with_capacity(self.blocks.len());
         for builder in self.blocks {
             let terminator =
@@ -604,8 +984,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             });
         }
         Ok(Unit {
+            id: UnitId(self.unit_index as u32),
             name: self.unit_name,
             kind,
+            schedule: ScheduleState::Phase2ScopeExit,
+            callable_body,
             entry,
             blocks,
             owners: self.owners,
@@ -648,16 +1031,74 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             }
             ConcreteHostExprKind::Var(name, ty) => self.lower_var(name, ty),
             ConcreteHostExprKind::Call {
-                function, args, ty, ..
+                function,
+                args,
+                arg_tys,
+                ty,
             } => {
-                let values = args
-                    .iter()
-                    .map(|arg| {
-                        self.with_site(HostSiteKind::Argument, |lowerer| {
-                            lowerer.lower_expr(arg, None)
+                let direct_specs = if crate::host::is_host_unresolved_marker(function)
+                    || matches!(self.lookup(function), Some(Place::Callback(_)))
+                {
+                    None
+                } else {
+                    self.ctx
+                        .signatures
+                        .get(function)
+                        .map(|signature| signature.params.clone())
+                };
+                let values = if let Some(specs) = direct_specs {
+                    if args.len() != specs.len() {
+                        return Err(OwnershipError::CallArityMismatch {
+                            unit: self.unit_name.clone(),
+                            callee: function.clone(),
+                            supplied: args.len(),
+                            declared: specs.len(),
+                        });
+                    }
+                    if arg_tys.len() != specs.len() {
+                        return Err(OwnershipError::CallArityMismatch {
+                            unit: self.unit_name.clone(),
+                            callee: function.clone(),
+                            supplied: arg_tys.len(),
+                            declared: specs.len(),
+                        });
+                    }
+                    let mut values = Vec::with_capacity(args.len());
+                    let mut instantiation = CallTypeInstantiation::default();
+                    for (index, ((arg, arg_ty), spec)) in
+                        args.iter().zip(arg_tys).zip(&specs).enumerate()
+                    {
+                        if !instantiation.admits(&spec.type_pattern, &spec.ty, arg_ty) {
+                            return Err(OwnershipError::CallArgumentType {
+                                unit: self.unit_name.clone(),
+                                callee: function.clone(),
+                                argument: index,
+                                expected: render_type(&spec.ty),
+                                actual: render_type(arg_ty),
+                            });
+                        }
+                        values.push(self.lower_direct_call_argument(
+                            DirectCallArgument {
+                                function,
+                                index,
+                                expr: arg,
+                                pattern: &spec.type_pattern,
+                                formal: &spec.ty,
+                                checked_slot: arg_ty,
+                            },
+                            &mut instantiation,
+                        )?);
+                    }
+                    values
+                } else {
+                    args.iter()
+                        .map(|arg| {
+                            self.with_site(HostSiteKind::Argument, |lowerer| {
+                                lowerer.lower_expr(arg, None)
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 self.lower_call(function, values, ty, tail)
             }
             ConcreteHostExprKind::Builtin { name, args, ty } => {
@@ -677,6 +1118,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     self.emit(Op::Apply {
                         dest: None,
                         label: format!("builtin:{name}"),
+                        kind: ApplyKind::Intrinsic,
                         schema: OperationSchema::new(vec![super::ir::OwnershipUse::Borrow], None),
                         args: vec![operand],
                     });
@@ -815,12 +1257,24 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         expected: Vec<super::ir::OwnershipUse>,
         args: Vec<Operand>,
     ) -> Result<Value, OwnershipError> {
+        self.apply_kind(ty, label, ApplyKind::Intrinsic, expected, args)
+    }
+
+    fn apply_kind(
+        &mut self,
+        ty: &ConcreteHostType,
+        label: String,
+        kind: ApplyKind,
+        expected: Vec<super::ir::OwnershipUse>,
+        args: Vec<Operand>,
+    ) -> Result<Value, OwnershipError> {
         let dest = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let class = self.info(dest)?.class;
         let schema = OperationSchema::new(expected, Some(class));
         self.emit(Op::Apply {
             dest: Some(dest),
             label,
+            kind,
             schema,
             args,
         });
@@ -937,6 +1391,84 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         Ok(Value::Named(body_owner))
     }
 
+    /// Resolve a variable through the ownership environment instead of
+    /// trusting its host-expression annotation. Call-site monomorphization can
+    /// legitimately leave the generic spelling on that annotation, while the
+    /// bound owner retains the concrete checked type.
+    fn direct_call_argument_type(
+        &self,
+        expr: &ConcreteHostExpr,
+    ) -> Result<ConcreteHostType, OwnershipError> {
+        if let ConcreteHostExprKind::Var(name, _) = &expr.kind {
+            if let Some(place) = self.lookup(name) {
+                let owner = match place {
+                    Place::Owner(owner) | Place::Callback(owner) => owner,
+                };
+                return Ok(self.info(owner)?.ty.clone());
+            }
+            if self.unit_name != ROOTS_UNIT
+                && let Some(binding) = self
+                    .ctx
+                    .host
+                    .globals
+                    .iter()
+                    .find(|binding| binding.name == *name)
+            {
+                return Ok(binding.ty.clone());
+            }
+        }
+        Ok(match &expr.kind {
+            ConcreteHostExprKind::Int(_) => ConcreteHostType::Scalar(Prim::Int32),
+            ConcreteHostExprKind::Float(_) => ConcreteHostType::Scalar(Prim::F32),
+            _ => expr_type(expr),
+        })
+    }
+
+    /// Restore the checker-owned call-slot type that the concrete host IR's raw
+    /// `Int`/`Float` lexical carriers do not retain. The slot has already been
+    /// checked against the resolved callee formal. Every other expression
+    /// carries its own concrete type and must be one consistent instantiation
+    /// of that formal instead of being retagged at the call boundary.
+    fn lower_direct_call_argument(
+        &mut self,
+        argument: DirectCallArgument<'_>,
+        instantiation: &mut CallTypeInstantiation,
+    ) -> Result<Value, OwnershipError> {
+        let actual = self.direct_call_argument_type(argument.expr)?;
+        self.with_site(HostSiteKind::Argument, |lowerer| {
+            lowerer.with_site(HostSiteKind::Expression, |lowerer| {
+                let raw_literal_allowed = match (&argument.expr.kind, argument.checked_slot) {
+                    (ConcreteHostExprKind::Int(_), ConcreteHostType::Scalar(prim)) => {
+                        prim.is_integer() || prim.is_float()
+                    }
+                    (ConcreteHostExprKind::Float(_), ConcreteHostType::Scalar(prim)) => {
+                        prim.is_float()
+                    }
+                    _ => false,
+                };
+                if raw_literal_allowed {
+                    let label = match &argument.expr.kind {
+                        ConcreteHostExprKind::Int(value) => format!("literal {value}"),
+                        ConcreteHostExprKind::Float(value) => format!("literal {value}"),
+                        _ => unreachable!("raw literal admission is exhaustive"),
+                    };
+                    return lowerer.define(argument.checked_slot, label);
+                }
+
+                if !instantiation.admits(argument.pattern, argument.formal, &actual) {
+                    return Err(OwnershipError::CallArgumentType {
+                        unit: lowerer.unit_name.clone(),
+                        callee: argument.function.to_string(),
+                        argument: argument.index,
+                        expected: render_type(argument.formal),
+                        actual: render_type(&actual),
+                    });
+                }
+                lowerer.lower_expr_at_site(argument.expr, None)
+            })
+        })
+    }
+
     fn lower_call(
         &mut self,
         function: &str,
@@ -962,7 +1494,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 args,
             );
         }
-        let (label, specs) = match self.lookup(function) {
+        let (label, kind, specs) = match self.lookup(function) {
             Some(Place::Callback(owner)) => {
                 let params = match &self.info(owner)?.ty {
                     ConcreteHostType::Function(params, _) => params.clone(),
@@ -988,14 +1520,35 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     .zip(modes)
                     .map(|(ty, mode)| ParamSpec {
                         mode,
+                        type_pattern: FormalTypePattern::nominal(&ty),
                         ty,
                         callback_modes: None,
                     })
                     .collect();
-                (format!("call_callback:%{}", owner.0), specs)
+                (
+                    format!("call_callback:%{}", owner.0),
+                    ApplyKind::IndirectCall,
+                    specs,
+                )
             }
             Some(Place::Owner(_)) | None => match self.ctx.signatures.get(function) {
-                Some(signature) => (format!("call:{function}"), signature.params.clone()),
+                Some(signature) => {
+                    let callee =
+                        self.ctx
+                            .function_units
+                            .get(function)
+                            .copied()
+                            .ok_or_else(|| {
+                                self.invariant(format!(
+                                    "resolved function `{function}` has no structural unit identity"
+                                ))
+                            })?;
+                    (
+                        format!("call:{function}"),
+                        ApplyKind::DirectCall { callee },
+                        signature.params.clone(),
+                    )
+                }
                 None => {
                     return Err(OwnershipError::UnknownCallee {
                         unit: self.unit_name.clone(),
@@ -1046,7 +1599,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 super::ir::OwnershipUse::Clone => unreachable!("parameter modes never clone"),
             });
         }
-        self.apply(ty, label, expected, args)
+        self.apply_kind(ty, label, kind, expected, args)
     }
 
     fn lower_join_arm(
@@ -1059,8 +1612,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let result = self.consume(value, Some(depth))?;
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: join,
             args: vec![result],
+            terminals: Vec::new(),
         }))
     }
 
@@ -1083,12 +1638,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Branch {
             condition: cond,
             then_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: then_block,
                 args: Vec::new(),
+                terminals: Vec::new(),
             },
             else_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: else_block,
                 args: Vec::new(),
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::BranchEdge, then_block);
@@ -1133,12 +1692,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             scrutinee,
             arms: vec![
                 Edge {
+                    id: EdgeId::UNASSIGNED,
                     target: some,
                     args: Vec::new(),
+                    terminals: Vec::new(),
                 },
                 Edge {
+                    id: EdgeId::UNASSIGNED,
                     target: none,
                     args: Vec::new(),
+                    terminals: Vec::new(),
                 },
             ],
         })?;
@@ -1156,6 +1719,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(payload),
             label: "option_payload".to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![super::ir::OwnershipUse::Borrow],
                 Some(self.info(payload)?.class),
@@ -1195,14 +1759,18 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let mut edges = arm_blocks
             .iter()
             .map(|target| Edge {
+                id: EdgeId::UNASSIGNED,
                 target: *target,
                 args: Vec::new(),
+                terminals: Vec::new(),
             })
             .collect::<Vec<_>>();
         if let Some(target) = default_block {
             edges.push(Edge {
+                id: EdgeId::UNASSIGNED,
                 target,
                 args: Vec::new(),
+                terminals: Vec::new(),
             });
         }
         if edges.is_empty() {
@@ -1229,6 +1797,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 self.emit(Op::Apply {
                     dest: Some(owner),
                     label: format!("adt_payload:{}:{}", arm.ctor, binding.field_index),
+                    kind: ApplyKind::Intrinsic,
                     schema: OperationSchema::new(
                         vec![super::ir::OwnershipUse::Borrow],
                         Some(self.info(owner)?.class),
@@ -1314,8 +1883,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             mode: ParamMode::Owned,
         }]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![init],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         self.sites.add(self.unit_index, HostSiteKind::Binding);
@@ -1342,12 +1913,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1373,8 +1948,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let next = self.consume(next, Some(depth))?;
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![next],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         Ok(Value::Fresh(exit_owner))
@@ -1419,8 +1996,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             mode: ParamMode::Owned,
         }]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(seed)],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         let acc = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
@@ -1438,12 +2017,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1472,6 +2055,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(next),
             label: step.to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![super::ir::OwnershipUse::Move, super::ir::OwnershipUse::Move],
                 Some(self.info(next)?.class),
@@ -1481,8 +2065,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.moved.insert(next);
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(next)],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         Ok(Value::Fresh(exit_owner))
@@ -1518,8 +2104,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             mode: ParamMode::Owned,
         }]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(seed)],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         let acc = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
@@ -1537,12 +2125,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1573,6 +2165,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(next),
             label: step.to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![
                     super::ir::OwnershipUse::Move,
@@ -1586,8 +2179,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.moved.insert(next);
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(next)],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         Ok(Value::Fresh(exit_owner))
@@ -1645,8 +2240,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             },
         ]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![init, Operand::move_(output_seed)],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         let body_state = self.mint(
@@ -1685,12 +2282,16 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_state), Operand::move_(header_output)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_state), Operand::move_(header_output)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1725,6 +2326,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(next_output),
             label: "list_push".to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![super::ir::OwnershipUse::Move, super::ir::OwnershipUse::Move],
                 Some(output_class),
@@ -1734,8 +2336,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.moved.insert(next_output);
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![next_state, Operand::move_(next_output)],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         if self.info(exit_state)?.class.is_heap() {
@@ -1743,12 +2347,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 owner: Operand::move_(exit_state),
             });
         } else {
-            self.emit(Op::Apply {
-                dest: None,
-                label: "discard scan state".to_string(),
-                schema: OperationSchema::new(vec![super::ir::OwnershipUse::Move], None),
-                args: vec![Operand::move_(exit_state)],
-            });
+            self.emit(Op::Discard { owner: exit_state });
         }
         self.moved.insert(exit_state);
         Ok(Value::Fresh(exit_output))
@@ -2054,7 +2653,7 @@ fn lower_roots(
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Exit)
     })?;
-    lowerer.finish(UnitKind::Roots, entry)
+    lowerer.finish(UnitKind::Roots, None, entry)
 }
 
 fn lower_function(
@@ -2152,7 +2751,12 @@ fn lower_function(
                     }
                 });
             }
-            lowerer.set_terminator(Terminator::Jump(Edge { target: body, args }))
+            lowerer.set_terminator(Terminator::Jump(Edge {
+                id: EdgeId::UNASSIGNED,
+                target: body,
+                args,
+                terminals: Vec::new(),
+            }))
         })?;
         (entry, body)
     } else {
@@ -2187,5 +2791,60 @@ fn lower_function(
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Return { result })
     })?;
-    lowerer.finish(UnitKind::Function, entry)
+    lowerer.finish(UnitKind::Function, Some(CallableBody::new(body)), entry)
+}
+
+#[cfg(test)]
+mod call_type_instantiation_tests {
+    use super::*;
+
+    fn tensor(dims: Vec<DimInfo>, precision: Prim) -> ConcreteHostType {
+        ConcreteHostType::Tensor(TensorType { dims, precision })
+    }
+
+    #[test]
+    fn callable_dimension_variable_accepts_one_consistent_call_site_instantiation() {
+        let formal = tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32);
+        let literal_four = tensor(vec![DimInfo::Lit(4)], Prim::F32);
+        let literal_five = tensor(vec![DimInfo::Lit(5)], Prim::F32);
+        let named_batch = tensor(vec![DimInfo::Named("batch".into(), None)], Prim::F32);
+        let pattern = FormalTypePattern::Tensor(vec![FormalDimension::Quantified("d0".into())]);
+        let mut instantiation = CallTypeInstantiation::default();
+
+        assert!(instantiation.admits(&pattern, &formal, &formal));
+        assert!(instantiation.admits(&pattern, &formal, &literal_four));
+        assert!(instantiation.admits(&pattern, &formal, &literal_four));
+        assert!(!instantiation.admits(&pattern, &formal, &literal_five));
+        assert!(CallTypeInstantiation::default().admits(&pattern, &formal, &named_batch));
+    }
+
+    #[test]
+    fn nominal_dimensions_keep_names_while_accepting_literal_extents_and_wildcards() {
+        let pattern = FormalTypePattern::Tensor(vec![FormalDimension::Nominal]);
+        let batch = tensor(vec![DimInfo::Named("batch".into(), None)], Prim::F32);
+        let same_batch = tensor(vec![DimInfo::Named("batch".into(), None)], Prim::F32);
+        let seq = tensor(vec![DimInfo::Named("seq".into(), None)], Prim::F32);
+        let literal_four = tensor(vec![DimInfo::Lit(4)], Prim::F32);
+        let wildcard = tensor(vec![DimInfo::Named("*".into(), None)], Prim::F32);
+
+        assert!(CallTypeInstantiation::default().admits(&pattern, &batch, &same_batch));
+        assert!(CallTypeInstantiation::default().admits(&pattern, &batch, &literal_four));
+        assert!(!CallTypeInstantiation::default().admits(&pattern, &batch, &seq));
+        assert!(CallTypeInstantiation::default().admits(&pattern, &wildcard, &seq));
+    }
+
+    #[test]
+    fn callable_dimension_instantiation_does_not_weaken_literals_rank_or_precision() {
+        let formal = tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32);
+        let quantified = FormalTypePattern::Tensor(vec![FormalDimension::Quantified("d0".into())]);
+        let wrong_rank = tensor(vec![DimInfo::Lit(4), DimInfo::Lit(1)], Prim::F32);
+        let wrong_precision = tensor(vec![DimInfo::Lit(4)], Prim::F64);
+        let literal_four = tensor(vec![DimInfo::Lit(4)], Prim::F32);
+        let literal_five = tensor(vec![DimInfo::Lit(5)], Prim::F32);
+        let nominal = FormalTypePattern::Tensor(vec![FormalDimension::Nominal]);
+
+        assert!(!CallTypeInstantiation::default().admits(&quantified, &formal, &wrong_rank));
+        assert!(!CallTypeInstantiation::default().admits(&quantified, &formal, &wrong_precision));
+        assert!(!CallTypeInstantiation::default().admits(&nominal, &literal_four, &literal_five));
+    }
 }

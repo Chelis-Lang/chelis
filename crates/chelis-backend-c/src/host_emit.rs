@@ -2516,15 +2516,7 @@ impl<'a> HostEmitter<'a> {
                         );
                     self.owner_vars.insert(dest.id(), value);
                 }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                    dest: None,
-                    label,
-                    args,
-                    ..
-                }) if args.len() == 1
-                    && label.starts_with("discard")
-                    && args[0].use_() == VerifiedOwnershipUse::Move
-                    && !args[0].owner().is_heap() => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
                 VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
                     dest: None,
                     label: "builtin:copy" | "builtin:debug",
@@ -2628,6 +2620,7 @@ impl<'a> HostEmitter<'a> {
             | VerifiedHostAction::Operation(VerifiedHostOperation::Project { block, .. })
             | VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { block, .. })
             | VerifiedHostAction::Operation(VerifiedHostOperation::Drop { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Discard { block, .. })
             | VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume { block, .. })
             | VerifiedHostAction::Terminator(VerifiedHostTerminator::Return { block, .. })
             | VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { block, .. })
@@ -2703,25 +2696,20 @@ impl<'a> HostEmitter<'a> {
                         );
                     self.owner_vars.insert(dest.id(), value);
                 }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
                     block: owner_block,
-                    dest: None,
-                    label,
-                    args,
                     ..
-                }) if *owner_block == block
-                    && label.starts_with("discard")
-                    && args.len() == 1
-                    && args[0].use_() == VerifiedOwnershipUse::Move
-                    && !args[0].owner().is_heap() => {}
+                }) if *owner_block == block => {}
                 VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
                     block: owner_block,
                     dest,
                     source,
+                    ..
                 }) if *owner_block == block => self.emit_clone_to(*dest, *source, None)?,
                 VerifiedHostAction::Operation(VerifiedHostOperation::Project {
                     block: owner_block,
                     source,
+                    ..
                 }) if *owner_block == block => {
                     self.owner_vars
                         .insert(source.owner().id(), target.to_string());
@@ -2730,6 +2718,7 @@ impl<'a> HostEmitter<'a> {
                 VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
                     block: owner_block,
                     owner,
+                    ..
                 }) if *owner_block == block => {
                     let var = self.owner_var(owner.owner())?;
                     let ty = Self::owner_abi_type(owner.owner())?;
@@ -2954,15 +2943,7 @@ impl<'a> HostEmitter<'a> {
                         self.lines.push(format!("{}{release}", self.indent));
                     }
                 }
-                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
-                    dest: None,
-                    label,
-                    args,
-                    ..
-                }) if args.len() == 1
-                    && label.starts_with("discard")
-                    && args[0].use_() == VerifiedOwnershipUse::Move
-                    && !args[0].owner().is_heap() => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
                 VerifiedHostAction::Terminator(VerifiedHostTerminator::Return { .. })
                 | VerifiedHostAction::Terminator(VerifiedHostTerminator::Exit { .. }) => {}
                 other => {

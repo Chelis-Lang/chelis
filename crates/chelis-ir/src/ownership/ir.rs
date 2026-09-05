@@ -10,6 +10,26 @@ pub(crate) struct OwnerId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BlockId(pub(crate) u32);
 
+/// Stable identity for one ownership unit. Unlike the diagnostic unit name,
+/// this identity is assigned structurally and is the only admissible direct-
+/// call target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct UnitId(pub(crate) u32);
+
+/// Stable identity for one operation within an ownership unit. Scheduling may
+/// reorder operations without invalidating host-site associations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct OpId(pub(crate) u32);
+
+/// Stable structural identity for one control-flow edge. It is assigned by
+/// lowering before host-site actions are recorded and survives scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct EdgeId(pub(crate) u32);
+
+impl EdgeId {
+    pub(crate) const UNASSIGNED: Self = Self(u32::MAX);
+}
+
 /// Opaque identity for one structurally selected host-emission site. The
 /// numeric key is private: downstream code can compare identities but cannot
 /// manufacture a carrier from an integer or derive ownership from spelling.
@@ -127,6 +147,15 @@ pub(crate) struct OperationSchema {
     pub(crate) result: Option<ValueClass>,
 }
 
+/// Closed semantic class for an application. A free-form diagnostic label
+/// cannot create a direct call or select its callee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyKind {
+    Intrinsic,
+    IndirectCall,
+    DirectCall { callee: UnitId },
+}
+
 impl OperationSchema {
     pub(crate) fn new(operands: Vec<OwnershipUse>, result: Option<ValueClass>) -> Self {
         Self { operands, result }
@@ -144,6 +173,7 @@ pub(crate) enum Op {
     Apply {
         dest: Option<OwnerId>,
         label: String,
+        kind: ApplyKind,
         schema: OperationSchema,
         args: Vec<Operand>,
     },
@@ -165,6 +195,12 @@ pub(crate) enum Op {
     Drop {
         owner: Operand,
     },
+    /// A typed terminal for an owned nonheap identity. This is deliberately
+    /// distinct from Apply: diagnostic spelling cannot turn an arbitrary
+    /// operation into a discard.
+    Discard {
+        owner: OwnerId,
+    },
     RootConsume {
         root: String,
         owner: Operand,
@@ -172,9 +208,60 @@ pub(crate) enum Op {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Operation {
+    pub(crate) id: OpId,
+    pub(crate) role: OperationRole,
+    pub(crate) kind: Op,
+}
+
+/// Typed scheduling authority. Diagnostic labels and operation spelling never
+/// decide whether a terminal is movable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OperationRole {
+    Semantic,
+    ProvisionalScopeExit,
+    ScheduledScopeExit,
+}
+
+/// The only operations admissible on a selected control-flow edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Terminal {
+    Drop(OwnerId),
+    Discard(OwnerId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EdgeTerminal {
+    pub(crate) id: OpId,
+    pub(crate) kind: Terminal,
+}
+
+impl Terminal {
+    pub(crate) fn owner(self) -> OwnerId {
+        match self {
+            Self::Drop(owner) | Self::Discard(owner) => owner,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Edge {
+    pub(crate) id: EdgeId,
     pub(crate) target: BlockId,
     pub(crate) args: Vec<Operand>,
+    pub(crate) terminals: Vec<EdgeTerminal>,
+}
+
+#[cfg(test)]
+impl Edge {
+    pub(crate) fn new(id: EdgeId, target: BlockId, args: Vec<Operand>) -> Self {
+        Self {
+            id,
+            target,
+            args,
+            terminals: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,11 +292,49 @@ pub(crate) enum Terminator {
     Exit,
 }
 
+impl Terminator {
+    pub(crate) fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
+        match self {
+            Self::Return { .. } | Self::Exit => Box::new(std::iter::empty()),
+            Self::Jump(edge) => Box::new(std::iter::once(edge)),
+            Self::Branch {
+                then_edge,
+                else_edge,
+                ..
+            }
+            | Self::Loop {
+                body_edge: then_edge,
+                exit_edge: else_edge,
+                ..
+            } => Box::new(std::iter::once(then_edge).chain(std::iter::once(else_edge))),
+            Self::Match { arms, .. } => Box::new(arms.iter()),
+        }
+    }
+
+    pub(crate) fn edges_mut(&mut self) -> Box<dyn Iterator<Item = &mut Edge> + '_> {
+        match self {
+            Self::Return { .. } | Self::Exit => Box::new(std::iter::empty()),
+            Self::Jump(edge) => Box::new(std::iter::once(edge)),
+            Self::Branch {
+                then_edge,
+                else_edge,
+                ..
+            }
+            | Self::Loop {
+                body_edge: then_edge,
+                exit_edge: else_edge,
+                ..
+            } => Box::new(std::iter::once(then_edge).chain(std::iter::once(else_edge))),
+            Self::Match { arms, .. } => Box::new(arms.iter_mut()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Block {
     pub(crate) id: BlockId,
     pub(crate) params: Vec<BlockParam>,
-    pub(crate) ops: Vec<Op>,
+    pub(crate) ops: Vec<Operation>,
     pub(crate) terminator: Terminator,
 }
 
@@ -219,10 +344,37 @@ pub(crate) enum UnitKind {
     Function,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScheduleState {
+    Phase2ScopeExit,
+    CanonicalAcyclic,
+}
+
+/// Structural identity of the callable body boundary. Authored functions may
+/// have a distinct `Unit::entry` adapter whose `EntryBorrow` parameters are
+/// copied before owned internal formals; direct calls target this body entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CallableBody {
+    entry: BlockId,
+}
+
+impl CallableBody {
+    pub(crate) fn new(entry: BlockId) -> Self {
+        Self { entry }
+    }
+
+    pub(crate) fn entry(self) -> BlockId {
+        self.entry
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Unit {
+    pub(crate) id: UnitId,
     pub(crate) name: String,
     pub(crate) kind: UnitKind,
+    pub(crate) schedule: ScheduleState,
+    pub(crate) callable_body: Option<CallableBody>,
     pub(crate) entry: BlockId,
     pub(crate) blocks: Vec<Block>,
     pub(crate) owners: BTreeMap<OwnerId, OwnerInfo>,
@@ -251,7 +403,7 @@ pub(crate) enum HostSiteAction {
     Operation {
         unit: usize,
         block: BlockId,
-        operation: usize,
+        operation: OpId,
     },
     Terminator {
         unit: usize,
@@ -259,6 +411,7 @@ pub(crate) enum HostSiteAction {
     },
     ControlEdge {
         unit: usize,
+        edge: EdgeId,
         source: BlockId,
         target: BlockId,
     },

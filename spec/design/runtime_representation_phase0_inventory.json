@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "bd1213b13aa1de1cb0b3f524c05bf200656f14838e63db3171548b69c5c12855",
+  "freeze_sha256": "2fe680f97f0cc6657b7b3292a3c1b8fc59b752c26634b790e50a2e1334c7d260",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1140,6 +1140,10 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=lower_program_to_library_inner",
+      "deletion_phase": 1
+    },
+    {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/last_use.rs|owner=definition_orders",
       "deletion_phase": 1
     },
     {
@@ -2553,6 +2557,10 @@
       "sample": "nodes . saturating_sub (last_dag_size)"
     },
     {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/last_use.rs|owner=definition_orders",
+      "sample": "operation . id . 0 . saturating_add (1)"
+    },
+    {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/specialize.rs|owner=dims_equivalent",
       "sample": "DimExpr :: from (lhs) . normalized_key ()"
     },
@@ -2826,7 +2834,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 65,
+        "registered_sources": 66,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",

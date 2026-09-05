@@ -8,17 +8,51 @@ use crate::host::{
     ConcreteHostProgram, HostDisplayRoot, HostFunctionOrigin, HostTensorHelper,
 };
 
-use super::classify::{classify, render_type};
+use super::classify::{Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    Block, BlockId, Edge, HostSiteAction, HostSiteMap, Op, Operand, OwnerId, OwnerOrigin,
-    OwnershipProgram, OwnershipUse, ParamMode, Terminator, Unit, UnitKind,
+    ApplyKind, Block, BlockId, Edge, EdgeId, HostSiteAction, HostSiteMap, Op, OpId, Operand,
+    OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ParamMode, Terminal,
+    Terminator, Unit, UnitId, UnitKind,
 };
 
-pub(super) fn verify(program: &OwnershipProgram) -> Result<(), OwnershipError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallableSchema {
+    operation: super::ir::OperationSchema,
+    parameter_classes: Vec<ValueClass>,
+}
+
+#[derive(Debug)]
+pub(super) struct HostVerification {
+    tail_calls: BTreeSet<(UnitId, OpId)>,
+    live_set_bound: super::VerifiedLiveSetBound,
+}
+
+impl HostVerification {
+    pub(super) fn is_tail_call(&self, unit: UnitId, operation: OpId) -> bool {
+        self.tail_calls.contains(&(unit, operation))
+    }
+
+    pub(super) fn live_set_bound(&self) -> &super::VerifiedLiveSetBound {
+        &self.live_set_bound
+    }
+}
+
+pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, OwnershipError> {
+    if super::last_use::has_schedule(program) {
+        super::last_use::verify_canonical(program)?;
+    }
     let mut names = BTreeSet::new();
+    let mut units = BTreeMap::new();
     let mut roots = 0;
     for unit in &program.units {
+        if units.insert(unit.id, unit).is_some() {
+            return Err(OwnershipError::DuplicateIdentity {
+                unit: unit.name.clone(),
+                kind: "unit",
+                id: unit.id.0,
+            });
+        }
         if !names.insert(&unit.name) {
             return Err(OwnershipError::DuplicateIdentity {
                 unit: unit.name.clone(),
@@ -27,13 +61,28 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<(), OwnershipError> {
             });
         }
         roots += usize::from(unit.kind == UnitKind::Roots);
-        verify_unit(unit)?;
     }
-    if roots == 1 {
-        Ok(())
-    } else {
-        Err(OwnershipError::RootUnitCount { actual: roots })
+    let mut callable_schemas = BTreeMap::new();
+    for unit in &program.units {
+        if let Some(schema) = derive_callable_schema(unit)? {
+            callable_schemas.insert(unit.id, schema);
+        }
     }
+    let mut max_live_heap_owners = 0;
+    for unit in &program.units {
+        max_live_heap_owners =
+            max_live_heap_owners.max(verify_unit(unit, &units, &callable_schemas)?);
+    }
+    if roots != 1 {
+        return Err(OwnershipError::RootUnitCount { actual: roots });
+    }
+    let tail_calls = program.units.iter().flat_map(classify_tail_calls).collect();
+    Ok(HostVerification {
+        tail_calls,
+        live_set_bound: super::VerifiedLiveSetBound {
+            max_live_heap_owners,
+        },
+    })
 }
 
 /// Prove that the exact payload-site universe and the ownership-directive
@@ -131,24 +180,28 @@ pub(super) fn verify_host_actions(
                     block,
                     operation,
                 } => {
-                    if !matches!(
+                    let ordinary_site = matches!(
                         site.kind,
                         super::ir::HostSiteKind::Expression
                             | super::ir::HostSiteKind::FunctionEntry
                             | super::ir::HostSiteKind::FunctionReturn
                             | super::ir::HostSiteKind::ManifestRoot
-                    ) {
-                        return Err(site_error(index, "operation has inappropriate site kind"));
-                    }
+                    );
                     let Some(unit_ref) = program.units.get(unit) else {
                         return Err(site_error(index, "operation names missing unit"));
                     };
-                    let Some(block_ref) = unit_ref.blocks.iter().find(|item| item.id == block)
-                    else {
+                    if !unit_ref.blocks.iter().any(|item| item.id == block) {
                         return Err(site_error(index, "operation names missing block"));
-                    };
-                    if block_ref.ops.get(operation).is_none() {
-                        return Err(site_error(index, "operation index is outside its block"));
+                    }
+                    if !operation_exists_in_block(unit_ref, block, operation) {
+                        return Err(site_error(index, "operation identity is outside its block"));
+                    }
+                    let is_edge_terminal = edge_for_operation(unit_ref, block, operation).is_some();
+                    if (is_edge_terminal
+                        && !operation_is_on_site_edge(program, site, unit, block, operation))
+                        || (!is_edge_terminal && !ordinary_site)
+                    {
+                        return Err(site_error(index, "operation has inappropriate site kind"));
                     }
                     if !operations.insert((unit, block, operation)) {
                         return Err(site_error(index, "operation belongs to two sites"));
@@ -204,10 +257,11 @@ pub(super) fn verify_host_actions(
                 }
                 HostSiteAction::ControlEdge {
                     unit,
+                    edge,
                     source,
                     target,
                 } => {
-                    let expected_kind = expected_control_kind(program, unit, source, target)
+                    let expected_kind = expected_control_kind(program, unit, edge, source, target)
                         .ok_or_else(|| {
                             site_error(index, "edge is not a typed control successor")
                         })?;
@@ -224,25 +278,32 @@ pub(super) fn verify_host_actions(
                     else {
                         return Err(site_error(index, "edge names missing source block"));
                     };
-                    if !successors(&block_ref.terminator).contains(&target) {
+                    if !block_ref
+                        .terminator
+                        .edges()
+                        .any(|candidate| candidate.id == edge && candidate.target == target)
+                    {
                         return Err(site_error(index, "edge target is not a successor"));
                     }
-                    if controls.insert((unit, source, target), site.kind).is_some() {
+                    if controls.insert((unit, edge), site.kind).is_some() {
                         return Err(site_error(index, "control edge belongs to two sites"));
                     }
                 }
             }
         }
-        if matches!(
-            site.kind,
-            super::ir::HostSiteKind::BranchEdge
-                | super::ir::HostSiteKind::MatchArm
-                | super::ir::HostSiteKind::LoopEdge
-        ) && site.actions.len() != 1
+        if is_control_site(site.kind)
+            && (!matches!(
+                site.actions.first(),
+                Some(HostSiteAction::ControlEdge { .. })
+            ) || site
+                .actions
+                .iter()
+                .skip(1)
+                .any(|action| !matches!(action, HostSiteAction::Operation { .. })))
         {
             return Err(site_error(
                 index,
-                "control-edge site does not carry exactly one action",
+                "control-edge site must carry its edge before edge-local terminals",
             ));
         }
     }
@@ -252,7 +313,17 @@ pub(super) fn verify_host_actions(
         .enumerate()
         .flat_map(|(unit, value)| {
             value.blocks.iter().flat_map(move |block| {
-                (0..block.ops.len()).map(move |operation| (unit, block.id, operation))
+                block
+                    .ops
+                    .iter()
+                    .map(move |operation| (unit, block.id, operation.id))
+                    .chain(
+                        block
+                            .terminator
+                            .edges()
+                            .flat_map(|edge| &edge.terminals)
+                            .map(move |terminal| (unit, block.id, terminal.id)),
+                    )
             })
         })
         .collect::<BTreeSet<_>>();
@@ -304,7 +375,8 @@ pub(super) fn verify_host_actions(
                     .units
                     .get(unit)
                     .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
-                    .and_then(|block| block.ops.get(operation)),
+                    .and_then(|block| block.ops.iter().find(|candidate| candidate.id == operation))
+                    .map(|operation| &operation.kind),
                 _ => None,
             })
             .filter_map(|op| match op {
@@ -337,7 +409,8 @@ pub(super) fn verify_host_actions(
                     .units
                     .get(unit)
                     .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
-                    .and_then(|block| block.ops.get(operation)),
+                    .and_then(|block| block.ops.iter().find(|candidate| candidate.id == operation))
+                    .map(|operation| &operation.kind),
                 _ => None,
             })
             .filter_map(|op| match op {
@@ -358,21 +431,91 @@ pub(super) fn verify_host_actions(
     Ok(())
 }
 
+fn is_control_site(kind: super::ir::HostSiteKind) -> bool {
+    matches!(
+        kind,
+        super::ir::HostSiteKind::BranchEdge
+            | super::ir::HostSiteKind::MatchArm
+            | super::ir::HostSiteKind::LoopEdge
+    )
+}
+
+fn operation_is_on_site_edge(
+    program: &OwnershipProgram,
+    site: &super::ir::HostSiteRecord,
+    unit: usize,
+    block: BlockId,
+    operation: OpId,
+) -> bool {
+    let Some(unit_ref) = program.units.get(unit) else {
+        return false;
+    };
+    let Some(edge) = edge_for_operation(unit_ref, block, operation) else {
+        return false;
+    };
+    let Some(operation_index) = site.actions.iter().position(
+        |action| matches!(action, HostSiteAction::Operation { operation: id, .. } if *id == operation),
+    ) else {
+        return false;
+    };
+    site.actions[..operation_index]
+        .iter()
+        .any(|action| match *action {
+            HostSiteAction::ControlEdge {
+                unit: action_unit,
+                edge: action_edge,
+                source,
+                target,
+            } => {
+                action_unit == unit
+                    && source == block
+                    && action_edge == edge.id
+                    && target == edge.target
+            }
+            HostSiteAction::Terminator {
+                unit: action_unit,
+                block: action_block,
+            } => {
+                action_unit == unit
+                    && action_block == block
+                    && matches!(
+                        unit_ref
+                            .blocks
+                            .iter()
+                            .find(|candidate| candidate.id == block)
+                            .map(|block| &block.terminator),
+                        Some(Terminator::Jump(jump)) if jump.id == edge.id
+                    )
+            }
+            _ => false,
+        })
+}
+
+fn edge_for_operation(unit: &Unit, block: BlockId, operation: OpId) -> Option<&Edge> {
+    unit.blocks
+        .iter()
+        .find(|candidate| candidate.id == block)?
+        .terminator
+        .edges()
+        .find(|edge| {
+            edge.terminals
+                .iter()
+                .any(|terminal| terminal.id == operation)
+        })
+}
+
 fn collect_expected_controls(
     program: &OwnershipProgram,
-) -> Result<BTreeMap<(usize, BlockId, BlockId), super::ir::HostSiteKind>, OwnershipError> {
+) -> Result<BTreeMap<(usize, EdgeId), super::ir::HostSiteKind>, OwnershipError> {
     let mut result = BTreeMap::new();
     for (unit_index, unit) in program.units.iter().enumerate() {
         for block in &unit.blocks {
-            let mut insert = |target: BlockId, kind: super::ir::HostSiteKind| {
-                if result
-                    .insert((unit_index, block.id, target), kind)
-                    .is_some()
-                {
+            let mut insert = |edge: &Edge, kind: super::ir::HostSiteKind| {
+                if result.insert((unit_index, edge.id), kind).is_some() {
                     Err(OwnershipError::HostSiteMap {
                         detail: format!(
-                            "unit {unit_index} block b{} repeats control target b{}",
-                            block.id.0, target.0
+                            "unit {unit_index} repeats control edge e{} from b{} to b{}",
+                            edge.id.0, block.id.0, edge.target.0
                         ),
                     })
                 } else {
@@ -385,12 +528,12 @@ fn collect_expected_controls(
                     else_edge,
                     ..
                 } => {
-                    insert(then_edge.target, super::ir::HostSiteKind::BranchEdge)?;
-                    insert(else_edge.target, super::ir::HostSiteKind::BranchEdge)?;
+                    insert(then_edge, super::ir::HostSiteKind::BranchEdge)?;
+                    insert(else_edge, super::ir::HostSiteKind::BranchEdge)?;
                 }
                 Terminator::Match { arms, .. } => {
                     for arm in arms {
-                        insert(arm.target, super::ir::HostSiteKind::MatchArm)?;
+                        insert(arm, super::ir::HostSiteKind::MatchArm)?;
                     }
                 }
                 Terminator::Loop {
@@ -398,8 +541,8 @@ fn collect_expected_controls(
                     exit_edge,
                     ..
                 } => {
-                    insert(body_edge.target, super::ir::HostSiteKind::LoopEdge)?;
-                    insert(exit_edge.target, super::ir::HostSiteKind::LoopEdge)?;
+                    insert(body_edge, super::ir::HostSiteKind::LoopEdge)?;
+                    insert(exit_edge, super::ir::HostSiteKind::LoopEdge)?;
                 }
                 Terminator::Jump(_) | Terminator::Return { .. } | Terminator::Exit => {}
             }
@@ -411,12 +554,19 @@ fn collect_expected_controls(
 fn expected_control_kind(
     program: &OwnershipProgram,
     unit: usize,
+    edge: EdgeId,
     source: BlockId,
     target: BlockId,
 ) -> Option<super::ir::HostSiteKind> {
+    let unit_ref = program.units.get(unit)?;
+    let block = unit_ref.blocks.iter().find(|block| block.id == source)?;
+    block
+        .terminator
+        .edges()
+        .find(|candidate| candidate.id == edge && candidate.target == target)?;
     collect_expected_controls(program)
         .ok()?
-        .get(&(unit, source, target))
+        .get(&(unit, edge))
         .copied()
 }
 
@@ -791,12 +941,41 @@ fn independent_display_root(root: &RootEntry) -> HostDisplayRoot {
     }
 }
 
-fn verify_unit(unit: &Unit) -> Result<(), OwnershipError> {
+fn verify_unit(
+    unit: &Unit,
+    units: &BTreeMap<UnitId, &Unit>,
+    callable_schemas: &BTreeMap<UnitId, CallableSchema>,
+) -> Result<usize, OwnershipError> {
+    if !matches!(
+        (unit.kind, unit.callable_body),
+        (UnitKind::Roots, None) | (UnitKind::Function, Some(_))
+    ) {
+        return Err(OwnershipError::LoweringInvariant {
+            unit: unit.name.clone(),
+            detail: "ownership unit kind and callable body disagree".to_string(),
+        });
+    }
     let blocks = blocks(unit)?;
     if !blocks.contains_key(&unit.entry) {
         return Err(missing_block(unit, unit.entry));
     }
     let definitions = definitions(unit)?;
+    check_operation_ids(unit)?;
+    for block in &unit.blocks {
+        for operation in &block.ops {
+            if operation.role != OperationRole::Semantic
+                && !matches!(operation.kind, Op::Drop { .. } | Op::Discard { .. })
+            {
+                return Err(OwnershipError::LoweringInvariant {
+                    unit: unit.name.clone(),
+                    detail: format!(
+                        "operation o{} marks a non-terminal as a scope exit",
+                        operation.id.0
+                    ),
+                });
+            }
+        }
+    }
     for owner in unit.owners.keys() {
         if !definitions.contains(owner) {
             return Err(incomplete(unit, *owner, "definition"));
@@ -832,12 +1011,30 @@ fn verify_unit(unit: &Unit) -> Result<(), OwnershipError> {
     let initial: BTreeSet<_> = entry.params.iter().map(|p| p.owner).collect();
     let mut incoming = BTreeMap::from([(unit.entry, initial)]);
     let mut queue = VecDeque::from([unit.entry]);
+    let mut max_live_heap_owners = 0;
     while let Some(id) = queue.pop_front() {
         let block = blocks[&id];
         let mut live = incoming[&id].clone();
         check_borrows(unit, block.id, &live)?;
-        for op in &block.ops {
-            verify_op(unit, block, op, &definitions, &mut live)?;
+        max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
+        for operation in &block.ops {
+            if let Some(dest) = destination(&operation.kind)
+                && unit.owners[&dest].class.is_heap()
+            {
+                // Account for the transient point after result allocation and
+                // before moved inputs receive their post-operation terminal.
+                max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live) + 1);
+            }
+            verify_op(
+                unit,
+                block,
+                &operation.kind,
+                &definitions,
+                units,
+                callable_schemas,
+                &mut live,
+            )?;
+            max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
         }
         verify_terminator(
             unit,
@@ -849,7 +1046,175 @@ fn verify_unit(unit: &Unit) -> Result<(), OwnershipError> {
             &mut queue,
         )?;
     }
+    Ok(max_live_heap_owners)
+}
+
+fn derive_callable_schema(unit: &Unit) -> Result<Option<CallableSchema>, OwnershipError> {
+    let body = match (unit.kind, unit.callable_body) {
+        (UnitKind::Roots, None) => return Ok(None),
+        (UnitKind::Function, Some(body)) => body,
+        _ => {
+            return Err(OwnershipError::LoweringInvariant {
+                unit: unit.name.clone(),
+                detail: "ownership unit kind and callable body disagree".to_string(),
+            });
+        }
+    };
+    let blocks = blocks(unit)?;
+    let reached = reachable_blocks(unit, &blocks)?;
+    if !reached.contains(&body.entry()) {
+        return Err(OwnershipError::UnreachableBlock {
+            unit: unit.name.clone(),
+            block: body.entry().0,
+        });
+    }
+    let callable = blocks
+        .get(&body.entry())
+        .ok_or_else(|| missing_block(unit, body.entry()))?;
+    let mut operands = Vec::with_capacity(callable.params.len());
+    let mut parameter_classes = Vec::with_capacity(callable.params.len());
+    let mut saw_capture = false;
+    for param in &callable.params {
+        if param.mode == ParamMode::EntryBorrow {
+            return Err(OwnershipError::LoweringInvariant {
+                unit: unit.name.clone(),
+                detail: format!(
+                    "callable body b{} carries artifact-only EntryBorrow parameter %{}",
+                    callable.id.0, param.owner.0
+                ),
+            });
+        }
+        let info = unit
+            .owners
+            .get(&param.owner)
+            .ok_or_else(|| incomplete(unit, param.owner, "metadata"))?;
+        match info.placement {
+            Placement::Parameter if saw_capture => {
+                return Err(OwnershipError::LoweringInvariant {
+                    unit: unit.name.clone(),
+                    detail: format!(
+                        "callable parameter %{} follows captured environment parameters",
+                        param.owner.0
+                    ),
+                });
+            }
+            Placement::Parameter => {
+                operands.push(param.mode.use_());
+                parameter_classes.push(info.class);
+            }
+            Placement::Value => {
+                saw_capture = true;
+                if param.mode != ParamMode::Borrowed || info.origin != OwnerOrigin::ExternalBorrow {
+                    return Err(OwnershipError::LoweringInvariant {
+                        unit: unit.name.clone(),
+                        detail: format!(
+                            "callable environment parameter %{} is not an external borrow",
+                            param.owner.0
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut result: Option<ValueClass> = None;
+    for block in unit
+        .blocks
+        .iter()
+        .filter(|block| reached.contains(&block.id))
+    {
+        let Terminator::Return { result: returned } = &block.terminator else {
+            continue;
+        };
+        if returned.use_ != OwnershipUse::Move {
+            return Err(OwnershipError::FunctionReturnMode {
+                unit: unit.name.clone(),
+                block: block.id.0,
+                actual: returned.use_.name(),
+            });
+        }
+        let actual = unit
+            .owners
+            .get(&returned.owner)
+            .ok_or_else(|| incomplete(unit, returned.owner, "metadata"))?
+            .class;
+        if let Some(expected) = result
+            && expected != actual
+        {
+            return Err(OwnershipError::FunctionReturnClass {
+                unit: unit.name.clone(),
+                block: block.id.0,
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+        result = Some(actual);
+    }
+    let result = result.ok_or_else(|| OwnershipError::LoweringInvariant {
+        unit: unit.name.clone(),
+        detail: "function has no reachable return".to_string(),
+    })?;
+    Ok(Some(CallableSchema {
+        operation: super::ir::OperationSchema::new(operands, Some(result)),
+        parameter_classes,
+    }))
+}
+
+fn check_operation_ids(unit: &Unit) -> Result<(), OwnershipError> {
+    let mut operations = BTreeSet::new();
+    let mut edges = BTreeSet::new();
+    for block in &unit.blocks {
+        for operation in &block.ops {
+            if !operations.insert(operation.id) {
+                return Err(OwnershipError::DuplicateIdentity {
+                    unit: unit.name.clone(),
+                    kind: "operation",
+                    id: operation.id.0,
+                });
+            }
+        }
+        for edge in block.terminator.edges() {
+            if edge.id == EdgeId::UNASSIGNED || !edges.insert(edge.id) {
+                return Err(OwnershipError::DuplicateIdentity {
+                    unit: unit.name.clone(),
+                    kind: "edge",
+                    id: edge.id.0,
+                });
+            }
+            for terminal in &edge.terminals {
+                if !operations.insert(terminal.id) {
+                    return Err(OwnershipError::DuplicateIdentity {
+                        unit: unit.name.clone(),
+                        kind: "operation",
+                        id: terminal.id.0,
+                    });
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+fn operation_exists_in_block(unit: &Unit, block: BlockId, operation: OpId) -> bool {
+    unit.blocks
+        .iter()
+        .find(|candidate| candidate.id == block)
+        .is_some_and(|block| {
+            block.ops.iter().any(|candidate| candidate.id == operation)
+                || block
+                    .terminator
+                    .edges()
+                    .flat_map(|edge| &edge.terminals)
+                    .any(|terminal| terminal.id == operation)
+        })
+}
+
+fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
+    live.iter()
+        .filter(|owner| {
+            unit.owners[owner].origin == OwnerOrigin::Owned && unit.owners[owner].class.is_heap()
+        })
+        .count()
 }
 
 fn blocks(unit: &Unit) -> Result<BTreeMap<BlockId, &Block>, OwnershipError> {
@@ -869,12 +1234,12 @@ fn blocks(unit: &Unit) -> Result<BTreeMap<BlockId, &Block>, OwnershipError> {
 fn definitions(unit: &Unit) -> Result<BTreeSet<OwnerId>, OwnershipError> {
     let mut result = BTreeSet::new();
     for block in &unit.blocks {
-        for owner in block
-            .params
-            .iter()
-            .map(|p| p.owner)
-            .chain(block.ops.iter().filter_map(destination))
-        {
+        for owner in block.params.iter().map(|p| p.owner).chain(
+            block
+                .ops
+                .iter()
+                .filter_map(|operation| destination(&operation.kind)),
+        ) {
             if !result.insert(owner) {
                 return Err(OwnershipError::DuplicateIdentity {
                     unit: unit.name.clone(),
@@ -891,7 +1256,156 @@ fn destination(op: &Op) -> Option<OwnerId> {
     match op {
         Op::Define { dest, .. } | Op::Copy { dest, .. } | Op::LoopItem { dest, .. } => Some(*dest),
         Op::Apply { dest, .. } => *dest,
-        Op::Project { .. } | Op::Drop { .. } | Op::RootConsume { .. } => None,
+        Op::Project { .. } | Op::Drop { .. } | Op::Discard { .. } | Op::RootConsume { .. } => None,
+    }
+}
+
+fn classify_tail_calls(unit: &Unit) -> Vec<(UnitId, OpId)> {
+    if unit.kind != UnitKind::Function {
+        return Vec::new();
+    }
+    unit.blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .filter_map(|operation| match &operation.kind {
+            Op::Apply {
+                dest: Some(owner),
+                kind: ApplyKind::DirectCall { .. },
+                ..
+            } if owner_reaches_return(unit, *owner, &mut BTreeSet::new()) => {
+                Some((unit.id, operation.id))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Recognize only ownership-transparent result chains. This is deliberately
+/// independent of the Apply label and of lowering's lexical `tail` hint.
+fn owner_reaches_return(unit: &Unit, owner: OwnerId, visiting: &mut BTreeSet<OwnerId>) -> bool {
+    if !visiting.insert(owner) {
+        return false;
+    }
+    let mut reaches_terminal = false;
+    for block in &unit.blocks {
+        for operation in &block.ops {
+            match &operation.kind {
+                Op::Project { source } if source.owner == owner => {
+                    if source.use_ != OwnershipUse::Borrow {
+                        visiting.remove(&owner);
+                        return false;
+                    }
+                }
+                Op::Apply { args, .. } if args.iter().any(|arg| arg.owner == owner) => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Copy { source, .. } if source.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::LoopItem { list, .. } if list.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Drop { owner: operand } if operand.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Discard { owner: discarded } if *discarded == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::RootConsume { owner: operand, .. } if operand.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Define { .. }
+                | Op::Apply { .. }
+                | Op::Copy { .. }
+                | Op::Project { .. }
+                | Op::LoopItem { .. }
+                | Op::Drop { .. }
+                | Op::Discard { .. }
+                | Op::RootConsume { .. } => {}
+            }
+        }
+        match &block.terminator {
+            Terminator::Return { result } if result.owner == owner => {
+                if result.use_ != OwnershipUse::Move {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                reaches_terminal = true;
+            }
+            Terminator::Branch { condition, .. } if condition.owner == owner => {
+                visiting.remove(&owner);
+                return false;
+            }
+            Terminator::Match { scrutinee, .. } if scrutinee.owner == owner => {
+                visiting.remove(&owner);
+                return false;
+            }
+            Terminator::Loop { list, .. } if list.owner == owner => {
+                visiting.remove(&owner);
+                return false;
+            }
+            Terminator::Return { .. }
+            | Terminator::Jump(_)
+            | Terminator::Branch { .. }
+            | Terminator::Match { .. }
+            | Terminator::Loop { .. }
+            | Terminator::Exit => {}
+        }
+        for edge in terminator_edges(&block.terminator) {
+            if edge
+                .terminals
+                .iter()
+                .any(|terminal| terminal.kind.owner() == owner)
+            {
+                visiting.remove(&owner);
+                return false;
+            }
+            for (arg, param) in edge.args.iter().zip(
+                unit.blocks
+                    .iter()
+                    .find(|candidate| candidate.id == edge.target)
+                    .into_iter()
+                    .flat_map(|target| &target.params),
+            ) {
+                if arg.owner != owner {
+                    continue;
+                }
+                if arg.use_ != OwnershipUse::Move
+                    || param.mode != ParamMode::Owned
+                    || !owner_reaches_return(unit, param.owner, visiting)
+                {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                reaches_terminal = true;
+            }
+        }
+    }
+    visiting.remove(&owner);
+    reaches_terminal
+}
+
+fn terminator_edges(terminator: &Terminator) -> Vec<&Edge> {
+    match terminator {
+        Terminator::Return { .. } | Terminator::Exit => Vec::new(),
+        Terminator::Jump(edge) => vec![edge],
+        Terminator::Branch {
+            then_edge,
+            else_edge,
+            ..
+        }
+        | Terminator::Loop {
+            body_edge: then_edge,
+            exit_edge: else_edge,
+            ..
+        } => vec![then_edge, else_edge],
+        Terminator::Match { arms, .. } => arms.iter().collect(),
     }
 }
 
@@ -919,6 +1433,20 @@ fn check_params(unit: &Unit) -> Result<(), OwnershipError> {
 }
 
 fn check_reachable(unit: &Unit, blocks: &BTreeMap<BlockId, &Block>) -> Result<(), OwnershipError> {
+    let reached = reachable_blocks(unit, blocks)?;
+    if let Some(block) = unit.blocks.iter().find(|b| !reached.contains(&b.id)) {
+        return Err(OwnershipError::UnreachableBlock {
+            unit: unit.name.clone(),
+            block: block.id.0,
+        });
+    }
+    Ok(())
+}
+
+fn reachable_blocks(
+    unit: &Unit,
+    blocks: &BTreeMap<BlockId, &Block>,
+) -> Result<BTreeSet<BlockId>, OwnershipError> {
     let mut reached = BTreeSet::new();
     let mut queue = VecDeque::from([unit.entry]);
     while let Some(id) = queue.pop_front() {
@@ -933,13 +1461,7 @@ fn check_reachable(unit: &Unit, blocks: &BTreeMap<BlockId, &Block>) -> Result<()
             queue.push_back(target);
         }
     }
-    if let Some(block) = unit.blocks.iter().find(|b| !reached.contains(&b.id)) {
-        return Err(OwnershipError::UnreachableBlock {
-            unit: unit.name.clone(),
-            block: block.id.0,
-        });
-    }
-    Ok(())
+    Ok(reached)
 }
 
 fn successors(terminator: &Terminator) -> Vec<BlockId> {
@@ -965,6 +1487,8 @@ fn verify_op(
     block: &Block,
     op: &Op,
     definitions: &BTreeSet<OwnerId>,
+    units: &BTreeMap<UnitId, &Unit>,
+    callable_schemas: &BTreeMap<UnitId, CallableSchema>,
     live: &mut BTreeSet<OwnerId>,
 ) -> Result<(), OwnershipError> {
     match op {
@@ -972,9 +1496,38 @@ fn verify_op(
         Op::Apply {
             dest,
             label,
+            kind,
             schema,
             args,
         } => {
+            let direct_schema = if let ApplyKind::DirectCall { callee } = kind {
+                match units.get(callee) {
+                    None => {
+                        return Err(OwnershipError::MissingUnit {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                        });
+                    }
+                    Some(target) if target.kind != UnitKind::Function => {
+                        return Err(OwnershipError::NonFunctionCallee {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                        });
+                    }
+                    Some(_)
+                        if callable_schemas.get(callee).map(|schema| &schema.operation)
+                            != Some(schema) =>
+                    {
+                        return Err(OwnershipError::DirectCallSchema {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                        });
+                    }
+                    Some(_) => callable_schemas.get(callee),
+                }
+            } else {
+                None
+            };
             if args.len() != schema.operands.len() {
                 return Err(OwnershipError::OperationArity {
                     unit: unit.name.clone(),
@@ -983,6 +1536,31 @@ fn verify_op(
                     expected: schema.operands.len(),
                     actual: args.len(),
                 });
+            }
+            if let Some(direct_schema) = direct_schema {
+                for (argument, (arg, expected)) in args
+                    .iter()
+                    .zip(&direct_schema.parameter_classes)
+                    .enumerate()
+                {
+                    let actual = unit
+                        .owners
+                        .get(&arg.owner)
+                        .ok_or_else(|| incomplete(unit, arg.owner, "metadata"))?
+                        .class;
+                    if actual != *expected {
+                        let ApplyKind::DirectCall { callee } = kind else {
+                            unreachable!("derived direct-call schema requires a direct call")
+                        };
+                        return Err(OwnershipError::DirectCallArgumentClass {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                            argument,
+                            expected: expected.to_string(),
+                            actual: actual.to_string(),
+                        });
+                    }
+                }
             }
             check_mixed_uses(unit, block.id, args)?;
             for (arg, expected) in args.iter().zip(&schema.operands) {
@@ -1064,6 +1642,26 @@ fn verify_op(
                 unit,
                 block.id,
                 owner,
+                Some(OwnershipUse::Move),
+                definitions,
+                live,
+            )
+        }
+        Op::Discard { owner } => {
+            if !definitions.contains(owner) {
+                return Err(incomplete(unit, *owner, "definition"));
+            }
+            if unit.owners[owner].class.is_heap() {
+                return Err(OwnershipError::HeapDiscard {
+                    unit: unit.name.clone(),
+                    owner: owner.0,
+                    block: block.id.0,
+                });
+            }
+            use_operand(
+                unit,
+                block.id,
+                &Operand::move_(*owner),
                 Some(OwnershipUse::Move),
                 definitions,
                 live,
@@ -1291,6 +1889,9 @@ fn transfer(
         }
     }
     next.extend(target.params.iter().map(|p| p.owner));
+    for terminal in &edge.terminals {
+        verify_edge_terminal(unit, block.id, terminal.kind, definitions, &mut next)?;
+    }
     check_borrows(unit, target.id, &next)?;
     if let Some(expected) = incoming.get(&target.id) {
         if expected != &next {
@@ -1306,6 +1907,44 @@ fn transfer(
         queue.push_back(target.id);
     }
     Ok(())
+}
+
+fn verify_edge_terminal(
+    unit: &Unit,
+    block: BlockId,
+    terminal: Terminal,
+    definitions: &BTreeSet<OwnerId>,
+    live: &mut BTreeSet<OwnerId>,
+) -> Result<(), OwnershipError> {
+    let owner = terminal.owner();
+    if !definitions.contains(&owner) {
+        return Err(incomplete(unit, owner, "definition"));
+    }
+    match terminal {
+        Terminal::Drop(_) if !unit.owners[&owner].class.is_heap() => {
+            return Err(OwnershipError::NonHeapDrop {
+                unit: unit.name.clone(),
+                owner: owner.0,
+                block: block.0,
+            });
+        }
+        Terminal::Discard(_) if unit.owners[&owner].class.is_heap() => {
+            return Err(OwnershipError::HeapDiscard {
+                unit: unit.name.clone(),
+                owner: owner.0,
+                block: block.0,
+            });
+        }
+        Terminal::Drop(_) | Terminal::Discard(_) => {}
+    }
+    use_operand(
+        unit,
+        block,
+        &Operand::move_(owner),
+        Some(OwnershipUse::Move),
+        definitions,
+        live,
+    )
 }
 
 fn check_mixed_uses(
