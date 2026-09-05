@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Run the complete Phase A hash-order determinism acceptance surface."""
+"""Run the complete Phase A hash-order determinism acceptance surface.
+
+One component was removed with its subject. `chelis-cli`'s
+`hash_order_stability` target ran K=24 fresh processes over programs whose
+settlement chose between two candidate `expand` shapes, which is the property
+chelis#1338 reported as nondeterministic. `spec/04-type-system.md` section
+4.7.2 gives `expand` and `insert` one result shape each, so there is nothing
+left to settle and #1338 is resolved by construction rather than by this
+oracle (chelis#1277 S2b). Every other component here is unrelated to that
+model and still runs.
+"""
 
 from __future__ import annotations
 
@@ -61,16 +71,6 @@ COMMANDS: tuple[tuple[str, ...], ...] = (
         "--test",
         "parity",
         "parity_hash_order_determinism",
-        "--no-fail-fast",
-    ),
-    (
-        "cargo",
-        "nextest",
-        "run",
-        "-p",
-        "chelis-cli",
-        "--test",
-        "hash_order_stability",
         "--no-fail-fast",
     ),
 )

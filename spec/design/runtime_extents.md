@@ -734,14 +734,13 @@ the properties below; the generator, not this document, enumerates rows.
    and compiled C path; and compares type, rank, shape, and value with the
    control. A negative fixture proves the typed-pipeline safety gate
    suppresses a rewrite that would not preserve the typed result.
-6. **Deferral stability.** Every positional candidate row runs in K fresh
-   processes and settles to the source-order verdict every time, including
-   [#1338]'s spelling and its operand-swapped form
-   `sub(expand(t1, 0, 3i64), reshape(expand(t0, 0, 6i64), [3i64, 2i64]))`,
-   which passes only when `reshape`'s literal target list counts as
-   independent evidence. [#1341]'s Phase A already runs both spellings at
-   K=24 (`crates/chelis-cli/tests/hash_order_stability.rs`), so this property
-   composes that harness rather than authoring one.
+6. **Deferral stability.** *Superseded, with the model it measured.* It asked
+   that every positional candidate row settle to the source-order verdict in K
+   fresh processes, which presupposes a choice to settle. `spec/04` §4.7.2
+   gives `expand` and `insert` one result shape each, so [#1338] is resolved by
+   construction and no row has a verdict to be unstable about. The K=24 harness
+   this property composed, `crates/chelis-cli/tests/hash_order_stability.rs`,
+   was deleted with the model, and [#1341]'s Phase A oracle no longer runs it.
 7. **Rebuild survival.** After each rebuild pass (vmap, grad, specialization,
    fusion, CSE, DCE, cloning, `splice_dag`), every bound slot and shifted
    axis is still present by `NodeId`, the stamped names survive on the
