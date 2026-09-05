@@ -462,8 +462,8 @@ In `crates/chelis-cli/src/main.rs`, add `"metal"` to the existing `target: Strin
     let dag = dead_code_eliminate(dag);
     let dag = fuse(dag);
     let verified = verified_dag_codegen_program(dag)?;
-    let plan = chelis_backend_metal::plan_metal(&verified);
-    let result = chelis_backend_metal::codegen_metal(&plan, &func_name)?;
+    let plan = chelis_backend_metal::plan_metal(verified);
+    let result = chelis_backend_metal::codegen_metal(plan, &func_name)?;
     cmd_build_metal(result, &func_name, output, &symbolic_dims)
 }
 ```

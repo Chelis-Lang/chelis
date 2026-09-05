@@ -62,14 +62,14 @@ struct DistinctMetalAllocation {
 /// type is neither `Clone` nor `Copy`, and it contains only the exact verified
 /// DAG plus one distinct identity for every physical allocation the Metal
 /// emitter will make.
-pub struct MetalNeverReuse<'a> {
-    dag: VerifiedDagView<'a>,
+pub struct MetalNeverReuse {
+    program: VerifiedDagProgram,
     allocations: Vec<DistinctMetalAllocation>,
 }
 
-impl<'a> MetalNeverReuse<'a> {
-    pub(crate) fn dag(&self) -> VerifiedDagView<'a> {
-        self.dag
+impl MetalNeverReuse {
+    pub(crate) fn dag(&self) -> VerifiedDagView<'_> {
+        self.program.emission()
     }
 
     pub fn allocation_for(&self, node: NodeId) -> Option<MetalAllocationId> {
@@ -89,9 +89,18 @@ impl<'a> MetalNeverReuse<'a> {
 /// Virtual nodes folded into a kernel are excluded. Every node that reaches
 /// a physical `chelis_metal_alloc` site receives exactly one opaque identity;
 /// emission checks the resulting bijection before returning an artifact.
-pub fn plan_metal(dag: &VerifiedDagProgram) -> MetalNeverReuse<'_> {
-    let dag = dag.emission();
-    let allocations = emit::allocation_nodes(dag)
+/// The verified input is moved into the plan and cannot be reused to mint a
+/// second target projection:
+///
+/// ```compile_fail
+/// # use chelis_ir::ownership::VerifiedDagProgram;
+/// fn reuse_verified(program: VerifiedDagProgram) {
+///     let _plan = chelis_backend_metal::plan_metal(program);
+///     let _other_projection = program.emission();
+/// }
+/// ```
+pub fn plan_metal(program: VerifiedDagProgram) -> MetalNeverReuse {
+    let allocations = emit::allocation_nodes(program.emission())
         .into_iter()
         .enumerate()
         .map(|(key, node)| DistinctMetalAllocation {
@@ -99,7 +108,10 @@ pub fn plan_metal(dag: &VerifiedDagProgram) -> MetalNeverReuse<'_> {
             id: MetalAllocationId { key },
         })
         .collect();
-    MetalNeverReuse { dag, allocations }
+    MetalNeverReuse {
+        program,
+        allocations,
+    }
 }
 
 /// Result of Metal code generation.
@@ -214,13 +226,31 @@ pub fn runtime_dir() -> &'static str {
 ///
 /// ```compile_fail
 /// # use chelis_backend_metal::MetalNeverReuse;
-/// # use chelis_ir::ownership::VerifiedDagView;
-/// fn forge<'a>(dag: VerifiedDagView<'a>) -> MetalNeverReuse<'a> {
-///     MetalNeverReuse { dag, allocations: Vec::new() }
+/// # use chelis_ir::ownership::VerifiedDagProgram;
+/// fn forge(program: VerifiedDagProgram) -> MetalNeverReuse {
+///     MetalNeverReuse { program, allocations: Vec::new() }
+/// }
+/// ```
+///
+/// The plan is linear at the public emission edge: codegen consumes it, so it
+/// cannot emit twice or be cloned into a second capability.
+///
+/// ```compile_fail
+/// # use chelis_backend_metal::{codegen_metal, MetalNeverReuse};
+/// fn emit_twice(plan: MetalNeverReuse) {
+///     let _ = codegen_metal(plan, "first");
+///     let _ = codegen_metal(plan, "second");
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use chelis_backend_metal::MetalNeverReuse;
+/// fn clone_plan(plan: MetalNeverReuse) {
+///     let _second = plan.clone();
 /// }
 /// ```
 pub fn codegen_metal(
-    plan: &MetalNeverReuse<'_>,
+    plan: MetalNeverReuse,
     func_name: &str,
 ) -> Result<MetalCodegenResult, Unsupported> {
     let dag = plan.dag();
@@ -228,7 +258,7 @@ pub fn codegen_metal(
     let output_labels = emit::output_labels(dag);
     let symbolic_dims = dag.symbolic_params();
 
-    let emitted = emit::emit_verified_dag(plan, func_name)?;
+    let emitted = emit::emit_verified_dag(&plan, func_name)?;
     let mm_source = emitted.mm_source;
     let peak_device_bytes = emitted.peak_device_bytes;
     let h_header = format!(

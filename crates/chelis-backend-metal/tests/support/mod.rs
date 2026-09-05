@@ -10,8 +10,8 @@ pub fn codegen_metal(dag: &Dag, name: &str) -> MetalCodegenResult {
 
 pub fn try_codegen_metal(dag: &Dag, name: &str) -> Result<MetalCodegenResult, Unsupported> {
     let verified = verified_dag(dag);
-    let plan = chelis_backend_metal::plan_metal(&verified);
-    chelis_backend_metal::codegen_metal(&plan, name)
+    let plan = chelis_backend_metal::plan_metal(verified);
+    chelis_backend_metal::codegen_metal(plan, name)
 }
 
 pub fn verified_dag(dag: &Dag) -> chelis_ir::ownership::VerifiedDagProgram {

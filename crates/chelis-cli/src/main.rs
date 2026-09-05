@@ -9766,8 +9766,8 @@ fn cmd_build_metal(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let verified = verified_dag_codegen_program(dag)?;
-    let plan = chelis_backend_metal::plan_metal(&verified);
-    let result = chelis_backend_metal::codegen_metal(&plan, func_name)?;
+    let plan = chelis_backend_metal::plan_metal(verified);
+    let result = chelis_backend_metal::codegen_metal(plan, func_name)?;
 
     let out_dir = output
         .map(|p| p.to_path_buf())

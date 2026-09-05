@@ -226,16 +226,18 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
         &rest[..rest.find('{').unwrap_or(rest.len())]
     };
     let plan = public_signature("plan_metal");
-    assert!(plan.contains("dag: &VerifiedDagProgram"), "{plan}");
-    assert!(plan.contains("-> MetalNeverReuse<'_>"), "{plan}");
+    assert!(plan.contains("program: VerifiedDagProgram"), "{plan}");
+    assert!(plan.contains("-> MetalNeverReuse"), "{plan}");
+    assert!(!plan.contains("&VerifiedDagProgram"), "{plan}");
     assert!(!plan.contains("&Dag"), "{plan}");
 
     let emit = public_signature("codegen_metal");
-    assert!(emit.contains("plan: &MetalNeverReuse<'_>"), "{emit}");
+    assert!(emit.contains("plan: MetalNeverReuse"), "{emit}");
     assert!(
         emit.contains("-> Result<MetalCodegenResult, Unsupported>"),
         "{emit}"
     );
+    assert!(!emit.contains("&MetalNeverReuse"), "{emit}");
     assert!(!emit.contains("VerifiedDagProgram"), "{emit}");
     assert!(!emit.contains("&Dag"), "{emit}");
 }

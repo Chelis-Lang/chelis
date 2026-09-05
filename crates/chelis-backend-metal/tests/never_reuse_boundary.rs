@@ -76,7 +76,7 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
     dag.add_root(output);
 
     let verified = support::verified_dag(&dag);
-    let plan = chelis_backend_metal::plan_metal(&verified);
+    let plan = chelis_backend_metal::plan_metal(verified);
     assert_eq!(plan.allocation_count(), 3);
     assert!(plan.allocation_for(left).is_some());
     assert!(plan.allocation_for(right).is_some());
@@ -85,7 +85,7 @@ fn virtual_matmul_nodes_are_excluded_from_the_physical_plan() {
     assert!(plan.allocation_for(expand_right).is_none());
     assert!(plan.allocation_for(multiply).is_none());
 
-    chelis_backend_metal::codegen_metal(&plan, "matmul")
+    chelis_backend_metal::codegen_metal(plan, "matmul")
         .expect("the physical plan must be bijective with successful emission");
 }
 
@@ -99,7 +99,7 @@ fn reusable_hint_still_projects_distinct_metal_allocations() {
     dag.add_root(output);
 
     let verified = support::verified_dag(&dag);
-    let plan = chelis_backend_metal::plan_metal(&verified);
+    let plan = chelis_backend_metal::plan_metal(verified);
 
     assert_ne!(
         plan.allocation_for(input),
@@ -110,7 +110,7 @@ fn reusable_hint_still_projects_distinct_metal_allocations() {
     assert_ne!(plan.allocation_for(scale), plan.allocation_for(output));
     assert_eq!(plan.allocation_count(), 3);
 
-    let generated = chelis_backend_metal::codegen_metal(&plan, "hint_ignored")
+    let generated = chelis_backend_metal::codegen_metal(plan, "hint_ignored")
         .expect("a reuse hint cannot make Metal codegen fail or alias storage");
     assert_eq!(
         generated.mm_source.matches("= chelis_metal_alloc(").count(),
@@ -173,16 +173,51 @@ fn production_source_has_no_local_reuse_or_abort_stub_path() {
     }
 
     let declaration = lib
-        .split_once("pub struct MetalNeverReuse<'a> {")
+        .split_once("pub struct MetalNeverReuse {")
         .expect("MetalNeverReuse declaration must remain present")
         .1
         .split_once('}')
         .expect("MetalNeverReuse declaration must remain closed")
         .0;
-    assert!(declaration.contains("dag:"), "{declaration}");
+    assert!(
+        declaration.contains("program: VerifiedDagProgram"),
+        "{declaration}"
+    );
     assert!(declaration.contains("allocations:"), "{declaration}");
     assert!(!declaration.contains("reuse"), "{declaration}");
     assert!(!declaration.contains("token"), "{declaration}");
+
+    let plan_signature = lib
+        .split_once("pub fn plan_metal(")
+        .expect("plan_metal must remain public")
+        .1
+        .split_once('{')
+        .expect("plan_metal must have a body")
+        .0;
+    assert!(
+        plan_signature.contains("program: VerifiedDagProgram"),
+        "{plan_signature}"
+    );
+    assert!(
+        !plan_signature.contains("&VerifiedDagProgram"),
+        "{plan_signature}"
+    );
+
+    let codegen_signature = lib
+        .split_once("pub fn codegen_metal(")
+        .expect("codegen_metal must remain public")
+        .1
+        .split_once('{')
+        .expect("codegen_metal must have a body")
+        .0;
+    assert!(
+        codegen_signature.contains("plan: MetalNeverReuse"),
+        "{codegen_signature}"
+    );
+    assert!(
+        !codegen_signature.contains("&MetalNeverReuse"),
+        "{codegen_signature}"
+    );
 
     assert_eq!(
         emitter.matches("= chelis_metal_alloc(").count(),

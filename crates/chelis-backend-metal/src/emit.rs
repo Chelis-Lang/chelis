@@ -82,7 +82,7 @@ mod rejection_authority_tests {
         );
         dag.add_root(output);
         let verified = crate::testing::verified_dag(&dag).unwrap();
-        let plan = crate::plan_metal(&verified);
+        let plan = crate::plan_metal(verified);
         let emitted = emit_verified_dag(&plan, "verified_drop").unwrap();
 
         assert!(emitted.mm_source.contains("verified_drop"));
@@ -101,7 +101,7 @@ mod rejection_authority_tests {
         dag.add_node(RiscOp::Drop, vec![borrowed], ty, None);
         dag.add_root(borrowed);
         let verified = crate::testing::verified_dag(&dag).unwrap();
-        let plan = crate::plan_metal(&verified);
+        let plan = crate::plan_metal(verified);
         let emitted = emit_verified_dag(&plan, "borrowed_drop").unwrap();
 
         assert!(emitted.mm_source.contains("borrowed_drop"));
@@ -271,7 +271,7 @@ pub struct EmitResult {
 }
 
 pub(crate) fn emit_verified_dag(
-    plan: &MetalNeverReuse<'_>,
+    plan: &MetalNeverReuse,
     func_name: &str,
 ) -> Result<EmitResult, Unsupported> {
     let dag = plan.dag();
@@ -367,9 +367,9 @@ impl TensorPlan {
     }
 }
 
-struct Emitter<'plan, 'dag> {
+struct Emitter<'plan> {
     func_name: String,
-    allocation_plan: &'plan MetalNeverReuse<'dag>,
+    allocation_plan: &'plan MetalNeverReuse,
     claimed_allocations: UnordSet<MetalAllocationId>,
     body: Vec<String>,
     /// Collected MSL kernel sources, one per compute node, in emission order.
@@ -388,8 +388,8 @@ struct Emitter<'plan, 'dag> {
     matmuls: UnordMap<usize, blas::MatmulInfo>,
 }
 
-impl<'plan, 'dag> Emitter<'plan, 'dag> {
-    fn new(func_name: &str, allocation_plan: &'plan MetalNeverReuse<'dag>) -> Self {
+impl<'plan> Emitter<'plan> {
+    fn new(func_name: &str, allocation_plan: &'plan MetalNeverReuse) -> Self {
         Self {
             func_name: func_name.to_string(),
             allocation_plan,
