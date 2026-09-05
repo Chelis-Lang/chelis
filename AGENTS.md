@@ -80,16 +80,33 @@ not drift.
   reviewer read never earns one.
 - Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
   exact head, changed files, the pull request's in-scope claims, the worktree and target
-  it may use and whether that target is free, the deadline (15 minutes unless the brief
-  says otherwise), and the delivery channel. The brief does not open with "read
+  it may use with pasted busy-signal output for that target, the deadline (15 minutes
+  unless the brief says otherwise), and the delivery channel. The brief does not open with "read
   `AGENTS.md`".
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   reviewer an existing worktree and its warm target cache when the worktree is at the
   exact review head, has a known clean baseline, and has no concurrent writer or build
-  owner. The brief saying the target is free is the heavyweight-command handshake of
+  owner. The brief does not assert that last condition; it pastes evidence bearing on
+  it. Run
+  `.venv/bin/python scripts/worktree_status.py [--path PATH] [--json] [--quiet]`
+  and paste its output, with the time you took it, into the brief. That pasted output,
+  not the sentence around it, is the heavyweight-command handshake of
   [Build Concurrency And Process Hygiene](#build-concurrency-and-process-hygiene) for
   that target. Create a new worktree or target only when those reuse conditions do not
   hold.
+- Read what that signal actually says. It answers free, busy, unknown, or not clean,
+  and where those conflict the more cautious answer wins. It never reports free on
+  missing evidence: a probe that could not read the process table answers unknown, so
+  unknown is a reason to wait rather than a reason to proceed. A `--local` or full gate
+  run is lease-proven and kernel-backed. A `--fast` run takes no lease and is inferred
+  from its cargo children, so it is the weakest of the signals. A finished gate report
+  is printed under a history label and is never current state.
+- A reviewer whose probes mutate tracked source does not share a worktree with anything
+  that compiles, whatever the signal reports. This is an exception to warm reuse rather
+  than a caveat on it: sequencing narrows the window in which one agent's inserted
+  variant reaches another agent's build, and a separate worktree closes it.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §7
+  has the collisions both rules come from.
 - Before spawning a fresh round, inventory subagent handles created in your own current
   session. Retire only stale or failed handles that will not be used again; a standing
   reviewer awaiting a fix is neither. Do not disturb another developer's handles. If the

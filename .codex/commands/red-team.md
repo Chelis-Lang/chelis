@@ -16,8 +16,11 @@ round.
 3. Pick the worktree and target: a clean, exact-head, idle worktree and its warm target
    when one exists, otherwise a new isolated one. Decide whether the target is free.
 4. Fill the round brief template from the skill: head SHA, files, in-scope claims,
-   worktree, target and its status, deadline (15 minutes unless you state otherwise),
-   and delivery channel. Do not tell the reviewer to read `AGENTS.md`.
+   worktree, the target with the output of
+   `.venv/bin/python scripts/worktree_status.py --path <target>` pasted verbatim and the
+   time you took it, deadline (15 minutes unless you state otherwise), and delivery
+   channel. Give a reviewer whose probes will mutate tracked source its own worktree.
+   Do not tell the reviewer to read `AGENTS.md`.
 5. Spawn a **new local subagent with fresh context** with the brief as its prompt. In
    Codex, use `list_agents`, `interrupt_agent`, `spawn_agent`, `send_message` or
    `followup_task`, and `wait_agent` rather than shelling out to `claude`, `codex exec`,

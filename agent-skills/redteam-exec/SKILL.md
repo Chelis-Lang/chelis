@@ -71,9 +71,17 @@ validation pass, or verification of a fix that a red team reported.
 - Prefer an existing worktree and warm target artifacts when it is pinned to the exact
   review head, its baseline status is known and clean, and no concurrent agent or build
   owns it. Otherwise create an isolated worktree or target.
-- The brief saying the target is free is the heavyweight-command handshake for that
-  target. The reviewer uses it without a cold rebuild and asks before starting any
-  other heavyweight build.
+- The brief pastes the busy signal for that target instead of asserting it:
+  `.venv/bin/python scripts/worktree_status.py [--path PATH] [--json] [--quiet]`.
+  That pasted output is the heavyweight-command handshake for that target. It answers
+  free, busy, unknown, or not clean, never reports free on missing evidence, and prints
+  a finished gate report under a history label rather than as current state, so treat
+  unknown as busy. The reviewer uses a free target without a cold rebuild and asks
+  before starting any other heavyweight build.
+- A reviewer whose probes mutate tracked source gets its own worktree, whatever the
+  signal reports. This is an exception to reuse, not a caveat on it: sequencing narrows
+  the window in which an inserted variant reaches someone else's compile, and a
+  separate worktree removes it.
 - Reusing a worktree must not relax exact-head verification, adversarial execution, or
   restoration proof. Restore temporary tests, fixtures, and mutations after the pass
   and report the final worktree status unless the user explicitly asks to retain them.
@@ -91,8 +99,10 @@ In-scope claims: <the pull request's stated claims, one per line>. A finding is 
 scope only when this pull request introduces it, worsens it, or claims to correct it;
 anything else is out of scope and gets an issue link or "untracked", not a repair.
 Worktree: <absolute path>, at the head above, baseline <clean | describe>.
-Target: <absolute path>, warm, <free: no other build owns it | busy until HH:MM>. Use
-it as is; do not rebuild cold, and ask before starting any other heavyweight build.
+Target: <absolute path>, warm. Busy signal, taken <HH:MM local>, pasted verbatim from
+`.venv/bin/python scripts/worktree_status.py --path <target>`:
+<paste the command's output here; do not summarise it>
+Use it as is; do not rebuild cold, and ask before starting any other heavyweight build.
 Deadline: <HH:MM local>, <15> minutes from now. Report what you have when it arrives;
 an unfinished check is "unvalidated", not a finding.
 Deliver by: <SendMessage to <name> | final report>. Nothing else counts as delivery.

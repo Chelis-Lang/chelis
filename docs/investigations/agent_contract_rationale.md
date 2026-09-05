@@ -147,3 +147,31 @@ carried 1,166 lines of tests that proved 7 of the 57 cases its claim covered.
 That ratio, not the diff size, is what produced two consecutive findings about
 claims outrunning their oracle, and it is measurable before a reviewer ever sees
 the branch.
+
+## 7. Nine hours of asserted free targets, behind "Fresh-Context Enforcement"
+
+Same run. For about nine hours every round brief asserted that the reviewer's target
+was free, and every one of those assertions was produced the same way: the author
+transcribed its own last report of the target. That is recollection with the timestamp
+removed, and it cannot see a build another agent started in between. Five collisions
+followed.
+
+The worst of them contaminated a gate run. A reviewer inserted a type variant into
+tracked source to prove that a guard fires, which is exactly the probe the round called
+for. The author's `--local` gate compiled the tree while that variant was in it and
+failed with three errors unrelated to anything either agent was working on. Nothing in
+the failure pointed at the cause, and the shape of it, several unrelated errors at once,
+is the shape the contract elsewhere teaches you to read as contention rather than as
+breakage.
+
+The fix existed before the collisions stopped. The advisory gate lease answers "is a
+gate running here" authoritatively, kernel-backed, and it shipped the same day. It was
+first consulted at 05:28:37Z, and the collision class closed at that point. The nine
+hours were not spent waiting for a mechanism; they were spent not asking a question that
+already had an answer. Hence the rule pastes the command's output rather than the
+author's belief about it.
+
+The separate-worktree exception has the same source. Sequencing a mutating probe against
+a neighbouring build narrows the window in which one agent's inserted variant reaches the
+other's compile. It does not remove the window, and the collision above happened inside
+one.
