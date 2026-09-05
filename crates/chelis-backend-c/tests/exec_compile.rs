@@ -194,8 +194,11 @@ fn compile_and_run_kernel_capturing(
     c_source: &str,
     harness: &str,
 ) -> (bool, String) {
-    let dir = std::env::temp_dir().join(format!("chelis_exec_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    // chelis#1492's collision class: a probe path built here rather than
+    // through `common::probe_dir` is a shared directory two concurrent tests
+    // can land in. `probe_dir_discipline` scans for exactly this line.
+    let probe = common::probe_dir(&format!("exec_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
     let include_dir = runtime_include_dir();
