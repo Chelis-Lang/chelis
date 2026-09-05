@@ -2166,8 +2166,10 @@ class ContractValidationTests(unittest.TestCase):
                 "JsonArray(List[Json])",
             ),
             "05-OP-44": (
-                "chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor)",
-                "chelis_write_view chelis_tensor_begin_write(chelis_tensor *tensor)",
+                "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar "
+                "rank, const chelis_scalar *shape)",
+                "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar "
+                "rank, chelis_scalar *shape)",
             ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (

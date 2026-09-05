@@ -187,7 +187,7 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
         chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
     )
     .unwrap();
-    let result = chelis_backend_c::codegen(&verified, func_name).unwrap();
+    let result = chelis_backend_c::codegen(verified, func_name).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();

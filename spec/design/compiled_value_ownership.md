@@ -1,9 +1,11 @@
 # Compiled Value Ownership
 
 **Status:** Design freeze and source/FFI ownership-contract freeze for [#1286].
-Phase 0's detector baseline and Phase 1's unified heap/ABI cutover are
-implemented. The stable `compiled-value-ownership-phase0-oracle` CI job now
-enforces the Phase 1 oracle. Phases 2 through 4 remain unimplemented.
+Phases 0 through 2 are implemented. The Phase 3 source implementation is
+present on the current draft change, but the mandatory AMD hardware gate has
+not run, so Phase 3 is not complete. Phase 4 remains unimplemented. The stable
+`compiled-value-ownership-phase0-oracle` CI job enforces the latest landed
+phase oracle.
 
 **Owning specs:** `spec/04-type-system.md` [04-LIN-1..8],
 `spec/05-risc-primitives.md` [05-OP-31..33] and [05-OP-44] with the four
@@ -477,14 +479,41 @@ Only the planner constructs `ReusableOwnedStorage`, and only when:
 
 The token names the exact source owner, storage identity, and consuming node.
 It is moved into the fused operation and cannot be reused. C and HIP consume
-the same proof-bearing plan. Backend-local `fused_in_place_spec` functions may
-select target mechanics only after receiving the proof; they may not decide
-ownership eligibility. Metal consumes `VerifiedOwnershipProgram` through a
-typed `MetalNeverReuse` plan whose input cannot carry `ReusableOwnedStorage`;
-it allocates distinct storage for every produced node. Enabling Metal reuse is
-a later amendment to this frozen boundary and requires Metal positive/negative
-execution rows in the same change. The runtime checks the live strong counts
-and write state again before mutation.
+the same proof-bearing plan. Backend-private C and HIP mechanics own the token
+and may derive only target spelling such as pointer qualifiers, a contiguity
+fallback, or whether a fallback slot has a later owner. They contain no
+ownership or capacity eligibility predicate. Metal consumes
+`VerifiedOwnershipProgram` through a typed `MetalNeverReuse` plan whose input cannot carry `ReusableOwnedStorage`; it allocates distinct storage for every
+produced node. Enabling Metal reuse is a later amendment to this frozen
+boundary and requires Metal positive/negative execution rows in the same
+change. The runtime checks the live strong counts and write state again before
+mutation.
+
+The shared plan compares exact `CapacityKey` equality, exact `Repr`, and exact
+per-axis shape before minting a `FusedElem` reuse token. An unresolved equality
+allocates fresh storage. A larger slot is not interchangeable with a smaller
+request, a resolved source-axis name has no semantic force beyond its exact
+value, and neither backend may consult `DimExprKey`, a machine-integer element
+count, or runtime-observed equality. Slot allocation and peak-byte accounting
+consume the same plan: distinct live physical slots are counted once, shared
+views add no bytes, C caller storage is excluded, HIP input mirrors are
+included, and C materialized stores own independent storage.
+
+An owned `Drop` ends any live exclusive write guard before releasing its
+descriptor. Because that release destroys the descriptor as well as ending the
+storage owner, the shared plan retires the physical slot after the dropped
+owner; a later owner allocates a fresh descriptor even when its `CapacityKey`
+is exactly equal. Slots whose prior owner ends without a destructive `Drop`
+remain eligible for ordinary exact-capacity recycling.
+
+Target placement follows shipped mechanics. C movement operations currently
+materialize canonical tensors and therefore receive `OwnedSlot` placements;
+they are not modeled as metadata views the public C runtime cannot construct.
+HIP movement operations retain `SharedView` placement. When C transfers an
+exact dead slot to a new logical owner, `chelis_tensor_repurpose` resets the
+unique runtime-owned descriptor to a same-byte shape before opening the new
+write guard. The numbered [05-OP-44] rule and `c_heap_lifetime` registry own
+that public runtime operation.
 
 Removing any one condition must fail a controlled test for both C and HIP. The
 HIP hardware leg is mandatory on the repository workstation; compiling an
@@ -707,8 +736,9 @@ independent frozen census. The recursive function-container fixtures use named
 function values so C and HIP reach the C-host ABI projection; Metal's current
 successful emission is an exact typed expected failure owned by [#879], not a
 passing rejection receipt. The Phase 3 C/HIP reuse rows name exact behavioral
-tests, preflight the test list against zero-test success, and freeze a real
-ignored HIP device-entry test that compares the caller's bytes after execution.
+tests, preflight the test list against zero-test success, and freeze ignored
+HIP device-entry tests that compare the caller's bytes after rejected reuse
+and execute a certified program-owned reuse.
 The ledger is compiled only by the private `ownership-ledger` runtime feature;
 normal runtime behavior and the public ABI are unchanged. Its JSONL event stream
 uses deterministic logical owner identities and portable payload-byte counts,
@@ -841,6 +871,22 @@ their promotion phase.
 This phase makes [#1206] and [#1214] green. The recursive ledger bound is
 derived from the verified live set, not a hand-tuned RSS threshold. HIP hardware
 absence blocks completion.
+
+**Phase 3 source receipt (AMD gate outstanding):** the current draft consumes
+the landed exact `CapacityKey` from one sealed C/HIP storage planner. The plan
+owns `VerifiedDagProgram`, makes token construction private and one-take, maps
+target physical placement separately from semantic provenance, performs exact
+slot reuse, and computes the physical live-byte bound. C and HIP no longer
+contain capacity or ownership eligibility predicates; each backend owns only
+the token-derived emission mechanics. C emits real slot transfer through the
+same-byte `chelis_tensor_repurpose` defense, while HIP derives both kernel
+qualifiers and wrapper aliasing from one retained token. Host C execution,
+planner collision controls, caller-owned C/HIP negatives, the isolated
+six-condition matrix, Metal's owning no-reuse boundary, and runtime repurpose
+positive/negative tests execute locally. The two HIP hardware rows are typed
+must-passes but have no local execution receipt; until the authoritative AMD
+command below passes on this exact head, this receipt is source-complete rather
+than Phase 3 completion evidence.
 
 **Not this phase:** a backend-specific escape hatch or a caller-buffer copy-on-
 write compatibility mode.

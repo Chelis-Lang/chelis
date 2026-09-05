@@ -868,6 +868,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_repurpose ( chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tensor_retain ( const chelis_tensor * tensor ) ;",
       "flags": []
     },

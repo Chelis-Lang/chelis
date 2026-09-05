@@ -1,10 +1,15 @@
 //! RISC DAG to C source code emission.
 
+use std::collections::BTreeMap;
+
 use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
     FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SymbolicDimSource, TensorType,
 };
-use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagProgram, VerifiedDagView};
+use chelis_ir::ownership::{
+    CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
+    VerifiedStoragePlan, plan_c_storage, plan_c_storage_layout,
+};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, ScalarValue};
@@ -23,6 +28,18 @@ fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     )
 }
 
+fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("storage planning".to_string()),
+        error.to_string(),
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-SHAPE-1]",
+            "C storage placement requires the verified exact-capacity plan"
+        ),
+    )
+}
+
 /// Emits C source code from a RISC DAG.
 pub struct CEmitter {
     lines: Vec<String>,
@@ -34,6 +51,9 @@ pub struct CEmitter {
     reduction_inlined: chelis_unord::UnordSet<usize>,
     /// Backing-slot plan for materialized C tensors.
     memory_plan: MemoryPlan,
+    fused_reuse: BTreeMap<NodeId, ReusableOwnedStorage>,
+    reused_sources: chelis_unord::UnordSet<NodeId>,
+    slot_current_owner: BTreeMap<usize, usize>,
     /// chelis#616: `(node id, output axis) -> (symbol, declares)` for every
     /// op-declared runtime dim (see `SymbolicDimSource::OpDeclared`). The
     /// owning movement op's emitter declares `int <symbol> = <extent>;` when
@@ -89,29 +109,82 @@ struct MatmulEmitSpec {
     operand_precision: Prim,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FusedInPlaceSpec {
-    reusable_input: NodeId,
+#[derive(Debug)]
+struct CFusedReuse {
+    token: ReusableOwnedStorage,
 }
 
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
     #[cfg(test)]
-    pub fn emit_dag(dag: &VerifiedDagProgram, func_name: &str) -> Result<String, Unsupported> {
+    pub fn emit_dag(dag: VerifiedDagProgram, func_name: &str) -> Result<String, Unsupported> {
         Self::emit_dag_with_options(dag, func_name, crate::CodegenOptions::default())
     }
 
     /// Emit C source for an entire DAG with explicit backend options.
     pub fn emit_dag_with_options(
-        dag: &VerifiedDagProgram,
+        dag: VerifiedDagProgram,
         func_name: &str,
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
-        Self::emit_verified_dag_with_options(dag.emission(), func_name, options)
+        let mut plan = plan_c_storage(dag).map_err(unsupported_storage_plan)?;
+        Self::emit_storage_plan_with_options(&mut plan, func_name, options)
+    }
+
+    fn emit_storage_plan_with_options(
+        plan: &mut VerifiedStoragePlan<CStorageLane>,
+        func_name: &str,
+        options: crate::CodegenOptions,
+    ) -> Result<String, Unsupported> {
+        let memory_plan = MemoryPlan::from_shared(plan);
+        let nodes = plan
+            .emission()
+            .nodes()
+            .iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        let mut fused_reuse = BTreeMap::new();
+        for node in nodes {
+            if let Some(token) = plan
+                .take_reuse_for(node)
+                .map_err(unsupported_storage_plan)?
+            {
+                fused_reuse.insert(node, token);
+            }
+        }
+        Self::emit_preplanned(
+            plan.emission(),
+            memory_plan,
+            fused_reuse,
+            func_name,
+            options,
+        )
     }
 
     pub(crate) fn emit_verified_dag_with_options(
         dag: VerifiedDagView<'_>,
+        func_name: &str,
+        options: crate::CodegenOptions,
+    ) -> Result<String, Unsupported> {
+        let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
+        let memory_plan = MemoryPlan::from_layout(&plan);
+        let nodes = dag.nodes().iter().map(|node| node.id).collect::<Vec<_>>();
+        let mut fused_reuse = BTreeMap::new();
+        for node in nodes {
+            if let Some(token) = plan
+                .take_reuse_for(node)
+                .map_err(unsupported_storage_plan)?
+            {
+                fused_reuse.insert(node, token);
+            }
+        }
+        Self::emit_preplanned(dag, memory_plan, fused_reuse, func_name, options)
+    }
+
+    fn emit_preplanned(
+        dag: VerifiedDagView<'_>,
+        memory_plan: MemoryPlan,
+        fused_reuse: BTreeMap<NodeId, ReusableOwnedStorage>,
         func_name: &str,
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
@@ -146,8 +219,6 @@ impl CEmitter {
             .iter()
             .map(|output| output.id)
             .collect::<Vec<_>>();
-        let memory_plan = MemoryPlan::build(dag, &output_ids, &reduction_inlined);
-
         // chelis#616: resolve each op-declared runtime dim to a declare/guard
         // site. A Load source anywhere makes every op site a guard; otherwise
         // the first op site (node-id order = emission order) declares and any
@@ -200,6 +271,9 @@ impl CEmitter {
                 .map(|id| id.0)
                 .collect(),
             memory_plan,
+            fused_reuse,
+            reused_sources: chelis_unord::UnordSet::new(),
+            slot_current_owner: BTreeMap::new(),
             runtime_dim_sites,
             local_dim_guard_sites,
             declared_dim_names: chelis_unord::UnordSet::new(),
@@ -401,13 +475,14 @@ impl CEmitter {
             }
         }
 
-        let dropped_sources = dag
+        let mut dropped_sources = dag
             .actions()
             .filter_map(|action| match action {
                 VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
                 _ => None,
             })
             .collect::<Vec<_>>();
+        dropped_sources.extend(e.reused_sources.to_sorted().into_iter().copied());
         let cleanup = e
             .memory_plan
             .emit_cleanup_with_drops(&output_ids, &dropped_sources);
@@ -701,6 +776,12 @@ impl CEmitter {
                         if drop == node.id && node.inputs.first() == Some(&source) =>
                     {
                         if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
+                            if self.write_nodes.remove(&source.0) {
+                                self.line(&format!(
+                                    "chelis_tensor_end_write(t{}_write_guard);",
+                                    source.0
+                                ));
+                            }
                             self.line(&format!("chelis_tensor_release(t{});", source.0));
                         }
                     }
@@ -882,10 +963,10 @@ impl CEmitter {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
             }
             RiscOp::FusedElem { ops } => {
-                // Phase 1 has no shared reusable-storage proof.  Materialize
-                // fused results into fresh uniquely guarded storage; Phase 3
-                // re-enables reuse only after C and HIP consume that proof.
-                let in_place = None;
+                let in_place = self
+                    .fused_reuse
+                    .remove(&node.id)
+                    .map(|token| CFusedReuse { token });
                 self.emit_fused_elem(id, ops, &node.inputs, &node.output_type, in_place)?;
             }
             RiscOp::BlasMatmul {
@@ -1852,7 +1933,6 @@ impl CEmitter {
         }
     }
 
-    #[allow(dead_code)] // Re-enabled only by the Phase 3 shared reuse proof (#1214).
     fn slot_id_for_node(&self, id: usize) -> usize {
         match self.memory_plan.node_kind(NodeId(id)) {
             NodeMemoryKind::SlotBacked { slot } => *slot,
@@ -1861,144 +1941,62 @@ impl CEmitter {
     }
 
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
+        let slot = self.slot_id_for_node(id);
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
-        self.emit_owned_tensor(id, &ndim.to_string(), &shape, dtype);
+        if let Some(previous) = self.slot_current_owner.get(&slot).copied() {
+            self.emit_reused_slot_wrapper(previous, id, ty);
+        } else {
+            self.emit_owned_tensor(id, &ndim.to_string(), &shape, dtype);
+        }
+        self.slot_current_owner.insert(slot, id);
     }
 
     fn emit_slot_wrapper(&mut self, id: usize, ty: &TensorType) {
         self.emit_slot_allocation_if_needed(id, ty);
     }
 
-    fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: FusedInPlaceSpec) {
-        let _ = spec;
-        self.emit_slot_wrapper(id, ty);
+    fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: CFusedReuse) {
+        let source = spec.token.source().0;
+        assert_eq!(spec.token.consumer(), NodeId(id));
+        let slot = self.slot_id_for_node(id);
+        assert_eq!(self.slot_id_for_node(source), slot);
+        assert_eq!(self.slot_current_owner.get(&slot), Some(&source));
+        self.emit_reused_slot_wrapper(source, id, ty);
+        // The source's former write view ended before repurpose. Rebind its
+        // local data cursor to the new guard's live view so the fused kernel
+        // reads the aliased external through valid guard-lifetime authority.
+        self.line(&format!("t{source}_data = t{id}_data;"));
+        self.slot_current_owner.insert(slot, id);
     }
 
-    #[allow(dead_code)] // Re-enabled only by the Phase 3 shared reuse proof (#1214).
-    fn fused_in_place_spec(&self, node: &DagNode, dag: VerifiedDagView<'_>) -> Option<NodeId> {
-        let reusable_input = node.reusable_input?;
-        if !matches!(node.op, RiscOp::FusedElem { .. }) {
-            return None;
+    fn emit_reused_slot_wrapper(&mut self, previous: usize, id: usize, ty: &TensorType) {
+        if self.write_nodes.remove(&previous) {
+            self.line(&format!(
+                "chelis_tensor_end_write(t{previous}_write_guard);"
+            ));
         }
-        // chelis#933: never write into a buffer the caller owns.
-        //
-        // `reusable_input` is a *linearity* fact: the analyzer proved
-        // the value is dead after this op, so reusing its storage is
-        // safe within the program. That says nothing about who owns the
-        // storage. When the value traces back to a program input, the
-        // bytes belong to the caller — `cpu_input_tensor` in
-        // `chelis-python` hands the compiled entry point a pointer
-        // straight into the caller's NumPy buffer — so reusing it
-        // in-place silently overwrites an argument. Observed as
-        // `sigmoid(x)` mutating `x`, a second call on the same array
-        // returning `sigmoid(sigmoid(x))`, and a `writeable=False`
-        // array being written to without an error.
-        //
-        // Dropping the in-place path here costs one buffer for a chain
-        // that reads a program input directly, and nothing anywhere
-        // else: intermediates are `SlotBacked`, so a chain fed by
-        // another operator still aliases. That is the narrowest form of
-        // the fix — the optimization is removed exactly where it was
-        // incorrect.
-        if self.memory_plan.borrows_caller_storage(reusable_input) {
-            return None;
-        }
-        if node
-            .inputs
+        self.line(&format!("chelis_tensor *t{id} = t{previous};"));
+        let shape = ty
+            .dims
             .iter()
-            .filter(|&&input| input == reusable_input)
-            .count()
-            != 1
-        {
-            return None;
-        }
-        let input_node = dag.get(reusable_input)?;
-        // Perf-F2(c): the reusable input's output_type must be
-        // binder-equivalent to the FusedElem's output_type, not just
-        // PartialEq-equal. This admits scoped same-property `forall` /
-        // binder-equivalent aliases (e.g. `Lit(4)` vs
-        // `Named("seq", Some(4))` for the same scope), which the
-        // upstream linearity analyzer already proved single-use.
-        if !Self::binder_equivalent_tensor_type(&input_node.output_type, &node.output_type) {
-            return None;
-        }
-        let consumer_count = dag
-            .nodes()
-            .iter()
-            .flat_map(|candidate| candidate.inputs.iter())
-            .filter(|&&input| input == reusable_input)
-            .count()
-            + dag
-                .roots()
-                .iter()
-                .filter(|&&root| root == reusable_input)
-                .count();
-        if consumer_count != 1 {
-            return None;
-        }
-        Some(reusable_input)
-    }
-
-    /// Perf-F2(c): conservative binder-equivalent equality for
-    /// `TensorType` shape comparisons in the in-place fused-elementwise
-    /// aliasing gate.
-    ///
-    /// Two tensor types are binder-equivalent iff:
-    ///   * precisions match exactly,
-    ///   * ranks match exactly,
-    ///   * each pair of dim descriptors is binder-equivalent per
-    ///     `binder_equivalent_dim_info` below.
-    ///
-    /// This is strictly weaker than `DimExprKey::normalized_key` (which
-    /// alpha-renames symbolic dims by shape alone, an unsound expansion
-    /// per the warning in `chelis_ir::dag::DimExprKey`'s rustdoc) and
-    /// strictly stronger than ignoring binder names. It accepts only
-    /// dim pairs whose binder name or known-size is provably consistent.
-    #[allow(dead_code)] // Re-enabled only by the Phase 3 shared reuse proof (#1214).
-    fn binder_equivalent_tensor_type(a: &TensorType, b: &TensorType) -> bool {
-        if a.precision != b.precision {
-            return false;
-        }
-        if a.dims.len() != b.dims.len() {
-            return false;
-        }
-        a.dims
-            .iter()
-            .zip(b.dims.iter())
-            .all(|(da, db)| Self::binder_equivalent_dim_info(da, db))
-    }
-
-    /// Two `DimInfo`s are binder-equivalent under the same forall scope
-    /// when their known-or-binder identity provably matches:
-    ///   * `Lit(n)` ≡ `Lit(n)` — identical concrete sizes.
-    ///   * `Named(n1, _)` ≡ `Named(n2, _)` — identical binder names
-    ///     **and** consistent known sizes when both are known.
-    ///   * `Lit(n)` ≡ `Named(_, Some(n))` and vice versa — a concrete
-    ///     literal matches a named binder that has been resolved to the
-    ///     same size (e.g. specialize lowering a `Named("seq", Some(4))`
-    ///     to `Lit(4)` mid-pipeline still admits in-place aliasing).
-    ///   * Everything else is rejected. `Lit` vs `Named(_, None)` is
-    ///     intentionally rejected: a binder with unresolved size has no
-    ///     evidence it matches a specific literal — `n` may differ.
-    #[allow(dead_code)] // Re-enabled only by the Phase 3 shared reuse proof (#1214).
-    fn binder_equivalent_dim_info(a: &DimInfo, b: &DimInfo) -> bool {
-        match (a, b) {
-            (DimInfo::Lit(la), DimInfo::Lit(lb)) => la == lb,
-            (DimInfo::Named(na, sa), DimInfo::Named(nb, sb)) => {
-                if na != nb {
-                    return false;
-                }
-                match (sa, sb) {
-                    (Some(la), Some(lb)) => la == lb,
-                    _ => true,
-                }
-            }
-            (DimInfo::Lit(la), DimInfo::Named(_, Some(lb)))
-            | (DimInfo::Named(_, Some(la)), DimInfo::Lit(lb)) => la == lb,
-            _ => false,
-        }
+            .map(|dim| {
+                let extent = Self::emit_dim_expr(&DimExpr::from(dim));
+                format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)({extent}))")
+            })
+            .collect::<Vec<_>>();
+        let shape = if shape.is_empty() {
+            "NULL".to_string()
+        } else {
+            format!("(chelis_scalar[]){{ {} }}", shape.join(", "))
+        };
+        self.line(&format!(
+            "chelis_tensor_repurpose(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({})), {shape});",
+            Self::ndim(ty)
+        ));
+        self.emit_tensor_snapshot(id, true);
+        self.reused_sources.insert(NodeId(previous));
     }
 
     /// Explicit f64 -> f32 narrowing for the `emit_const` F32 arm.
@@ -3977,7 +3975,7 @@ impl CEmitter {
         ops: &[FusedStep],
         inputs: &[NodeId],
         ty: &TensorType,
-        in_place: Option<FusedInPlaceSpec>,
+        in_place: Option<CFusedReuse>,
     ) -> Result<(), Unsupported> {
         // chelis#919: this path is parameterized on the IR-pinned
         // element type for f32 and f64 (`Self::elem_type` for the data
@@ -4047,6 +4045,7 @@ impl CEmitter {
         // Every generated dereference names the IR-pinned element type.
         let out_cast = format!("({et}*)");
         let in_cast = format!("(const {et}*)");
+        let reusable_input = in_place.as_ref().map(|spec| spec.token.source());
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
         } else {
@@ -4067,7 +4066,7 @@ impl CEmitter {
         self.indent += 1;
 
         // Declare restrict pointers for each external input (used by all fast paths).
-        if in_place.is_some() {
+        if reusable_input.is_some() {
             self.line(&format!("{et}* __out_{id} = {out_cast}t{id}_data;"));
         } else {
             self.line(&format!(
@@ -4076,7 +4075,7 @@ impl CEmitter {
         }
         for (ext_idx, ext_node) in inputs.iter().enumerate() {
             let ext_id = ext_node.0;
-            if in_place.is_some_and(|spec| spec.reusable_input == *ext_node) {
+            if reusable_input == Some(*ext_node) {
                 self.line(&format!(
                     "const {et}* __ext{ext_idx}_{id} = {in_cast}t{ext_id}_data;"
                 ));
@@ -6541,9 +6540,6 @@ impl CEmitter {
         dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
         // chelis#616: a node-valued (runtime) target extent is read from its
         // rank-0 bound scalar behind a negativity guard, then declared (or
         // equality-guarded) under the axis's symbolic dim name so the
@@ -6591,7 +6587,7 @@ impl CEmitter {
                  reshape numel mismatch at node {id}\\n\"); abort(); }}"
             ));
         }
-        self.emit_owned_tensor(id, &ndim.to_string(), &shape, dtype);
+        self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "memcpy(t{id}_data, t{a}_data, (size_t)t{id}_byte_capacity);"
         ));
@@ -6607,11 +6603,8 @@ impl CEmitter {
         _dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
         let elem_type = Self::elem_type(ty);
-        self.emit_owned_tensor(id, &ndim.to_string(), &shape, dtype);
+        self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
@@ -6660,11 +6653,8 @@ impl CEmitter {
             let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
             self.emit_runtime_dim_site(id, axis, &extent);
         }
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
         let elem_type = Self::elem_type(ty);
-        self.emit_owned_tensor(id, &ndim.to_string(), &shape, dtype);
+        self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
@@ -7077,11 +7067,8 @@ impl CEmitter {
             }
             self.emit_runtime_dim_site(id, d, &extent);
         }
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
         let elem_type = Self::elem_type(ty);
-        self.emit_owned_tensor(id, &ndim.to_string(), &shape, dtype);
+        self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
@@ -7341,7 +7328,7 @@ mod tests {
     fn emit_test_dag(dag: &Dag, name: &str) -> Result<String, Unsupported> {
         let verified = crate::testing::verified_dag(dag, crate::CodegenOptions::default())
             .expect("C emitter unit-test DAG must verify ownership");
-        CEmitter::emit_dag(&verified, name)
+        CEmitter::emit_dag(verified, name)
     }
 
     fn scalar_f32() -> TensorType {
@@ -7675,6 +7662,34 @@ mod tests {
             1,
             "verified Drop must release its exact descriptor at the Drop site and suppress cleanup duplication:\n{c}"
         );
+    }
+
+    #[test]
+    fn exact_same_byte_slot_reuse_repurposes_descriptor_metadata() {
+        let mut dag = Dag::new();
+        let first_ty = tensor_ty(&[2, 2], Prim::F32);
+        let first = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            first_ty.clone(),
+            None,
+        );
+        dag.add_node(RiscOp::Neg, vec![first], first_ty, None);
+        let output = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 3.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        dag.add_root(output);
+
+        let c = emit_test_dag(&dag, "test_exact_same_byte_slot_reuse").unwrap();
+        assert!(c.contains("chelis_tensor *t2 = t0;"), "{c}");
+        assert!(
+            c.contains("chelis_tensor_repurpose(t2, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){ chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)(4)) });"),
+            "same-byte slot reuse must reset the old rank-2 descriptor to rank 1; got:\n{c}"
+        );
+        assert!(!c.contains("chelis_tensor_release(t0);"), "{c}");
     }
 
     #[test]
@@ -8583,7 +8598,7 @@ mod tests {
         let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
             .expect("f64 exp test DAG must verify ownership");
         let c = CEmitter::emit_dag_with_options(
-            &verified,
+            verified,
             "test_fn",
             crate::CodegenOptions {
                 math_lib_override: Some(crate::MathLib::None),
@@ -8696,7 +8711,7 @@ mod tests {
         };
         let verified = crate::testing::verified_dag(&dag, options)
             .expect("BLAS codegen test DAG must verify ownership");
-        let result = crate::codegen_with_options(&verified, "test_fn", options).unwrap();
+        let result = crate::codegen_with_options(verified, "test_fn", options).unwrap();
         assert!(result.c_source.contains("cblas_sgemm("));
     }
 
@@ -9144,11 +9159,9 @@ mod tests {
     }
 
     #[test]
-    fn target_fused_in_place_is_deferred_without_reuse_proof() {
-        // The old planner's `reusable_input` marker proves liveness only; it
-        // cannot authorize storage reuse across the opaque descriptor ABI.
-        // Phase 3 introduces the shared C/HIP provenance proof. Until then,
-        // even a program-owned intermediate gets a fresh output allocation.
+    fn target_fused_in_place_consumes_the_verified_reuse_proof() {
+        // The shared planner turns the DAG's liveness hint into the sealed
+        // provenance/capacity proof consumed by C emission.
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
@@ -9174,13 +9187,12 @@ mod tests {
         let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(!c.contains("chelis_alloc_view"), "{c}");
-        assert!(c.contains("chelis_tensor *t3 = chelis_alloc("), "{c}");
+        assert!(c.contains("chelis_tensor *t3 = t1;"), "{c}");
+        assert!(c.contains("chelis_tensor_repurpose(t3,"), "{c}");
+        assert!(c.contains("t1_data = t3_data;"), "{c}");
+        assert!(c.contains("float* __out_3 = (float*)t3_data;"), "{c}");
         assert!(
-            c.contains("float* restrict __out_3 = (float*)t3_data;"),
-            "{c}"
-        );
-        assert!(
-            c.contains("const float* restrict __ext0_3 = (const float*)t1_data;"),
+            c.contains("const float* __ext0_3 = (const float*)t1_data;"),
             "{c}"
         );
         assert!(
@@ -9233,10 +9245,10 @@ mod tests {
 
     #[test]
     fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
-        // chelis#933, second shape: a metadata view (`reshape`) over a
-        // program input is still a window onto the caller's bytes, so
-        // the borrowed-storage walk has to follow `MetadataView`
-        // sources rather than only checking the node itself.
+        // chelis#933, second shape: C has no public metadata-view
+        // constructor. `reshape` materializes program-owned canonical
+        // storage, so the shared proof may later reuse that intermediate,
+        // but it must never transfer the caller's descriptor or bytes.
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let x = dag.add_node(
@@ -9273,10 +9285,14 @@ mod tests {
 
         let c = emit_test_dag(&dag, "test_fn").unwrap();
 
+        assert!(c.contains("chelis_tensor *t1 = chelis_alloc("), "{c}");
         assert!(
-            !c.contains("CHELIS_DTYPE_F32, t1_data)"),
-            "the fused output must not be a view over a reshape of the caller's \
-             input buffer; got:\n{c}"
+            c.contains("chelis_tensor *t3 = t1;"),
+            "the materialized reshape is program-owned and may supply the exact token; got:\n{c}"
+        );
+        assert!(
+            !c.contains("chelis_tensor *t3 = t0;"),
+            "the fused output must not transfer the caller-owned descriptor; got:\n{c}"
         );
     }
 

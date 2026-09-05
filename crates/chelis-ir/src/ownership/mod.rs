@@ -122,16 +122,16 @@ mod ir;
 mod last_use;
 mod lower;
 mod render;
-#[expect(
-    dead_code,
-    reason = "Phase 3 storage proof construction waits for chelis#893 CapacityKey"
-)]
 mod storage;
 mod verify;
 
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
-pub use storage::ReusableOwnedStorage;
+pub use storage::{
+    CStorageLane, ExactStorageCapacity, HipStorageLane, ReusableOwnedStorage, StorageLane,
+    StoragePlacement, StorageSlotId, StorageSlotPlan, VerifiedStorageLayout, VerifiedStoragePlan,
+    plan_c_storage, plan_c_storage_layout, plan_hip_storage,
+};
 
 /// Whether a class member's own output dim carries an extent the checker
 /// already resolved.
@@ -1292,7 +1292,7 @@ pub enum PayloadKind {
 /// The oracle handoff remains an integration step with the reuse proof because
 /// physical reused-slot capacity can exceed a tensor's logical shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LiveByteBound {
+pub enum LiveByteBound {
     Exact(u64),
     Unknown,
     Unbounded,

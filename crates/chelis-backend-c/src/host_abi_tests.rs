@@ -208,13 +208,15 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
     }
 
     let c = sources[0].1;
-    assert!(c.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(c.contains("dag: chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(!c.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
     assert!(c.contains("program: &chelis_ir::ownership::VerifiedHostProgram"));
     assert!(c.contains("mod emit;"));
     assert!(c.contains("mod host_emit;"));
 
     let hip = sources[1].1;
-    assert!(hip.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(hip.contains("dag: chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(!hip.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
 
     let metal = sources[2].1;
     let public_signature = |name: &str| {
@@ -475,6 +477,57 @@ fn loop_source_release_is_emitted_after_the_loop_not_on_each_back_edge() {
     assert!(
         ys_binding < xs_releases[0] && xs_releases[0] < xs_observe && xs_observe < xs_releases[1],
         "the loop must finish before xs dies, and its retained root copy must survive observation:\n{main}"
+    );
+}
+
+#[test]
+fn fold_dead_heap_accumulator_binds_the_body_edge_before_its_release() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1346_fold_fresh.ch"
+    );
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, "fold_fresh_control")
+        .expect("verified fold edge terminals must have physical C bindings")
+        .c_source;
+    let main = emitted_function_body(&emitted, "main");
+    let loop_start = main
+        .find("for (int64_t __i = 0;")
+        .unwrap_or_else(|| panic!("missing emitted fold loop:\n{main}"));
+    let loop_body = &main[loop_start..];
+
+    assert_eq!(
+        loop_body
+            .matches("chelis_tuple_release(__fold_acc_")
+            .count(),
+        1,
+        "the unused owned accumulator must release once on each selected body edge:\n{loop_body}"
+    );
+    let released = loop_body
+        .split_once("chelis_tuple_release(")
+        .and_then(|(_, tail)| tail.split_once(')'))
+        .map(|(name, _)| name)
+        .unwrap_or_else(|| panic!("missing fold accumulator release:\n{loop_body}"));
+    assert!(
+        loop_body.contains(&format!("{released} = NULL;")),
+        "the physical callback alias must not retain a released pointer:\n{loop_body}"
+    );
+}
+
+#[test]
+fn nested_option_match_releases_the_scrutinee_on_both_selected_arms() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1352_match_option_fresh.ch"
+    );
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, "match_option_fresh_control")
+        .expect("verified nested match terminals must survive C emission")
+        .c_source;
+    let choose = emitted_function_body(&emitted, "choose__chelis_owned_body");
+
+    assert_eq!(
+        choose.matches("chelis_option_release(__let_0);").count(),
+        2,
+        "each selected match arm must release the borrowed scrutinee after its final use:\n{choose}"
     );
 }
 

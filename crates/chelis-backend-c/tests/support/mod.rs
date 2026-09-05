@@ -15,7 +15,7 @@ pub fn codegen_with_options(
     options: CodegenOptions,
 ) -> Result<CodegenResult, Unsupported> {
     let verified = verified_dag(dag, options);
-    chelis_backend_c::codegen_with_options(&verified, name, options)
+    chelis_backend_c::codegen_with_options(verified, name, options)
 }
 
 pub fn verified_dag(

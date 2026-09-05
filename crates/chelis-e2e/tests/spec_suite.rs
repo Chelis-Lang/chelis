@@ -479,7 +479,7 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
         chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
     )
     .unwrap();
-    let result = chelis_backend_c::codegen(&verified, func_name).unwrap();
+    let result = chelis_backend_c::codegen(verified, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let write = |name: &str, content: &str| {
@@ -586,7 +586,7 @@ fn spec_generated_c_compiles() {
         chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
     )
     .unwrap();
-    let result = chelis_backend_c::codegen(&verified, "spec_test").unwrap();
+    let result = chelis_backend_c::codegen(verified, "spec_test").unwrap();
     assert!(
         !result.c_source.is_empty(),
         "codegen should produce non-empty C source"

@@ -229,4 +229,10 @@ pub enum OwnershipError {
     DagDirectiveMap { detail: String },
     #[error("DAG root n{root} does not name an owned producer")]
     DagInvalidRoot { root: usize },
+    #[error("DAG storage capacity for n{node} is not exact: {detail}")]
+    DagStorageCapacity { node: usize, detail: String },
+    #[error("DAG storage planner cannot represent dtype `{dtype}` for n{node}")]
+    DagStorageDType { node: usize, dtype: &'static str },
+    #[error("DAG storage reuse token for n{consumer} was already consumed")]
+    DagStorageReuseTaken { consumer: usize },
 }

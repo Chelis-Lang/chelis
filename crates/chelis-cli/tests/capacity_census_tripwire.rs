@@ -2565,6 +2565,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         atom: "[05-OP-31]",
         authority_anchor: "Fill requires the scalar dtype to equal the tensor dtype and\n> writes the exact scalar bits to every element",
     },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_repurpose ( chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-44]",
+        authority_anchor: "`chelis_tensor_repurpose` is the one descriptor-metadata mutation",
+    },
 ];
 
 fn final_authority_registries() -> AuthorityRegistries<'static> {
@@ -4961,6 +4971,38 @@ fn tensor_entry_borrow_successor_has_exact_op44_authority() {
     assert!(
         include_str!("../../../spec/registry/c_heap_lifetime.md").contains(SIGNATURE),
         "[05-OP-44]'s incorporated registry must contain the exact successor signature"
+    );
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).expect("read spec/05");
+    assert_eq!(
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(row),
+            final_authority_registries(),
+            &spec,
+        ),
+        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-44]" })
+    );
+}
+
+#[test]
+fn tensor_repurpose_has_exact_op44_authority() {
+    const ID: &str = "chelis_runtime.h: void chelis_tensor_repurpose ( chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;";
+    const SIGNATURE: &str = "`void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape)`";
+
+    let root = repo_root();
+    let current = current_inventory(&root);
+    let row = current
+        .iter()
+        .find(|row| row.kind == "header-export" && row.id == ID)
+        .expect("the exact tagged repurpose callable is present in the public census");
+    let registration = FINAL_NUMERIC_OPERATION_ROWS
+        .iter()
+        .find(|registration| registration.surface.kind == row.kind && registration.surface.id == ID)
+        .expect("tensor repurpose has an exact semantic registration");
+    assert_eq!(registration.atom, "[05-OP-44]");
+    assert!(registration.surface.flags.is_empty());
+    assert!(
+        include_str!("../../../spec/registry/c_heap_lifetime.md").contains(SIGNATURE),
+        "[05-OP-44]'s incorporated registry must contain the exact tagged signature"
     );
     let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).expect("read spec/05");
     assert_eq!(

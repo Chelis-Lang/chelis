@@ -2177,9 +2177,9 @@ fn fused_direct_sub_and_min_gpu_match_unfused_evaluator() {
 }
 
 // ===========================================================================
-// GF3: Fused in-place fan-in (Perf-F2(b)) — when the chain marks an
-// external input as reusable, the HIP backend aliases the FusedElem
-// output view onto the reusable input's device buffer at runtime
+// GF3: Fused in-place fan-in — when the chain marks a program-owned
+// intermediate as reusable, the HIP backend aliases the FusedElem output
+// view onto that intermediate's device buffer at runtime
 // (`chelis_gpu_is_contiguous` guard + `chelis_gpu_alloc_view` onto
 // `d_t{reusable}->data`). The GPU result must still match the unfused
 // CPU evaluator bit-for-bit-within-tolerance.
@@ -2187,22 +2187,23 @@ fn fused_direct_sub_and_min_gpu_match_unfused_evaluator() {
 
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
-fn gf3_fused_in_place_fan_in_gpu_matches_cpu() {
+fn gf3_program_owned_fused_in_place_fan_in_gpu_matches_cpu() {
     let mut dag = Dag::new();
-    // `(x + y) * z`, with `x` marked as the reusable input on the
-    // Add step. `fuse` propagates the hint into the new FusedElem
-    // node so the HIP emitter takes the in-place alias path.
+    // `(copy(x) + y) * z`, with the program-owned copy marked as the
+    // reusable input on the Add step. `fuse` propagates the hint into the
+    // new FusedElem node so the shared planner can mint the token.
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(8), None);
+    let owned_x = dag.add_node(RiscOp::Copy, vec![x], vec_f32(8), None);
     let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(8), None);
     let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], vec_f32(8), None);
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(8), None);
-    dag.set_reusable_input(add, x);
+    let add = dag.add_node(RiscOp::Add, vec![owned_x, y], vec_f32(8), None);
+    dag.set_reusable_input(add, owned_x);
     let out = dag.add_node(RiscOp::Mul, vec![add, z], vec_f32(8), None);
     dag.add_root(out);
 
     assert_fused_gpu_matches_unfused_eval(
         &dag,
-        "gf3_fused_in_place_fan_in",
+        "gf3_program_owned_fused_in_place_fan_in",
         &[
             TestInput::new("x", &[8], &[1.0, -2.0, 3.5, -4.25, 0.5, -0.75, 8.0, -16.0]),
             TestInput::new("y", &[8], &[0.5, 4.0, -1.5, 2.25, -0.25, 1.5, -2.0, 4.0]),
@@ -2211,8 +2212,8 @@ fn gf3_fused_in_place_fan_in_gpu_matches_cpu() {
     );
 }
 
-/// chelis#1214 Phase 0 expected failure: executing a reusable-input fusion
-/// must leave the caller's original device-backed input bytes unchanged.
+/// Executing a rejected caller-input reuse hint must leave the caller's
+/// original device-backed bytes unchanged.
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn compiled_value_ownership_caller_bytes_unchanged() {
@@ -2257,6 +2258,68 @@ fn compiled_value_ownership_caller_bytes_unchanged() {
         vec![1.0, 2.0, 3.0, 4.0],
         "the compiled HIP entry point mutated caller-owned bytes"
     );
+}
+
+/// The Phase 3 HIP gate executes the shared proof's positive path. A
+/// program-owned `Copy` is terminal at the FusedElem, the generated wrapper
+/// aliases the output view onto that exact intermediate, the kernel result is
+/// correct, and the caller input remains unchanged.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn compiled_value_ownership_program_owned_reuse() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    let scale = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let fused = dag.add_node(
+        RiscOp::FusedElem {
+            ops: vec![chelis_ir::dag::FusedStep {
+                op: chelis_ir::dag::FusedStepOp::Mul,
+                input_indices: vec![
+                    chelis_ir::dag::FusedInput::External(0),
+                    chelis_ir::dag::FusedInput::External(1),
+                ],
+            }],
+        },
+        vec![owned, scale],
+        vec_f32(4),
+        None,
+    );
+    dag.set_reusable_input(fused, owned);
+    dag.add_root(fused);
+
+    let generated = codegen_hip(&dag, "compiled_value_ownership_program_owned_reuse")
+        .expect("program-owned reuse must codegen");
+    assert!(
+        generated.c_source.contains(
+            "d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size);"
+        ),
+        "the executed artifact must contain the token-selected alias path"
+    );
+    assert!(
+        generated
+            .c_source
+            .contains("if (chelis_gpu_is_contiguous(d_t1)) {"),
+        "the runtime path must test the same token-selected source"
+    );
+
+    let lines = compile_and_run_output_and_inputs(
+        &dag,
+        "compiled_value_ownership_program_owned_reuse",
+        &[TestInput::new("x", &[4], &[1.0, 2.0, 3.0, 4.0])],
+    );
+    assert_eq!(
+        lines.len(),
+        2,
+        "one output and one caller input are required"
+    );
+    assert_close_vec(&lines[0], &[2.0, 4.0, 6.0, 8.0]);
+    assert_eq!(lines[1], vec![1.0, 2.0, 3.0, 4.0]);
 }
 
 // ===========================================================================

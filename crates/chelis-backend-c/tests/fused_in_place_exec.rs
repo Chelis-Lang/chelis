@@ -27,9 +27,6 @@ fn target_debug_dir() -> PathBuf {
 }
 
 fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
     let deps_dir = canonical
         .parent()
         .expect("canonical lib path has no parent")
@@ -53,6 +50,9 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
+    if canonical.exists() && canonical.metadata()?.modified()? >= hashed.metadata()?.modified()? {
+        return Ok(());
+    }
     // PID-suffixed tmp so concurrent test binaries (nextest runs sister
     // exec-style tests in parallel; they all materialize the same
     // canonical path) do not race on a shared tmp filename and trip
@@ -214,6 +214,104 @@ fn fused_in_place_compile_run_preserves_canonical_caller_input() {
         stdout,
         "\
 contig_out 2.000000 4.000000 6.000000 8.000000
+contig_input 1.000000 2.000000 3.000000 4.000000
+"
+    );
+}
+
+/// A program-owned `Copy` with one terminal fused consumer receives the
+/// shared reuse token. The emitted C transfers that descriptor, repurposes
+/// its exact metadata, computes the right result, and leaves the caller's
+/// entry tensor untouched.
+#[test]
+fn fused_in_place_compile_run_reuses_program_owned_storage() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    let scale = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let ops = vec![FusedStep {
+        op: FusedStepOp::Mul,
+        input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+    }];
+    let fused = dag.add_node(
+        RiscOp::FusedElem { ops },
+        vec![owned, scale],
+        vec_f32(4),
+        None,
+    );
+    dag.set_reusable_input(fused, owned);
+    dag.add_root(fused);
+
+    let result = codegen(&dag, "fused_in_place_probe").unwrap();
+    assert!(
+        result.c_source.contains("chelis_tensor *t3 = t1;"),
+        "the fused output must transfer the token-selected descriptor"
+    );
+    assert!(
+        result
+            .c_source
+            .contains("chelis_tensor_repurpose(t3, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){ chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)(4)) });"),
+        "the transferred descriptor must receive exact output metadata"
+    );
+    let stdout = compile_and_run(
+        "fused_program_owned_reuse_probe",
+        &result.c_source,
+        result.requirements,
+    );
+
+    assert_eq!(
+        stdout,
+        "\
+contig_out 2.000000 4.000000 6.000000 8.000000
+contig_input 1.000000 2.000000 3.000000 4.000000
+"
+    );
+}
+
+/// `Drop` destroys its source descriptor as well as releasing the backing
+/// storage. A later equal-capacity owner therefore needs a fresh descriptor;
+/// the generic slot recycler may not resurrect the released pointer.
+#[test]
+fn drop_then_equal_capacity_owner_allocates_a_fresh_descriptor() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let disposable = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    dag.add_node(RiscOp::Drop, vec![disposable], vec_f32(4), None);
+    let output = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+    dag.add_root(output);
+
+    let result = codegen(&dag, "fused_in_place_probe").unwrap();
+    let guard_end = result
+        .c_source
+        .find("chelis_tensor_end_write(t1_write_guard);")
+        .expect("Drop must end the source write guard");
+    let release = result
+        .c_source
+        .find("chelis_tensor_release(t1);")
+        .expect("Drop must release the source descriptor");
+    assert!(
+        guard_end < release,
+        "Drop must end the guard before release"
+    );
+    assert!(
+        !result.c_source.contains("chelis_tensor *t3 = t1;"),
+        "the released descriptor must not be selected for later slot reuse"
+    );
+    let stdout = compile_and_run(
+        "drop_then_equal_capacity_owner_probe",
+        &result.c_source,
+        result.requirements,
+    );
+
+    assert_eq!(
+        stdout,
+        "\
+contig_out 1.000000 2.000000 3.000000 4.000000
 contig_input 1.000000 2.000000 3.000000 4.000000
 "
     );

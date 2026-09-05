@@ -43,6 +43,7 @@ void chelis_tensor_retain(const chelis_tensor *tensor);
 void chelis_tensor_release(const chelis_tensor *tensor);
 /* A successful chelis_tensor_begin_write invalidates every prior read view; dereferencing a stale view violates the caller precondition. */
 chelis_read_view chelis_tensor_read_view(const chelis_tensor *tensor);
+void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape);
 chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor);
 chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard);
 void chelis_tensor_end_write(chelis_tensor_write *guard);

@@ -4,6 +4,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chelis_unord::UnordSet;
+use chelis_vocab::Repr;
 use num_bigint::BigUint;
 
 use crate::axis_sources::AxisSource;
@@ -121,6 +122,25 @@ impl CapacityKey {
             | CanonicalCapacity::Product(_)
             | CanonicalCapacity::ExactQuotient { .. } => None,
         }
+    }
+
+    /// Exact allocation bytes for a literal capacity and representation.
+    ///
+    /// The multiplication remains inside the private arbitrary-precision
+    /// owner; callers receive only the checked final `u64` bound.
+    pub(crate) fn literal_allocation_bytes(
+        &self,
+        repr: Repr,
+    ) -> Result<Option<u64>, CapacityKeyBuildError> {
+        let Some(elements) = self.literal_elements() else {
+            return Ok(None);
+        };
+        let mut bytes = ExactLiteralProduct::one();
+        bytes.include(elements.clone());
+        bytes.include(BigUint::from(repr.byte_width()));
+        u64::try_from(bytes.into_biguint())
+            .map(Some)
+            .map_err(|_| CapacityKeyBuildError::LiteralByteCountOverflow)
     }
 
     fn from_typed_expr(
@@ -246,6 +266,8 @@ pub(crate) enum CapacityKeyBuildError {
     StaticZeroDivisor,
     #[error("verified capacity source is malformed: {0}")]
     MalformedSource(String),
+    #[error("exact literal allocation byte count does not fit u64")]
+    LiteralByteCountOverflow,
 }
 
 struct CanonicalParts {
@@ -415,6 +437,27 @@ pub(crate) fn capacity_key_for_node(
         factors.push(axis_capacity_expr(dag, node, axis, &mut visiting)?);
     }
     CapacityKey::from_typed_expr(CapacityExpr::Product(factors))
+}
+
+/// Build one exact proof carrier per output axis for shape equality.
+pub(crate) fn shape_capacity_keys_for_node(
+    dag: VerifiedDagView<'_>,
+    node: NodeId,
+) -> Result<Vec<CapacityKeyBuild>, CapacityKeyBuildError> {
+    let output = dag.get(node).ok_or_else(|| {
+        CapacityKeyBuildError::MalformedSource(format!("node {} is absent", node.0))
+    })?;
+    let mut keys = Vec::with_capacity(output.output_type.dims.len());
+    let mut visiting = UnordSet::new();
+    for axis in 0..output.output_type.dims.len() {
+        keys.push(CapacityKey::from_typed_expr(axis_capacity_expr(
+            dag,
+            node,
+            axis,
+            &mut visiting,
+        )?)?);
+    }
+    Ok(keys)
 }
 
 fn axis_capacity_expr(

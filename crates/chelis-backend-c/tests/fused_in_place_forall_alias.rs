@@ -1,14 +1,5 @@
-//! Perf-F2(c): preserve the shape-equivalence probes while ownership Phase 1
-//! disables C in-place reuse until the shared Phase 3 proof exists.
-//!
-//! Wire-format expectations pin the safe Phase 1 boundary: a reuse hint is
-//! never enough to alias storage, regardless of whether dimensions are
-//! literal-equal, binder-equivalent, or incompatible.
-//!
-//! Boundary: this file exercises only the in-place fusion gate in
-//! `chelis-backend-c::emit::fused_in_place_spec`. Phase 3 restores proven
-//! reuse through a shared C/HIP planner; these tests ensure Phase 1 cannot
-//! accidentally revive the deleted unproved `chelis_alloc_view` path.
+//! C in-place fused-elementwise reuse consumes the shared planner's exact
+//! shape, dtype, capacity, operation, and lifetime proof.
 
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_types::types::Prim;
@@ -50,7 +41,7 @@ fn vec_lit_f64(n: usize) -> TensorType {
 /// as SlotBacked, mirroring the copy-elision-probe fan-in shape).
 ///
 /// `a_ty`, `b_ty`, `c_ty`, `out_ty` are independent so callers can probe
-/// binder-equivalent vs literal-equal vs non-equivalent shapes without
+/// resolved exact equality, unresolved extents, and mismatches without
 /// rebuilding the chain.
 fn fan_in_dag(
     a_ty: TensorType,
@@ -103,34 +94,46 @@ fn fan_in_dag(
     (dag, fused, a)
 }
 
-fn assert_reuse_deferred(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_ir::dag::NodeId) {
+fn assert_reuse_proven(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_ir::dag::NodeId) {
     let fused_id = fused.0;
     let reusable_id = reusable.0;
     assert!(
         !c.contains("chelis_alloc_view"),
-        "Phase 1 must not emit the deleted unproved view allocator; got:\n{c}"
+        "the C backend must not restore the deleted unproved view allocator; got:\n{c}"
     );
     assert!(
-        c.contains(&format!("chelis_tensor *t{fused_id} = chelis_alloc(")),
-        "fused output must own fresh storage while reuse proof is deferred; got:\n{c}"
-    );
-    assert!(
-        c.contains(&format!(
-            "float* restrict __out_{fused_id} = (float*)t{fused_id}_data;"
-        )),
-        "fresh fused output must remain restrict-qualified; got:\n{c}"
+        c.contains(&format!("chelis_tensor *t{fused_id} = t{reusable_id};")),
+        "fused output must consume the shared reuse proof; got:\n{c}"
     );
     assert!(
         c.contains(&format!(
-            "const float* restrict __ext0_{fused_id} = (const float*)t{reusable_id}_data;"
+            "chelis_tensor_repurpose(t{fused_id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){{ chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)(4)) }});"
         )),
-        "reusable hint must remain a non-overlapping input until Phase 3; got:\n{c}"
+        "proven reuse must reset exact descriptor metadata; got:\n{c}"
+    );
+    assert!(
+        c.contains(&format!(
+            "float* __out_{fused_id} = (float*)t{fused_id}_data;"
+        )),
+        "aliased output must not claim restrict; got:\n{c}"
     );
 }
 
-/// Literal equality does not substitute for the missing ownership proof.
+fn assert_reuse_rejected(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_ir::dag::NodeId) {
+    assert!(
+        !c.contains(&format!("chelis_tensor *t{} = t{};", fused.0, reusable.0)),
+        "unproved reuse must not transfer the source descriptor; got:\n{c}"
+    );
+    assert!(
+        c.contains(&format!("chelis_tensor *t{} = chelis_alloc(", fused.0)),
+        "unproved reuse must allocate owned storage; got:\n{c}"
+    );
+}
+
+/// Positive: a program-owned, terminal input with an exact literal shape
+/// satisfies the shared proof and transfers its descriptor to the output.
 #[test]
-fn fan_in_literal_equal_shapes_defer_reuse_without_shared_proof() {
+fn fan_in_literal_equal_shapes_consume_shared_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_lit_f32(4),
         vec_lit_f32(4),
@@ -138,22 +141,13 @@ fn fan_in_literal_equal_shapes_defer_reuse_without_shared_proof() {
         vec_lit_f32(4),
     );
     let c = emit_dag(&dag, "test_fan_in_literal").unwrap();
-    assert_reuse_deferred(&c, fused, a);
+    assert_reuse_proven(&c, fused, a);
 }
 
-/// Positive — binder-equivalent: FusedElem output uses
-/// `Named("seq", Some(4))` while reusable input uses `Lit(4)` and the
-/// other inputs use the matching `Named("seq", Some(4))`. PartialEq says
-/// these `TensorType`s are NOT equal because `DimInfo::Lit != DimInfo::Named`.
-/// The binder-equivalent extension must still admit the in-place alias.
-///
-/// This is the case the Perf-F2(c) closure narrative names: the IR has
-/// proven the same forall-binder is in scope for both the producer (Lit
-/// concrete after specialize / lower) and the consumer (Named, still
-/// carrying the source binder name), and the C backend must not fall
-/// back just because the structural `DimInfo` representations differ.
+/// Positive: `Lit(4)` and `Named(_, Some(4))` both carry the exact extent
+/// value four. The shared `CapacityKey` proof ignores the non-semantic name.
 #[test]
-fn fan_in_binder_equivalent_lit_to_named_defers_reuse_without_shared_proof() {
+fn fan_in_resolved_lit_to_named_consumes_exact_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_lit_f32(4),
         vec_named_f32("seq", 4),
@@ -161,14 +155,13 @@ fn fan_in_binder_equivalent_lit_to_named_defers_reuse_without_shared_proof() {
         vec_named_f32("seq", 4),
     );
     let c = emit_dag(&dag, "test_fan_in_binder_lit_to_named").unwrap();
-    assert_reuse_deferred(&c, fused, a);
+    assert_reuse_proven(&c, fused, a);
 }
 
-/// Positive — binder-equivalent the other direction: FusedElem output
-/// uses `Lit(4)` while reusable input is `Named("seq", Some(4))`. The
-/// alias must still fire — the binder-equivalent predicate is symmetric.
+/// Positive: resolved exact equality is symmetric when the source uses a
+/// named extent and the consumer uses a literal extent.
 #[test]
-fn fan_in_binder_equivalent_named_to_lit_defers_reuse_without_shared_proof() {
+fn fan_in_resolved_named_to_lit_consumes_exact_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_f32("seq", 4),
         vec_lit_f32(4),
@@ -176,13 +169,12 @@ fn fan_in_binder_equivalent_named_to_lit_defers_reuse_without_shared_proof() {
         vec_lit_f32(4),
     );
     let c = emit_dag(&dag, "test_fan_in_binder_named_to_lit").unwrap();
-    assert_reuse_deferred(&c, fused, a);
+    assert_reuse_proven(&c, fused, a);
 }
 
-/// Positive — same Named binder name on both sides with matching known
-/// size: this is the canonical binder-equivalent case and must alias.
+/// Positive: matching resolved named extents satisfy the exact proof.
 #[test]
-fn fan_in_same_named_binder_defers_reuse_without_shared_proof() {
+fn fan_in_same_resolved_name_consumes_exact_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
@@ -190,14 +182,11 @@ fn fan_in_same_named_binder_defers_reuse_without_shared_proof() {
         vec_named_f32("seq", 4),
     );
     let c = emit_dag(&dag, "test_fan_in_same_named_binder").unwrap();
-    assert_reuse_deferred(&c, fused, a);
+    assert_reuse_proven(&c, fused, a);
 }
 
-/// Positive — same Named binder name with unsized binder on the reusable
-/// side: a `Named("seq", None)` (symbolic size, unresolved) must still be
-/// binder-equivalent to `Named("seq", Some(4))` provided the binder
-/// *name* matches (the alias proof relies on the binder identity, not
-/// the resolved size that was concretized later).
+/// Negative: an unresolved source extent does not become exact merely
+/// because its spelling matches a resolved consumer extent.
 #[test]
 fn fan_in_named_binder_with_unknown_size_defers_reuse_without_shared_proof() {
     let (dag, fused, a) = fan_in_dag(
@@ -207,15 +196,13 @@ fn fan_in_named_binder_with_unknown_size_defers_reuse_without_shared_proof() {
         vec_named_f32("seq", 4),
     );
     let c = emit_dag(&dag, "test_fan_in_named_unsized").unwrap();
-    assert_reuse_deferred(&c, fused, a);
+    assert_reuse_rejected(&c, fused, a);
 }
 
-/// Negative — different binder names: the alias proof does NOT consider
-/// `Named("batch", Some(4))` equivalent to `Named("seq", Some(4))`, even
-/// though both resolve to size 4. The extension must not aliasing-rename
-/// distinct binder names.
+/// Positive: resolved extent values are the capacity authority; different
+/// source-level names with the same exact value do not prevent reuse.
 #[test]
-fn fan_in_different_named_binders_does_not_alias() {
+fn fan_in_different_resolved_names_alias_exact_equal_shape() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_f32("batch", 4),
         vec_named_f32("seq", 4),
@@ -223,13 +210,10 @@ fn fan_in_different_named_binders_does_not_alias() {
         vec_named_f32("seq", 4),
     );
     let c = emit_dag(&dag, "test_fan_in_different_binders").unwrap();
-    assert_reuse_deferred(&c, fused, a);
+    assert_reuse_proven(&c, fused, a);
 }
 
-/// Negative — different concrete sizes on the same binder name: a
-/// `Named("seq", Some(4))` is NOT binder-equivalent to
-/// `Named("seq", Some(8))`. Same binder *name* alone is not enough when
-/// both sides carry a known and conflicting size.
+/// Negative: a repeated name cannot equate conflicting exact extent values.
 #[test]
 fn fan_in_same_binder_different_known_size_does_not_alias() {
     let (dag, fused, a) = fan_in_dag(
@@ -239,22 +223,11 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
         vec_named_f32("seq", 8),
     );
     let c = emit_dag(&dag, "test_fan_in_size_mismatch").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // FusedElem's output is `Named("seq", Some(8))` so it would lower
-    // to `(int64_t[]){ 8 }` if the in-place wrapper fired.
-    let forbidden_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 8 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        !c.contains(&forbidden_alias),
-        "binder with conflicting known sizes must NOT alias; got:\n{c}"
-    );
+    assert_reuse_rejected(&c, fused, a);
 }
 
-/// Negative — different precision: F32 vs F64 is never binder-equivalent
-/// even when dim shapes match. dtype is part of the alias proof.
+/// Negative: exact representation, not equal extent or equal byte width,
+/// is part of the shared proof.
 #[test]
 fn fan_in_different_precision_does_not_alias() {
     let (dag, fused, a) = fan_in_dag(
@@ -264,20 +237,11 @@ fn fan_in_different_precision_does_not_alias() {
         vec_lit_f32(4),
     );
     let c = emit_dag(&dag, "test_fan_in_different_precision").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    let forbidden_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        !c.contains(&forbidden_alias),
-        "different-precision fan-in must NOT alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
+    assert_reuse_rejected(&c, fused, a);
 }
 
-/// Negative — multi-consumer reusable input: even when shapes are
-/// binder-equivalent, an input with more than one consumer must NOT be
+/// Negative: even when capacities and representations are exact, an input
+/// with more than one consumer must NOT be
 /// aliased in-place. Mutating shared buffers breaks the second consumer.
 #[test]
 fn fan_in_multi_consumer_reusable_input_does_not_alias() {
@@ -309,27 +273,17 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     );
     dag.set_reusable_input(fused, a);
 
-    // Second consumer of `a` forces fall-back even with binder-equivalent shapes.
+    // The second consumer keeps `a` live and forces a fresh fused output.
     let other = dag.add_node(RiscOp::Neg, vec![a], vec_named_f32("seq", 4), None);
     dag.add_root(fused);
     dag.add_root(other);
 
     let c = emit_dag(&dag, "test_fan_in_multi_consumer").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    let forbidden_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        !c.contains(&forbidden_alias),
-        "multi-consumer reusable input must NOT alias even with binder-equivalent shapes; got:\n{c}"
-    );
+    assert_reuse_rejected(&c, fused, a);
 }
 
-/// Negative — different rank: a rank-1 reusable input and a rank-2
-/// FusedElem output are never binder-equivalent, regardless of total
-/// element count.
+/// Negative: equal total capacity does not satisfy the per-axis exact-shape
+/// requirement when source and consumer ranks differ.
 #[test]
 fn fan_in_different_rank_does_not_alias() {
     let ty_r1 = TensorType {
@@ -342,15 +296,5 @@ fn fan_in_different_rank_does_not_alias() {
     };
     let (dag, fused, a) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
     let c = emit_dag(&dag, "test_fan_in_different_rank").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // Forbidden aliases for both possible output shape literals.
-    let forbidden_r2 = format!(
-        "t{fused_id} = chelis_alloc_view(2, (int64_t[]){{ 2, 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        !c.contains(&forbidden_r2),
-        "different-rank fan-in must NOT alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
+    assert_reuse_rejected(&c, fused, a);
 }

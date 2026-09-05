@@ -88,20 +88,36 @@ pub fn runtime_dir() -> &'static str {
 /// }
 /// ```
 pub fn codegen_hip(
-    dag: &chelis_ir::ownership::VerifiedDagProgram,
+    dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
 ) -> Result<HipCodegenResult, chelis_types::unsupported::Unsupported> {
-    let dag = dag.emission();
     // chelis#1277 C4.1/C4.5: derived after the last rewrite, so this runs on
     // the specialized DAG the emitter actually consumes.
-    dag.check_axis_sources(chelis_types::unsupported::Stage::Codegen("hip"))?;
-    let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(dag, func_name)?;
+    dag.emission()
+        .check_axis_sources(chelis_types::unsupported::Stage::Codegen("hip"))?;
     let h_header = format!(
         "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
-    let input_labels = emit::HipEmitter::input_labels(dag);
-    let output_labels = emit::HipEmitter::output_labels(dag);
-    let symbolic_dims = dag.symbolic_params();
+    let (input_labels, output_labels, symbolic_dims) = {
+        let emission = dag.emission();
+        (
+            emit::HipEmitter::input_labels(emission),
+            emit::HipEmitter::output_labels(emission),
+            emission.symbolic_params(),
+        )
+    };
+    let plan = chelis_ir::ownership::plan_hip_storage(dag).map_err(|error| {
+        chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Op("storage planning".to_string()),
+            error.to_string(),
+            chelis_types::unsupported::Stage::Codegen("hip"),
+            chelis_types::deliberate_rejection!(
+                "[04-SHAPE-1]",
+                "HIP storage placement requires the verified exact-capacity plan"
+            ),
+        )
+    })?;
+    let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(plan, func_name)?;
     let mut link_flags = vec!["-lhiprtc".to_string()];
     // WS-A3: bf16 / f16 matmul also routes through hipBLAS (via
     // `hipblasGemmEx`). Add `-lhipblas` whenever any hipblas wrapper

@@ -2748,9 +2748,15 @@ impl<'a> HostEmitter<'a> {
                     self.owner_vars.insert(dest.id(), value);
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                    operation,
                     block: owner_block,
                     ..
-                }) if *owner_block == block => {}
+                }) if *owner_block == block
+                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+                {
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
                 VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
                     block: owner_block,
                     dest,
@@ -2767,18 +2773,63 @@ impl<'a> HostEmitter<'a> {
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
                 VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation,
                     block: owner_block,
                     owner,
                     ..
-                }) if *owner_block == block => {
+                }) if *owner_block == block
+                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+                {
                     self.emit_owner_drop(owner.owner())?;
+                    self.pre_emitted_terminals.insert((site.id, *operation));
                 }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { .. }) => {}
                 VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
                     block: owner_block,
                     edge,
                 }) if *owner_block == block && edge.params().len() == 1 => {
                     self.owner_vars
                         .insert(edge.params()[0].id(), target.to_string());
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit one verified owner's scheduled terminal in a physical block.
+    ///
+    /// A nested source expression can move control to child blocks before the
+    /// parent site's completion jump.  Its parent-owned terminals still need
+    /// to run after that child expression on the selected path, even when the
+    /// completion block differs from the arm's entry block.
+    fn emit_expression_block_terminal_for_owner(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        expected_owner: VerifiedOwnerId,
+    ) -> Result<(), Unsupported> {
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation,
+                    block: owner_block,
+                    owner,
+                    ..
+                }) if *owner_block == block
+                    && owner.owner().id() == expected_owner
+                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+                {
+                    self.emit_owner_drop(owner.owner())?;
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                    operation,
+                    block: owner_block,
+                    owner,
+                    ..
+                }) if *owner_block == block && owner.id() == expected_owner => {
+                    self.pre_emitted_terminals.insert((site.id, *operation));
                 }
                 _ => {}
             }
@@ -3328,14 +3379,17 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "option match")?;
-                let (some_edge, none_edge) = site
+                let (scrutinee_owner, some_edge, none_edge) = site
                     .directives
                     .iter()
                     .find_map(|action| match action {
                         VerifiedHostAction::Terminator(VerifiedHostTerminator::Match {
+                            scrutinee,
                             arms,
                             ..
-                        }) if arms.len() == 2 => Some((arms[0].clone(), arms[1].clone())),
+                        }) if arms.len() == 2 => {
+                            Some((scrutinee.owner().id(), arms[0].clone(), arms[1].clone()))
+                        }
                         _ => None,
                     })
                     .ok_or_else(|| {
@@ -3400,6 +3454,11 @@ impl<'a> HostEmitter<'a> {
                 // shadow: a reference to it dead-ends exactly as it does
                 // today.
                 self.assign_expr(target, some_expr, ty)?;
+                self.emit_expression_block_terminal_for_owner(
+                    site,
+                    some_edge.target(),
+                    scrutinee_owner,
+                )?;
                 self.emit_expression_block_actions(site, arm_blocks.0, target)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
@@ -3407,6 +3466,11 @@ impl<'a> HostEmitter<'a> {
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.emit_edge_terminals(site.id, &none_edge)?;
                 self.assign_expr(target, none_expr, ty)?;
+                self.emit_expression_block_terminal_for_owner(
+                    site,
+                    none_edge.target(),
+                    scrutinee_owner,
+                )?;
                 self.emit_expression_block_actions(site, arm_blocks.1, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
@@ -6946,12 +7010,6 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
-        self.emit_edge_terminals(site.id, &body_edge)?;
-        let item_value = self.next_temp("fold_item_value");
-        self.lines.push(format!(
-            "{}chelis_value {} = chelis_list_index({}, __i);",
-            self.indent, item_value, list_var
-        ));
         let params = callback_params(callback);
         let acc_arg = self.next_temp("fold_acc");
         self.lines.push(format!(
@@ -6984,6 +7042,25 @@ impl<'a> HostEmitter<'a> {
         // a later name-derived recovery would reintroduce backend inference.
         self.owner_vars.insert(body_acc.id(), acc_arg.clone());
         self.owner_vars.insert(exit_acc.id(), target.to_string());
+        let body_acc_dropped = body_edge.terminals().iter().any(|terminal| {
+            matches!(
+                terminal,
+                VerifiedTerminalView::Drop { owner, .. } if owner.id() == body_acc.id()
+            )
+        });
+        self.emit_edge_terminals(site.id, &body_edge)?;
+        if body_acc_dropped {
+            // An inline callback still has a physical parameter even when the
+            // verified program proves that parameter dead on entry.  Do not
+            // propagate a released pointer into that non-semantic C alias.
+            self.lines
+                .push(format!("{}{} = NULL;", self.indent, acc_arg));
+        }
+        let item_value = self.next_temp("fold_item_value");
+        self.lines.push(format!(
+            "{}chelis_value {} = chelis_list_index({}, __i);",
+            self.indent, item_value, list_var
+        ));
         let item_arg = self.next_temp("fold_item");
         self.lines.push(format!(
             "{}{} {};",

@@ -1179,6 +1179,13 @@ fn validate_scalar(value: chelis_scalar, context: &str) -> RuntimeDType {
     dtype
 }
 
+fn exact_i64_scalar(value: chelis_scalar, context: &str) -> i64 {
+    if validate_scalar(value, context) != RuntimeDType::I64 {
+        runtime_fail!("Domain: {context} requires int64 tagged metadata");
+    }
+    i64::from_ne_bytes(value.bits.to_ne_bytes())
+}
+
 unsafe fn payload_bytes(value: &chelis_value_payload) -> &[u8; 16] {
     &*(value as *const chelis_value_payload).cast::<[u8; 16]>()
 }
@@ -2053,6 +2060,69 @@ pub unsafe extern "C" fn chelis_tensor_read_view(tensor: *const chelis_tensor) -
     };
     unlock_tensor(tensor_ref, TENSOR_ACCESS_IDLE);
     view
+}
+
+/// Reset one unique runtime-owned tensor descriptor to an exact same-byte
+/// shape without reallocating or transferring its storage.
+///
+/// # Safety
+///
+/// `tensor` must be a live tensor owner and `shape` must point to the number
+/// of readable tagged extents named by `rank` when that rank is positive. The
+/// runtime validates the full [05-OP-44] tagged-metadata, uniqueness,
+/// provenance, and capacity contract.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_repurpose(
+    tensor: *mut chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let rank_i64 = exact_i64_scalar(rank, "chelis_tensor_repurpose rank");
+    let rank = c_int::try_from(rank_i64).unwrap_or_else(|_| {
+        runtime_fail!("Overflow: chelis_tensor_repurpose rank {rank_i64} exceeds int32")
+    });
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: chelis_tensor_repurpose has null shape for rank {rank}");
+    }
+    let mut decoded_shape = Vec::with_capacity(rank.max(0) as usize);
+    for axis in 0..rank.max(0) as usize {
+        decoded_shape.push(exact_i64_scalar(
+            *shape.add(axis),
+            "chelis_tensor_repurpose shape extent",
+        ));
+    }
+    let tensor_ref = lock_tensor_idle(tensor, "chelis_tensor_repurpose");
+    let dtype = validate_tensor_contents(tensor_ref, "chelis_tensor_repurpose");
+    if tensor_ref.header.strong.load(Ordering::Relaxed) != 1 {
+        runtime_fail!("Domain: chelis_tensor_repurpose requires a unique tensor owner");
+    }
+    let storage = &*tensor_ref.storage;
+    if storage.header.strong.load(Ordering::Relaxed) != 1 {
+        runtime_fail!("Domain: chelis_tensor_repurpose requires unique tensor storage");
+    }
+    if storage.provenance != TensorStorageProvenance::RuntimeOwned {
+        runtime_fail!("Domain: chelis_tensor_repurpose requires runtime-owned storage");
+    }
+    let metadata = checked_tensor_metadata(
+        rank,
+        decoded_shape.as_ptr(),
+        dtype,
+        "chelis_tensor_repurpose",
+    );
+    if metadata.required_bytes != storage.byte_capacity {
+        runtime_fail!(
+            "Domain: chelis_tensor_repurpose byte size {} does not equal storage capacity {}",
+            metadata.required_bytes,
+            storage.byte_capacity
+        );
+    }
+
+    (*tensor).shape = metadata.shape;
+    (*tensor).strides = metadata.strides;
+    (*tensor).size = metadata.size;
+    (*tensor).rank = metadata.rank;
+    debug_assert_eq!((*tensor).dtype, metadata.dtype.id() as chelis_dtype);
+    unlock_tensor(&*tensor, TENSOR_ACCESS_IDLE);
 }
 
 #[no_mangle]

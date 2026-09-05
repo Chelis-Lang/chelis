@@ -59,8 +59,10 @@ FROZEN_FIXTURE_IDS = frozenset(
     aggregate-refcount-scalar-control recursive-depth-1-control
     recursive-scalar-control recursive-depth-32 recursive-depth-128
     recursive-depth-288 c-caller-owned-reuse c-caller-owned-view-reuse
+    c-program-owned-reuse c-dropped-slot-no-reuse
     hip-caller-owned-reuse hip-caller-owned-view-reuse hip-no-reuse-control
-    hip-caller-bytes-unchanged-hardware root-alias-clean distinct-roots-clean
+    hip-caller-bytes-unchanged-hardware hip-program-owned-reuse-hardware
+    root-alias-clean distinct-roots-clean
     captured-copy-clean fresh-function-binding-clean fold-alias-single-owner
     fold-fresh-control if-mixed-fresh-arm match-adt-mixed-fresh-arm
     match-option-mixed-fresh-control if-alias-control fresh-call-argument
@@ -111,6 +113,7 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ManifestContractTests.test_option_and_recursive_function_projection_universe_is_frozen
     ManifestContractTests.test_option_scalars_freeze_every_emitted_root
     ManifestContractTests.test_phase_one_mutation_canaries_bind_exact_runtime_receipts
+    ManifestContractTests.test_phase_three_storage_proof_mutations_fail_closed
     ManifestContractTests.test_phase_two_mutation_canaries_bind_exact_execution_receipts
     ManifestContractTests.test_phase_zero_is_hardware_independent_but_hardware_row_exists
     ManifestContractTests.test_recursive_function_fixtures_reach_named_value_projection
@@ -122,7 +125,6 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ReceiptContractTests.test_balanced_ledger_cannot_hide_wrong_stdout
     ReceiptContractTests.test_empty_python_and_cargo_test_suites_fail_zero_vacuity
     ReceiptContractTests.test_execution_receipt_rejects_missing_extra_and_wrong_outcomes
-    ReceiptContractTests.test_expected_failing_test_must_execute_and_fail
     ReceiptContractTests.test_expected_failure_requires_the_exact_detector
     ReceiptContractTests.test_forged_import_transcript_cannot_replace_python_callbacks
     ReceiptContractTests.test_forged_main_transcript_without_owned_receipt_fails_zero_vacuity
@@ -132,6 +134,7 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ReceiptContractTests.test_listing_only_execution_fails_zero_vacuity
     ReceiptContractTests.test_must_pass_rejects_a_detected_failure
     ReceiptContractTests.test_nonzero_receipt_rejects_exit_and_diagnostic_drift
+    ReceiptContractTests.test_promoted_reuse_test_failure_is_detected
     ReceiptContractTests.test_python_execution_receipt_schema_and_counts_fail_closed
     ReceiptContractTests.test_unexpected_success_fails_closed
     """.split()
@@ -188,12 +191,16 @@ FROZEN_COUNTERPARTS = {
             {
                 "c-caller-owned-reuse",
                 "c-caller-owned-view-reuse",
+                "c-program-owned-reuse",
                 "hip-caller-owned-reuse",
                 "hip-caller-owned-view-reuse",
                 "hip-caller-bytes-unchanged-hardware",
+                "hip-program-owned-reuse-hardware",
             }
         ),
-        "negative": frozenset({"hip-no-reuse-control"}),
+        "negative": frozenset(
+            {"c-dropped-slot-no-reuse", "hip-no-reuse-control"}
+        ),
     },
     1222: {
         "positive": frozenset({"root-alias-clean"}),
@@ -760,11 +767,10 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 1206,
                 Polarity.POSITIVE,
                 Detector.PEAK_BOUND,
-                xfail(1206, Detector.PEAK_BOUND),
+                MustPass(),
                 Action.LEDGER_BUILD_RUN,
                 f"issue_1206_depth_{depth}.ch",
                 peak_bound=512,
-                green_by=3,
             )
         )
 
@@ -819,15 +825,64 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 ),
             ),
             _fixture(
+                "c-program-owned-reuse",
+                1214,
+                Polarity.POSITIVE,
+                Detector.SOURCE_CONTRACT,
+                MustPass(),
+                Action.COMMAND,
+                backend=Backend.C,
+                platform=Platform.ANY,
+                command=(
+                    "cargo",
+                    "test",
+                    "-p",
+                    "chelis-backend-c",
+                    "--test",
+                    "fused_in_place_exec",
+                    "fused_in_place_compile_run_reuses_program_owned_storage",
+                    "--",
+                    "--exact",
+                ),
+                test_receipt=test_receipt(
+                    ("fused_in_place_compile_run_reuses_program_owned_storage",)
+                ),
+            ),
+            _fixture(
+                "c-dropped-slot-no-reuse",
+                1214,
+                Polarity.NEGATIVE,
+                Detector.SOURCE_CONTRACT,
+                MustPass(),
+                Action.COMMAND,
+                backend=Backend.C,
+                platform=Platform.ANY,
+                command=(
+                    "cargo",
+                    "test",
+                    "-p",
+                    "chelis-backend-c",
+                    "--test",
+                    "fused_in_place_exec",
+                    "drop_then_equal_capacity_owner_allocates_a_fresh_descriptor",
+                    "--",
+                    "--exact",
+                ),
+                test_receipt=test_receipt(
+                    (
+                        "drop_then_equal_capacity_owner_allocates_a_fresh_descriptor",
+                    )
+                ),
+            ),
+            _fixture(
                 "hip-caller-owned-reuse",
                 1214,
                 Polarity.POSITIVE,
                 Detector.SOURCE_CONTRACT,
-                xfail(1214, Detector.SOURCE_CONTRACT),
+                MustPass(),
                 Action.COMMAND,
                 backend=Backend.HIP,
                 platform=Platform.ANY,
-                green_by=3,
                 command=(
                     "cargo",
                     "test",
@@ -836,12 +891,10 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--lib",
                     "emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
                     "--",
-                    "--ignored",
                     "--exact",
                 ),
                 test_receipt=test_receipt(
-                    ("emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",),
-                    TestOutcome.FAILED,
+                    ("emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",)
                 ),
             ),
             _fixture(
@@ -849,11 +902,10 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 1214,
                 Polarity.POSITIVE,
                 Detector.SOURCE_CONTRACT,
-                xfail(1214, Detector.SOURCE_CONTRACT),
+                MustPass(),
                 Action.COMMAND,
                 backend=Backend.HIP,
                 platform=Platform.ANY,
-                green_by=3,
                 command=(
                     "cargo",
                     "test",
@@ -862,14 +914,12 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--lib",
                     "emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
                     "--",
-                    "--ignored",
                     "--exact",
                 ),
                 test_receipt=test_receipt(
                     (
                         "emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
-                    ),
-                    TestOutcome.FAILED,
+                    )
                 ),
             ),
             _fixture(
@@ -902,11 +952,10 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 1214,
                 Polarity.POSITIVE,
                 Detector.NONZERO_EXIT,
-                xfail(1214, Detector.NONZERO_EXIT),
+                MustPass(),
                 Action.HIP_HARDWARE,
                 backend=Backend.HIP,
                 platform=Platform.HIP_HARDWARE,
-                green_by=3,
                 command=(
                     "{python}",
                     "scripts/hip_test.py",
@@ -921,6 +970,31 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 ),
                 test_receipt=test_receipt(
                     ("compiled_value_ownership_caller_bytes_unchanged",)
+                ),
+            ),
+            _fixture(
+                "hip-program-owned-reuse-hardware",
+                1214,
+                Polarity.POSITIVE,
+                Detector.NONZERO_EXIT,
+                MustPass(),
+                Action.HIP_HARDWARE,
+                backend=Backend.HIP,
+                platform=Platform.HIP_HARDWARE,
+                command=(
+                    "{python}",
+                    "scripts/hip_test.py",
+                    "-p",
+                    "chelis-backend-hip",
+                    "--test",
+                    "gpu_correctness",
+                    "compiled_value_ownership_program_owned_reuse",
+                    "--",
+                    "--ignored",
+                    "--test-threads=1",
+                ),
+                test_receipt=test_receipt(
+                    ("compiled_value_ownership_program_owned_reuse",)
                 ),
             ),
         ]
@@ -1191,11 +1265,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             )
         )
 
-    receipts = {
-        "recursive-depth-32": ledger_receipt(peak_live_bytes=4720),
-        "recursive-depth-128": ledger_receipt(peak_live_bytes=18544),
-        "recursive-depth-288": ledger_receipt(peak_live_bytes=41584),
-    }
+    receipts: dict[str, LedgerReceipt] = {}
     outputs = {
         "aggregate-tensor-list": "make = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]\nout = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]",
         "aggregate-tensor-tuple": "make = [(tensor(shape=[2], data=[1.0, 2.0]), 1), (tensor(shape=[2], data=[3.0, 4.0]), 2)]\nout = [(tensor(shape=[2], data=[1.0, 2.0]), 1), (tensor(shape=[2], data=[3.0, 4.0]), 2)]",
@@ -1307,6 +1377,133 @@ def validate_active_mutation_contracts(phase: str) -> None:
         raise OracleFailure(
             "backend-local-ownership-predicate-restored: "
             f"verified C host ownership action path is incomplete {missing!r}"
+        )
+    if phase not in {"3", "4", "complete"}:
+        return
+
+    storage_source = (
+        REPO_ROOT / "crates/chelis-ir/src/ownership/storage.rs"
+    ).read_text()
+    storage_requirements = (
+        "pub struct VerifiedStoragePlan<L: StorageLane> {\n    program: VerifiedDagProgram,",
+        "pub struct ReusableOwnedStorage {\n    source: NodeId,\n    storage: StorageId,\n    consumer: NodeId,\n}",
+        "        if !self.one_live_program_owner {",
+        "        if !self.unique_descriptor_and_storage {",
+        "        if self.provenance != StorageProvenance::RuntimeOwned || !self.writable {",
+        "        if !self.no_live_view_or_borrow {",
+        "        if self.exact.is_none() {",
+        "        if !self.terminal_use {",
+        ".capacity\n                    .proves_equal(&consumer_requirement.capacity)",
+        "&& exact_shape_equal(dag, source, consumer.id)?",
+        "matches!(consumer.op, RiscOp::FusedElem { .. })",
+        "let token = self.reusable.remove(&consumer);",
+        "pub fn plan_c_storage(\n    program: VerifiedDagProgram,",
+        "pub fn plan_hip_storage(\n    program: VerifiedDagProgram,",
+        "let live = intervals",
+        ".collect::<BTreeSet<_>>();",
+        "slots[slot.index].capacity.allocation_bytes",
+    )
+    missing_storage = tuple(
+        requirement
+        for requirement in storage_requirements
+        if requirement not in storage_source
+    )
+    if missing_storage:
+        raise OracleFailure(
+            "shared storage proof drift: exact-capacity, six-condition, linear-token, "
+            f"or physical-byte authority is incomplete {missing_storage!r}"
+        )
+    token_prefix = storage_source.split("pub struct ReusableOwnedStorage {", 1)[0]
+    token_derive = token_prefix.rsplit("#[derive(", 1)[-1].split(")]", 1)[0]
+    if "Clone" in token_derive or "Copy" in token_derive:
+        raise OracleFailure(
+            "shared storage proof drift: ReusableOwnedStorage became duplicable"
+        )
+
+    c_memory = (REPO_ROOT / "crates/chelis-backend-c/src/memory.rs").read_text()
+    hip_memory = (REPO_ROOT / "crates/chelis-backend-hip/src/memory.rs").read_text()
+    c_emit = (REPO_ROOT / "crates/chelis-backend-c/src/emit.rs").read_text()
+    hip_emit = (REPO_ROOT / "crates/chelis-backend-hip/src/emit.rs").read_text()
+    hip_fusion = (REPO_ROOT / "crates/chelis-backend-hip/src/fusion.rs").read_text()
+    forbidden_local_authority = (
+        "DimExprKey",
+        "capacity_fits",
+        "logical_elements",
+        "fused_in_place_spec",
+        "binder_equivalent_tensor_type",
+        "borrows_caller_storage",
+    )
+    restored = tuple(
+        name
+        for name in forbidden_local_authority
+        if any(name in source for source in (c_memory, hip_memory, c_emit, hip_emit, hip_fusion))
+    )
+    if restored:
+        raise OracleFailure(
+            "backend-local capacity authority restored: "
+            f"C or HIP contains forbidden eligibility mechanisms {restored!r}"
+        )
+
+    c_lib = (REPO_ROOT / "crates/chelis-backend-c/src/lib.rs").read_text()
+    hip_lib = (REPO_ROOT / "crates/chelis-backend-hip/src/lib.rs").read_text()
+    backend_requirements = (
+        (c_lib, "pub fn codegen(\n    dag: chelis_ir::ownership::VerifiedDagProgram,"),
+        (c_lib, "pub fn codegen_with_options(\n    dag: chelis_ir::ownership::VerifiedDagProgram,"),
+        (c_emit, "let mut plan = plan_c_storage(dag)"),
+        (c_emit, "token: ReusableOwnedStorage"),
+        (hip_lib, "pub fn codegen_hip(\n    dag: chelis_ir::ownership::VerifiedDagProgram,"),
+        (hip_lib, "plan_hip_storage(dag)"),
+        (hip_fusion, "token: ReusableOwnedStorage"),
+    )
+    missing_backend = tuple(
+        requirement
+        for source, requirement in backend_requirements
+        if requirement not in source
+    )
+    if missing_backend:
+        raise OracleFailure(
+            "shared storage proof drift: C or HIP no longer consumes one owned "
+            f"verified plan and token {missing_backend!r}"
+        )
+
+    metal_source = (REPO_ROOT / "crates/chelis-backend-metal/src/lib.rs").read_text()
+    metal_requirements = (
+        "pub struct MetalNeverReuse {\n    program: VerifiedDagProgram,",
+        "pub fn plan_metal(program: VerifiedDagProgram) -> MetalNeverReuse",
+        "pub fn codegen_metal(\n    plan: MetalNeverReuse,",
+    )
+    if "ReusableOwnedStorage" in metal_source or any(
+        requirement not in metal_source for requirement in metal_requirements
+    ):
+        raise OracleFailure(
+            "Metal no-reuse boundary drift: the owning plan became reuse-capable or borrowable"
+        )
+
+    runtime_source = (REPO_ROOT / "crates/chelis-runtime/src/lib.rs").read_text()
+    runtime_header = (
+        REPO_ROOT / "crates/chelis-runtime/include/chelis_runtime.h"
+    ).read_text()
+    runtime_requirements = (
+        "pub unsafe extern \"C\" fn chelis_tensor_repurpose(",
+        "    rank: chelis_scalar,",
+        "    shape: *const chelis_scalar,",
+        "exact_i64_scalar(rank, \"chelis_tensor_repurpose rank\")",
+        "tensor_ref.header.strong.load(Ordering::Relaxed) != 1",
+        "storage.header.strong.load(Ordering::Relaxed) != 1",
+        "storage.provenance != TensorStorageProvenance::RuntimeOwned",
+        "    if metadata.required_bytes != storage.byte_capacity {",
+    )
+    tagged_repurpose_signature = (
+        "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, "
+        "const chelis_scalar *shape);"
+    )
+    if (
+        any(requirement not in runtime_source for requirement in runtime_requirements)
+        or tagged_repurpose_signature not in runtime_header
+    ):
+        raise OracleFailure(
+            "runtime repurpose defense drift: exact capacity, descriptor/storage "
+            "uniqueness, or runtime provenance check is missing"
         )
 
 

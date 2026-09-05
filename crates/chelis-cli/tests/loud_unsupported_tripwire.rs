@@ -400,12 +400,6 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::UnwrapOrDefault,
-        "crates/chelis-backend-c/src/memory.rs",
-        1,
-        "pre-existing at the P0 baseline; not censused as substituting",
-    ),
-    (
-        Pat::UnwrapOrDefault,
         "crates/chelis-backend-c/src/lib.rs",
         1,
         "pre-existing at the P0 baseline; not censused as substituting",
@@ -419,12 +413,6 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-backend-hip/src/emit.rs",
-        1,
-        "pre-existing at the P0 baseline; not censused as substituting",
-    ),
-    (
-        Pat::UnwrapOrDefault,
-        "crates/chelis-backend-hip/src/memory.rs",
         1,
         "pre-existing at the P0 baseline; not censused as substituting",
     ),
