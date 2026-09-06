@@ -394,6 +394,11 @@ pub(super) fn infer_program_with_product_in_session(
                 env.active_declared_type_names(),
                 errors,
             );
+            // chelis#1489: decide this def's deferred operands against the
+            // final substitution (see `validate_deferred_tensor_operands`).
+            // One pass, per def — an earlier revision had a second,
+            // whole-program phase that three library lanes never reached.
+            validate_deferred_tensor_operands(&mut subst, env.active_declared_type_names(), errors);
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
@@ -1460,6 +1465,12 @@ pub(super) fn infer_ir_program_with_state(
             validate_deferred_borrow_vars(
                 &state.subst,
                 &state.adt_reg,
+                state.env.active_declared_type_names(),
+                errors,
+            );
+            // chelis#1489: see `validate_deferred_tensor_operands`.
+            validate_deferred_tensor_operands(
+                &mut state.subst,
                 state.env.active_declared_type_names(),
                 errors,
             );
