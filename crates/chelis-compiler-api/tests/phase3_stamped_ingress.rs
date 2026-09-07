@@ -659,6 +659,24 @@ fn authoring_doors_still_reject_an_unknown_tag_below_a_declaration() {
         "{}",
         error.errors[0].message
     );
+    // chelis#1395 / [04-FIT-17]: `require_valid_deep` is the THIRD fabrication
+    // site, and the one chelis#1395's body never names. `ValidationWarning`
+    // carries an offset and no end, so the location must travel as a point.
+    //
+    // `assert_deep_ingress_rejection` above only asserts `span.is_some()`,
+    // which a fabricated `Range { len: 0 }` satisfies -- so reverting this site
+    // to the exact defect the change exists to remove left the whole suite
+    // green. The other two sites got named permanent tests; this pins the one
+    // that did not.
+    assert_eq!(
+        error.errors[0].span,
+        // 45 is the `(` opening `(future-form ...)`, the offending node --
+        // not the enclosing `(def` at 30.
+        Some(DiagnosticSpan::Point { offset: 45 }),
+        "a validation warning holds a coordinate and no end, so it must not \
+         publish an extent: {:?}",
+        error.errors[0].span
+    );
 }
 
 // ── Non-module fields carry their own roles ──────────────────────────
