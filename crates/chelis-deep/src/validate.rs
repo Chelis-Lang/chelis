@@ -110,6 +110,25 @@ pub enum WarningKind {
     Arity,
 }
 
+impl WarningKind {
+    /// The governed wire spelling for this kind (chelis#886).
+    ///
+    /// A published identity a consumer matches on, not a rendering of the Rust
+    /// identifier. `check_snippet` used `{:?}` here, which made the wire a
+    /// function of the variant's name: a rename moved it with nothing
+    /// objecting, which is the hazard chelis#886 exists to remove.
+    /// `every_warning_kind_projects_to_its_pinned_spelling` restates all four
+    /// spellings independently, so a rename fails by name instead.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::UnknownTag => "UnknownTag",
+            Self::MissingMetadata => "MissingMetadata",
+            Self::Structural => "Structural",
+            Self::Arity => "Arity",
+        }
+    }
+}
+
 pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
     for expr in exprs {
