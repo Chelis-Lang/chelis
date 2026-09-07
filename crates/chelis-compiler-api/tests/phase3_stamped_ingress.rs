@@ -22,8 +22,9 @@
 use chelis_compiler_api::compiler::{self, CompilerError};
 use chelis_compiler_api::schema::{
     AddFunctionRequest, AddPropertyRequest, ChangeSignatureRequest, CheckRequest, DecompileRequest,
-    DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest, ParseRequest, RenameRequest,
-    ReplaceFunctionBodyRequest, ReplaceFunctionRequest, SourceKind, ValidateMode, ValidateRequest,
+    DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest, DiagnosticSpan, ParseRequest,
+    RenameRequest, ReplaceFunctionBodyRequest, ReplaceFunctionRequest, SourceKind, ValidateMode,
+    ValidateRequest,
 };
 
 /// A well-formed module every door accepts at ingress. It carries the
@@ -581,9 +582,28 @@ fn a_stamp_rejection_points_at_the_offending_form_not_the_whole_input() {
 
     let span = error.errors[0].span.expect("stamp rejections carry a span");
     assert_eq!(
-        span.offset, expected,
+        span.offset(),
+        expected,
         "span must address the bare name: {}",
         error.errors[0].message
+    );
+    // The VARIANT, not just the offset (chelis#1395). The stamp half is the
+    // one producer here that genuinely measured an extent, so it must report
+    // `Range`. Asserting only `offset()` cannot tell a measured range from a
+    // bare coordinate, which let the two be swapped silently.
+    assert_eq!(
+        span,
+        DiagnosticSpan::Range {
+            offset: expected,
+            len: "unwrapped_name".len(),
+        },
+        "a measured stamp rejection reports a range covering the form: {}",
+        error.errors[0].message
+    );
+    assert_eq!(
+        span.extent(),
+        Some("unwrapped_name".len()),
+        "the extent is the one the stamp measured, not an invented width"
     );
     assert!(
         error.errors[0].message.contains("bare name"),
@@ -638,6 +658,24 @@ fn authoring_doors_still_reject_an_unknown_tag_below_a_declaration() {
         error.errors[0].message.contains("unknown tag"),
         "{}",
         error.errors[0].message
+    );
+    // chelis#1395 / [04-FIT-17]: `require_valid_deep` is the THIRD fabrication
+    // site, and the one chelis#1395's body never names. `ValidationWarning`
+    // carries an offset and no end, so the location must travel as a point.
+    //
+    // `assert_deep_ingress_rejection` above only asserts `span.is_some()`,
+    // which a fabricated `Range { len: 0 }` satisfies -- so reverting this site
+    // to the exact defect the change exists to remove left the whole suite
+    // green. The other two sites got named permanent tests; this pins the one
+    // that did not.
+    assert_eq!(
+        error.errors[0].span,
+        // 45 is the `(` opening `(future-form ...)`, the offending node --
+        // not the enclosing `(def` at 30.
+        Some(DiagnosticSpan::Point { offset: 45 }),
+        "a validation warning holds a coordinate and no end, so it must not \
+         publish an extent: {:?}",
+        error.errors[0].span
     );
 }
 

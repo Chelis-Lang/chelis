@@ -2300,8 +2300,6 @@ Each element of `errors` carries:
 > shape choice this atom does not decide; independent optionality is the
 > requirement.
 
-(A coordinate does not yet travel without an identity; chelis#1395 owns that
-gap.)
 
 > **[04-FIT-17]** The serializer SHALL NOT fabricate an extent it did not
 > measure. Where a producer supplied only a point, or only an opaque
@@ -2332,7 +2330,7 @@ Illustrative of the shape only; the atoms above are normative.
       "expected": "tensor[batch, hidden, f32]",
       "got": "tensor[batch, hidden, bf16]",
       "suggestions": ["Insert explicit cast"],
-      "span": {"offset": 786, "len": 20},
+      "span": {"span": "range", "offset": 786, "len": 20},
       "span_id": "surf:786..806"
     }
   ],

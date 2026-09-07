@@ -185,7 +185,7 @@ pub struct Diagnostic {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub span: Option<Span>,
+    pub span: Option<DiagnosticSpan>,
     /// Forward-compatible Deep-address slot for the L2 authoring loop. The
     /// fragment body-replacement check (`chelis_replace_function_body`) will
     /// populate this with the Deep path of the offending node so a caller can
@@ -303,38 +303,29 @@ impl Diagnostic {
 /// `<source>:<start>..<end>` rendering is the only place a real end offset
 /// exists, so the range is DERIVED from it and omitted when it cannot be.
 ///
-/// Where the identity IS present, omitting the range loses nothing: the
-/// identity carries the coordinate. Where it is absent, this drops a
-/// coordinate the producer held and the previous hand-assembled document
-/// published as `span_offset` -- 17 of 219 diagnostics across the repo
-/// corpus. That is a real regression against [04-FIT-16], which requires a
-/// coordinate to travel without an identity. It cannot be repaired here:
-/// `Span`'s two fields are non-optional, and making the extent optional adds
-/// a successor row the §C6 census cannot disposition. chelis#1395 owns it.
-fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<Span> {
-    let offset = error.span_offset?;
-    let (start, end) = error
-        .span_id
-        .as_deref()
-        .and_then(|id| {
-            id.rsplit_once(':')
-                .map(|(_, range)| range)
-                .unwrap_or(id)
-                .split_once("..")
-        })
-        .and_then(|(start, end)| {
-            Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
-        })?;
-    // `end <= start`, not `end < start`: [04-FIT-17] rules out a zero-width
-    // range as well as an inverted one. A degenerate `start..start` identity
-    // is a coordinate the producer never measured an extent for, and a
-    // consumer cannot tell an emitted `len: 0` from a measured empty range.
-    if start != offset || end <= start {
-        return None;
-    }
-    Some(Span {
-        offset,
-        len: end - start,
+/// The coordinate travels as `DiagnosticSpan::Point` whether or not an
+/// identity accompanies it (chelis#1395). The carrier's variant tag records
+/// whether an extent was measured, so [04-FIT-16]'s requirement that a
+/// coordinate travel without an identity is met without weakening
+/// [04-FIT-17]'s prohibition on inventing one: `Point` has no `len` field.
+fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<DiagnosticSpan> {
+    // Always a point. `CheckError` carries `span_offset` and an opaque
+    // `span_id`, and no measured extent -- so there is nothing here to build a
+    // `Range` from.
+    //
+    // This previously recovered a length by parsing `N..M` out of `span_id`.
+    // That is not provenance: `spec/03-deep-syntax.md` §1.1.1 makes external
+    // span IDs opaque and their interpretation none of Chelis's concern, so a
+    // foreign `octant:30..34` is a valid opaque identity that the parse turned
+    // into a measured `Range { offset: 30, len: 4 }` nobody measured. A
+    // numeric-looking identity is still an identity; spelling is not
+    // provenance, and [04-FIT-17] forbids inventing an extent.
+    //
+    // A `Range` from this producer therefore waits on a typed field that
+    // carries an extent Chelis itself measured. The stamp ingress path in
+    // `compiler.rs` already has one and still reports `Range`.
+    Some(DiagnosticSpan::Point {
+        offset: error.span_offset?,
     })
 }
 
@@ -397,7 +388,7 @@ pub struct WireDiagnostic {
     pub got: Option<String>,
     #[serde(default)]
     pub suggestions: Vec<String>,
-    pub span: Option<Span>,
+    pub span: Option<DiagnosticSpan>,
     pub deep_path: Option<WireDeepErrorPath>,
     #[serde(default)]
     pub span_id: Option<String>,
@@ -585,7 +576,7 @@ pub(crate) fn stage_error_with_span(
     stage: &str,
     message: impl Into<String>,
     kind: GeneralKind,
-    span: Option<Span>,
+    span: Option<DiagnosticSpan>,
 ) -> crate::compiler::CompilerError {
     let mut diagnostic = Diagnostic::general(kind, message, 1.0);
     diagnostic.span = span;
@@ -621,6 +612,50 @@ pub struct WireDeepErrorPath {
 pub struct Span {
     pub offset: usize,
     pub len: usize,
+}
+
+/// A diagnostic's reported source location (chelis#1395).
+///
+/// Deliberately NOT `Span`. An AST node's span is structurally a range --
+/// `WireParam`, `WireVariant`, `WireMatchArm` and `WireTypeInvariant` all
+/// require one -- whereas a diagnostic's producer may hold only a coordinate.
+/// Reusing `Span` there forces a choice between fabricating an extent, which
+/// [04-FIT-17] forbids, and dropping the coordinate, which [04-FIT-16]
+/// forbids.
+///
+/// The variant tag carries which of the two the producer measured, so the
+/// prohibition is structural rather than a rule to remember: `Point` has no
+/// `len` field to invent. This is the same carrier shape as `WireRtDim`,
+/// whose `InputAxis.tensor` slot index is the wire census's registered
+/// tagged transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "span", rename_all = "snake_case")]
+pub enum DiagnosticSpan {
+    /// The producer measured a range.
+    Range { offset: usize, len: usize },
+    /// The producer held a coordinate and no extent.
+    Point { offset: usize },
+}
+
+impl DiagnosticSpan {
+    /// The byte offset, which both variants carry.
+    pub fn offset(self) -> usize {
+        match self {
+            Self::Range { offset, .. } | Self::Point { offset } => offset,
+        }
+    }
+
+    /// The measured extent, absent when the producer held only a coordinate.
+    ///
+    /// Named for [04-FIT-17]'s word rather than `len`: this is not a
+    /// collection length, and calling it one invites `is_empty`, which would
+    /// be meaningless for a source coordinate.
+    pub fn extent(self) -> Option<usize> {
+        match self {
+            Self::Range { len, .. } => Some(len),
+            Self::Point { .. } => None,
+        }
+    }
 }
 
 /// Execution-payload wire version (chelis#729 Phase 1, the section C3
@@ -3479,7 +3514,7 @@ mod tests {
 
 #[cfg(test)]
 mod diagnostic_projection_contract {
-    use super::{Diagnostic, check_error_kind, effect_error_kind};
+    use super::{Diagnostic, DiagnosticSpan, check_error_kind, effect_error_kind};
     use chelis_effects::EffectErrorKind as E;
     use chelis_types::errors::{CheckError, CheckErrorKind as K};
 
@@ -3623,47 +3658,131 @@ mod diagnostic_projection_contract {
         }
     }
 
-    /// spec/04 [04-FIT-17]: a producer holding only a point or an opaque
-    /// identity gets neither an invented length nor a `0..0` range.
+    /// chelis#1395: a producer that held a coordinate and no extent reports
+    /// it, rather than losing it for want of a length.
+    ///
+    /// Before the tagged carrier this returned `None`, dropping a coordinate
+    /// the previous hand-assembled document published as `span_offset` --
+    /// 17 of 219 diagnostics, per the corpus measurement recorded on
+    /// chelis#1395 — cited rather than restated so a reader can check it.
     #[test]
-    fn a_span_is_emitted_only_when_its_range_is_derivable() {
-        let derived = Diagnostic::from_check_error(&check_error(
-            K::UnboundVariable {
-                identifier: "x".to_string(),
-            },
-            Some(30),
-            Some("surf:30..34"),
-        ));
-        assert_eq!(
-            derived.span.map(|span| (span.offset, span.len)),
-            Some((30, 4))
-        );
+    fn a_coordinate_without_an_identity_travels_as_a_point() {
+        let derived = Diagnostic::from_check_error(&check_error(K::Other, Some(30), None));
+        assert_eq!(derived.span, Some(DiagnosticSpan::Point { offset: 30 }));
+        assert_eq!(derived.span.map(|span| span.extent()), Some(None));
+    }
 
-        // [04-FIT-17]: a degenerate `start..start` identity is a coordinate,
-        // not a measured empty range. Absent from the natural corpus, so it
-        // needs an explicit case or the guard regresses unnoticed.
+    /// [04-FIT-17]: a degenerate `start..start` identity is a coordinate the
+    /// producer never measured an extent for, not a measured empty range.
+    /// The distinction is the whole point of the atom -- a consumer cannot
+    /// tell an invented `len: 0` from a real one.
+    #[test]
+    fn a_degenerate_identity_is_a_point_not_a_zero_width_range() {
+        let derived =
+            Diagnostic::from_check_error(&check_error(K::Other, Some(77), Some("surf:77..77")));
+        assert_eq!(derived.span, Some(DiagnosticSpan::Point { offset: 77 }));
+    }
+
+    /// The carrier makes the prohibition structural: `Point` has no `len`
+    /// field, so a fabricated extent is unrepresentable rather than merely
+    /// forbidden. This pins the property that motivates the shape.
+    #[test]
+    fn a_point_cannot_carry_an_extent() {
+        assert_eq!(DiagnosticSpan::Point { offset: 5 }.extent(), None);
+        assert_eq!(
+            DiagnosticSpan::Range { offset: 5, len: 2 }.extent(),
+            Some(2)
+        );
+        assert_eq!(DiagnosticSpan::Point { offset: 5 }.offset(), 5);
+        assert_eq!(DiagnosticSpan::Range { offset: 5, len: 2 }.offset(), 5);
+    }
+
+    /// The variant tag is what earns the census's tagged-transport class, so
+    /// it is part of the wire contract rather than a serde detail.
+    #[test]
+    fn both_variants_carry_their_tag_on_the_wire() {
+        let point =
+            serde_json::to_string(&DiagnosticSpan::Point { offset: 30 }).expect("point serializes");
+        assert_eq!(point, r#"{"span":"point","offset":30}"#);
+        let range = serde_json::to_string(&DiagnosticSpan::Range { offset: 30, len: 4 })
+            .expect("range serializes");
+        assert_eq!(range, r#"{"span":"range","offset":30,"len":4}"#);
+    }
+
+    /// spec/04 [04-FIT-17] and `spec/03-deep-syntax.md` §1.1.1: a check
+    /// diagnostic reports the coordinate it holds and never derives an extent
+    /// from the identity beside it.
+    ///
+    /// `CheckError` carries `span_offset` and an opaque `span_id`, and no
+    /// measured length. An earlier revision recovered one by parsing `N..M`
+    /// out of the identity, which invents an extent for any identity that
+    /// happens to be spelled that way -- including a foreign one, since §1.1.1
+    /// makes external span IDs opaque and their interpretation none of
+    /// Chelis's concern.
+    #[test]
+    fn a_check_diagnostic_reports_a_coordinate_never_a_derived_range() {
+        // A producer with no location at all still reports nothing. `Point`
+        // exists for a coordinate the producer HELD, never for one it lacked.
         assert!(
-            Diagnostic::from_check_error(&check_error(K::Other, Some(77), Some("surf:77..77")))
+            Diagnostic::from_check_error(&check_error(K::Other, None, None))
                 .span
                 .is_none(),
-            "a zero-width identity must not become a zero-width range"
+            "no location at all must stay absent"
         );
 
         for (label, error) in [
-            ("no location at all", check_error(K::Other, None, None)),
-            ("a point with no id", check_error(K::Other, Some(30), None)),
+            ("no identity at all", check_error(K::Other, Some(30), None)),
             (
-                "an opaque id carrying no range",
+                "an opaque identity carrying no range",
                 check_error(K::Other, Some(30), Some("octant:theorem-7")),
             ),
+            // The identity is Chelis's own spelling and still yields no
+            // extent: reading one back out of a string is not a typed
+            // producer path, so `surf:` earns no more trust here than
+            // `octant:` does.
             (
-                "an id whose range contradicts the offset",
+                "a range-shaped identity with Chelis's own prefix",
+                check_error(
+                    K::UnboundVariable {
+                        identifier: "x".to_string(),
+                    },
+                    Some(30),
+                    Some("surf:30..34"),
+                ),
+            ),
+            // The adversarial case: an EXTERNAL identity that merely looks
+            // like a range. Spelling is not provenance, and a consumer must
+            // not receive `len: 4` that no producer measured.
+            (
+                "a range-shaped identity from a foreign producer",
+                check_error(K::Other, Some(30), Some("octant:30..34")),
+            ),
+            // A degenerate identity is a coordinate, not a measured empty
+            // range; a consumer cannot tell an invented `len: 0` from a real
+            // one.
+            (
+                "a degenerate range-shaped identity",
+                check_error(K::Other, Some(30), Some("surf:30..30")),
+            ),
+            // The identity's range disagrees with the producer's own offset.
+            // `span_offset` is the first-class coordinate; the identity still
+            // travels in `span_id`, so a consumer can see the disagreement
+            // rather than having it hidden.
+            (
+                "an identity whose range contradicts the offset",
                 check_error(K::Other, Some(30), Some("surf:99..104")),
             ),
         ] {
-            assert!(
-                Diagnostic::from_check_error(&error).span.is_none(),
-                "{label} must not synthesize a range"
+            let span = Diagnostic::from_check_error(&error).span;
+            assert_eq!(
+                span,
+                Some(DiagnosticSpan::Point { offset: 30 }),
+                "{label} must report the coordinate and no range"
+            );
+            assert_eq!(
+                span.map(|span| span.extent()),
+                Some(None),
+                "{label} must carry no extent"
             );
         }
     }
@@ -3678,6 +3797,9 @@ mod diagnostic_projection_contract {
             Some("octant:theorem-7"),
         ));
         assert_eq!(projected.span_id.as_deref(), Some("octant:theorem-7"));
-        assert!(projected.span.is_none());
+        // Both travel: [04-FIT-16] requires the coordinate and the identity
+        // to be independently carryable, so an opaque identity that yields no
+        // range does not suppress the coordinate beside it.
+        assert_eq!(projected.span, Some(DiagnosticSpan::Point { offset: 30 }));
     }
 }
