@@ -12,18 +12,27 @@ use serde::Serialize;
 /// document body -- which is the defect chelis#886 names, surviving in a
 /// second producer after #1384 converted the CLI's.
 ///
-/// Field order here IS the wire order, and NOTHING PINS THAT: no test in the
-/// repo executes this binary's output, so a field reorder changes the wire
-/// silently. The sibling `bench_phase1e` in this crate is output-tested via
-/// `Command::cargo_bin`; this one is not.
+/// Field order here IS the wire order. `tests/check_snippet_wire.rs` pins it
+/// to exact bytes, because until it existed a field reorder or a renamed
+/// `kind` changed the wire while every suite in the workspace stayed green,
+/// and `py/src/chelis_tools/skill_eval.py` -- the only consumer -- broke. A
+/// renamed `fitness` is the quiet one: the consumer reads it with a default,
+/// so it does not raise, it just flips every verdict to fail.
 ///
 /// The document is JSON-VALUE-identical to the hand-written version, not
-/// byte-identical. Two spellings changed:
+/// byte-identical. Three spellings differ, two of them reachable:
 ///
 ///   * `fitness` gained its integral fraction (`1` -> `1.0`). The old success
 ///     path used Rust `Display` while the parse-error path pushed a hardcoded
 ///     `0.0`, so one field was spelled two ways depending on which branch
 ///     produced it. It is now uniform.
+///   * Non-finite `fitness`. `format!` printed `NaN`/`inf`; serde prints
+///     `null`, which the consumer's `>= 0.9` turns from a `False` into a
+///     `TypeError`. UNREACHABLE today -- every fitness division is guarded
+///     (`total.max(1)`, and an explicit zero-node branch) so the value cannot
+///     be non-finite. Listed because the Unicode domain below was enumerated
+///     and this one was not, and an unenumerated domain is how the first two
+///     divergences went unnoticed.
 ///   * Control-character escaping. `json_escape` escaped every
 ///     `char::is_control()` codepoint as `\uXXXX`; serde escapes only
 ///     `0x00-0x1F`, with named short forms. Exactly 35 codepoints differ,

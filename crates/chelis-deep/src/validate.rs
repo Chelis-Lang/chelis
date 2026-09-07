@@ -113,12 +113,20 @@ pub enum WarningKind {
 impl WarningKind {
     /// The governed wire spelling for this kind (chelis#886).
     ///
-    /// A published identity a consumer matches on, not a rendering of the Rust
+    /// A wire spelling a consumer matches on, not a rendering of the Rust
     /// identifier. `check_snippet` used `{:?}` here, which made the wire a
     /// function of the variant's name: a rename moved it with nothing
     /// objecting, which is the hazard chelis#886 exists to remove.
     /// `every_warning_kind_projects_to_its_pinned_spelling` restates all four
     /// spellings independently, so a rename fails by name instead.
+    ///
+    /// "Published" would overstate it: nothing normative governs these four
+    /// strings -- they appear nowhere in `spec/` or `openspec/specs`, and the
+    /// repo's structural mechanism for exactly this concern
+    /// (`chelis-vocab::DiagnosticKind`, `[05-UNS-6]`, and the diagnostic-kind
+    /// mutation oracle) does not cover `WarningKind`. Routing it there is the
+    /// real fix and is a separate change; this table plus its test is the
+    /// local one.
     pub fn wire_name(&self) -> &'static str {
         match self {
             Self::UnknownTag => "UnknownTag",
