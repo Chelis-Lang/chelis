@@ -242,6 +242,64 @@ pub enum BypassExpectation {
     FormExpecting,
 }
 
+/// The content shape a form's semantics reads out of one child slot.
+///
+/// `spec/04-type-system.md` §10 [04-TOT-4] requires a form that reads a child
+/// through a partial extraction to name, on failure, "the form and the shape it
+/// expected". This enum is that vocabulary: a closed set of shapes with one
+/// spelling each, so no consumer composes the phrase itself and no two
+/// diagnostics describe the same expectation differently. `Display` renders the
+/// shape as a noun phrase, which the consumer places after "expected".
+///
+/// It is separate from [`BypassExpectation`], which classifies what the STAMP
+/// pass requires of a bypass child. This one classifies what a form's checker
+/// disposition reads, which is why it names families of value rather than
+/// vocabulary heads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SlotShape {
+    /// A symbol naming a declared record field (`access`, `kv`).
+    FieldName,
+    /// A symbol naming a constructor (`pat-ctor`, `pat-record`).
+    ConstructorName,
+    /// A symbol naming a value binding (`pat-var`, `pat-as`).
+    BindingName,
+    /// A symbol naming a named operation mode (`cast`).
+    ModeSelector,
+    /// An integer axis (`vmap`).
+    IntegerAxis,
+    /// A non-negative integer projection index (`tuple-get`).
+    TupleIndex,
+    /// An integer parameter index, or a tuple of them (`grad`'s `wrt`).
+    ParameterIndices,
+    /// A scalar literal value (`pat-lit`). spec/03-deep-syntax.md section 6.3
+    /// fixes this as a value rather than an expression node: "patterns do not
+    /// contain expression nodes".
+    LiteralValue,
+    /// The value paired with a field name in a `kv`. Not a selector read: it
+    /// is here so a `kv` whose second child is missing entirely is reported in
+    /// the same voice as one whose key cannot be read.
+    FieldValue,
+}
+
+impl core::fmt::Display for SlotShape {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let text = match self {
+            SlotShape::FieldName => "a symbol field name",
+            SlotShape::ConstructorName => "a symbol constructor name",
+            SlotShape::BindingName => "a symbol binding name",
+            SlotShape::ModeSelector => "a symbol mode selector",
+            SlotShape::IntegerAxis => "an integer axis",
+            SlotShape::TupleIndex => "a non-negative integer index",
+            SlotShape::ParameterIndices => {
+                "an integer parameter index or a tuple of integer parameter indices"
+            }
+            SlotShape::LiteralValue => "a scalar literal value",
+            SlotShape::FieldValue => "a value expression",
+        };
+        f.write_str(text)
+    }
+}
+
 /// Exhaustive child-role table for the closed Deep vocabulary.
 ///
 /// Total over `DeepTag` — no wildcard arm.

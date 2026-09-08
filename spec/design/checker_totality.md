@@ -2677,6 +2677,24 @@ child, so each pair isolates the extraction failure rather than the form.
 | R5 control | same | `f`, the declared field name | clean pass |
 | R5 control | same | `nosuchfield` | loud: `unknown record field 'nosuchfield' in construction of R` |
 
+The implementation pass re-ran this table on `3b701e54b` and found four further
+live instances of the same class, in the same four inference functions, that
+the probe pass above missed; they are recorded here rather than left to the
+reader to rediscover.
+
+| # | form and slot | probe child | verdict |
+|---|---|---|---|
+| S1 | `pat-var` name, `child_stamp_role(PatVar, 0) = Binder` | `(var {} zz)` | loud, but misattributed: `internal: ... missing authoritative type stamp for pattern binding `pat-var`` |
+| S2 | `pat-as` name, same role | `(var {} zz)` | loud, misattributed the same way, naming `pat-as` |
+| S3 | `kv` key inside a `pat-record`, `child_stamp_role(Kv, 0) = Selector` | `(var {} zz)` | **vacuous**, score 1.0 |
+| S4 | `kv` key in `record-update`, same slot | `(var {} zz)` | loud, misattributed exactly as R5 |
+
+S3 is the third `kv` key read in the checker, beside `infer_record`'s (R5) and
+`infer_record_update`'s (S4); it defaulted to a fresh type variable rather than
+skipping, which is why it is fully silent where the other two are misattributed.
+S1 and S2 sit in `Binder` slots, so they are named instances and not a
+statement about that role, which stays unenumerated below.
+
 The comparison rows matter more than the vacuous ones, and the `Selector`
 role is small enough to enumerate exhaustively. `child_stamp_role` is total
 over `DeepTag`, and six of its match arms yield `Selector` at some child
@@ -2835,6 +2853,19 @@ spelling of the read. So the structural fix belongs at the read:
    `MalformedForm` naming the form and the shape. The three defect
    spellings named above do not survive it: there is no `Option` at the
    call site to default, skip, or `continue` past.
+
+   *Implementation note.* The seam owns the decision and the guarantee; the
+   caller owns only detail. It returns a `Result` whose error arm is an
+   `ErrorWitness`, which only `report_witness` can mint, so no caller can
+   produce a value from the unreadable branch without visibly laundering a
+   witness of a diagnostic that has already been pushed. It takes the parent
+   `DeepTag` and a `SlotShape` -- an enum with a `Display`, not free text --
+   so the message always names both and the kind is always `MalformedForm`; a
+   caller may append a richer description of what it found, as `tuple-get`
+   does, but cannot omit the push, drop either name, or change the kind. This
+   is why the migration in Slice 2 changes the four already-rejecting slots'
+   diagnostic text and kind rather than preserving them: a seam that let each
+   caller supply its own message would guarantee nothing.
 2. **Absence and unreadability become different types at the seam.** The
    `vmap(f)` default axis is legitimate and stays; it is expressed as
    `kids.get(1)` being `None`, which the seam distinguishes from a present
@@ -2882,12 +2913,12 @@ coarser test would call that good enough.
 
 **Positive controls (disposition locks, green in both states).** The
 sanctioned bare-list slots must stay accepted, enumerated from
-`crates/chelis-surf/src/desugar.rs`'s `bare_list()` (defined `:465`):
-`fn` parameter lists (`:1115`, `:1452`), import name lists (`:1202`),
-the `import-all` empty list (`:1212`), the empty match guard (`:1711`), and
-`:1743`'s empty list. Add `loc` metadata values, ADT type-parameter lists,
-`vmap(f)` with no axis child at all, `vmap(f, axis=0)`, and a `pat-ctor`
-whose head is a legitimate in-scope constructor. Their job is to prove the
+`crates/chelis-surf/src/desugar.rs`'s `bare_list()` (defined `:481`):
+`fn` parameter lists (`:1200`, `:1545`), an import name list (`:1287`),
+a qualified import's empty name list (`:1297`), the empty match guard (`:1804`), and
+`:1836`'s empty list, which is the unit literal's. Add `span` metadata values,
+ADT type-parameter lists, `vmap(f)` with no axis child at all, `vmap(f, axis=0)`,
+and a `pat-ctor` whose head is a legitimate in-scope constructor. Their job is to prove the
 seam rejects unreadability rather than non-tagged-ness; without them the
 cheapest wrong fix - rejecting every bare list - passes the negatives.
 

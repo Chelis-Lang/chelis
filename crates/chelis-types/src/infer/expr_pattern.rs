@@ -142,6 +142,48 @@ pub(super) fn infer_match(
     result_ty.unwrap_or_else(|| vg.fresh_type())
 }
 
+/// Visit sub-patterns whose element types could not be derived, each against a
+/// fresh type variable.
+///
+/// chelis#874 / [04-TOT-4]: the recovery path after a pattern's constructor
+/// head is rejected as unreadable. The head's rejection says nothing about the
+/// sub-patterns, which are still nodes the author submitted; abandoning them
+/// would leave an unvisited subtree behind the diagnostic -- the same coverage
+/// defect one level down -- and would let §C4.1's owner-stamp tripwire report
+/// an unstamped `pat-var` instead of the head that was actually wrong.
+///
+/// A fresh-variable element type is the established shape for this: the
+/// `pat-tuple` arm already hands each child one when the resolved scrutinee is
+/// not a matching tuple.
+#[allow(clippy::too_many_arguments)]
+fn visit_sub_patterns_untyped(
+    sub_pats: &[deep::Expr],
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    covered_variants: &mut Vec<String>,
+    has_wildcard: &mut bool,
+) {
+    for sub_pat in sub_pats {
+        let fresh = vg.fresh_type();
+        pattern_bindings(
+            sub_pat,
+            &fresh,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            product,
+            covered_variants,
+            has_wildcard,
+        );
+    }
+}
+
 /// True for arm patterns that match every value of the scrutinee:
 /// `pat-var`, `pat-wild`, and `pat-as` wrapping an irrefutable inner
 /// pattern (`q @ x`). Applies at the ARM level only.
@@ -173,9 +215,23 @@ pub(super) fn pattern_bindings(
     if let Some((tag, _, kids)) = stamped_parts(pat) {
         match tag {
             DeepTag::PatVar => {
-                if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                    let resolved = subst.apply(scrutinee_ty);
-                    product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
+                // chelis#874 / [04-TOT-4]: `if let Some(name) = ..` with no
+                // `else` bound nothing and rejected nothing when the name child
+                // could not be read. The pattern node then went unstamped and
+                // §C4.1's owner-stamp tripwire fired on it as an `internal:`
+                // invariant violation naming `pat-var` -- a diagnostic that
+                // blames the walk rather than the slot. Stamp the node either
+                // way, so the reported defect is the one the author can fix.
+                let resolved = subst.apply(scrutinee_ty);
+                product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
+                if let Ok(name) = read_required_slot(
+                    kids,
+                    DeepTag::PatVar,
+                    0,
+                    SlotShape::BindingName,
+                    symbol_name,
+                    errors,
+                ) {
                     env.bind_lexical(name.to_string(), Scheme::mono(resolved));
                 }
             }
@@ -189,10 +245,59 @@ pub(super) fn pattern_bindings(
                 // checked here so every nesting depth reached by this walk --
                 // tuple, record, and constructor sub-patterns included -- gets
                 // one decision at both checker ingresses.
-                check_literal_pattern(pat, kids.first(), scrutinee_ty, subst, adt_reg, errors);
+                //
+                // chelis#1525: the value child is read FIRST and structurally.
+                // spec/03-deep-syntax.md section 6.3 settles its shape -- "patterns
+                // do not contain expression nodes" -- so `(pat-lit {} (lit {} 1))`
+                // is malformed Deep rather than a typing question, and the read
+                // belongs here rather than inside `check_literal_pattern`, which
+                // returns early on an unresolved or already-failed scrutinee.
+                // Structural well-formedness must not depend on the scrutinee's
+                // type. Before this, `literal_pattern_atom` returned `None` for
+                // any non-atom child and the [04-PAT-1] check silently declined,
+                // so a `lit`-wrapped pattern of the wrong family scored 1.0.
+                if let Ok(atom) = read_required_slot(
+                    kids,
+                    DeepTag::PatLit,
+                    0,
+                    SlotShape::LiteralValue,
+                    literal_pattern_atom,
+                    errors,
+                ) {
+                    check_literal_pattern(pat, atom, scrutinee_ty, subst, adt_reg, errors);
+                }
             }
             DeepTag::PatCtor => {
-                if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
+                // chelis#874 R2 / [04-TOT-4]: an unreadable head used to fall
+                // off the `if let` binding, so the arm neither bound nor
+                // rejected and the whole program scored 1.0. The sub-patterns
+                // are still nodes the author submitted, so they are visited
+                // with fresh element types rather than abandoned behind the
+                // diagnostic; leaving them unvisited would be the same coverage
+                // defect one level down, and would make §C4.1's owner-stamp
+                // tripwire report the collateral node instead of the head.
+                let Ok(ctor_name) = read_required_slot(
+                    kids,
+                    DeepTag::PatCtor,
+                    0,
+                    SlotShape::ConstructorName,
+                    symbol_name,
+                    errors,
+                ) else {
+                    visit_sub_patterns_untyped(
+                        kids.get(1..).unwrap_or_default(),
+                        env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        errors,
+                        product,
+                        covered_variants,
+                        has_wildcard,
+                    );
+                    return;
+                };
+                {
                     // chelis#317: an out-of-scope constructor pattern (a type-
                     // only import that names `| Alpha =>` without importing
                     // `Alpha`) must be rejected at `check` here, the same way
@@ -261,9 +366,20 @@ pub(super) fn pattern_bindings(
             }
             DeepTag::PatAs => {
                 // (pat-as {} name inner_pat): bind name to scrutinee type, recurse into inner_pat
-                if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
-                    let resolved = subst.apply(scrutinee_ty);
-                    product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
+                //
+                // chelis#874 / [04-TOT-4]: the `pat-var` treatment, for the
+                // same reason. Stamp the node, reject an unreadable name at its
+                // own slot, and still recurse into the inner pattern below.
+                let resolved = subst.apply(scrutinee_ty);
+                product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
+                if let Ok(name) = read_required_slot(
+                    kids,
+                    DeepTag::PatAs,
+                    0,
+                    SlotShape::BindingName,
+                    symbol_name,
+                    errors,
+                ) {
                     env.bind_lexical(name.to_string(), Scheme::mono(resolved));
                 }
                 if kids.len() >= 2 {
@@ -284,7 +400,38 @@ pub(super) fn pattern_bindings(
             DeepTag::PatRecord => {
                 // (pat-record {} TypeName (kv {} k1 p1) ...): validate against ADT registry
                 // kids[0] = TypeName, kids[1..] = (kv {} key pat)
-                if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
+                //
+                // chelis#874 R3 / [04-TOT-4]: the `pat-ctor` head's twin, with
+                // the same unvisited-subtree recovery -- the field patterns live
+                // one level down inside `kv` nodes, so the recovery reads each
+                // `kv`'s value child rather than the direct children.
+                let Ok(ctor_name) = read_required_slot(
+                    kids,
+                    DeepTag::PatRecord,
+                    0,
+                    SlotShape::ConstructorName,
+                    symbol_name,
+                    errors,
+                ) else {
+                    for kv_expr in kids.iter().skip(1) {
+                        let Some((DeepTag::Kv, _, kv_kids)) = stamped_parts(kv_expr) else {
+                            continue;
+                        };
+                        visit_sub_patterns_untyped(
+                            kv_kids.get(1..).unwrap_or_default(),
+                            env,
+                            vg,
+                            subst,
+                            adt_reg,
+                            errors,
+                            product,
+                            covered_variants,
+                            has_wildcard,
+                        );
+                    }
+                    return;
+                };
+                {
                     // chelis#317: same out-of-scope guard as the positional
                     // `pat-ctor` arm — a record-shaped match against a
                     // constructor that was never imported must be an `unknown
@@ -354,7 +501,23 @@ pub(super) fn pattern_bindings(
                         if let Some((DeepTag::Kv, _, kv_kids)) = stamped_parts(kv_expr)
                             && kv_kids.len() >= 2
                         {
-                            let field_name = symbol_name(&kv_kids[0]);
+                            // chelis#874 / [04-TOT-4]: the third `kv` key read
+                            // in the checker, and the one the design's PP8 table
+                            // missed. `symbol_name` returning `None` used to fall
+                            // through to the `None => vg.fresh_type()` arm below,
+                            // so an unreadable key was indistinguishable from a
+                            // field whose type the registry could not supply and
+                            // the program scored 1.0. The sub-pattern is still
+                            // visited afterwards, with that fresh type.
+                            let field_name = read_required_slot(
+                                kv_kids,
+                                DeepTag::Kv,
+                                0,
+                                SlotShape::FieldName,
+                                symbol_name,
+                                errors,
+                            )
+                            .ok();
                             // Look up declared field type — reject unknown fields
                             let field_ty = match field_name {
                                 Some(n) => {
@@ -417,6 +580,8 @@ pub(super) fn pattern_bindings(
                                         vg.fresh_type() // no ADT info available
                                     }
                                 }
+                                // The key was rejected above; the sub-pattern
+                                // still gets a type so it is visited and bound.
                                 None => vg.fresh_type(),
                             };
                             pattern_bindings(
@@ -540,8 +705,8 @@ impl LiteralPatternAtom<'_> {
     }
 }
 
-fn literal_pattern_atom(value: Option<&deep::Expr>) -> Option<LiteralPatternAtom<'_>> {
-    match value? {
+fn literal_pattern_atom(value: &deep::Expr) -> Option<LiteralPatternAtom<'_>> {
+    match value {
         deep::Expr::Atom(deep::Atom::Int(value), _) => Some(LiteralPatternAtom::Integer(*value)),
         deep::Expr::Atom(deep::Atom::Float(value), _) => Some(LiteralPatternAtom::Float(*value)),
         deep::Expr::Atom(deep::Atom::Bool(value), _) => Some(LiteralPatternAtom::Bool(*value)),
@@ -551,8 +716,10 @@ fn literal_pattern_atom(value: Option<&deep::Expr>) -> Option<LiteralPatternAtom
         // A `pat-lit` whose child is not a scalar atom is a Deep
         // well-formedness question, not a typing one. Deciding a family for it
         // here would report [04-PAT-1] against a node that has no literal
-        // value at all, so this check declines and leaves the shape to its
-        // owner.
+        // value at all. chelis#1525: that shape now HAS an owner -- the
+        // `DeepTag::PatLit` arm reads this slot through the seam and rejects a
+        // non-atom child as malformed, so `None` here is the seam's signal
+        // rather than a silent decline.
         _ => None,
     }
 }
@@ -579,7 +746,7 @@ fn literal_pattern_atom(value: Option<&deep::Expr>) -> Option<LiteralPatternAtom
 /// leave no spelling for an `int64` literal pattern.
 fn check_literal_pattern(
     pat: &deep::Expr,
-    value: Option<&deep::Expr>,
+    atom: LiteralPatternAtom<'_>,
     scrutinee_ty: &Type,
     subst: &Subst,
     adt_reg: &AdtRegistry,
@@ -589,12 +756,15 @@ fn check_literal_pattern(
     // An unresolved scrutinee decides nothing yet, and an already-failed one
     // owns its own diagnostic: reporting here would either invent a rejection
     // or cascade off a root cause reported upstream (chelis#731 section C3).
+    //
+    // chelis#1525: this early return is why the structural read of the value
+    // child does NOT live here. Well-formedness of the `pat-lit` form cannot
+    // depend on whether the scrutinee's type happens to be resolved, so the
+    // caller reads the slot first and this function receives an atom it can
+    // always decide about.
     if matches!(resolved, Type::Var(_) | Type::Error(_)) {
         return;
     }
-    let Some(atom) = literal_pattern_atom(value) else {
-        return;
-    };
 
     let Type::Prim(prim) = &resolved else {
         report_literal_pattern_error(

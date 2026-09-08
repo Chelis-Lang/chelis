@@ -14,6 +14,7 @@ use chelis_unord::{UnordMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use chelis_deep::ast as deep;
+use chelis_deep::role::SlotShape;
 use chelis_deep::{DeepTag, Span, decode_effect_kind};
 use chelis_vocab::EffectKind;
 
@@ -77,6 +78,7 @@ mod program;
 pub(crate) mod recursion;
 mod rigid;
 mod shape_honesty;
+mod slot;
 mod static_int;
 mod static_value;
 mod validate;
@@ -106,6 +108,7 @@ use expr_record::*;
 use expr_transform::*;
 use program::*;
 use rigid::*;
+use slot::*;
 pub use static_int::fold_static_int_expr;
 use static_value::*;
 use validate::*;

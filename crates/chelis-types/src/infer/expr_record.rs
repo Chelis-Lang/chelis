@@ -344,12 +344,31 @@ pub(super) fn infer_record(
         if kv_tag != DeepTag::Kv {
             continue;
         }
-        let (Some(field_name), Some(value)) =
-            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
-        else {
+        // chelis#874 R5 / [04-TOT-4]: this was
+        // `let (Some(..), Some(..)) = (..) else { continue };`. The `continue`
+        // skipped the `infer_expr(value, ..)` below, so an unreadable key left
+        // the VALUE unvisited and unstamped, and section C4.1's owner-stamp
+        // tripwire fired on that value as an `internal:` invariant violation
+        // naming `lit`. The program was rejected, but for a node the author did
+        // not write wrongly. Read the key at its own slot, and infer the value
+        // either way so the walk still covers it.
+        let field_name = read_required_slot(
+            kv_kids,
+            DeepTag::Kv,
+            0,
+            SlotShape::FieldName,
+            symbol_name,
+            errors,
+        )
+        .ok();
+        let Some(value) = kv_kids.get(1) else {
+            malformed_slot(DeepTag::Kv, 1, SlotShape::FieldValue, None, None, errors);
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
+        let Some(field_name) = field_name else {
+            continue;
+        };
         if known_field_set.contains(field_name) {
             let pos = declared_field_names
                 .iter()
@@ -684,12 +703,26 @@ pub(super) fn infer_record_update(
         if kv_tag != DeepTag::Kv {
             continue;
         }
-        let (Some(field_name), Some(value)) =
-            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
-        else {
+        // chelis#874 / [04-TOT-4]: `infer_record`'s repair, applied to the
+        // identical `else { continue }` here. This site produced the same
+        // owner-stamp misattribution on the update value.
+        let field_name = read_required_slot(
+            kv_kids,
+            DeepTag::Kv,
+            0,
+            SlotShape::FieldName,
+            symbol_name,
+            errors,
+        )
+        .ok();
+        let Some(value) = kv_kids.get(1) else {
+            malformed_slot(DeepTag::Kv, 1, SlotShape::FieldValue, None, None, errors);
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
+        let Some(field_name) = field_name else {
+            continue;
+        };
         kv_pairs.push((field_name, value_ty));
     }
     let mut resolved = subst.apply(&target_ty);
