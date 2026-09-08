@@ -1292,7 +1292,7 @@ fn a_sym_reshape_target_is_not_a_local_guard_site() {
     );
 }
 
-/// Round 1's P2-1. The `Expand` arm of `local_guard_extent_carrier` is NOT
+/// Round 1's P2-1. The `Expand` arm of the derivation's carrier read is NOT
 /// dead: an `expand`/`insert` whose size reads the shape of a tensor this
 /// function COMPUTED carries an `InputAxis` carrier whose producer is not a
 /// `Load`, so the class is `Local` and the axis is a site. The reviewer's two
@@ -1351,14 +1351,91 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
         vec![(inserted.0, 0, "n".to_string(), "expand")],
         "the expand that introduces the extent owes the guard",
     );
+    // The carrier is no longer readable through a public helper: the derivation
+    // states it in the site, which is the point of the unification. So the
+    // assertion reads the site's own read instruction.
+    let observed = chelis_ir::axis_sources::local_dim_guard_sites(&dag)
+        .into_iter()
+        .find(|((node, axis), _)| *node == inserted.0 && *axis == 0)
+        .map(|(_, claim)| claim.observed)
+        .expect("the expand's axis is a site");
     assert!(
-        chelis_ir::axis_sources::local_guard_extent_carrier(
-            &dag.get(inserted).expect("node").op,
-            0
-        )
-        .is_some(),
-        "and the derivation hands both lanes the carrier to evaluate",
+        matches!(
+            observed,
+            chelis_ir::axis_sources::LocalGuardObservation::Carrier(RtDim::InputAxis { .. })
+        ),
+        "and the derivation hands both lanes the carrier to evaluate, not a \
+         realized shape read: {observed:?}",
     );
+}
+
+/// Every class site's read instruction is the carrier its own source names.
+///
+/// The derivation admits a class member only when its source is `InputAxis` or
+/// `ScalarInput`, and `rt_dim_source` mints exactly those two from
+/// `RtDim::InputAxis` and `RtDim::Node`. So the source and the carrier are one
+/// fact read two ways, and the `else { continue }` guarding the carrier read in
+/// `local_dim_guard_sites` is unreachable rather than a silent drop.
+///
+/// That correspondence is what lets [`LocalGuardObservation`] have two variants
+/// instead of three: no class site needs a "cannot be observed" state. If a
+/// future change admits a third source without giving it a carrier, sites would
+/// vanish from BOTH lanes with nothing to show for it, so the property is
+/// asserted rather than trusted.
+///
+/// EVIDENTIARY STATUS: disposition lock. It cannot fail on today's tree; it
+/// fails on the tree that widens the source filter without widening the read.
+#[test]
+fn every_local_class_site_carries_the_carrier_its_source_names() {
+    // A class with both kinds of admitted source: a node-valued reshape target
+    // (`ScalarInput`) and an expand sized from a computed tensor's shape
+    // (`InputAxis`).
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let size = f32_load(&mut dag, "k", vec![]);
+    let reshaped = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1)],
+        },
+        vec![x, size],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let computed = dag.add_node(
+        RiscOp::Mul,
+        vec![x, x],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let expanded = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 3,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![reshaped, computed],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    assert!(
+        !sites.is_empty(),
+        "the fixture must produce sites for the property to say anything",
+    );
+    let _ = expanded;
+    for ((node, axis), claim) in sites {
+        match claim.observed {
+            chelis_ir::axis_sources::LocalGuardObservation::Carrier(_) => {}
+            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent => {
+                // A unit-extent site legitimately has no carrier; this fixture
+                // builds none, so reaching here means the class loop took the
+                // wrong branch.
+                panic!("node {node} axis {axis} is a class site with no carrier");
+            }
+        }
+    }
 }
 
 /// Round 1's P2-2. The eval consumer's `CanonicalExtent::Resolved` arm: a

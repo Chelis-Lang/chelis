@@ -1354,6 +1354,70 @@ fn a_local_unit_extent_claim_traps_at_its_operation_on_c() {
     );
 }
 
+/// The same locally placed unit-extent claim on the EVAL lane.
+///
+/// S2b guarded this claim on eval from a check inside the DAG evaluator's
+/// `Expand` arm, and shipped no row for it: its two rows are the C lane and the
+/// HIP host lowering. B2r's unification deletes that arm, so the claim is now
+/// carried by the one consumer that reads every local site's own read
+/// instruction. A moved mechanism with no row is a mechanism that can be
+/// deleted silently, which is why this row exists.
+///
+/// It also pins a lane agreement the two implementations did not have. S2b's
+/// arm reported the `expand`'s node id and the C emitter reports the site's,
+/// which is the OPERAND's, so the same claim on the same program named `node 5`
+/// on eval and `node 4` on C. Reading the site rather than the operation makes
+/// both lanes name the site, so the whole two-line diagnostic is now identical
+/// text on both lanes.
+///
+/// EVIDENTIARY STATUS: regression test for the unification. Under the unified
+/// consumer replaced by a no-op this fails; before the unification it passed
+/// with a different node id, which is why the assertion is byte-exact rather
+/// than a `contains` on the trap line alone.
+#[test]
+fn a_local_unit_extent_claim_traps_at_its_operation_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // The control first, so the row proves a guard and not a broken lane: the
+    // same shape over an operand the shrink leaves at extent 1 executes.
+    let ok_path = fixture(&dir, "local_unit.ch", LOCAL_UNIT_SOURCE);
+    let accepted = eval(&ok_path);
+    let ok_stdout = String::from_utf8_lossy(&accepted.stdout).to_string();
+    assert!(
+        accepted.status.success(),
+        "a satisfied local claim executes on eval: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(
+        ok_stdout.contains("shape=[3]") && ok_stdout.contains("data=[7.0, 7.0, 7.0]"),
+        "the satisfied claim broadcasts exactly: {ok_stdout}"
+    );
+
+    let path = fixture(&dir, "local_refuted.ch", LOCAL_NON_UNIT_SOURCE);
+    let evaluated = eval(&path);
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(
+        !evaluated.status.success(),
+        "an operand extent of 2 under a unit claim must not produce a value: {stdout}"
+    );
+    assert!(
+        !stdout.contains("data=[7.0, 7.0, 7.0]"),
+        "and must not broadcast element 0 of a two-element axis: {stdout}"
+    );
+    assert!(
+        stderr.contains(&domain_trap_line("expand")),
+        "the trap line names the operation that introduces the claim: {stderr}"
+    );
+    // Byte-exact, and on the operand's node id: this is the site's key, the
+    // same one the C emitter renders.
+    assert!(
+        stderr.contains("extent `1`: claimed = 1, node 4 axis 0 = 2"),
+        "section 4.7's context names the SITE, so the two lanes agree text for \
+         text: {stderr}"
+    );
+}
+
 /// The HIP lane carries the locally placed claim too, through the shared host
 /// lowering rather than through a HIP-specific guard.
 ///

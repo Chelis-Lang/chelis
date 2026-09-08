@@ -994,15 +994,18 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
 /// when the axis is one [`sets_axis`] admits as a witness.
 ///
 /// This is the same C1.7 owner matrix `sets_axis` reads, returning the carrier
-/// rather than a bit, so a lane that has to EVALUATE the guarded quantity gets
-/// it from the derivation instead of re-deriving which operand holds it. The
-/// C emitter already has the carrier in hand at each site (it renders the
-/// extent expression there); the DAG evaluator does not, and asking the
-/// question twice is exactly the divergence C2.7 forbids.
+/// rather than a bit. It is PRIVATE and has exactly one caller, the class loop
+/// in [`local_dim_guard_sites`], which stores what it returns in the site's
+/// [`LocalGuardObservation`]. It was briefly public, so the DAG evaluator could
+/// ask an operation which carrier held its guarded extent; that made the
+/// evaluator answer a question the derivation had already answered, and it got
+/// a unit-extent site wrong, because that site's node is the operand and its
+/// operation carries no such axis. The derivation states the answer now, which
+/// is what C2.7 asks for.
 ///
 /// A `Sym` or `Lit` carrier is deliberately absent: neither computes an
 /// extent, and `sets_axis` does not make either a witness on a `Reshape`.
-pub fn local_guard_extent_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
+fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
     let carrier = match op {
         RiscOp::Expand { axis: set, size } if axis == *set => size,
         RiscOp::Reshape { new_shape } => new_shape.get(axis)?,
@@ -1512,7 +1515,37 @@ impl std::fmt::Display for CanonicalExtent {
     }
 }
 
-/// What a local guard reports and what it compares against.
+/// How a consumer reads the extent a local guard observes.
+///
+/// The derivation states it, because C2.7 puts one answer to one question in
+/// one place. The two kinds of local claim observe different quantities: an
+/// equality class compares the extent an operation is ABOUT TO produce, read
+/// from the carrier it was given, and a unit-extent claim compares the extent
+/// its operand ALREADY produced, read from that operand's realized shape. A
+/// consumer that re-derives which of those to read from the site's own `op`
+/// can only get one of them right, which is exactly the divergence C2.7
+/// forbids.
+///
+/// The variants also fix WHEN each is readable, and that is not incidental.
+/// [`Self::Carrier`] is readable before the site's node runs, which is where
+/// `spec/04-type-system.md` section 4.7 puts a class guard: at "the source
+/// position of the operation that introduces the guarded extent", so a wrong
+/// claim is reported instead of the operation's own downstream failure.
+/// [`Self::RealizedExtent`] is readable only after the site's node runs, which
+/// is still "after its producers and before the first allocation or element
+/// access whose shape depends on the guarded extent", because the site's node
+/// IS the producer and the allocation belongs to its consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalGuardObservation {
+    /// Evaluate this carrier against the site's node, before that node runs.
+    Carrier(RtDim),
+    /// Read the site node's realized output extent at the site's axis, after
+    /// that node runs.
+    RealizedExtent,
+}
+
+/// What a local guard reports, what it compares against, and how it reads the
+/// value it compares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalGuardClaim {
     /// The claim as reported in the guard's context line.
@@ -1521,6 +1554,8 @@ pub struct LocalGuardClaim {
     pub canonical: CanonicalExtent,
     /// The operation [04-NUM-9]'s `<op>` slot names.
     pub op: &'static str,
+    /// How to read the extent this guard observes.
+    pub observed: LocalGuardObservation,
 }
 
 /// Whether a class member's own output dim carries an extent the checker
@@ -1634,6 +1669,22 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             let Some(node) = dag.get(member.node) else {
                 continue;
             };
+            // The carrier this member's operation was given for the axis, which
+            // is the value a consumer compares BEFORE the operation runs.
+            //
+            // The `else` is unreachable rather than defensive, and the two
+            // filters above are why. `rt_dim_source` mints `ScalarInput` only
+            // from `RtDim::Node` and `InputAxis` only from `RtDim::InputAxis`,
+            // and the source filter just above admits no other source; a
+            // member's source and its carrier are therefore the same fact read
+            // two ways. `expand_or_reshape_carrier` re-reads the carrier from
+            // the operation, so the two cannot drift apart silently:
+            // `every_local_class_site_carries_the_carrier_its_source_names`
+            // fails if a future source widens the admitted set without
+            // widening this.
+            let Some(carrier) = expand_or_reshape_carrier(&node.op, member.axis) else {
+                continue;
+            };
             // [04-NUM-9]'s `<op>` names the operation that introduces the
             // guarded extent, in the same vocabulary every other trap on this
             // lane uses.
@@ -1646,6 +1697,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         None => CanonicalExtent::Binder(name.clone()),
                     },
                     op: crate::grad::risc_op_name(&node.op),
+                    observed: LocalGuardObservation::Carrier(carrier.clone()),
                 },
             ));
         }
@@ -1680,6 +1732,12 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 claim: "1".to_string(),
                 canonical: CanonicalExtent::Resolved(1),
                 op: claim.trap_op(dag),
+                // The claim is about the extent the OPERAND produced, and no
+                // carrier states it: the operand's own operation was not given
+                // this axis, it computed it. So it is read from the realized
+                // shape, which is why the read instruction is data rather than
+                // something a consumer infers from the site's `op`.
+                observed: LocalGuardObservation::RealizedExtent,
             },
         ));
     }
