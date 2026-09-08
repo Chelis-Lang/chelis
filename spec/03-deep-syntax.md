@@ -786,7 +786,9 @@ matching `type` entries on a `def`, its `fn` value, and its function parameters
 when an adjacent matching `defsig` already carries the exact same types; a
 disagreement is never erased. For a standalone checked `def`, normalization may
 materialize that metadata as an adjacent `defsig` and then apply the same exact
-redundancy rule. Empty `tuple`/`t-tuple` normalize to `lit`/`t-unit`. No `app`
+redundancy rule. Empty expression `tuple` and type `t-tuple` nodes normalize
+to `lit` and `t-unit`, respectively. Syntax-valued metadata containers retain
+their declared shapes under [03-META-2]. No `app`
 normalizes to a `var`: `Ctor`, `Ctor()`, and `Ctor {}` retain their distinct
 `var`, `app`, and `record` structures. Because Surf negative
 numerals are unary minus rather than signed tokens, a negative Deep `lit`
