@@ -20,24 +20,13 @@ class HashOrderPhaseAOracleTests(unittest.TestCase):
         self.assertEqual(
             ORACLE.COMMANDS,
             (
-                (ORACLE.sys.executable, "scripts/check_hash_order_compile_fail.py"),
-                (
-                    "cargo",
-                    "nextest",
-                    "run",
-                    "-p",
-                    "chelis-types",
-                    "--lib",
-                    "hash_order_",
-                    "--no-fail-fast",
-                ),
                 (
                     "cargo",
                     "nextest",
                     "run",
                     "-p",
                     "chelis-compiler-api",
-                    "cache_format_version_tracks_ordered_deferred_constraints",
+                    "cache_format_version_tracks_the_deferred_ledger_removal",
                     "--no-fail-fast",
                 ),
                 (
@@ -70,16 +59,6 @@ class HashOrderPhaseAOracleTests(unittest.TestCase):
                     "--test",
                     "parity",
                     "parity_hash_order_determinism",
-                    "--no-fail-fast",
-                ),
-                (
-                    "cargo",
-                    "nextest",
-                    "run",
-                    "-p",
-                    "chelis-cli",
-                    "--test",
-                    "hash_order_stability",
                     "--no-fail-fast",
                 ),
             ),

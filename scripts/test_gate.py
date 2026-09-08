@@ -914,17 +914,6 @@ class ListOutputTests(unittest.TestCase):
         ):
             self.assertIn(command, rendered)
 
-    def test_hash_order_compile_fail_contract_is_continuous_and_local(self):
-        command = "<managed-python> scripts/check_hash_order_compile_fail.py"
-        self.assertIn(
-            command,
-            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
-        )
-        self.assertIn(
-            command,
-            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
-        )
-
     def test_phase_b_compile_fail_is_continuous_and_local(self):
         # The ban's liveness proof. Without it, deleting the `disallowed-types`
         # entries from clippy.toml leaves every continuous job green.

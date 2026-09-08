@@ -258,3 +258,161 @@ fn two_roots_spelling_one_binder_are_two_claims_not_one_class() {
         );
     }
 }
+
+// ===========================================================================
+// S2b: the same-rank `expand`'s unit-extent claim on this evaluator.
+//
+// The CLI `.eval` receipt in `crates/chelis-cli/tests/runtime_extent_slice_b.rs`
+// proves the HOST interpreter, which is the lane `chelis eval` reaches for a
+// program of that shape. It is not evidence about the DAG evaluator's own
+// guard, so that guard gets its own row here, with inputs bound at the API
+// boundary, for exactly the reason this file's header gives.
+// ===========================================================================
+
+/// A same-rank `Expand` over a symbolic operand: the claim is that `x`'s axis
+/// 0 is 1, and nothing in the graph proves it.
+fn unit_extent_claim_dag() -> (Dag, NodeId) {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", vec![named("n")]);
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(3),
+        },
+        vec![x],
+        ty(vec![DimInfo::Lit(3)], Prim::F32),
+        None,
+    );
+    dag.add_root(out);
+    (dag, out)
+}
+
+/// An operand extent that refutes the claim traps, with [04-NUM-9]'s line.
+///
+/// `spec/05-risc-primitives.md` section 2.4.1: the same-rank form "is a claim
+/// that the operand's extent at `axis` is 1 [...] A symbolic or runtime
+/// operand extent at `axis` other than 1 fails that claim's runtime extent
+/// guard and traps `Domain`."
+///
+/// `<op>` is `load` rather than `expand` for the same reason the class rows
+/// above give: the only quantity this guard reads is an input tensor's axis,
+/// which section 4.7 lists first among interface values, so the guard is
+/// placed at entry and takes the `load` primitive.
+///
+/// EVIDENTIARY STATUS: regression test. On the tree without
+/// `derive_unit_extent_claims` this program evaluates silently and returns a
+/// tensor built by reading index 0 of an axis with more than one element,
+/// which is the `silent_unguarded` baseline the corpus records.
+#[test]
+fn a_non_unit_operand_extent_refutes_the_unit_claim_and_traps() {
+    let (dag, root) = unit_extent_claim_dag();
+    let err = eval_tensor_roots_with_strict(&dag, &[root], |name| bind(name, 2))
+        .expect_err("an operand extent of 2 must not broadcast under a unit claim");
+    assert!(
+        err.contains(&domain_trap_line("load")),
+        "the claim's failure is an [04-NUM-9] typed precondition guard, got: {err}",
+    );
+    assert!(
+        err.contains("claimed = 1") && err.contains("x axis 0 = 2"),
+        "section 4.7 also requires the axis and the value observed for it: {err}",
+    );
+}
+
+/// The control: an operand that satisfies the claim broadcasts, and the guard
+/// stays out of the way.
+///
+/// This is what separates a guard from a rejection of the symbolic spelling.
+/// Without it the row above would pass just as well against an evaluator that
+/// refused every unproven extent.
+#[test]
+fn a_unit_operand_extent_satisfies_the_claim_and_broadcasts() {
+    let (dag, root) = unit_extent_claim_dag();
+    let values = eval_tensor_roots_with_strict(&dag, &[root], |name| bind(name, 1))
+        .expect("a unit operand extent satisfies the claim");
+    let out = &values[&root];
+    assert_eq!(out.shape, vec![3], "the broadcast sets the claimed axis");
+    assert_eq!(
+        out.to_f64_lossy_vec(),
+        vec![1.0, 1.0, 1.0],
+        "and repeats the single element across it"
+    );
+}
+
+/// A LOCALLY placed unit-extent claim, on this evaluator.
+///
+/// The operand's extent is computed by a `Shrink` with a node-valued end, so
+/// no input carries it and the entry loop cannot see it. `spec/04-type-system.md`
+/// section 4.7 places such a guard "after its producers and takes the source
+/// position of the operation that introduces the guarded extent", which is the
+/// `expand`, and gives its `<op>` slot the same name.
+///
+/// EVIDENTIARY STATUS: regression test. The first cut of S2b derived the Local
+/// case and wired only the entry consumer, so this program evaluated to a
+/// broadcast of element 0 of a two-element axis.
+fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", vec![named("n")]);
+    // A movement bound source is extent-domain and therefore exactly `int64`
+    // ([05-DIM-1]); the f32 helper above is for tensor operands.
+    let end = dag.add_node(
+        RiscOp::Load { name: "end".into() },
+        vec![],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    let shrunk = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(RtDim::Lit(0), RtDim::Node(end_slot))],
+        },
+        vec![x, end],
+        ty(vec![named("_rt_shrink")], Prim::F32),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(3),
+        },
+        vec![shrunk],
+        ty(vec![DimInfo::Lit(3)], Prim::F32),
+        None,
+    );
+    dag.add_root(out);
+    (dag, out)
+}
+
+#[test]
+fn a_locally_placed_unit_claim_traps_at_the_expand_that_makes_it() {
+    let (dag, root) = local_unit_extent_claim_dag(1);
+    let err = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
+        // Shrink to two elements, which refutes the claim.
+        "end" => Some(TensorValue::scalar(2.0)),
+        _ => None,
+    })
+    .expect_err("a computed operand extent of 2 must not broadcast under a unit claim");
+    assert!(
+        err.contains(&domain_trap_line("expand")),
+        "a locally placed guard names the operation that introduces the claim, \
+         not `load`: {err}",
+    );
+    assert!(
+        err.contains("claimed = 1") && err.contains("axis 0 = 2"),
+        "with the axis and the value observed for it: {err}",
+    );
+}
+
+/// The control: the same graph shrunk to one element satisfies the claim.
+#[test]
+fn a_locally_placed_unit_claim_that_holds_broadcasts() {
+    let (dag, root) = local_unit_extent_claim_dag(1);
+    let values = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
+        "end" => Some(TensorValue::scalar(1.0)),
+        _ => None,
+    })
+    .expect("a computed operand extent of 1 satisfies the claim");
+    let out = &values[&root];
+    assert_eq!(out.shape, vec![3]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![7.0, 7.0, 7.0]);
+}

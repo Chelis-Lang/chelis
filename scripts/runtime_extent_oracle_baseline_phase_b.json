@@ -1,322 +1,322 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "93c5a6f13e4167e7da8aaf1bd8ab459c20d50d4b6165352c43cb960b569bdff3",
+  "corpus_sha256": "71041f16942d4f83a469587d69893557344ee68251dd4c857b1a31842aa6c74a",
   "rows": [
     {
-      "id": "class.load_load.c",
       "baseline": "silent_unguarded",
+      "id": "class.load_load.c",
       "phase_b": "executes_exactly",
       "receipt": "exec_c.an_all_interface_class_traps_at_entry_when_its_witnesses_disagree"
     },
     {
-      "id": "class.load_load.eval",
       "baseline": "silent_unguarded",
+      "id": "class.load_load.eval",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.load_load_named_class_guards_every_non_canonical_member_on_eval"
     },
     {
-      "id": "class.load_op_output.c",
       "baseline": "silent_unguarded",
+      "id": "class.load_op_output.c",
       "phase_b": "executes_exactly",
       "receipt": "exec_c.a_local_class_guards_at_its_operation_and_renders_the_numeric_trap"
     },
     {
-      "id": "class.load_op_output.eval",
       "baseline": "silent_unguarded",
+      "id": "class.load_op_output.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_eval"
     },
     {
-      "id": "class.local_members.all_guarded.c",
       "baseline": "silent_unguarded",
+      "id": "class.local_members.all_guarded.c",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.every_local_member_of_one_class_is_guarded_at_its_operation_on_c"
     },
     {
-      "id": "class.no_movement_consumer.c",
       "baseline": "silent_unguarded",
+      "id": "class.no_movement_consumer.c",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_c"
     },
     {
-      "id": "class.no_movement_consumer.eval",
       "baseline": "silent_unguarded",
+      "id": "class.no_movement_consumer.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_eval"
     },
     {
-      "id": "class.op_output_op_output.c",
       "baseline": "silent_unguarded",
+      "id": "class.op_output_op_output.c",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_c"
     },
     {
-      "id": "class.op_output_op_output.eval",
       "baseline": "silent_unguarded",
+      "id": "class.op_output_op_output.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_eval"
     },
     {
-      "id": "class.shared_member_node.c",
       "baseline": "silent_unguarded",
+      "id": "class.shared_member_node.c",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_c"
     },
     {
-      "id": "class.shared_member_node.eval",
       "baseline": "silent_unguarded",
+      "id": "class.shared_member_node.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_eval"
     },
     {
-      "id": "class.splice_f_of_n_n.c",
       "baseline": "silent_unguarded",
+      "id": "class.splice_f_of_n_n.c",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_c"
     },
     {
-      "id": "class.splice_f_of_n_n.eval",
       "baseline": "silent_unguarded",
+      "id": "class.splice_f_of_n_n.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval"
     },
     {
-      "id": "expand.arith_size.named_claim.c",
       "baseline": "lane_divergent",
+      "id": "expand.arith_size.named_claim.c",
       "phase_b": "lane_divergent",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c"
     },
     {
-      "id": "expand.arith_size.named_claim.eval",
       "baseline": "lane_divergent",
+      "id": "expand.arith_size.named_claim.eval",
       "phase_b": "lane_divergent",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval"
     },
     {
-      "id": "expand.foreign_claim.same_tensor_set_axis.c",
       "baseline": "silent_unguarded",
+      "id": "expand.foreign_claim.same_tensor_set_axis.c",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_c"
     },
     {
-      "id": "expand.foreign_claim.same_tensor_set_axis.eval",
       "baseline": "silent_unguarded",
+      "id": "expand.foreign_claim.same_tensor_set_axis.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval"
     },
     {
-      "id": "expand.kept_axis.op_declared_source.c",
       "baseline": "ice",
+      "id": "expand.kept_axis.op_declared_source.c",
       "phase_b": "ice",
       "receipt": "cli_slice_b.issue_665_expand_over_stride_builds_and_runs"
     },
     {
-      "id": "expand.kept_axis.op_declared_source.eval",
       "baseline": "ice",
+      "id": "expand.kept_axis.op_declared_source.eval",
       "phase_b": "ice",
       "receipt": "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval"
     },
     {
-      "id": "expand.literal_claim.cross_tensor_read.c",
       "baseline": "lane_divergent",
+      "id": "expand.literal_claim.cross_tensor_read.c",
       "phase_b": "lane_divergent",
       "receipt": "cli_slice_b.issue_1374_cross_tensor_read_traps_on_c"
     },
     {
-      "id": "expand.literal_claim.cross_tensor_read.eval",
       "baseline": "lane_divergent",
+      "id": "expand.literal_claim.cross_tensor_read.eval",
       "phase_b": "lane_divergent",
       "receipt": "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane_on_eval"
     },
     {
-      "id": "expand.literal_claim.exported_kernel.c",
       "baseline": "nonconforming_rejection",
+      "id": "expand.literal_claim.exported_kernel.c",
       "phase_b": "executes_exactly",
       "receipt": "exec_c.a_literal_claim_over_a_runtime_read_traps_at_entry_on_c"
     },
     {
-      "id": "expand.literal_claim.exported_kernel.eval",
       "baseline": "silent_unguarded",
+      "id": "expand.literal_claim.exported_kernel.eval",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval"
     },
     {
-      "id": "expand.literal_claim.inlined_root.c",
       "baseline": "lane_divergent",
+      "id": "expand.literal_claim.inlined_root.c",
       "phase_b": "lane_divergent",
       "receipt": "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c"
     },
     {
-      "id": "expand.literal_claim.inlined_root.eval",
       "baseline": "lane_divergent",
+      "id": "expand.literal_claim.inlined_root.eval",
       "phase_b": "lane_divergent",
       "receipt": "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard_on_eval"
     },
     {
-      "id": "expand.named_claim.cross_tensor_read.c",
       "baseline": "silent_unguarded",
+      "id": "expand.named_claim.cross_tensor_read.c",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_c"
     },
     {
-      "id": "expand.named_claim.cross_tensor_read.eval",
       "baseline": "silent_unguarded",
+      "id": "expand.named_claim.cross_tensor_read.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval"
     },
     {
-      "id": "expand.op_declared_source.hip_prologue",
       "baseline": "ice",
+      "id": "expand.op_declared_source.hip_prologue",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_op_declared_witness_reaches_the_hip_prologue_without_panicking"
     },
     {
-      "id": "expand.piped_shape_read.lint_fix",
       "baseline": "nonconforming_rejection",
+      "id": "expand.piped_shape_read.lint_fix",
       "phase_b": "nonconforming_rejection",
       "receipt": "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds"
     },
     {
-      "id": "expand.positional.replacement.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "expand.positional.replacement.c",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.issue_597_positional_same_rank_replacement_executes_on_c"
     },
     {
-      "id": "expand.positional.replacement.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "expand.positional.replacement.eval",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval"
     },
     {
-      "id": "expand.positional.replacement.non_unit_source_static",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "expand.positional.replacement.non_unit_source_static",
+      "phase_b": "rejects_exactly",
       "receipt": "cli_slice_b.a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error"
     },
     {
-      "id": "expand.positional.replacement.non_unit_source_traps.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c"
+      "id": "expand.positional.replacement.non_unit_source_traps.c",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c"
     },
     {
-      "id": "expand.positional.replacement.non_unit_source_traps.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "expand.positional.replacement.non_unit_source_traps.eval",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval"
     },
     {
-      "id": "expand.positional.replacement_zero.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "expand.positional.replacement_zero.c",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_c"
     },
     {
-      "id": "expand.positional.replacement_zero.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "expand.positional.replacement_zero.eval",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_eval"
     },
     {
-      "id": "expand.record_projection.size",
       "baseline": "nonconforming_rejection",
+      "id": "expand.record_projection.size",
       "phase_b": "nonconforming_rejection",
       "receipt": "cli_slice_b.a_record_projection_is_an_admissible_expand_size"
     },
     {
-      "id": "expand.shape_derived.declared_result_survives.c",
       "baseline": "silent_unguarded",
+      "id": "expand.shape_derived.declared_result_survives.c",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_c"
     },
     {
-      "id": "expand.shape_derived.declared_result_survives.eval",
       "baseline": "silent_unguarded",
+      "id": "expand.shape_derived.declared_result_survives.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
     },
     {
-      "id": "guard_order.effect_after.c",
       "baseline": "silent_unguarded",
+      "id": "guard_order.effect_after.c",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c"
     },
     {
-      "id": "guard_order.effect_after.eval",
       "baseline": "silent_unguarded",
+      "id": "guard_order.effect_after.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval"
     },
     {
-      "id": "guard_order.effect_before.c",
       "baseline": "silent_unguarded",
+      "id": "guard_order.effect_before.c",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_c"
     },
     {
-      "id": "guard_order.effect_before.eval",
       "baseline": "silent_unguarded",
+      "id": "guard_order.effect_before.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_eval"
     },
     {
-      "id": "guard_order.trap_after.c",
       "baseline": "silent_unguarded",
+      "id": "guard_order.trap_after.c",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.c_independent_trap_after_a_mismatch_loses"
     },
     {
-      "id": "guard_order.trap_after.eval",
       "baseline": "silent_unguarded",
+      "id": "guard_order.trap_after.eval",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_later_trap_is_preempted_by_the_extent_guard_on_eval"
     },
     {
-      "id": "guard_order.trap_before.c",
       "baseline": "silent_unguarded",
+      "id": "guard_order.trap_before.c",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.c_independent_trap_before_a_mismatch_wins"
     },
     {
-      "id": "guard_order.trap_before.eval",
       "baseline": "silent_unguarded",
+      "id": "guard_order.trap_before.eval",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_earlier_trap_preempts_the_extent_guard_on_eval"
     },
     {
-      "id": "ir.axis_source.cardinality",
       "baseline": "silent_unguarded",
+      "id": "ir.axis_source.cardinality",
       "phase_b": "executes_exactly",
       "receipt": "ir_sources.omitted_or_duplicated_output_axis_source_fails_before_emission"
     },
     {
-      "id": "rebuild.classes_after_each_pass",
       "baseline": "silent_unguarded",
+      "id": "rebuild.classes_after_each_pass",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.every_rebuild_pass_preserves_the_derived_classes"
     },
     {
-      "id": "reshape.named_claim.node_target.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "reshape.named_claim.node_target.c",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c"
     },
     {
-      "id": "reshape.named_claim.node_target.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "id": "reshape.named_claim.node_target.eval",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
     },
     {
-      "id": "shrink.elementwise_const.build",
       "baseline": "ice",
+      "id": "shrink.elementwise_const.build",
       "phase_b": "typed_unsupported(#1482)",
       "receipt": "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt"
     },
     {
-      "id": "shrink.to_end.nonzero_start",
       "baseline": "silent_unguarded",
+      "id": "shrink.to_end.nonzero_start",
       "phase_b": "rejects_exactly",
       "receipt": "ir_sources.to_end_shrink_end_requires_a_literal_zero_start"
     }

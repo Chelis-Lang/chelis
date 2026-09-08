@@ -65,7 +65,7 @@ pub struct CEmitter {
     /// against, and the operation [04-NUM-9]'s `<op>` slot names.
     local_dim_guard_sites: chelis_unord::UnordMap<
         chelis_ir::ownership::LocalGuardSite,
-        chelis_ir::ownership::LocalGuardClaim,
+        Vec<chelis_ir::ownership::LocalGuardClaim>,
     >,
     /// Claim names this function actually declares as C variables. A local
     /// guard compares against the claim BY NAME, so a claim that resolved to
@@ -255,10 +255,40 @@ impl CEmitter {
         // class. Reading the declaration through the axis SOURCE rather than
         // through the stamped name is C4.4's remaining half and is what closes
         // chelis#665; it is not this change.
-        let local_dim_guard_sites: chelis_unord::UnordMap<
+        // Two claim KINDS reach this list: the equality classes and, since
+        // chelis#1277 S2b, the unit-extent claims (C2.9). They are keyed the
+        // same way, on the axis whose extent the guard reads, so two sites can
+        // land on one key.
+        //
+        // Every distinct claim on a key is emitted, and equal ones coalesce:
+        //
+        // - EQUAL sites coalesce. One locally computed unit axis feeding two
+        //   `expand` nodes produces the same claim, canonical and operation
+        //   twice, and one emitted guard satisfies both, so a second is
+        //   redundant rather than lost.
+        // - DISAGREEING sites are TWO OBLIGATIONS, and both are emitted. This
+        //   replaces an `Unsupported` refusal. The refusal was argued from a
+        //   pair that could not arise; it can. A `reshape` with a computed
+        //   target, claimed by a signature and then broadcast by a same-rank
+        //   `expand`, puts the class's `n` and the unit claim's `1` on the
+        //   reshape's own axis, and refusing there refuses a program that
+        //   checks clean. One comparison cannot discharge two claims, so the
+        //   answer is two comparisons, not a rejection and not a silent
+        //   replacement.
+        //
+        // `LocalGuardClaim` derives `PartialEq` over its fields, so "equal"
+        // means agreeing in claim, canonical, operation AND read instruction,
+        // which is exactly the set one comparison discharges.
+        let mut local_dim_guard_sites: chelis_unord::UnordMap<
             chelis_ir::ownership::LocalGuardSite,
-            chelis_ir::ownership::LocalGuardClaim,
-        > = dag.local_dim_guard_sites().into_iter().collect();
+            Vec<chelis_ir::ownership::LocalGuardClaim>,
+        > = chelis_unord::UnordMap::new();
+        for (site, claim) in dag.local_dim_guard_sites() {
+            let claims = local_dim_guard_sites.entry(site).or_default();
+            if !claims.contains(&claim) {
+                claims.push(claim);
+            }
+        }
 
         let mut e = CEmitter {
             lines: Vec::new(),
@@ -1736,6 +1766,40 @@ impl CEmitter {
                 self.indent -= 1;
                 self.line("}");
             }
+        }
+
+        // chelis#1277 S2b: the same-rank `expand`'s unit-extent claim. It is
+        // an operation PRECONDITION on an operand rather than an identity
+        // between output axes, so it is its own derivation, but it places and
+        // renders by the same rules: `spec/05-risc-primitives.md` section
+        // 2.4.1 sends a symbolic or runtime operand extent to "that claim's
+        // runtime extent guard", section 4.7 puts it at entry when the operand
+        // is an input tensor's axis, and the `<op>` slot is `load` for exactly
+        // that reason. The claimed side is the literal 1, so there is no
+        // canonical member to read it from.
+        for (load, read_axis) in dag.entry_unit_extent_reads() {
+            let Some(RiscOp::Load { name }) = dag.get(load).map(|node| &node.op) else {
+                continue;
+            };
+            let Some(&slot) = input_slots.get(name.as_str()) else {
+                continue;
+            };
+            let read_axis = read_axis as i32;
+            if !guarded.insert(("1".to_string(), slot, read_axis)) {
+                continue;
+            }
+            let label = &input_labels[slot];
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
+            self.line(&format!(
+                "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
+            ));
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.indent -= 1;
+            self.line("}");
         }
     }
 
@@ -6742,11 +6806,22 @@ impl CEmitter {
     /// Load-declared in the prologue or declared by an earlier op — the
     /// checker unified them, so a disagreement is a real shape error).
     fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
+        // Declaring and guarding are not exclusive. The legacy walk owns
+        // declarations and the derivation owns guards, so an axis that
+        // declares its own extent may ALSO be the axis another operation
+        // makes a claim about: chelis#1277 S2b's unit-extent claim is exactly
+        // that shape, since it asserts something about the `expand`'s
+        // OPERAND, whose own axis a producer such as `shrink` has already
+        // declared. Returning after the declaration made every such guard
+        // unreachable, which is how a compiled kernel came to broadcast
+        // element 0 of a two-element axis in silence.
         if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
             let name = name.clone();
             self.declared_dim_names.insert(name.clone());
             self.line(&format!("int64_t {name} = {extent_expr};"));
-            return;
+            if !self.local_dim_guard_sites.contains_key(&(id, axis)) {
+                return;
+            }
         }
         // The guard site and the claim it compares against are the
         // derivation's, and the rendering is [04-NUM-9]'s: the complete
@@ -6765,21 +6840,29 @@ impl CEmitter {
         // entry path emits for a `Literal` claim (chelis#1377). Keying it on
         // whether a C variable happened to be allocated narrowed a required
         // check to an implementation convenience.
-        let Some(site) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
+        let Some(sites) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        let (name, operand, op) = (site.claim, site.operand, site.op);
-        let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
-        self.line(&format!("if (({extent_expr}) != {operand}) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
-        ));
-        self.line(&format!(
-            "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        // One comparison per DISTINCT claim on this axis. Two claims here are
+        // two obligations, and the derivation already coalesced the equal ones.
+        for site in sites {
+            // The class's canonical value, rendered as a C expression: the
+            // variable this function's prologue declared for the claim's
+            // binder, or the size the checker resolved.
+            let operand = site.canonical.to_string();
+            let (name, op) = (site.claim, site.op);
+            let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
+            self.line(&format!("if (({extent_expr}) != {operand}) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
+            ));
+            self.line(&format!(
+                "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
+            ));
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     /// chelis#616 (defense in depth): a RUNTIME axis whose output dim

@@ -344,38 +344,6 @@ pub(super) fn check_conv2d_signature(
     subst.apply(&output_template)
 }
 
-/// `spec/05-risc-primitives.md` §4.1: `matmul` contracts the last axis of its
-/// left operand against the first axis of its right operand, so neither
-/// operand can have rank below two.
-const MATMUL_MIN_RANK: usize = 2;
-
-/// Whether a contracted-extent pair can still agree.
-///
-/// Conservative on the value: only two known literals can definitely
-/// disagree, so anything symbolic stays admissible. That is not sufficient on
-/// its own; the caller must also compare the correct pair of axes, which is
-/// what [`right_operand_contracted_axis`] exists to get right.
-fn contraction_may_agree(contracted: Option<&Dim>, against: Option<&Dim>) -> bool {
-    match (contracted, against) {
-        (Some(Dim::Lit(left)), Some(Dim::Lit(right))) => left == right,
-        _ => true,
-    }
-}
-
-/// The axis a right-hand `matmul` operand contracts on: its second-to-last,
-/// not its first.
-///
-/// Those coincide exactly when the operand has rank two, which is why a suite
-/// whose siblings are all rank two cannot tell the two readings apart. At rank
-/// three or more the first axis is a batch axis, and comparing against it
-/// eliminates forms `matmul` admits and can leave the one form it rejects.
-/// `checked_sub` because nothing here establishes the operand has rank two or
-/// more: a rank-1 or rank-0 shape yields no contracted axis, and
-/// [`contraction_may_agree`] then admits rather than guessing.
-fn right_operand_contracted_axis(shape: &[Dim]) -> Option<&Dim> {
-    shape.len().checked_sub(2).and_then(|axis| shape.get(axis))
-}
-
 pub(super) fn check_matmul_signature(
     arg_tys: &[Type],
     result_ty: &Type,
@@ -384,54 +352,6 @@ pub(super) fn check_matmul_signature(
 ) -> Type {
     if arg_tys.len() != 2 {
         return report_builtin_arity_bare(errors, "matmul", "2 arguments", arg_tys.len());
-    }
-
-    // §4.7.2 candidate elimination by the consumer's own typing rule: a
-    // positional `expand` result keeps only the forms `matmul` admits at all.
-    // That is rank at least two, and, when the other operand is already
-    // resolved, a contracted extent that can still agree with it. Exactly one
-    // survivor fixes the result; several leave the choice open; none rejects
-    // the program. Without this the result variable was never bound and an
-    // inference variable escaped into the checked signature (chelis#1380).
-    //
-    // Each slot is settled in turn so that fixing one operand can supply the
-    // sibling evidence for the other. The `Type::Error` arms below stay as
-    // they are: they are chelis#731 cascade suppression rather than deferral.
-    for slot in 0..2 {
-        let sibling_dims = match type_for_readonly_check(&arg_tys[1 - slot], subst) {
-            Type::Tensor(dims, _) => Some(dims),
-            _ => None,
-        };
-        let Type::Var(var) = type_for_readonly_check(&arg_tys[slot], subst) else {
-            continue;
-        };
-        let rule = |dims: &[Dim]| -> bool {
-            if dims.len() < MATMUL_MIN_RANK {
-                return false;
-            }
-            let Some(sibling_dims) = sibling_dims.as_deref() else {
-                return true;
-            };
-            if slot == 0 {
-                // The candidate is the left operand: its last axis contracts
-                // against the sibling's second-to-last.
-                contraction_may_agree(dims.last(), right_operand_contracted_axis(sibling_dims))
-            } else {
-                // The candidate is the right operand: the sibling's last axis
-                // contracts against the candidate's second-to-last.
-                contraction_may_agree(sibling_dims.last(), right_operand_contracted_axis(dims))
-            }
-        };
-        if let Err(error) = subst.settle_deferred_tensor(
-            var,
-            DeferralAction::Constrain(ShapeEvidence::Admits {
-                rule: &rule,
-                requirement: "a tensor of rank two or more whose contracted extent agrees \
-                              with the other operand",
-            }),
-        ) {
-            return report(errors, error.into());
-        }
     }
 
     let lhs = type_for_readonly_check(&arg_tys[0], subst);
@@ -909,13 +829,41 @@ pub(super) fn check_reduction_signature(
     subst.apply(&canonical)
 }
 
+/// `expand`'s unit-extent claim, statically refuted.
+///
+/// spec/05-risc-primitives.md §2.4.1: "`expand` sets the extent at `axis` and
+/// is well formed only when the operand's extent at `axis` is 1 (the size-1
+/// broadcast of §2.4's table); the operation is a claim that the operand's
+/// extent at `axis` is 1. A literal operand extent at `axis` other than 1 is
+/// a type error. A symbolic or runtime operand extent at `axis` other than 1
+/// fails that claim's runtime extent guard and traps `Domain`."
+///
+/// So this returns an error only for a literal that refutes the claim.
+/// Everything else, a named dim or an unconstrained extent, is admitted here
+/// and carries the claim into the IR, where the §4.7 runtime extent guard
+/// compares it against the value observed.
+fn unit_extent_claim_error(builtin: &str, input_dims: &[Dim], axis: usize) -> Option<CheckError> {
+    match input_dims.get(axis) {
+        Some(Dim::Lit(1)) => None,
+        Some(Dim::Lit(extent)) => Some(CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            format!(
+                "{builtin} requires the operand's extent at axis {axis} to be 1, got \
+                 {extent}: {builtin} broadcasts a size-1 axis and cannot replace an \
+                 axis that already carries data (spec/05-risc-primitives.md \u{00a7}2.4.1)"
+            ),
+            vec![],
+        )),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_expand_signature(
     builtin: &'static str,
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
-    source_ordinal: SourceOrdinal,
     axis_is_dim_name: bool,
     size_class: SizeClass,
     env: &Env,
@@ -948,18 +896,41 @@ pub(super) fn check_expand_signature(
 
     let has_spread = input_dims.iter().any(|d| matches!(d, Dim::Rank(_)));
 
-    // chelis#339 named-axis expand (spec/04-type-system.md §4.5.3): when the
+    // chelis#339 named-axis insert (spec/04-type-system.md §4.5.3): when the
     // axis argument is a dimension NAME rather than an integer, the call
-    // inserts a new named axis — at the trailing end (3-arg form) or
+    // inserts a new named axis, at the trailing end (3-arg form) or
     // immediately before an existing named anchor (4-arg form). This is the
-    // only valid expand form on a rank-spread operand. `axis_is_dim_name` is
+    // only valid form on a rank-spread operand. `axis_is_dim_name` is
     // scope-discriminated by the caller: a bare var bound in the value
     // environment is a runtime value (issue #259), not a dim name, and falls
     // through to the compile-time-constant rejection below.
+    //
+    // The form belongs to `insert`. spec/05-risc-primitives.md §2.4: "The
+    // named-axis form (`insert(x, new, size)` with a dimension name) and the
+    // four-argument anchored form belong to `insert`", and §4.5.3 is written
+    // in `insert` throughout. `expand` therefore names the fix rather than
+    // adopting a form that would raise the rank it must leave alone.
     if axis_is_dim_name
         && arg_exprs.get(1).and_then(extract_int_for_dim).is_none()
         && let Some(new_name) = arg_exprs.get(1).and_then(symbolic_dim_ref_name)
     {
+        if !inserts_only {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "{builtin} takes a positional int32 axis, not the dimension \
+                         name `{new_name}`: the named-axis form adds an axis and \
+                         belongs to `insert`. Write `insert(x, {new_name}, size)` to \
+                         add a named axis, or `{builtin}(x, <int32 axis>, size)` to \
+                         broadcast an existing size-1 axis \
+                         (spec/05-risc-primitives.md \u{00a7}2.4)"
+                    ),
+                    vec![],
+                ),
+            );
+        }
         return check_named_expand_signature(
             builtin,
             new_name,
@@ -974,37 +945,61 @@ pub(super) fn check_expand_signature(
     }
 
     // From here on the call is the positional concrete-rank form. A fourth
-    // (anchor) argument is only meaningful in the named-axis form.
+    // (anchor) argument is only meaningful in the named-axis form, which is
+    // `insert`'s.
     if arg_exprs.len() == 4 {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                format!(
-                    "{builtin} takes a fourth (anchor) argument only in the named-axis \
-                     form `{builtin}(x, new, size, anchor)`, where `new` names the \
-                     inserted axis (spec/04-type-system.md \u{00a7}4.5.3)"
-                ),
+                if inserts_only {
+                    format!(
+                        "{builtin} takes a fourth (anchor) argument only in the named-axis \
+                         form `{builtin}(x, new, size, anchor)`, where `new` names the \
+                         inserted axis (spec/04-type-system.md \u{00a7}4.5.3)"
+                    )
+                } else {
+                    format!(
+                        "{builtin} takes exactly three arguments `(x, axis, size)`. The \
+                         four-argument anchored form adds a named axis and belongs to \
+                         `insert`: write `insert(x, new, size, anchor)` \
+                         (spec/05-risc-primitives.md \u{00a7}2.4)"
+                    )
+                },
                 vec![],
             ),
         );
     }
     // A positional index is meaningless at symbolic rank: against a spread
-    // there is no fixed position to insert at. Mirror the reduction arm —
-    // name the inserted axis instead.
+    // there is no fixed position. For `insert`, spec/04-type-system.md §4.5.3
+    // says so and offers the named form. `expand` has no named form, and no
+    // sentence states its verdict on a spread operand, so it keeps the same
+    // rejection and says only what is decided: the axis it broadcasts must be
+    // an axis the operand's static rank has. Tracked as a spec gap by
+    // chelis#1575.
     if has_spread {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                format!(
-                    "{builtin}: a positional integer axis is only valid on a \
-                     concrete-rank operand; on a rank-spread operand, name the \
-                     inserted axis (e.g. `{builtin}(x, one, 1)` for a trailing insert, \
-                     or `{builtin}(x, c, n, seq)` to insert before the named `seq` \
-                     anchor) so the insertion point stays name-anchored \
-                     (spec/04-type-system.md \u{00a7}4.5.3)"
-                ),
+                if inserts_only {
+                    format!(
+                        "{builtin}: a positional integer axis is only valid on a \
+                         concrete-rank operand; on a rank-spread operand, name the \
+                         inserted axis (e.g. `{builtin}(x, one, 1)` for a trailing insert, \
+                         or `{builtin}(x, c, n, seq)` to insert before the named `seq` \
+                         anchor) so the insertion point stays name-anchored \
+                         (spec/04-type-system.md \u{00a7}4.5.3)"
+                    )
+                } else {
+                    format!(
+                        "{builtin}: a positional integer axis is only valid on a \
+                         concrete-rank operand, because the axis it broadcasts must be \
+                         one the operand's static rank has; a rank-spread operand has \
+                         no fixed position. `{builtin}` has no named-axis form \
+                         (spec/05-risc-primitives.md \u{00a7}2.4)"
+                    )
+                },
                 vec![],
             ),
         );
@@ -1053,19 +1048,42 @@ pub(super) fn check_expand_signature(
             );
         }
     };
-    // Both positional forms share the inclusive insertion bound. Diagnose
-    // values beyond it before consulting an expected result: expected-result
+    // The two operations have different axis ranges, and
+    // spec/04-type-system.md §4.7.2 states both: "`expand` requires `axis`
+    // within `rank(x)` [...] `insert` admits `axis` in `0..=rank(x)`, so
+    // `axis == rank(x)` appends a trailing axis. An axis outside its
+    // operation's range is a type error."
+    //
+    // Diagnose it before consulting an expected result: expected-result
     // propagation may carry an independently wrong rank, but it must not mask
     // the more local invalid-axis reason (chelis#579/#942).
-    if axis > input_dims.len() {
+    // `saturating_sub` would let axis 0 through on a rank-0 operand, which has
+    // no axis at all, so the two bounds are written as the conditions §4.7.2
+    // states rather than as one arithmetic limit.
+    let axis_out_of_range = if inserts_only {
+        axis > input_dims.len()
+    } else {
+        axis >= input_dims.len()
+    };
+    if axis_out_of_range {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                format!(
-                    "{builtin} axis {axis} is out of bounds for rank {} tensor",
-                    input_dims.len()
-                ),
+                if inserts_only {
+                    format!(
+                        "{builtin} axis {axis} is out of bounds for rank {} tensor",
+                        input_dims.len()
+                    )
+                } else {
+                    format!(
+                        "{builtin} axis {axis} is out of bounds for rank {} tensor: \
+                         {builtin} broadcasts an existing axis, so its axis must be \
+                         within the operand's rank. Use `insert` to add an axis \
+                         (spec/04-type-system.md \u{00a7}4.7.2)",
+                        input_dims.len()
+                    )
+                },
                 vec![],
             ),
         );
@@ -1136,28 +1154,15 @@ pub(super) fn check_expand_signature(
                     ),
                 );
             }
-            if out_dims.len() == input_dims.len() + 1 {
-                let mut expected = input_dims.clone();
-                expected.insert(axis, size.clone());
-                Type::Tensor(expected, input_prec)
-            } else if out_dims.len() == input_dims.len() && !inserts_only {
-                if axis >= input_dims.len() {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            format!(
-                                "{builtin} axis {axis} is out of bounds for rank {} tensor",
-                                input_dims.len()
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-                let mut expected = input_dims.clone();
-                expected[axis] = size.clone();
-                Type::Tensor(expected, input_prec)
+            // One result shape per operation (spec/04-type-system.md §4.7.2:
+            // "Each operation has exactly one result shape"), so the declared
+            // rank agrees with the operation or the program is rejected.
+            let expected_rank = if inserts_only {
+                input_dims.len() + 1
             } else {
+                input_dims.len()
+            };
+            if out_dims.len() != expected_rank {
                 return report(
                     errors,
                     CheckError::new(
@@ -1170,42 +1175,48 @@ pub(super) fn check_expand_signature(
                             )
                         } else {
                             format!(
-                                "{builtin} output rank {} must equal input rank {} or {}",
+                                "{builtin} output rank {} must equal input rank {}: \
+                                 {builtin} broadcasts an existing size-1 axis and leaves \
+                                 the rank alone. Use `insert` to add an axis \
+                                 (spec/04-type-system.md \u{00a7}4.7.2)",
                                 out_dims.len(),
-                                input_dims.len(),
-                                input_dims.len() + 1
+                                input_dims.len()
                             )
                         },
                         vec![],
                     ),
                 );
             }
+            if inserts_only {
+                let mut expected = input_dims.clone();
+                expected.insert(axis, size.clone());
+                Type::Tensor(expected, input_prec)
+            } else {
+                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis) {
+                    return report(errors, error);
+                }
+                let mut expected = input_dims.clone();
+                expected[axis] = size.clone();
+                Type::Tensor(expected, input_prec)
+            }
         }
-        Type::Var(_) if inserts_only => {
-            // `insert` has one legal shape, so there is nothing to defer: the
-            // result follows from the operand and the axis alone.
-            let mut expected = input_dims.clone();
-            expected.insert(axis, size.clone());
-            Type::Tensor(expected, input_prec)
-        }
-        Type::Var(result_var) => {
-            // [04-TENSOR-EXPAND]: retain both legal shapes until ordinary
-            // unification supplies a tensor result. The obligation is tied to
-            // this monomorphic result variable, so a later consumer can select
-            // insertion or replacement and the unifier checks the selected
-            // shape. A shape-neutral consumer such as `cast` materializes the
-            // documented context-free default (chelis#942).
-            subst.record_deferred_expand_constraint(
-                result_var,
-                source_ordinal,
-                crate::unify::DeferredExpandConstraint {
-                    input_dims,
-                    input_prec,
-                    axis,
-                    size,
-                },
-            );
-            Type::Var(result_var)
+        Type::Var(_) => {
+            // spec/04-type-system.md §4.7.2: "No result is deferred, no
+            // consumer selects between shapes, and no context supplies a
+            // default." Each operation's one shape follows from the operand,
+            // the axis and the size alone, with nothing to record.
+            if inserts_only {
+                let mut expected = input_dims.clone();
+                expected.insert(axis, size.clone());
+                Type::Tensor(expected, input_prec)
+            } else {
+                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis) {
+                    return report(errors, error);
+                }
+                let mut expected = input_dims.clone();
+                expected[axis] = size.clone();
+                Type::Tensor(expected, input_prec)
+            }
         }
         Type::Error(witness) => return propagate(&witness),
         other => {

@@ -144,8 +144,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "chelis-python/extension-module,"
             "chelis-runtime/ownership-ledger,"
             "chelis-types/checkpoint-compile-probe,"
-            "chelis-types/generalize-sweep-oracle,"
-            "chelis-types/hash-order-compile-probe",
+            "chelis-types/generalize-sweep-oracle",
             "--",
             "-D",
             "warnings",

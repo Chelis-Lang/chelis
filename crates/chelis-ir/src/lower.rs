@@ -5700,7 +5700,8 @@ impl LowerCtx {
         }
     }
 
-    fn fallback_expand_type(
+    /// `insert`'s result type: the operand's dims with one axis added.
+    fn inserted_axis_type(
         &self,
         input: NodeId,
         axis: usize,
@@ -5714,6 +5715,44 @@ impl LowerCtx {
             return None;
         }
         dims.insert(axis, inserted_dim);
+        Some(TensorType {
+            dims,
+            precision: input_ty.precision,
+        })
+    }
+
+    /// `expand`'s result type: the operand's dims with one extent replaced.
+    ///
+    /// The replaced dim is taken from the CHECKER's stamped type whenever that
+    /// type has the operand's rank, not from the size's own `DimInfo`. The
+    /// stamped dim is the claim the program makes about that axis; deriving it
+    /// from the size instead would make the claim and its source the same
+    /// value, and the derived equality class would then owe no runtime guard
+    /// (`spec/design/runtime_extents.md` C2.4, C2.7). Only when the stamp is
+    /// unusable does the size supply the dim.
+    ///
+    /// Precision comes from the operand chain rather than from the stamp, for
+    /// the reason the `permute` arm records: a monomorphization rename can
+    /// leave the stamped type carrying a renamed `(t-var ...)` precision that
+    /// is absent from the callsite substitutions.
+    fn broadcast_axis_type(
+        &self,
+        input: NodeId,
+        axis: usize,
+        size: &RtDim,
+        inputs: &[NodeId],
+        stamped: &TensorType,
+    ) -> Option<TensorType> {
+        let input_ty = self.dag.get(input)?.output_type.clone();
+        let mut dims = input_ty.dims;
+        if axis >= dims.len() {
+            return None;
+        }
+        dims[axis] = if stamped.dims.len() == dims.len() {
+            stamped.dims[axis].clone()
+        } else {
+            self.dim_info_from_rt_dim(size, inputs)?
+        };
         Some(TensorType {
             dims,
             precision: input_ty.precision,
@@ -9293,8 +9332,14 @@ impl LowerCtx {
                     self.current_span_id.clone(),
                 )
             }
-            "expand" | "insert" if args.len() >= 2 => {
-                let x = self.lower_expr_node(&args[0], "expand input");
+            callee @ ("expand" | "insert") if args.len() >= 2 => {
+                // The two operations share every argument rule and differ only
+                // in the result shape they build. spec/04-type-system.md
+                // §4.7.2: "`expand` sets the extent at `axis` and leaves the
+                // rank unchanged; `insert` adds an axis of extent `size` at
+                // `axis` and produces rank `rank(x) + 1`."
+                let inserts = callee == "insert";
+                let x = self.lower_expr_node(&args[0], "expand/insert input");
                 // chelis#339 named-axis expand (spec §4.5.3): when the axis
                 // argument is a dimension NAME, the insertion point is
                 // resolved against the monomorphized operand dims — the
@@ -9309,6 +9354,23 @@ impl LowerCtx {
                 } else {
                     bare_var_name(&args[1])
                 };
+                // The named-axis form belongs to `insert`
+                // (spec/05-risc-primitives.md §2.4), and the checker rejects
+                // it for `expand` before lowering runs. Reaching here with one
+                // is an internal desync, not an input shape: a plain lowering
+                // diagnostic would be absorbed by the host-fallback path and
+                // emit the axis name as an undeclared C identifier.
+                if !inserts && named_insert.is_some() {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "internal lowering desync: `{callee}` reached lowering with a \
+                             named axis, which belongs to `insert` \
+                             (spec/05-risc-primitives.md \u{00a7}2.4)"
+                        ),
+                        Some(args[1].span()),
+                        args[1].span_id().map(ToOwned::to_owned),
+                    );
+                }
                 // chelis#339: the inserted name must not collide with an axis
                 // of the MONOMORPHIZED operand. The checker rejects visible
                 // collisions, but a rank spread (or a single-letter dim var,
@@ -9332,7 +9394,7 @@ impl LowerCtx {
                     // identifiers — garbage C, not a loud failure.
                     raise_fatal_lowering_error(
                         format!(
-                            "`expand` inserts an axis named `{name}`, but the monomorphized \
+                            "`{callee}` inserts an axis named `{name}`, but the monomorphized \
                              operand already carries an axis named `{name}` (a rank spread or \
                              single-letter dim var at the call boundary can cover an axis name \
                              the symbolic checker cannot see); later by-name axis lookups would \
@@ -9354,7 +9416,7 @@ impl LowerCtx {
                             Some(node) => node.output_type.dims.len(),
                             None => raise_lowering_error(
                                 format!(
-                                    "internal lowering desync: `expand` operand node {} \
+                                    "internal lowering desync: `{callee}` operand node {} \
                                      is missing from the DAG (section C1.4)",
                                     x.0
                                 ),
@@ -9370,14 +9432,14 @@ impl LowerCtx {
                     // expanding the wrong axis (section C1.4 raise-or-prove).
                     None => self.extract_usize_value(&args[1]).unwrap_or_else(|| {
                         let unsupported = Unsupported::new(
-                            UnsupportedKind::Construct(
-                                "a non-literal `expand` axis argument".to_string(),
-                            ),
-                            "the compiled-backend lowering of `expand`",
+                            UnsupportedKind::Construct(format!(
+                                "a non-literal `{callee}` axis argument"
+                            )),
+                            "the compiled-backend lowering of `expand`/`insert`",
                             Stage::Lowering,
                             chelis_types::deliberate_rejection!(
                                 "[05-AXIS-1]",
-                                "the expand axis must be an integer literal or a named \
+                                "the expand/insert axis must be an integer literal or a named \
                                  dimension; a computed axis previously fell back to axis 0 \
                                  silently (chelis#730 section C1.4, flagged by chelis#782)"
                             ),
@@ -9498,7 +9560,7 @@ impl LowerCtx {
                         } else {
                             raise_fatal_lowering_error(
                                 format!(
-                                    "`expand` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                                    "`{callee}` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469"
                                 ),
                                 Some(app_span),
                                 self.current_span_id.clone(),
@@ -9518,7 +9580,7 @@ impl LowerCtx {
                     //     prevent.
                     else {
                         raise_fatal_lowering_error(
-                            "`expand` size is a runtime expression the backend cannot \
+                            "`{callee}` size is a runtime expression the backend cannot \
                              materialize as an extent: integer arithmetic that combines a \
                              `shape(tensor, axis)` read (or a symbolic dimension) with another \
                              term (e.g. `mul(shape(x, 0), 2)` or `add(shape(x, 0), 1)`) has no \
@@ -9543,15 +9605,19 @@ impl LowerCtx {
                     (Some(name), RtDim::Lit(n)) => Some(DimInfo::Named(name.clone(), Some(*n))),
                     _ => None,
                 };
-                let out_ty = self
-                    .fallback_expand_type(x, axis, &size, &inputs)
-                    .map(|mut t| {
-                        if let Some(dim) = named_dim {
-                            t.dims[axis] = dim;
-                        }
-                        t
-                    })
-                    .unwrap_or_else(|| ty.clone());
+                let out_ty = if inserts {
+                    self.inserted_axis_type(x, axis, &size, &inputs)
+                        .map(|mut t| {
+                            if let Some(dim) = named_dim {
+                                t.dims[axis] = dim;
+                            }
+                            t
+                        })
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    self.broadcast_axis_type(x, axis, &size, &inputs, ty)
+                        .unwrap_or_else(|| ty.clone())
+                };
                 self.dag.add_node(
                     RiscOp::Expand { axis, size },
                     inputs,
@@ -14062,26 +14128,29 @@ mod tests {
         );
     }
 
-    /// The fix recovers the broadcast EXTENT only; it leaves the
-    /// language's rank/insert rule for `expand` untouched. To prove the
-    /// extent recovery is orthogonal to the rank rule, lower a rank-1
-    /// size-1 source `tensor[1]` with a shape-derived size: `expand([1],
-    /// 0, shape(&x, 0))` with `x: tensor[2]`. The recovered extent at the
+    /// The fix recovers the broadcast EXTENT only; it leaves the rank rule
+    /// of the operation it lowers untouched. To prove the extent recovery
+    /// is orthogonal to that rule, lower a rank-1 size-1 source
+    /// `tensor[1]` with a shape-derived size: `insert([1], 0,
+    /// shape(&x, 0))` with `x: tensor[2]`. The recovered extent at the
     /// inserted axis must be the concrete `2` (NOT the default `1`), and
-    /// the output must follow the established INSERT semantics
-    /// (`[1] -> [2, 1]`, axis 0 inserted) — the same rule pinned by
-    /// `cli::build_c_linreg_expand_singleton_bias_keeps_rank2_shape` and
+    /// the output must follow `insert`'s rule (`[1] -> [2, 1]`, axis 0
+    /// added), the same rule pinned by
+    /// `cli::build_c_linreg_insert_singleton_bias_keeps_rank2_shape` and
     /// `chelis-compiler-api`'s
-    /// `host_runtime_expand_singleton_input_inserts_not_replicates`.
-    /// #318's real source is rank-0 (`scalar_to_tensor`), so this rank-1
-    /// case only exists to lock that the size fix did not perturb the
-    /// rank rule.
+    /// `host_runtime_insert_singleton_input_adds_an_axis`.
+    ///
+    /// The call spells `insert` because it raises the rank:
+    /// `spec/04-type-system.md` §4.7.2 gives `expand` the same-rank
+    /// broadcast and `insert` the rank-increasing form. #318's real source
+    /// is rank-0 (`scalar_to_tensor`), so this rank-1 case only exists to
+    /// lock that the size fix did not perturb the rank rule.
     #[test]
-    fn issue_318_expand_shape_arg_recovers_extent_without_changing_rank_rule() {
+    fn issue_318_insert_shape_arg_recovers_extent_without_changing_rank_rule() {
         // Source: a rank-1 size-1 constant `tensor[1]`.
         let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 1) (t-prim {} f32))}
-                 (var {} expand)
+                 (var {} insert)
                  (cast {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
                        (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 3.0)
                        (t-prim {} f32))
@@ -14106,7 +14175,7 @@ mod tests {
         assert_eq!(
             dims,
             vec![DimInfo::Lit(2), DimInfo::Lit(1)],
-            "rank rule is unchanged: a rank-1 size-1 source INSERTS axis 0 \
+            "rank rule is unchanged: `insert` adds axis 0 \
              ([1] -> [2, 1]); got {dims:?}",
         );
     }

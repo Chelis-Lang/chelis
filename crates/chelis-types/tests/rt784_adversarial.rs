@@ -153,11 +153,15 @@ const SUM_SRC: &str = r#"
            (var {} sum) (var {} x) (lit {} 1)))
 "#;
 
+// A rank-increasing call, so it spells `insert`: `expand` leaves the rank
+// alone (spec/04-type-system.md section 4.7.2). The subject is the write-back
+// of a concrete annotation over an error operand, which the operation's
+// identity does not affect.
 const EXPAND_SRC: &str = r#"
     (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
     (def {} e
       (app {type: (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))}
-           (var {} expand) (var {} x) (lit {} 0) 4i64))
+           (var {} insert) (var {} x) (lit {} 0) 4i64))
 "#;
 
 #[test]
@@ -181,12 +185,12 @@ fn sum_error_operand_does_not_clobber_concrete_annotation() {
 }
 
 #[test]
-fn expand_error_operand_does_not_clobber_concrete_annotation() {
-    let tags = writeback_type_tags(EXPAND_SRC, "expand");
-    assert!(!tags.is_empty(), "expected an expand app node type");
+fn insert_error_operand_does_not_clobber_concrete_annotation() {
+    let tags = writeback_type_tags(EXPAND_SRC, "insert");
+    assert!(!tags.is_empty(), "expected an insert app node type");
     assert!(
         tags.iter().all(|t| t == "t-tensor"),
-        "expand written-back type must stay concrete t-tensor, got {tags:?}",
+        "insert written-back type must stay concrete t-tensor, got {tags:?}",
     );
 }
 

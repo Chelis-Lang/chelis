@@ -192,7 +192,6 @@ pub(super) fn infer_expand_app(
         &kids[1..],
         &arg_tys,
         &result_ty,
-        product.source_ordinal_for_list(list),
         axis_is_dim_name,
         size_class,
         env,
@@ -444,7 +443,7 @@ pub(super) fn infer_reshape_app(
 
             Type::Tensor(vec![Dim::Wildcard], precision)
         }
-        Type::Var(input_var) => {
+        Type::Var(_) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
@@ -469,9 +468,9 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
-                // A `shape(input, axis)` element may have selected the
-                // positional-expand replacement form while the shape list was
-                // inferred. Re-read the input before deriving the output.
+                // Inferring the shape list may have bound the input's own
+                // type through a `shape(input, axis)` element. Re-read the
+                // input before deriving the output.
                 if let Type::Tensor(input_dims, precision) = subst.apply(&input_ty) {
                     let dims = reshape_output_dims(
                         shape_expr,
@@ -506,17 +505,6 @@ pub(super) fn infer_reshape_app(
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
-                }
-                match subst.settle_deferred_tensor(
-                    input_var,
-                    DeferralAction::Constrain(ShapeEvidence::ElementCount {
-                        target_dims: &dims,
-                        ordinal: product.source_ordinal_for_list(list),
-                    }),
-                ) {
-                    Ok(Some(output)) => return output,
-                    Ok(None) => {}
-                    Err(error) => return report(errors, error.into()),
                 }
             }
             input_ty

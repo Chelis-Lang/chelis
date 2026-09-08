@@ -242,6 +242,52 @@ pub enum BypassExpectation {
     FormExpecting,
 }
 
+/// The content shape a form's semantics reads out of one child slot.
+///
+/// `spec/04-type-system.md` §10 [04-TOT-4] requires a form that reads a child
+/// through a partial extraction to name, on failure, "the form and the shape it
+/// expected". This enum is that vocabulary: a closed set of shapes with one
+/// spelling each, so no consumer composes the phrase itself and no two
+/// diagnostics describe the same expectation differently. `Display` renders the
+/// shape as a noun phrase, which the consumer places after "expected".
+///
+/// It is separate from [`BypassExpectation`], which classifies what the STAMP
+/// pass requires of a bypass child. This one classifies what a form's checker
+/// disposition reads, which is why it names families of value rather than
+/// vocabulary heads.
+///
+/// The set holds exactly the shapes a consumer reads today. A slot that joins
+/// the seam brings its own variant in the same change, so the enum never
+/// carries a spelling nothing produces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SlotShape {
+    /// A symbol naming a declared record field (`access`, `kv`).
+    FieldName,
+    /// A symbol naming a constructor (`pat-ctor`, `pat-record`).
+    ConstructorName,
+    /// A symbol naming a value binding (`pat-var`, `pat-as`).
+    BindingName,
+    /// An integer axis (`vmap`).
+    IntegerAxis,
+    /// A scalar literal value (`pat-lit`). spec/03-deep-syntax.md section 6.3
+    /// fixes this as a value rather than an expression node: "patterns do not
+    /// contain expression nodes".
+    LiteralValue,
+}
+
+impl core::fmt::Display for SlotShape {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let text = match self {
+            SlotShape::FieldName => "a symbol field name",
+            SlotShape::ConstructorName => "a symbol constructor name",
+            SlotShape::BindingName => "a symbol binding name",
+            SlotShape::IntegerAxis => "an integer axis",
+            SlotShape::LiteralValue => "a scalar literal value",
+        };
+        f.write_str(text)
+    }
+}
+
 /// Exhaustive child-role table for the closed Deep vocabulary.
 ///
 /// Total over `DeepTag` — no wildcard arm.

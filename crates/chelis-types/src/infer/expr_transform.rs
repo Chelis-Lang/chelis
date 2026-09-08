@@ -46,10 +46,26 @@ pub(super) fn infer_grad(
             }
         }
         Type::Error(w) => propagate(&w),
-        _ => {
-            // Can't determine function structure, return fresh var
-            vg.fresh_type()
-        }
+        // An operand whose type is still a variable decides nothing yet: it is
+        // not KNOWN to be a non-function, and reporting here would invent a
+        // rejection against an undecided type (chelis#731 §C3). Deferring it is
+        // what the checker does with unresolved variables elsewhere, and it is
+        // the one input the arm below must not claim.
+        Type::Var(_) => vg.fresh_type(),
+        // chelis#874 R4 / [04-TOT-1]: this arm used to be
+        // `_ => vg.fresh_type()`, commented "Can't determine function
+        // structure, return fresh var". A resolved non-function IS determined,
+        // and the sibling `infer_vmap` rejects the identical input with the
+        // message below; the two were written to the same template and only one
+        // kept a disposition, so an `f32`-typed `grad` operand scored 1.0.
+        other => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("grad expects a function, got {other}"),
+                vec!["Apply `grad` to a named function or inline lambda".to_string()],
+            ),
+        ),
     }
 }
 
@@ -305,7 +321,26 @@ pub(super) fn infer_vmap(
     // wrapped axis literal peels to the underlying int and trips the
     // non-negative check. Surf parser restricts vmap's axis to bare
     // ints, so this is defense-in-depth for Deep-direct callers.
-    let axis = kids.get(1).and_then(extract_int_for_dim).unwrap_or(0);
+    //
+    // chelis#874 R1 / [04-TOT-4]: this read used to be
+    // `kids.get(1).and_then(extract_int_for_dim).unwrap_or(0)`, one
+    // `unwrap_or` serving two different inputs. `kids.get(1) == None` is
+    // spec/02 §0.1's bare `vmap(f)`, where the zero default is correct;
+    // `Some(child)` that cannot be read is a node the program submitted and
+    // the checker discarded, which scored a perfect 1.0. The seam keeps the
+    // first and rejects the second.
+    let axis = match read_optional_slot(
+        kids,
+        DeepTag::Vmap,
+        1,
+        SlotShape::IntegerAxis,
+        extract_int_for_dim,
+        errors,
+    ) {
+        Ok(Some(axis)) => axis,
+        Ok(None) => 0,
+        Err(witness) => return propagate(&witness),
+    };
     if axis < 0 {
         return report(
             errors,

@@ -21,21 +21,6 @@ pub(super) fn infer_tuple(
         .iter()
         .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, product))
         .collect();
-    for elem in &elems {
-        // C3 `Propagate` (`spec/04-type-system.md` §4.7.2): an anonymous tuple
-        // field carries the unresolved monomorphic candidate and adds no
-        // evidence. Only a variable field can resolve to a deferred result, so
-        // the pre-filter keeps every other field free of a substitution walk.
-        //
-        // The action cannot fail: it inspects nothing and mutates nothing, so
-        // the result is deliberately discarded rather than given an error arm
-        // no input can reach.
-        if matches!(elem, Type::Var(_))
-            && let Type::Var(v) = subst.apply(elem)
-        {
-            let _ = subst.settle_deferred_tensor(v, DeferralAction::Propagate);
-        }
-    }
     Type::Tuple(elems)
 }
 
@@ -344,12 +329,36 @@ pub(super) fn infer_record(
         if kv_tag != DeepTag::Kv {
             continue;
         }
-        let (Some(field_name), Some(value)) =
-            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
-        else {
+        // chelis#874 R5 / [04-TOT-4]: this was
+        // `let (Some(..), Some(..)) = (..) else { continue };`. The `continue`
+        // skipped the `infer_expr(value, ..)` below, so an unreadable key left
+        // the VALUE unvisited and unstamped, and section C4.1's owner-stamp
+        // tripwire fired on that value as an `internal:` invariant violation
+        // naming `lit`. The program was rejected, but for a node the author did
+        // not write wrongly. Read the key at its own slot, and infer the value
+        // either way so the walk still covers it.
+        let field_name = read_required_slot(
+            kv_kids,
+            DeepTag::Kv,
+            0,
+            SlotShape::FieldName,
+            symbol_name,
+            errors,
+        )
+        .ok();
+        // The ABSENT value child is not this class and is not claimed here.
+        // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
+        // the stamp boundary, so `(kv {} r)` is rejected as
+        // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
+        // ever runs; this arm is reachable only from the producerless legacy
+        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        let Some(value) = kv_kids.get(1) else {
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
+        let Some(field_name) = field_name else {
+            continue;
+        };
         if known_field_set.contains(field_name) {
             let pos = declared_field_names
                 .iter()
@@ -684,12 +693,31 @@ pub(super) fn infer_record_update(
         if kv_tag != DeepTag::Kv {
             continue;
         }
-        let (Some(field_name), Some(value)) =
-            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
-        else {
+        // chelis#874 / [04-TOT-4]: `infer_record`'s repair, applied to the
+        // identical `else { continue }` here. This site produced the same
+        // owner-stamp misattribution on the update value.
+        let field_name = read_required_slot(
+            kv_kids,
+            DeepTag::Kv,
+            0,
+            SlotShape::FieldName,
+            symbol_name,
+            errors,
+        )
+        .ok();
+        // The ABSENT value child is not this class and is not claimed here.
+        // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
+        // the stamp boundary, so `(kv {} r)` is rejected as
+        // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
+        // ever runs; this arm is reachable only from the producerless legacy
+        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        let Some(value) = kv_kids.get(1) else {
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
+        let Some(field_name) = field_name else {
+            continue;
+        };
         kv_pairs.push((field_name, value_ty));
     }
     let mut resolved = subst.apply(&target_ty);
@@ -809,14 +837,7 @@ pub(super) fn infer_cast(
     };
 
     let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let resolved = match subst.apply(&expr_ty) {
-        Type::Var(v) => match subst.settle_deferred_tensor(v, DeferralAction::Freeze) {
-            Ok(Some(ty)) => ty,
-            Ok(None) => Type::Var(v),
-            Err(error) => return report(errors, error.into()),
-        },
-        other => other,
-    };
+    let resolved = subst.apply(&expr_ty);
 
     // Every target spelling first crosses the centralized resolver. Bare
     // primitive symbols are retained for historical compatibility; canonical
@@ -1054,83 +1075,6 @@ pub(super) fn report_unknown_cast_target(
     );
     let error = location.map_or(error.clone(), |location| location.attach(error));
     report(errors, error)
-}
-
-/// True if `name` is one of the unsigned integer dtype names reserved
-/// as deferred by `spec/04-type-system.md` §1.1.1 (§1.1.2 names the
-/// `uint*` spellings canonical; the short `u*` spellings are not
-/// reserved). Covers both the short form (`u8`/`u16`/`u32`/`u64`) and
-/// the canonical `uint*` family that LLMs and cross-language users
-/// tend to write.
-pub(super) fn is_unsigned_dtype_name(name: &str) -> bool {
-    matches!(
-        name,
-        "u8" | "u16" | "u32" | "u64" | "uint8" | "uint16" | "uint32" | "uint64"
-    )
-}
-
-/// Build a §1.1.1 diagnostic for an unsigned dtype name appearing as a
-/// cast target or a tensor element type. Returns `None` for non-unsigned
-/// names so call sites can short-circuit with `&&`.
-pub(super) fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
-    if !is_unsigned_dtype_name(name) {
-        return None;
-    }
-    let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-    Some(CheckError::new(
-        CheckErrorKind::UnsupportedTensorPrecision,
-        format!(
-            "cannot use `{name}` as a {surface} dtype: unsigned integer types \
-             are deferred per spec/04-type-system.md §1.1.1 (canonical \
-             spelling uint8/uint16/uint32/uint64 per §1.1.2; active set: \
-             {active_set})"
-        ),
-        vec![
-            "spec/04-type-system.md §1.1.2 documents the workaround: cast to \
-             int32 or int64 and reason at the wider signed precision; or use \
-             a tensor of int8 / int16 / int32 / int64 if the bit-width matters"
-                .to_string(),
-        ],
-    ))
-}
-
-/// True if `name` is one of the remaining reserved-but-deferred dtype
-/// names of `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because
-/// it is a real `Prim` variant and takes the `Prim::parse_name` path;
-/// the unsigned family has its own predicate above). These spellings
-/// never resolve through `Prim::parse_name`, so without a dedicated arm
-/// they would fall to the generic unknown-name rejections with no
-/// §1.1.1 citation.
-pub(super) fn is_deferred_dtype_name(name: &str) -> bool {
-    matches!(
-        name,
-        "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128" | "decimal256"
-    )
-}
-
-/// Build a §1.1.1 diagnostic for a reserved-but-deferred dtype name
-/// appearing as a cast target or a tensor element type. Returns `None`
-/// for other names so call sites can short-circuit.
-pub(super) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
-    if !is_deferred_dtype_name(name) {
-        return None;
-    }
-    let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-    Some(CheckError::new(
-        CheckErrorKind::UnsupportedTensorPrecision,
-        format!(
-            "cannot use `{name}` as a {surface} dtype: {name} is reserved \
-             but deferred per spec/04-type-system.md §1.1.1 (active set: \
-             {active_set})"
-        ),
-        vec![format!(
-            "spec/04-type-system.md §1.1.1 records the deferral rationale \
-             and {name}'s declared arithmetic width; pick one of \
-             {active_set} until it activates"
-        )],
-    ))
 }
 
 /// Emit the canonical "unsupported precision" diagnostic for either a

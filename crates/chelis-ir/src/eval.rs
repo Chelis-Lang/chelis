@@ -1942,6 +1942,35 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
 /// program and another way for an evaluated one.
 type EntryDimGuard = (String, (String, usize), (String, usize));
 
+/// The unit-extent claims this graph checks at entry, as
+/// `(input label, axis)` pairs to read.
+///
+/// The claimed value is the literal 1, so unlike [`EntryDimGuard`] there is no
+/// canonical witness to carry: the guard compares one read against a constant.
+/// Everything else is shared with the class path, `derive_unit_extent_claims`
+/// and `member_load_axis` included, so a claim cannot be identified one way
+/// for a compiled program and another way for an evaluated one.
+fn entry_unit_extent_guards(dag: &Dag) -> Vec<(String, usize)> {
+    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
+        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
+        _ => None,
+    };
+    let mut guards = Vec::new();
+    for claim in crate::axis_sources::derive_unit_extent_claims(dag) {
+        if claim.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
+            continue;
+        }
+        let Some((load, axis)) = crate::axis_sources::member_load_axis(dag, &claim.member()) else {
+            continue;
+        };
+        let Some(name) = label(load) else {
+            continue;
+        };
+        guards.push((name, axis));
+    }
+    guards
+}
+
 fn entry_dim_guards(dag: &Dag) -> Vec<EntryDimGuard> {
     let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
         Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
@@ -2159,6 +2188,33 @@ where
         ));
     }
 
+    // The same-rank `expand`'s unit-extent claim, at the same point and by the
+    // same reading of the inputs as the class guard above.
+    // `spec/05-risc-primitives.md` section 2.4.1 makes the operation "a claim
+    // that the operand's extent at `axis` is 1" and sends a symbolic or
+    // runtime extent other than 1 to this guard.
+    //
+    // Order matters and B2h fixed it: the literal-extent check, then the class
+    // guard, then this, and only then `infer_symbolic_bindings_from_inputs`.
+    // The inference is a backstop that reports a targeted error for a symbol
+    // it cannot bind; running a claim guard after it would report the
+    // inference's message for a program whose real fault is a refuted claim.
+    for (label, axis) in entry_unit_extent_guards(dag) {
+        let Some(observed) = resolved_inputs
+            .get(&label)
+            .and_then(|value| value.shape.get(axis).copied())
+        else {
+            continue;
+        };
+        if observed == 1 {
+            continue;
+        }
+        return Err(format!(
+            "extent `1`: claimed = 1, {label} axis {axis} = {observed}\n\
+             numeric trap: domain in load at int64",
+        ));
+    }
+
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
         let mut bindings =
@@ -2203,6 +2259,25 @@ where
     // dims so a declared-vs-computed disagreement errs loudly (the eval
     // mirror of the C backend's runtime equality-abort guard).
     let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
+    // chelis#1277 C1.3: the eval lane's LOCAL guards, from the same
+    // `local_dim_guard_sites` the C emitter reads (C2.7). Derived from `dag`
+    // and not from `bound_dag` for the same reason the entry guards are:
+    // binding rewrites a resolved `Named(n, None)` to `Named(n, Some(4))`, and
+    // the derivation reads a member's own dim to decide whether the checker
+    // already proved its extent, so on the bound graph every local member
+    // looks statically proved and every site disappears. Node ids survive
+    // `bind_symbolic_dims`, which rebuilds the graph to preserve them, so a
+    // site derived here addresses the node the loop below evaluates.
+    let mut local_guard_sites: UnordMap<
+        NodeId,
+        Vec<(usize, crate::axis_sources::LocalGuardClaim)>,
+    > = UnordMap::new();
+    for ((node, axis), claim) in crate::axis_sources::local_dim_guard_sites(dag) {
+        local_guard_sites
+            .entry(NodeId(node))
+            .or_default()
+            .push((axis, claim));
+    }
     let mut runtime_dims = prebound_dims;
 
     // chelis#914: cooperative cancellation. `eval_compiled` runs two lanes —
@@ -2222,6 +2297,39 @@ where
             && !mask[node.id.0]
         {
             continue;
+        }
+
+        // `spec/04-type-system.md` section 4.7: a guard comparing a locally
+        // computed value "takes the source position of the operation that
+        // introduces the guarded extent", so it runs BEFORE that operation,
+        // where the C lane emits it. Placing it after the value existed would
+        // let the operation's own failure - a `reshape` numel mismatch that
+        // the disagreeing extent caused - be reported instead of the claim
+        // that is actually wrong, which is the C lane's behaviour before the
+        // guard site existed.
+        // One consumer for every local site the derivation yields, whatever
+        // kind of claim it is. Which extent to read, and therefore when it can
+        // be read, is the site's own `LocalGuardObservation`; this loop takes
+        // the ones readable BEFORE the node runs and the loop at the foot of
+        // the body takes the ones readable only after.
+        //
+        // `spec/04-type-system.md` section 4.7: a guard comparing a locally
+        // computed value "takes the source position of the operation that
+        // introduces the guarded extent", so it runs BEFORE that operation,
+        // where the C lane emits it. Placing it after the value existed would
+        // let the operation's own failure - a `reshape` numel mismatch that the
+        // disagreeing extent caused - be reported instead of the claim that is
+        // actually wrong, which is the C lane's behaviour before the guard site
+        // existed.
+        if let Some(sites) = local_guard_sites.get(&node.id) {
+            for (axis, claim) in sites {
+                let crate::axis_sources::LocalGuardObservation::Carrier(carrier) = &claim.observed
+                else {
+                    continue;
+                };
+                let observed = resolve_eval_bound(carrier, node, &values, 0)?;
+                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+            }
         }
 
         let out_prim = node.output_type.precision;
@@ -2800,10 +2908,88 @@ where
                 }
             }
         }
+        // The same consumer, for the sites whose extent only exists once this
+        // node has produced it. Section 4.7 places these "after its producers
+        // and before the first allocation or element access whose shape
+        // depends on the guarded extent": this node IS the producer, and the
+        // allocation that depends on the extent belongs to its consumer, which
+        // has not run. A unit-extent claim is the case, and the site is keyed
+        // on the operand rather than on the `expand` that makes the claim,
+        // because that is where the C emitter renders the extent.
+        if let Some(sites) = local_guard_sites.get(&node.id) {
+            for (axis, claim) in sites {
+                if !matches!(
+                    claim.observed,
+                    crate::axis_sources::LocalGuardObservation::RealizedExtent
+                ) {
+                    continue;
+                }
+                let Some(&observed) = value.shape.get(*axis) else {
+                    continue;
+                };
+                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+            }
+        }
         values.insert(node.id, value);
     }
 
     Ok((values, path_random_counter))
+}
+
+/// One local extent guard, compared and reported.
+///
+/// Both consumers below call this and nothing else formats a local guard on
+/// this lane, so the two kinds of site cannot drift into two diagnostics. The
+/// text is [04-NUM-9]'s complete line with no prefix and no suffix, and
+/// section 4.7's context on its own preceding line, in the C lane's wording:
+/// the two lanes report one guard.
+///
+/// A binder this lane has not bound supplies no value, so the site is skipped
+/// rather than compared against an invented number.
+///
+/// The C lane does NOT match that skip, and saying so is the point. Once
+/// control reaches `emit_runtime_dim_site`'s GUARD branch it consults no
+/// binding table and emits its comparison against the binder unconditionally,
+/// so where this lane skips, C would emit an identifier its prologue may never
+/// declare. What keeps that from being a live divergence is not the absence of
+/// such a class - one is easy to build, with a `Load` whose only axis is a
+/// literal and two op-declared members - but the branch above it.
+/// `runtime_dim_sites` (`chelis-backend-c/src/emit.rs`) makes the FIRST
+/// op-declared occurrence of a symbol no `Load` declares a DECLARE site, so
+/// `emit_runtime_dim_site` returns before the guard branch for exactly the
+/// symbols this lane has not bound; a later site for that symbol compares
+/// against a variable by then declared. The eval mirror is the `runtime_dims`
+/// insert in the same loop, which binds the same symbol when the same node
+/// evaluates. The lanes line up case by case.
+///
+/// The residual window is a derivation site that the legacy
+/// `symbolic_occurrences` walk records nowhere, for a symbol nothing declares.
+/// Neither this author nor a reviewer could construct one. It stays a latent
+/// asymmetry in one derivation's two consumers, recorded rather than papered
+/// over, and closing it means giving the derivation the answer rather than
+/// adding a second test in either lane.
+fn local_guard_verdict(
+    node_id: usize,
+    axis: usize,
+    claim: &crate::axis_sources::LocalGuardClaim,
+    observed: usize,
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<(), String> {
+    let claimed = match &claim.canonical {
+        crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
+        crate::axis_sources::CanonicalExtent::Binder(name) => match runtime_dims.get(name) {
+            Some(value) => *value,
+            None => return Ok(()),
+        },
+    };
+    if observed != claimed {
+        return Err(format!(
+            "extent `{}`: claimed = {claimed}, node {node_id} axis {axis} = {observed}\n\
+             numeric trap: domain in {} at int64",
+            claim.claim, claim.op,
+        ));
+    }
+    Ok(())
 }
 
 pub fn eval_tensor_with<F>(

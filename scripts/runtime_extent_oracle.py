@@ -201,7 +201,7 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
             "expand.rank_ascription",
             "silent_unguarded",
             TERMINAL_CONTROL,
-            "cli.shape_sourced_expand_rejects_wrong_rank_ascription",
+            "cli.shape_sourced_insert_rejects_wrong_rank_ascription",
         ),
         _row(
             "grad.input_axis.runtime_movement_source.eval_c",
@@ -515,43 +515,43 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.positional.replacement.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.issue_597_positional_same_rank_replacement_executes_on_c",
         ),
         _row(
             "expand.positional.replacement.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
         ),
         _row(
             "expand.positional.replacement.non_unit_source_static",
             "silent_unguarded",
-            "silent_unguarded",
+            TERMINAL_CONTROL,
             "cli_slice_b.a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
         ),
         _row(
             "expand.positional.replacement.non_unit_source_traps.c",
             "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
+            EXECUTES,
+            "exec_c.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
         ),
         _row(
             "expand.positional.replacement.non_unit_source_traps.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         ),
         _row(
             "expand.positional.replacement_zero.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_c",
         ),
         _row(
             "expand.positional.replacement_zero.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_eval",
         ),
         _row(
@@ -649,13 +649,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "reshape.named_claim.node_target.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
         ),
         _row(
             "reshape.named_claim.node_target.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
         ),
         # Chelis#1313 removes the synthesized zero only from ReLU. Sigmoid
@@ -761,10 +761,21 @@ def phase_a_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
         TestTarget(
             "cli",
             ("cargo", "test", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
+            # `insert_def_body_wrong_rank_names_the_callee` is NOT a receipt
+            # for any phase-a row. The row it sits beside,
+            # `expand.rank_ascription`, asserts that a wrong-rank ascription is
+            # refused, which `shape_sourced_insert_rejects_wrong_rank_ascription`
+            # proves; the def-body test asserts something else, that on the
+            # route where a declared result reaches the call as an expected
+            # result the diagnostic names the callee, and it pins chelis#1277
+            # S2a's own seed extension. It is listed only because this target
+            # runs the whole file and the receipt check requires the observed
+            # test set to EQUAL the expected one.
             (
                 "bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice",
+                "insert_def_body_wrong_rank_names_the_callee",
                 "negative_extent_remains_a_static_type_error",
-                "shape_sourced_expand_rejects_wrong_rank_ascription",
+                "shape_sourced_insert_rejects_wrong_rank_ascription",
                 "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
                 "vmap_accepts_shape_and_shared_scalar_extent_sources",
                 "vmap_rejects_element_derived_extent_at_public_checker",
@@ -908,9 +919,22 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "runtime_extent_slice_b", "--", "--nocapture",
             ),
             (
+                "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
                 "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
                 "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
+                "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
+                "a_local_unit_extent_claim_traps_at_its_operation_on_c",
+                "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
+                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
+                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
+                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
+                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
+                "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
+                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
+                "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
+                "a_zero_positional_replacement_declares_an_empty_axis_on_c",
+                "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
                 "an_earlier_trap_preempts_the_extent_guard_on_eval",
                 "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
                 "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
@@ -920,10 +944,12 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "c_independent_trap_after_a_mismatch_loses",
                 "c_independent_trap_before_a_mismatch_wins",
                 "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
+                "issue_597_positional_same_rank_replacement_executes_on_c",
                 "load_load_named_class_guards_every_non_canonical_member_on_eval",
                 "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
                 "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
                 "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
+                "two_expands_over_one_operand_axis_share_one_guard",
             ),
         ),
         # A CLI-rooted program is not the exported kernel: `def main() =
@@ -943,6 +969,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "exec_compile", "--", "--nocapture", "--exact",
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
                 "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
+                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
@@ -950,6 +977,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
             (
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
                 "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
+                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",

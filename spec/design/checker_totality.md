@@ -1,12 +1,20 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phases 0-3 and PP1-PP4 are delivered. PP5 is partial: it delivers
-the four results listed in its own section, three under [#668] and the C
-host-value lane's operand guard under [#1484], and makes no claim beyond
-them; its completion design (2026-09-03, in that section) retires the rank
-side channel in favour of unification and routes the residue to [#597],
-[#1512], and [#1506] under the single-meaning `expand` rule of [#1532], with
-implementation pending. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
+**Status:** Phases 0-3 and PP1-PP4 are delivered. PP5 is partial. Its
+completion design (2026-09-03, in that section) retires the rank side channel
+in favour of unification and routes the residue to [#597], [#1512], and
+[#1506] under the single-meaning `expand` rule of [#1532]. D8 PR A has landed
+the checker half: the side channel is deleted, unification is the one rank
+authority, and both ingresses agree on every program the RANK oracle
+(`issue_668_rank_agreement_is_unification`) covers. That agreement is the rank
+oracle's alone and does not extend to the checker as a whole: the
+post-inference validator, `conv2d`'s guard included, runs on
+`check_ir_program` only, which
+`issue_668_deleted_derivation_does_not_suppress_conv2d`'s
+`the_post_inference_validator_runs_only_on_the_ir_ingress` records. That
+asymmetry predates PR A and is untouched by it.
+The C emitter guards of R3 and R4 stand. PP5 stays partial until PR B's
+comparison surface lands and [#597] and [#1512] close with their owners. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
 schedule, paired-ingress, and public CLI oracles are green. PR [#1406] delivered the
 separately owned [#1247] kinded nominal-application residue; the bounded
 [#1125] nominal-rank ingress repair and [#1134] forward-reference parity are
@@ -1313,37 +1321,50 @@ the result is a located `DimensionMismatch`, `check` exits nonzero, and
 arguments remain subject to the builtin's ordinary scheme (including `clamp`'s
 explicit scalar-bound form); PP5 creates no scalar-broadcast permission.
 
-R1 describes the shipped behaviour, not the contract. The completion design
-below (D5) records that the rank it derives for `expand`, the input rank plus
-one, is a rank the language never assigns to `expand` under the single-meaning
-rule of [#1532], and one the checker at `f5ec5ca63` did not stamp at these
-call sites either; the rejection therefore disagrees with the checker's own
-stamped types in the same run.
+**R1 is retired.** It described the shipped behaviour at `f5ec5ca63`, not the
+contract, and D5 records why: the rank it derived for `expand`, the input rank
+plus one, is a rank the language never assigns to `expand` under the
+single-meaning rule of [#1532], and one the checker did not stamp at those
+call sites either, so the rejection disagreed with the checker's own stamped
+types in the same run. D8 PR A deleted the carrier, the derivation, and the
+gate. What remains at every call site above is unification, which rejected the
+same programs already; D8's measured outcome below records that the deletion
+changed no verdict.
 
 *Evidence:* `cargo nextest run -p chelis-cli --test
-issue_668_elementwise_rank_honesty`, 17 tests, covering operand order, nested
-inline identities, `floor_div`, discarded comparisons, rank-zero, matching-rank
-controls, and lexical shadowing. The negative also joins the permanent #731
-fitness-honesty corpus.
+issue_668_elementwise_rank_honesty`, 18 tests after PR A, covering operand
+order, nested inline identities, `floor_div`, discarded comparisons,
+rank-zero, matching-rank controls, lexical shadowing, and the run-time
+loudness of the `expand`-built reproducer. The negative also joins the
+permanent #731 fitness-honesty corpus, whose
+`issue_668_rank_divergent_elementwise` row spells the rank raise with `insert`
+and is unchanged by PR A.
 
-**R2. The rank facts the checker carries cannot be forged from source, and are
-not inherited across a rebinding.**
+**R2. The shape facts the checker carries cannot be forged from source, and
+are not inherited across a rebinding.**
 
-Rank-only facts live in a private Rust `ShapeTypeFact::RankOnly` carrier with
-no Deep-syntax representation, so an authored dimension name cannot alias
-validator state. Exact-shape validators consume only the `Exact` variant, so
-the checker neither copies nor invents runtime extents. The carrier accepts
-exact facts only from checker-owned lexical bindings: raw `type` metadata on a
-runtime expression is source syntax, not validator evidence. Binding a name to
-a value whose shape is not derivable clears that name's prior fact rather than
-inheriting it.
+R2's forgeability half is retired with R1. It held because rank-only facts
+lived in a private Rust `ShapeTypeFact::RankOnly` carrier with no Deep-syntax
+representation, so an authored dimension name could not alias validator state.
+PR A deleted the carrier, so there is nothing left to forge, and what the row
+now locks is the weaker property that an unusual `d-name` does not perturb the
+exact-shape `conv2d` derivation.
 
-*Evidence:* within the same 17 tests, `authored_rank_only_prefix_dimension_is_
-not_internal_validator_state`, `authored_deep_type_metadata_cannot_override_
-checker_owned_rank_facts`, and the rebinding pair. The rebinding positive was
-confirmed to fail against the pre-repair tree and pass after it; its negative
-companion pins the opposite direction, so the repair cannot become "stop
-checking rebound names".
+The rest stands and is unchanged by PR A. The environment accepts exact facts
+only from checker-owned lexical bindings, so raw `type` metadata on a runtime
+expression is source syntax rather than validator evidence; and binding a name
+to a value whose shape is not derivable clears that name's prior entry rather
+than inheriting it.
+
+*Evidence:* within the same file,
+`an_authored_rank_only_prefix_dimension_is_an_ordinary_name`,
+`authored_deep_type_metadata_cannot_override_the_inferred_rank`, and the
+rebinding pair. The rebinding positive was confirmed to fail against the
+pre-repair tree and pass after it; its negative companion pins the opposite
+direction, so the repair cannot become "stop checking rebound names". Both
+rebinding rows are disposition locks after PR A: their original consumer was
+the rank comparison it deletes, and the environment they exercise now feeds
+only the exact-shape validators.
 
 **R3. The tensor-DAG C emitter compares every positive-rank input pair and
 aborts before allocation or indexing.**
@@ -1398,39 +1419,37 @@ crates/chelis-backend-c/src/host_emit.rs` now returns non-zero, locked by
 
 #### What PP5 does not establish
 
-No test asserts that PP5's rank validator rejects a disagreement arising from
-an operation outside R1's derived set, because it does not reject one.
+The rank claim is now stated at the granularity unification proves, and the
+"escapes" of the pre-PR-A text are not checker negatives.
 
-This is a statement about PP5's validator, not about the checker as a whole.
-Ordinary inference still rejects what it can see: a declared-rank mismatch
-between a `sig` and its argument reports `tensor rank mismatch: 2 dims vs 1
-dims` at score 0.92, and mixing dtypes reports a precision mismatch. The
-escapes below are programs in which `expand`'s result is rank 1, the only rank
-[#1532] assigns to it and the rank the `f5ec5ca63` checker reaches through a
-consumer selection that rule deletes, so both operands carry rank 1 and
-inference has no conflict to report (D2 in the completion design); PP5's
-validator derives the insertion rank for the same expression and has no second
-fact to compare it against.
+Under the single-meaning rule an `expand` result is rank 1, which is the rank
+both the checker stamps and the language assigns, so `add(s, e)` and every
+program that launders `e` through `cast`, `cast_trunc`, `normalize`,
+`realize`, or a user `def` is rank 1 beside rank 1 and WELL TYPED. Those
+programs are positive controls, not gaps. Their loud outcome when the
+operand's extent at the axis is not 1 is the `spec/05-risc-primitives.md`
+section 2.4.1 `Domain` trap, which [#1277] S2b landed on the evaluator and C
+lanes; `issue_668_elementwise_rank_honesty`'s
+`the_expand_built_reproducer_is_loud_at_run_time` runs one such program on
+both lanes and asserts the trap text. What closes for them is the rest of
+[#597], not a checker rule. The `add(e, sum(e, 0i32))` and `add(e, mean(e,
+0i32))` rows are [#1512]'s, for the same reason: their operand is a genuinely
+unresolved reduction result, not an `expand` one.
 
-Constructing one therefore takes a movement-op result laundered through an
-operation the resolver does not classify. The direct form is caught:
-`add(x, cast(y, f32))` on a rank-1 and a rank-2 parameter reports a rank
-mismatch at 0.9586. `cast_trunc` needs both operands cast, because casting one
-leaves a precision mismatch to report at 0.9385. Confirmed escapes, each
-scoring 1 with an empty error list: `ShapeClass::Rewriting` operations such as
-`cast`, `cast_trunc`, `normalize`, and `realize`; rank-changing
-`ShapeClass::NameTracked` reductions such as `add(e, sum(e, 0i32))` and
-`add(e, mean(e, 0i32))`; and a rank reaching the operation through a user
-`def`. These are examples of the gap, not a partition of it.
+The comparison family is PR B's, not PR A's. The seven identities still carry
+the [#1506] scalar rewrite, so a scalar beside a tensor under `gt` is accepted
+where `add` and `max_elem` reject it. Row 14 decides that it goes; until PR B
+lands, `issue_668_rank_agreement_is_unification` deliberately asserts nothing
+about them.
 
-The gap is therefore not "shape-preserving operations are missing". The
-resolver derives rank for one central class plus four separately named
-operations, and everything else escapes, whether it preserves rank or changes
-it. Closing that requires deciding which property the resolver should be driven
-by and driving it totally from a registry, with no separately named
-operations. That is follow-up work owned by [#668]. Adding further names would
-rebuild the enumeration this slice removed, and would not change the shape of
-the claim.
+What PR A does not claim: nothing here is an exhaustive statement about
+elementwise operations. The oracle covers `add`, `mul`, `eq`, `max_elem`,
+`where`, and `floor_div` over the operand shapes its fixtures spell. No
+enumerator drives it, so an operation absent from it is unclaimed rather than
+excluded. The general property is `spec/04-type-system.md` section 4.7.2's:
+every `ShapeClass::Identity` builtin is registered with one dimension row for
+both operands, so unification is the only route to a result, but no test in
+this repository enumerates that registry against the oracle.
 
 #### Completion design (2026-09-03)
 
@@ -1456,7 +1475,13 @@ and §4.5.3's named-axis forms are `insert`'s. The measurements below were taken
 on the two-candidate code at
 `f5ec5ca63` and are kept as the record of what that code does; each
 conclusion is stated under the single-meaning rule, and where the two differ
-the text says which is which.
+the text says which is which. That code no longer exists: chelis#1277 S2b
+flipped the checker, the lowering and the host interpreter onto the single
+meaning, and S2c deleted the deferral ledger, the settlement executor, the
+`TensorSettlement` registry and the source-ordinal index. Every symbol the
+measurements name below (`DeferredExpandConstraint`, `candidate_types`,
+`DeferralAction`, `ShapeEvidence`) is gone from the tree, so the line
+references are archaeology rather than navigation.
 
 **D1. Rank agreement between elementwise operands is decided by unification,
 totally and at both ingresses.** Every `ShapeClass::Identity` binary builtin
@@ -1723,6 +1748,17 @@ rank authority; route the residue to its three owners.** Concretely:
    (`validate.rs:2063`). `ShapeTypeFact` collapses to the exact-shape carrier
    the RT-205 conv2d chaining needs. Nothing is added: no spec sentence
    authorizes a second rank model, so the trace for this item is a deletion.
+   One coupling this list did not anticipate, found by red-team round 1 and
+   part of the same item: the failed-derivation marker of
+   `record_let_binding_shape_fact` was keyed on `is_ir_shape_sensitive_builtin`
+   membership, which still holds `stride`, `expand`, and `insert`. Deleting
+   their arms without re-keying it turned all three into PERMANENT failed
+   derivations, and a marked binding suppresses the whole `conv2d` validator
+   downstream. The marker is therefore re-keyed onto
+   `ir_builtin_has_output_type_derivation`, the table that owes the type. That
+   is a repair to the deletion, not an addition: a marker meaning "this
+   validator owed a type here and could not produce one" cannot be keyed on a
+   list that answers a different question.
 2. The `cast`/`realize`/`normalize`/user-def family and R1's own reproducer
    close through [#597], not through the checker: on the C lanes when Slice
    B2a item b2.5 deletes `fallback_expand_type` (C2.7 of
@@ -1806,60 +1842,103 @@ mismatch: 1 dims vs 2 dims`, with no side channel, which is the cleanest
 demonstration of D1; the `expand`-built rows become positive controls whose
 runtime outcome for `n != 1` is §2.4.1's `Domain` trap once b2.5 lands.
 
+**What PR A measured, against what this plan predicted.** The plan above was
+written against `f5ec5ca63` and predicted that ten [#1463] rows, the control
+half of an eleventh, and the corpus row would flip from rejection to
+acceptance. None of them did, and the reason is [#1277] S2b, which landed
+between the plan and the implementation. S2b did two things this plan did not
+anticipate. It gave the validator rank delta 0 for `expand`, so the validator
+agreed with the stamp and stopped rejecting the `expand`-built reproducers on
+its own; and it re-vehicled every row of
+`issue_668_elementwise_rank_honesty` onto `insert`, whose result genuinely is
+rank 2, so those rows became ordinary unification rejections. The verdict flip
+the user confirmed in row 15 therefore shipped in S2b. PR A deletes a
+mechanism that by then changed no verdict at all.
+
+Measured on `12c04c66a`, the rebased base, and on the repaired deletion, at
+both ingresses: for
+the elementwise family every rejection stays a rejection with the same `unify`
+text, and every acceptance stays an acceptance. What the deletion removes there
+is a DUPLICATE. On the `check_ir_program` ingress the validator reported a
+second `DimensionMismatch` for a call unification had already refused, and
+`check_typed_program`, which never calls `validate_ir_program`, reported one.
+Same program, two diagnostic sets: the [#1107] class. It also removed the
+`where` cascade D5 names, where the duplicate sat beside `where`'s own rule.
+
+**That claim is stated for the elementwise family because that is where it was
+measured, and the first attempt to state it unqualified was false.** Red-team
+round 1 found the reason: the same `ShapeTypeEnv` has a second consumer, the
+`conv2d` validator, reached through the failed-derivation marker rather than
+through a rank comparison. Before the marker was re-keyed ((d)1 above), a
+`conv2d` whose input came from a let-bound `stride`, `expand`, or `insert`
+had its whole validator suppressed, so an invalid `stride = 0` scored 1 and
+then panicked in codegen. With the marker re-keyed, the repaired tree and
+`12c04c66a` return byte-identical verdicts, messages, and scores on all seven
+of that round's probes, so the no-verdict-change result holds for both
+consumers of the environment. The lesson generalises and is recorded because
+it will recur: **a claim about deleting a shared data structure has to be
+measured at every consumer of that structure, not at the one the deletion was
+about.**
+
 Test dispositions, each stated for the `check` ingress and, in the new
 `chelis-types` file, for `check_typed_program` as well:
 
-- Positive controls that stay accepted and are disposition locks (green
-  before and after): `matching_runtime_rank_control_still_checks`,
-  `matching_rank_identity_chain_still_checks`,
-  `matching_inline_identity_chain_still_checks`,
-  `lexical_floor_div_parameter_is_not_reclassified_by_identity_registry`,
-  `authored_rank_only_prefix_dimension_is_not_internal_validator_state`,
-  `rebinding_to_a_nonderivable_value_drops_the_stale_rank_fact`.
-- Rows that today assert rejection of a program the single-meaning rule types
-  at rank 1 beside rank 1, and therefore flip to acceptance with the stamped
-  rank asserted (`f: (tensor[d0, f32]) ->
-  tensor[*, f32]` or `-> tensor[2, f32]` as D2 measured): `provable_positive_
-  rank_mismatch_is_a_dimension_error`, `unary_identity_cannot_erase_rank_
-  evidence`, `binary_identity_cannot_erase_rank_evidence`, `inline_unary_
-  identity_preserves_rank_in_both_argument_orders`, `nested_inline_identity_
-  chain_preserves_rank`, `inline_binary_identity_preserves_rank`, `central_
-  identity_registry_drives_inline_floor_div_rank_in_both_orders`, `central_
-  identity_registry_drives_let_bound_floor_div_rank`, `inline_comparison_
-  cannot_hide_rank_mismatch_in_discarded_binding`, `rebinding_to_a_
-  derivable_rank_still_rejects_a_genuine_mismatch`, the control half of
-  `authored_deep_type_metadata_cannot_override_checker_owned_rank_facts`, and
-  the corpus row. Each is a regression test in the reverse direction: red on
-  the tree with the side channel (the validator rejects), green after the
-  deletion. The prove-red step is `git checkout <base> --
+- The REGRESSION assertion is ingress agreement, in
+  `issue_668_rank_agreement_is_unification`'s `agreed_diagnostics`: the two
+  ingresses must return the same diagnostic set. Six of that file's fifteen
+  rows are red on `12c04c66a` and green after the deletion, each failure
+  printing the validator's surplus diagnostic. Its `where` row asserts a
+  diagnostic COUNT of one and is red on the base for the same reason. The
+  prove-red step is `git checkout 12c04c66a --
   crates/chelis-types/src/infer/shape_honesty.rs
-  crates/chelis-types/src/infer/validate.rs`, rebuild the one test target,
-  watch the flipped rows fail, restore, watch them pass.
-- Negatives that must stay red, as disposition locks on unification, in both
-  operand orders: a declared rank-2 user def beside a rank-1 operand (D1 row
-  1), a rank-0 reduction result beside its rank-1 input (D1 row 2), a scalar
-  beside a tensor under `add` and `max_elem` (D1 row 3), a rank-2 `where`
-  branch (D1 row 4), and, once `insert` exists, `add(s, insert(x, 0i32,
-  2i64))` in both orders. Each asserts the `DimensionMismatch` or
-  `TypeMismatch` text D1 measured; the `insert` rows are new and are proved
-  red against a tree with the side channel deleted and `insert` present, so
-  the rejection is unification's alone.
-- The forged half of `authored_deep_type_metadata_cannot_override_checker_
-  owned_rank_facts` is measured, not predicted: whether inference accepts or
-  rejects a `var` node carrying authored `type:` metadata that disagrees with
-  the binding is not established here (see below), and the row records
-  whichever verdict inference gives with the reason.
-- Mutation receipt: with the side channel gone, mutate `unify`'s `(0, 0)` arm
-  to skip the length check and rerun the new file; every rank negative must
-  go red at both ingresses. That proves the oracle measures unification and
-  not a leftover derivation. Restore before committing.
+  crates/chelis-types/src/infer/validate.rs`, rebuild the one target, watch
+  those rows fail, restore, watch them pass. The receipt was first taken
+  against `c8a5f1a75` and re-run against `12c04c66a` after the rebase; both
+  files are byte-identical between those two commits, so it is the same
+  experiment under the current base's name rather than a relabelled one.
+- Every verdict assertion is a DISPOSITION LOCK, green in both states, and
+  labelled as one. That covers the rejections in both operand orders (a
+  declared rank-2 user def beside a rank-1 operand, D1 row 1; a rank-0
+  reduction result beside its rank-1 input, D1 row 2; a scalar beside a tensor
+  under `add` and `max_elem`, D1 row 3; a rank-2 `where` branch, D1 row 4; and
+  the `insert` rows `add(s, insert(x, 0i32, 2i64))` and its reverse), the
+  acceptances, and every row of the CLI file.
+- Mutation receipt, run and recorded in the pull request: with the side
+  channel gone, `unify`'s `(0, 0)` arm was mutated to skip the length check
+  and the new file rerun. All seven `tensor rank mismatch` rows went red at
+  BOTH ingresses, reporting no diagnostic at all. The four
+  scalar-beside-tensor rows stayed green and are not claimed to move: they are
+  rejected by the type constructor, not by the rank comparison. The `where`
+  row stayed green, which confirms its diagnostic is `where`'s own rule's.
+- The forged half of `authored_deep_type_metadata_cannot_override_the_
+  inferred_rank` is now measured rather than open: authored `type:` metadata
+  on a `var` that disagrees with its binding does not displace the inferred
+  type, so the forged program is refused for the same reason as the control.
+- New, from round 1:
+  `crates/chelis-types/tests/issue_668_deleted_derivation_does_not_suppress_conv2d.rs`
+  covers the environment's OTHER consumer. Four regression rows, red at the
+  first pushed head `948ed5736`, where each scored 1 with an empty error list:
+  `stride = 0` behind a let-bound `expand`, `insert`, and `stride`, and a
+  symbolic spatial dimension behind a let-bound `expand`. Two disposition
+  locks: the direct call, which reaches the stride check itself and names it,
+  and a genuinely failed derivation, whose cascade must stay suppressed. One
+  row locks a PRE-EXISTING false rejection, the well-typed `conv2d` behind a
+  let-bound `expand` that the base refuses identically; fixing it needs the
+  validator to read unification's stamped type rather than re-derive operand
+  types, which is [#1612]'s, not this pull request's. One row records that the
+  post-inference validator runs on `check_ir_program` only, so the other rows'
+  silence about the second ingress is stated rather than implied.
+- New: `the_expand_built_reproducer_is_loud_at_run_time` builds and runs the
+  `expand`-built reproducer with a refuted unit-extent claim on the evaluator
+  and C lanes, and asserts section 2.4.1's `Domain` trap, `numeric trap:
+  domain in load at int64` with `claimed = 1` and `axis 0 = 2`, beside a
+  satisfied-claim control that executes exactly. Both lanes trap.
 
 The six D2/D3 escapes in both operand orders are *not* checker negatives in
 PR A: the `cast`/`realize`/`normalize`/user-def rows are spec-accepted
 programs whose loud outcome belongs to [#597]'s runtime guard, and the
 `sum`/`mean` rows are [#1512]'s. PR A records both facts in this section
-rather than asserting a verdict it does not own. Estimated hand-written size:
-under 600 lines, most of it test edits.
+rather than asserting a verdict it does not own.
 
 *PR B, the comparison surface ([#1506]).* Files:
 `crates/chelis-types/src/infer/app.rs:457-506` (delete the rewrite block so
@@ -1970,11 +2049,13 @@ cargo nextest run -p chelis-cli --test issue_668_elementwise_rank_honesty --no-f
 cargo nextest run -p chelis-backend-c --test exec_compile direct_positive_rank_mismatch_traps_before_indexing
 ```
 
-with the first file's rows green at both ingresses and red under the D8
-mutation; [#1484]'s host-lane oracle green; [#1506]'s negative controls green
-(PR B); and [#597] and [#1512] closed by their owners, each with the D2 or D3
-rows re-measured on the closing head. The checker half of [#668] is then a
-statement about unification, and the runtime half about the guards.
+with the first file's rows green at both ingresses and its rank rows red
+under the D8 mutation; [#1484]'s host-lane oracle green; [#1506]'s negative
+controls green (PR B); and [#597] and [#1512] closed by their owners, each
+with the D2 or D3 rows re-measured on the closing head. PR A has delivered the
+first two commands and the mutation receipt; the remainder is PR B's and the
+two owners'. The checker half of [#668] is then a statement about unification,
+and the runtime half about the guards.
 
 ### PP6. Schedule and header honesty ([#1486], [#1487], [#1485]; closes [#1134])
 
@@ -2641,7 +2722,8 @@ so PP7 could not have decided the rule for itself.
 
 ### PP8. Source-coverage totality ([#874], [#887])
 
-**Opened 2026-09-03.** §C4.1's invariant quantifies over the checked result.
+**Opened 2026-09-03; Slice 1 delivered by PR [#1602].** §C4.1's invariant
+quantifies over the checked result.
 [#874] proposed the complementary obligation over the submitted program and
 recorded three tag-keyed routes to the vacuity. This item establishes three
 things by execution. The vacuity is **live on `main` today**. The live routes
@@ -2676,6 +2758,24 @@ child, so each pair isolates the extraction failure rather than the form.
 | R5 | `kv` key, `child_stamp_role(Kv, 0) = Selector` | `(var {} nonexistent_name_zzz)` | loud, but misattributed: `internal: annotation owner-stamp invariant violated: missing authoritative type stamp for metadata-eligible expression `lit`` |
 | R5 control | same | `f`, the declared field name | clean pass |
 | R5 control | same | `nosuchfield` | loud: `unknown record field 'nosuchfield' in construction of R` |
+
+The implementation pass re-ran this table on `3b701e54b` and found four further
+live instances of the same class, in the same four inference functions, that
+the probe pass above missed; they are recorded here rather than left to the
+reader to rediscover.
+
+| # | form and slot | probe child | verdict |
+|---|---|---|---|
+| S1 | `pat-var` name, `child_stamp_role(PatVar, 0) = Binder` | `(var {} zz)` | loud, but misattributed: `internal: ... missing authoritative type stamp for pattern binding `pat-var`` |
+| S2 | `pat-as` name, same role | `(var {} zz)` | loud, misattributed the same way, naming `pat-as` |
+| S3 | `kv` key inside a `pat-record`, `child_stamp_role(Kv, 0) = Selector` | `(var {} zz)` | **vacuous**, score 1.0 |
+| S4 | `kv` key in `record-update`, same slot | `(var {} zz)` | loud, misattributed exactly as R5 |
+
+S3 is the third `kv` key read in the checker, beside `infer_record`'s (R5) and
+`infer_record_update`'s (S4); it defaulted to a fresh type variable rather than
+skipping, which is why it is fully silent where the other two are misattributed.
+S1 and S2 sit in `Binder` slots, so they are named instances and not a
+statement about that role, which stays unenumerated below.
 
 The comparison rows matter more than the vacuous ones, and the `Selector`
 role is small enough to enumerate exhaustively. `child_stamp_role` is total
@@ -2835,6 +2935,25 @@ spelling of the read. So the structural fix belongs at the read:
    `MalformedForm` naming the form and the shape. The three defect
    spellings named above do not survive it: there is no `Option` at the
    call site to default, skip, or `continue` past.
+
+   *Implementation note.* The seam owns the decision, the guarantee, and the
+   message; the caller supplies no text. It returns a `Result` whose error arm
+   is an `ErrorWitness`, which only `report_witness` can mint, so no caller can
+   produce a value from the unreadable branch without visibly laundering a
+   witness of a diagnostic that has already been pushed. It takes the parent
+   `DeepTag` and a `SlotShape` -- an enum with a `Display`, not free text -- so
+   the message always names both and the kind is always `MalformedForm`.
+
+   Slice 2 is where that becomes a live tension rather than a design
+   statement. The four slots it migrates already reject correctly, and two of
+   them say more than a shared template can: `tuple-get`'s diagnostic peels a
+   `lit` wrapper to name the found atom's family and value. Slice 2 therefore
+   adds the affordance for a caller to append its own found-shape detail, with
+   `tuple-get` as its first consumer, and changes those four slots' diagnostic
+   text and kind rather than preserving them. Slice 1 has no such caller and
+   carries no such affordance: a seam that let each caller supply its own
+   message would guarantee nothing, and one that carried the parameter before
+   any caller used it would be a mechanism ahead of its use.
 2. **Absence and unreadability become different types at the seam.** The
    `vmap(f)` default axis is legitimate and stays; it is expressed as
    `kids.get(1)` being `None`, which the seam distinguishes from a present
@@ -2882,12 +3001,12 @@ coarser test would call that good enough.
 
 **Positive controls (disposition locks, green in both states).** The
 sanctioned bare-list slots must stay accepted, enumerated from
-`crates/chelis-surf/src/desugar.rs`'s `bare_list()` (defined `:465`):
-`fn` parameter lists (`:1115`, `:1452`), import name lists (`:1202`),
-the `import-all` empty list (`:1212`), the empty match guard (`:1711`), and
-`:1743`'s empty list. Add `loc` metadata values, ADT type-parameter lists,
-`vmap(f)` with no axis child at all, `vmap(f, axis=0)`, and a `pat-ctor`
-whose head is a legitimate in-scope constructor. Their job is to prove the
+`crates/chelis-surf/src/desugar.rs`'s `bare_list()` (defined `:481`):
+`fn` parameter lists (`:1200`, `:1545`), an import name list (`:1287`),
+a qualified import's empty name list (`:1297`), the empty match guard (`:1804`), and
+`:1836`'s empty list, which is the unit literal's. Add `span` metadata values,
+ADT type-parameter lists, `vmap(f)` with no axis child at all, `vmap(f, axis=0)`,
+and a `pat-ctor` whose head is a legitimate in-scope constructor. Their job is to prove the
 seam rejects unreadability rather than non-tagged-ness; without them the
 cheapest wrong fix - rejecting every bare list - passes the negatives.
 
@@ -3257,7 +3376,7 @@ is closed.
 | PP2 | [#1147] and the future supply of registered builtins with no inference disposition |
 | PP3 | [#1209]/[#1211]/[#1212]'s name-keyed binding-identity channel |
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
-| PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement, and under [#1484] so does the host-value emitter for its six binary elementwise builtins. No claim is made for operations outside that set, nor for any checker verdict on the host-lane programs; see PP5. The 2026-09-03 completion design retires that side channel (unification is the rank authority) under the single-meaning `expand` rule of [#1532] and routes the residue to [#597] (the runtime lanes execute `expand` as the unit-extent broadcast the language assigns, with §2.4.1's guard), [#1512] (reductions over a genuinely unresolved operand), and [#1506] (comparison scalar rewrite); the row stays partial until the acceptance list in PP5 holds |
+| PP5 (partial) | [#668]; unification is the one rank authority for elementwise tensor operands, at both ingresses, and the identity-rank side channel that ran beside it on `check_ir_program` only is deleted (D8 PR A). The claim covers the operations the PP5 oracle spells, not an enumerated registry; see PP5. The tensor-DAG C emitter aborts on a positive-rank operand disagreement, and under [#1484] so does the host-value emitter for its six binary elementwise builtins. The residue is routed: [#597] (the runtime lanes execute `expand` as the unit-extent broadcast the language assigns, with §2.4.1's guard, which S2b landed), [#1512] (reductions over a genuinely unresolved operand), and [#1506] (comparison scalar rewrite, PR B); the row stays partial until the acceptance list in PP5 holds |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
 | PP6 | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), and [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses) are delivered with the shared-graph, schedule, paired-ingress, and CLI oracles |
@@ -3284,7 +3403,7 @@ is closed.
 | 12 | which references inside a top-level value's initializer are eager for cycle detection | DECIDED 2026-09-03: all of them, lambda bodies included, transitively through every referenced top-level declaration, with an applied value required like a read one. The argument-position refinement was rejected as unsound for stored and returned closures; the over-rejection is accepted and is already the detector's treatment of a bare function reference | [04-INF-7] + PP6 |
 | 13 | whether one checker entry may check a program the other does not, when the difference is which admitted carrier represents it | DECIDED 2026-09-03: no. Verdict is independent of entry and of carrier. Normalizing at the one non-normalizing entry is rejected as the mechanism because three of the seven probed divergences live outside every checker entry (`prune.rs` before the check, `tier_b_lower.rs` and `count_invariant_opaque_deep` after it); the reader, not the entry, is the unit that must be total. A carrier a reader cannot decode is diagnosed, never observed as empty | [04-TOT-5] + PP7 |
 | 14 | whether the seven comparison identities admit a scalar beside a tensor ([#1506]) | DECIDED 2026-09-03: no; the checker rejects and the spec wins. `[05-OP-36]` ("Mixed surfaces ... are type errors"), `spec/05` §1.2, and `spec/04` §4.2-§4.3 already decide it, and `add`/`max_elem` reject the same pair today, the `spec/05` §2.1 prose above `[05-OP-40]` naming their scalar form "the rank-zero instance of the tensor rule, not scalar/tensor broadcasting". The rewrite at `infer/app.rs:457-506` goes; the three accepting `issue5_cmp_broadcast_both_forms` rows and `coral_comparison_ops_broadcast_tensor_scalar` become negative controls; scalar-scalar and same-shape tensor-tensor forms stay; the diagnostic names `[05-OP-36]` and the explicit `expand(to_tensor([c]), axis, shape(x, axis))` spelling. ALTERNATIVE, not taken and requiring the user's explicit choice: amend `[05-OP-36]` to admit one active-numeric scalar beside one tensor of the same dtype, comparing every element against the scalar and returning `tensor[D, bool]`. Its cost: it contradicts §1.2's "hard rule" and §4.2's rationale; it must explain why comparison broadcasts when `add`, `max_elem`, and `[05-OP-17..19]` do not, or extend them too; it leaves a rank-0 tensor beside a tensor undecided; the evaluator already implements it, so the runtime cost is nil; and Coral depends on the accepting behaviour today (`coral_prerequisites.rs:315`), so the rejection has a downstream migration cost that the alternative avoids. Sequencing under the decision taken: the explicit spelling executes as an insertion on every lane until [#597] closes (Slice B2a item b2.5 for C, Slice B2h for eval), so PR B of PP5 D8 lands after both or states the gap | PP5 D4/D8 + `[05-OP-36]` |
-| 15 | whether PP5's identity-rank validator stays as a second rank model beside unification | DECIDED 2026-09-03 by `spec/04` §4.7.2 and the D1-D5 evidence: it goes. **What the user is asked to confirm, in one sentence:** for `s = stride(x, 2i64); e = expand(x, 0i32, 2i64); add(s, e)` on `x: tensor[n, f32]`, the checker accepts the program with `e` at `tensor[2, f32]`, the only shape the language assigns to `expand` (row 16, [#1532]; the `f5ec5ca63` checker already stamps it), and PP5 stops rejecting it; the loud outcome for `n != 1` is the `Domain` trap `spec/05` §2.4.1 states ([#1523], merged; narrowed by [#1532]) once Slice B2a item b2.5 carries its guard, a literal operand extent other than 1 being a check-time type error instead. Today, for this program, eval rejects with `[3] vs [2, 6]` and the C insertion path trips R3's rank guard, because the runtime still inserts ([#597]) and the consumer `add` exposes the inserted axis; that loudness is the consumer's, not the language's: the bare spelling `sig f: tensor[6, f32] -> tensor[2, f32]; def f(x) = expand(x, 0, 2i64)` with no consumer is silent on both lanes today (`chelis check` score 1 at `-> tensor[2, f32]`, `chelis eval` and the compiled C both print `shape=[2, 6]` with no diagnostic; measured by the [#1277] owner and re-measured here on the f5ec5ca63 build and the 09-01 binary), which is [#597] as filed, and under the single-meaning rule plainly so. Unification is the one rank authority; the validator's `expand` derivation, input rank plus one, is a rank the language never assigns to `expand`, and it rejects programs whose stamped types agree (measured, D2 third row). The checker half of [#668] resolves into [#597] (the runtime must execute `expand` as the unit-extent broadcast, with §2.4.1's guard), [#1512] (reductions over a genuinely unresolved operand), and [#1506]. Because this flips ten whole [#1463] rows, the control half of an eleventh, and the corpus row in `issue_731_fitness_honesty_corpus.rs` from rejection to acceptance, the implementation PR (D8 PR A) states the flip in its body, lands after S2a (the [#1277] stream's `insert` builtin plus mechanical rename, branch `agent/1277-s2a-insert-rename`; [#1532] itself is merged as `b8e08e5b9`), and lands only after the user confirms the sentence above. The single-meaning decision (row 16) removed the earlier alternative reading of positional `expand` as insertion-only; that meaning is now `insert`'s | PP5 D6 (d) |
+| 15 | whether PP5's identity-rank validator stays as a second rank model beside unification | DECIDED 2026-09-03 by `spec/04` §4.7.2 and the D1-D5 evidence: it goes. **What the user is asked to confirm, in one sentence:** for `s = stride(x, 2i64); e = expand(x, 0i32, 2i64); add(s, e)` on `x: tensor[n, f32]`, the checker accepts the program with `e` at `tensor[2, f32]`, the only shape the language assigns to `expand` (row 16, [#1532]; the `f5ec5ca63` checker already stamps it), and PP5 stops rejecting it; the loud outcome for `n != 1` is the `Domain` trap `spec/05` §2.4.1 states ([#1523], merged; narrowed by [#1532]) once Slice B2a item b2.5 carries its guard, a literal operand extent other than 1 being a check-time type error instead. Today, for this program, eval rejects with `[3] vs [2, 6]` and the C insertion path trips R3's rank guard, because the runtime still inserts ([#597]) and the consumer `add` exposes the inserted axis; that loudness is the consumer's, not the language's: the bare spelling `sig f: tensor[6, f32] -> tensor[2, f32]; def f(x) = expand(x, 0, 2i64)` with no consumer is silent on both lanes today (`chelis check` score 1 at `-> tensor[2, f32]`, `chelis eval` and the compiled C both print `shape=[2, 6]` with no diagnostic; measured by the [#1277] owner and re-measured here on the f5ec5ca63 build and the 09-01 binary), which is [#597] as filed, and under the single-meaning rule plainly so. Unification is the one rank authority; the validator's `expand` derivation, input rank plus one, is a rank the language never assigns to `expand`, and it rejects programs whose stamped types agree (measured, D2 third row). The checker half of [#668] resolves into [#597] (the runtime must execute `expand` as the unit-extent broadcast, with §2.4.1's guard), [#1512] (reductions over a genuinely unresolved operand), and [#1506]. Because this was expected to flip ten whole [#1463] rows, the control half of an eleventh, and the corpus row in `issue_731_fitness_honesty_corpus.rs` from rejection to acceptance, the implementation PR (D8 PR A) states the flip in its body, lands after S2a (the [#1277] stream's `insert` builtin plus mechanical rename, branch `agent/1277-s2a-insert-rename`; [#1532] itself is merged as `b8e08e5b9`), and lands only after the user confirms the sentence above. The single-meaning decision (row 16) removed the earlier alternative reading of positional `expand` as insertion-only; that meaning is now `insert`'s. MEASURED OUTCOME, recorded when PR A landed: the flip shipped in [#1277] S2b, not in PR A. S2b gave the validator rank delta 0 for `expand`, which stopped it rejecting those programs, and re-vehicled every `issue_668_elementwise_rank_honesty` row onto `insert`, whose rank 2 is genuine. PR A therefore changed no verdict for the elementwise family; what it removed there was a duplicate diagnostic on one ingress. Its first pushed head DID change verdicts at the environment's other consumer, the `conv2d` validator, by turning the three deleted operations into permanent failed derivations; red-team round 1 found it, and re-keying the failed-derivation marker restores byte-identical verdicts against the base on every probe. See the measured-outcome paragraph in D8 | PP5 D6 (d) |
 | 16 | whether positional `expand` is one operation or two | DECIDED 2026-09-03 by the user: "I don't want ambiguity that is resolved at runtime. Make expand canonically only insert or increase the number of dimension (whichever is more canonical). Use something else (e.g. insert) for alternative. I don't want overloaded uses like this." Confirmed as: `expand` keeps only the same-rank singleton broadcast (rank unchanged; the operand's extent at `axis` must be 1; a literal violation is a check-time type error; a symbolic extent is a §4.7 runtime `Domain` guard, per [#1523]); a new primitive `insert` adds an axis of extent `size` at `axis`; `spec/04` §4.7.2's two-candidate deferred model is deleted. Recorded in PR [#1532], merged as `b8e08e5b9` (`spec/02`, `spec/03`, `spec/04`, `spec/05`, `spec/06`, `spec/08`, `runtime_extents.md`; `spec/05` §2.4 rows and adjoints for both primitives under `[05-AXIS-1]`/`[05-MOV-1]`, §4.7.2 without the two-candidate model, §4.5.3's named forms as `insert`; no new `[05-OP-N]`). PP5 consumes the decision and adds nothing to it | [#1532] + PP5 D2 |
 | 17 | whether the source-coverage obligation is a new atom or a tightening of an existing one, and whether [#887] closes | DECIDED 2026-09-03: a new atom that EXTENDS [04-TOT-3] rather than replacing it. [04-TOT-3] already governs the live instances and the shipped `access`/`record` rejections cite it, so R1 through R3 are unimplemented [04-TOT-3] cases and an implementer fixing them cites [04-TOT-3]. [04-TOT-4] carries that obligation from the form to each of the form's slots and adds the two sentences no earlier atom states: an omitted optional child and a present unreadable one are distinct inputs with only the omission permitted to default, and coverage quantifies over the submitted program rather than the checked result. The second is the one [04-TOT-2] structurally cannot express, and R1 proves it by satisfying [04-TOT-2] completely while being wrong. [#887] is RE-SCOPED, not closed: its Tier 2 shipped via [#998]/[#1019]/[#1041], and its Tier 1 consumption-boundary residue is this item's Slice 2 | [04-TOT-4] + PP8 |
 | 18 | whether a parsed-vs-checked coverage census belongs at `finalize_checked_program` | OPEN, recorded 2026-09-03, no deliverable attached. It closes none of PP8's five named instances, which Slices 1 and 2 close between them, and its three candidate justifications do not survive a necessity trace: the roles it would guard have no demonstrated defect, `child_stamp_role` already makes an unclassified tag a compile error, and the cancellation route it would subsume is closed at the surface [#874] named. It is also the only proposal here touching the public fitness surface. Revisit if a coverage-keyed instance appears that the selector-read seam does not reach | PP8 + [#874] |
@@ -3381,6 +3500,7 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
 [#1543]: https://github.com/Chelis-Lang/chelis/pull/1543
 [#1546]: https://github.com/Chelis-Lang/chelis/pull/1546
+[#1602]: https://github.com/Chelis-Lang/chelis/pull/1602
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
 [#930]: https://github.com/Chelis-Lang/chelis/issues/930
@@ -3413,3 +3533,4 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1519]: https://github.com/Chelis-Lang/chelis/pull/1519
 [#1523]: https://github.com/Chelis-Lang/chelis/pull/1523
 [#1532]: https://github.com/Chelis-Lang/chelis/pull/1532
+[#1612]: https://github.com/Chelis-Lang/chelis/issues/1612

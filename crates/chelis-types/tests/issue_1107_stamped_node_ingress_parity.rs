@@ -452,9 +452,14 @@ fn expand_with_sourceless_runtime_size_is_rejected_on_both_ingresses() {
 fn expand_sized_by_a_shape_read_is_accepted_on_both_ingresses() {
     // Over-rejection control for the fix above: a size read off an in-scope
     // tensor is the canonical Form-3 source and must still check clean.
+    //
+    // The operand carries the unit extent `expand` claims at its axis
+    // (spec/05-risc-primitives.md section 2.4.1). The Form-3 source under test
+    // is the `shape` read in the size slot, which is unaffected by the
+    // operand's extent.
     assert_agree_and_accept(
-        "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)) \
-           (t-tensor {} (d-lit {} 4) (t-prim {} f32))))\n\
+        "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 1) (t-prim {} f32)) \
+           (t-tensor {} (d-lit {} 1) (t-prim {} f32))))\n\
          (def {} f (fn {} (params {} x) (app {} (var {} expand) (var {} x) \
            (lit {type: (t-prim {} int32)} 0) \
            (app {} (var {} shape) (var {} x) (lit {type: (t-prim {} int32)} 0)))))",
