@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -75,6 +77,12 @@ class ChangelogTests(unittest.TestCase):
     def snapshot(self):
         return {str(p.relative_to(self.root)): p.read_bytes()
                 for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}
+
+    def invoke_main(self, args):
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            code = m.main(args, root=self.root)
+        return code, output.getvalue(), errors.getvalue()
 
     def test_exact_rendering_and_preview_is_read_only(self):
         self.write("changelog.d/z.fixed.md", "Ordinary fix.\n")
@@ -208,7 +216,9 @@ class ChangelogTests(unittest.TestCase):
         summary = self.root / "summary.md"
         event = self.write("event.json", json.dumps({"pull_request": {"labels": []}}))
         with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
-            self.assertEqual(m.main(["check-pr", "--base", self.base, "--head", "HEAD", "--event-file", str(event), "--advisory"], root=self.root), 0)
+            code, output, errors = self.invoke_main(["check-pr", "--base", self.base, "--head", "HEAD", "--event-file", str(event), "--advisory"])
+        self.assertEqual(code, 0, errors)
+        self.assertIn("::warning::missing fragment", output)
         self.assertIn("advisory finding", summary.read_text())
         self.assertIn("missing fragment", summary.read_text())
         self.assertNotIn("PASS", summary.read_text())
@@ -222,13 +232,17 @@ class ChangelogTests(unittest.TestCase):
         self.write("changelog.d/a.fixed.md", "Fix.")
         before = self.snapshot()
         with mock.patch.object(m.os, "replace", side_effect=OSError("write refused")):
-            self.assertEqual(m.main(["build", "--version", "0.2.0", "--date", "2026-09-08", "--write"], root=self.root), 2)
+            code, _, errors = self.invoke_main(["build", "--version", "0.2.0", "--date", "2026-09-08", "--write"])
+        self.assertEqual(code, 2)
+        self.assertIn("write refused", errors)
         self.assertEqual(before, self.snapshot())
 
     def test_failed_deletion_keeps_published_note_and_reports_failure(self):
         self.write("changelog.d/a.fixed.md", "Fix.")
         with mock.patch.object(Path, "unlink", side_effect=PermissionError("delete refused")):
-            self.assertEqual(m.main(["build", "--version", "0.2.0", "--date", "2026-09-08", "--write"], root=self.root), 2)
+            code, _, errors = self.invoke_main(["build", "--version", "0.2.0", "--date", "2026-09-08", "--write"])
+        self.assertEqual(code, 2)
+        self.assertIn("delete refused", errors)
         self.assertIn("- Fix.", (self.root / "CHANGELOG.md").read_text())
         self.assertTrue((self.root / "changelog.d/a.fixed.md").exists())
 
@@ -359,6 +373,17 @@ class ChangelogTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_test_fixture_does_not_emit_workflow_annotations(self):
+        root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [sys.executable, "-B", "-m", "unittest",
+             "scripts.test_changelog.ChangelogTests.test_summary_reports_advisories_without_claiming_success"],
+            cwd=root, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "", "fixture output must not become real GitHub annotations")
+        self.assertNotIn("::warning::", result.stderr)
+
     def test_advisory_workflow_and_publishing_wiring(self):
         root = Path(__file__).resolve().parent.parent
         workflow = (root / ".github/workflows/changelog.yml").read_text()
