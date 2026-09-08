@@ -3,7 +3,10 @@
 //! Every Deep node is a 3-tuple: (tag {} children...)
 //! where {} is an inline metadata map.
 
-use chelis_deep::{DTYPE_BOUNDS_KEY, DeepTag, DtypeFamily, encode_dtype_bounds};
+use chelis_deep::{
+    Atom as DeepAtom, DTYPE_BOUNDS_KEY, DeepTag, DtypeFamily, LiteralFamilyFit, LiteralSource,
+    classify_literal_source, encode_dtype_bounds,
+};
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
@@ -145,20 +148,31 @@ struct DesugarCtx {
     ///
     /// A `Cell` because the desugar walk takes `&self` throughout.
     next_destructure_temp: std::cell::Cell<usize>,
+    /// Each declaration's inline or standalone-signature binders. `None`
+    /// marks a declared but unbounded binder, which cannot adopt a literal.
+    declared_type_binders: UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
+    /// Binder scope installed while one declaration body is desugared.
+    current_type_binders: std::cell::RefCell<UnordMap<String, Option<DtypeFamily>>>,
 }
 
 impl DesugarCtx {
+    fn current_type_binder(&self, name: &str) -> Option<Option<DtypeFamily>> {
+        self.current_type_binders.borrow().get(name).copied()
+    }
+
     fn new(decls: &[Decl]) -> Self {
         let mut top_level_fn_params = UnordMap::new();
         let mut top_level_fn_tensor_param_prec = UnordMap::new();
         let mut explicit_sig_names = UnordSet::new();
         let mut def_effects = UnordMap::new();
+        let mut declared_type_binders = UnordMap::new();
         for decl in decls {
             for_each_decl(decl, &mut |d| {
                 collect_top_level_fn_params(d, &mut top_level_fn_params);
                 collect_top_level_fn_tensor_param_prec(d, &mut top_level_fn_tensor_param_prec);
                 collect_explicit_sig_names(d, &mut explicit_sig_names);
                 collect_def_effects(d, &mut def_effects);
+                collect_declared_type_binders(d, &mut declared_type_binders);
             });
         }
         Self {
@@ -167,6 +181,8 @@ impl DesugarCtx {
             explicit_sig_names,
             def_effects,
             next_destructure_temp: std::cell::Cell::new(0),
+            declared_type_binders,
+            current_type_binders: std::cell::RefCell::new(UnordMap::new()),
         }
     }
 }
@@ -931,9 +947,44 @@ fn collect_top_level_fn_params(decl: &Decl, out: &mut UnordMap<String, Vec<Strin
     }
 }
 
-/// Collect names that carry an explicit standalone `sig` declaration, so
-/// `desugar_fun_def` can suppress the redundant wildcard-filled `defsig` it
-/// would otherwise synthesize for a same-name annotated `def` (chelis#285).
+/// Merge inline and standalone-signature binders by declaration name.
+fn collect_declared_type_binders(
+    decl: &Decl,
+    out: &mut UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
+) {
+    let (name, type_binders, signature_type) = match decl {
+        Decl::FunDef {
+            name, type_binders, ..
+        } => (name, type_binders, None),
+        Decl::Sig {
+            name,
+            type_binders,
+            ty,
+            ..
+        } => (name, type_binders, Some(ty)),
+        _ => return,
+    };
+    let entry = out.entry(name.clone()).or_default();
+    for binder in type_binders {
+        let slot = entry.entry(binder.name.clone()).or_insert(None);
+        if slot.is_none() {
+            *slot = binder.bound;
+        }
+    }
+    if let Some(signature_type) = signature_type {
+        let mut implicit = UnordSet::new();
+        collect_sig_type_vars(signature_type, &mut implicit);
+        for name in implicit.to_sorted() {
+            entry.entry(name.clone()).or_insert(None);
+        }
+    }
+    if entry.is_empty() {
+        out.remove(name);
+    }
+}
+
+/// Collect names with a standalone `sig`, suppressing a synthesized duplicate
+/// `defsig` for the same annotated `def` (chelis#285).
 fn collect_explicit_sig_names(decl: &Decl, out: &mut UnordSet<String>) {
     if let Decl::Sig { name, .. } = decl {
         out.insert(name.clone());
@@ -1269,12 +1320,20 @@ impl DesugarCtx {
         // whose declared return type is a tensor type and whose body is
         // itself a tensor literal. Narrow numeric literals in `body` to
         // the tensor element type.
+        // Binder scope controls `t-var` cast targets and literal adoption.
+        let restore_binders = self.current_type_binders.replace(
+            self.declared_type_binders
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        );
         let desugared_body = match (ret_ty.as_ref().and_then(tensor_element_prim_name), body) {
             (Some(prec), Expr::List(items, _)) => {
                 self.desugar_list_as_tensor_literal(items, &prec, &body_scope)
             }
             _ => self.desugar_expr_with_scope(body, &body_scope),
         };
+        self.current_type_binders.replace(restore_binders);
         let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
         let def_node = node(DeepTag::Def, vec![sym(name), fn_node]);
         // A standalone `sig` owns this declaration's binders, so its `def`
@@ -1779,6 +1838,8 @@ impl DesugarCtx {
                 // `cast_trunc([1.9], int32)` into an int32 tensor and
                 // make the truncating cast a type error on its own
                 // argument.
+                let binder = self.current_type_binder(prec);
+                let binder_bound = binder.flatten();
                 let inner = match e.as_ref() {
                     _ if *mode == CastMode::Trunc => {
                         self.desugar_expr_with_scope(e, local_fn_params)
@@ -1786,34 +1847,49 @@ impl DesugarCtx {
                     Expr::List(items, _) => {
                         self.desugar_list_as_tensor_literal(items, prec, local_fn_params)
                     }
-                    Expr::Lit(lit, span) if scalar_literal_adopts_cast_target(lit, prec) => {
-                        attach_span_metadata(
-                            adopted_scalar_literal(lit, prec, /* negate = */ false),
-                            *span,
-                        )
+                    other => {
+                        let unsuffixed = is_unsuffixed_surf_numeric_literal(other);
+                        // A signed direct `lit` is the unambiguous carrier only
+                        // when the Surf syntax is eligible for adoption, or when
+                        // it proves the narrow literal-source rejection for an
+                        // unbounded binder. Ordinary suffixed casts keep their
+                        // authored unary-minus application shape.
+                        let needs_signed_literal = unsuffixed || matches!(binder, Some(None));
+                        let ordinary = needs_signed_literal
+                            .then(|| canonical_signed_cast_literal(other))
+                            .flatten()
+                            .map(|literal| attach_span_metadata(literal, expr_span(other)))
+                            .unwrap_or_else(|| {
+                                self.desugar_expr_with_scope(other, local_fn_params)
+                            });
+                        let adopted = classify_literal_source(&ordinary).and_then(|source| {
+                            if scalar_literal_source_adopts_binder_target(
+                                source,
+                                binder_bound,
+                                unsuffixed,
+                            ) {
+                                adopted_scalar_literal_source(source, prec, DeepTag::TVar)
+                            } else if scalar_literal_source_adopts_cast_target(
+                                source, prec, unsuffixed,
+                            ) {
+                                adopted_scalar_literal_source(source, prec, DeepTag::TPrim)
+                            } else {
+                                None
+                            }
+                        });
+                        adopted
+                            .map(|literal| attach_span_metadata(literal, expr_span(other)))
+                            .unwrap_or(ordinary)
                     }
-                    // Mirror of the RT-2 P2 sign-fold in
-                    // `desugar_tensor_literal_item`: the parser turns
-                    // `-1.1` into `Unary(Neg, Lit(Float(1.1)))`. Fold
-                    // the sign into the adopted literal so `cast(-1.1,
-                    // f64)` binds `-1.1` at f64.
-                    Expr::Unary(UnaryOp::Neg, neg_inner, span)
-                        if matches!(
-                            neg_inner.as_ref(),
-                            Expr::Lit(lit, _) if scalar_literal_adopts_cast_target(lit, prec)
-                        ) =>
-                    {
-                        let Expr::Lit(lit, _) = neg_inner.as_ref() else {
-                            unreachable!("guarded by the matches! above");
-                        };
-                        attach_span_metadata(
-                            adopted_scalar_literal(lit, prec, /* negate = */ true),
-                            *span,
-                        )
-                    }
-                    other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
-                let mut children = vec![inner, node(DeepTag::TPrim, vec![sym(prec)])];
+                // Every declared binder is a `t-var`; only a bound permits
+                // literal adoption. The checker rejects unbounded targets.
+                let target = if binder.is_some() {
+                    node(DeepTag::TVar, vec![sym(prec)])
+                } else {
+                    node(DeepTag::TPrim, vec![sym(prec)])
+                };
+                let mut children = vec![inner, target];
                 if let Some(selector) = mode.deep_selector() {
                     children.push(sym(selector));
                 }
@@ -2137,6 +2213,31 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
     }
 }
 
+fn canonical_signed_cast_literal(expr: &Expr) -> Option<deep::Expr> {
+    let Expr::Unary(UnaryOp::Neg, inner, _) = expr else {
+        return None;
+    };
+    let literal = match inner.as_ref() {
+        Expr::Lit(Literal::Int(value), _) => Literal::Int(fold_unary_minus_int(*value)),
+        Expr::Lit(Literal::Float(value), _) => Literal::Float(-*value),
+        Expr::Lit(Literal::TypedInt(value, suffix), _) => {
+            Literal::TypedInt(fold_unary_minus_int(*value), *suffix)
+        }
+        Expr::Lit(Literal::TypedFloat(value, suffix), _) => Literal::TypedFloat(-*value, *suffix),
+        _ => return None,
+    };
+    Some(desugar_literal(&literal))
+}
+
+fn is_unsuffixed_surf_numeric_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Lit(Literal::Int(_) | Literal::Float(_), _))
+        || matches!(
+            expr,
+            Expr::Unary(UnaryOp::Neg, inner, _)
+                if matches!(inner.as_ref(), Expr::Lit(Literal::Int(_) | Literal::Float(_), _))
+        )
+}
+
 /// Position 4 (spec §5.6 / §P10b) admission test for a bare scalar
 /// literal under `cast(literal, p)` (issue #308). An unsuffixed numeric
 /// literal adopts the cast target when the binding is meaningful:
@@ -2154,49 +2255,71 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
 /// suffixed literals bind at their suffix (§5.5), float→integer keeps
 /// truncation semantics, and bool/string targets are not numeric
 /// binding precisions.
-fn scalar_literal_adopts_cast_target(lit: &Literal, prec: &str) -> bool {
+/// [02-P10b] binder-target literal adoption. Float literals require `Float`
+/// or `Numeric`; integer literals also admit `Int`. Unbounded binders cannot
+/// adopt and remain checker-rejected cast targets under [04-DTYPE-2].
+fn scalar_literal_source_adopts_binder_target(
+    source: LiteralSource<'_>,
+    bound: Option<DtypeFamily>,
+    unsuffixed: bool,
+) -> bool {
+    unsuffixed
+        && bound.is_some_and(|family| {
+            matches!(
+                source.family_fit(family),
+                LiteralFamilyFit::Fits | LiteralFamilyFit::IntegerOutOfRange
+            )
+        })
+}
+
+fn scalar_literal_source_adopts_cast_target(
+    source: LiteralSource<'_>,
+    prec: &str,
+    unsuffixed: bool,
+) -> bool {
+    if !unsuffixed {
+        return false;
+    }
     let float_target = matches!(prec, "f32" | "f64" | "bf16" | "f16");
     let int_target = matches!(prec, "int8" | "int16" | "int32" | "int64");
-    match lit {
-        Literal::Float(_) => float_target,
-        Literal::Int(_) => float_target || int_target,
+    match source.numeric_atom() {
+        Some(DeepAtom::Float(_)) => float_target,
+        Some(DeepAtom::Int(_)) => float_target || int_target,
         _ => false,
     }
 }
 
 /// Build the adopted-literal Deep node for a scalar literal under
 /// `cast(literal, p)`. Mirrors `desugar_tensor_literal_item`'s lit
-/// construction (including the RT-2 P2 sign fold via `negate`). Only
-/// called for literals admitted by `scalar_literal_adopts_cast_target`.
-fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr {
-    match lit {
-        Literal::Int(n) => {
-            let value = if negate { fold_unary_minus_int(*n) } else { *n };
-            let float_typed = matches!(prec, "f32" | "f64" | "bf16" | "f16");
-            let ty = node(DeepTag::TPrim, vec![sym(prec)]);
-            let meta = if float_typed {
-                meta_with_integer_float_type(ty, Some("unsuffixed"))
-            } else {
-                numeric_literal_meta(ty, "unsuffixed")
-            };
-            node_meta(
+/// construction. Exact Surf unary syntax is already a signed direct `lit`.
+/// Only called for a syntactically adopting source; the checker diagnoses an
+/// integer that cannot fit every member of a family bound.
+fn adopted_scalar_literal_source(
+    source: LiteralSource<'_>,
+    prec: &str,
+    target_tag: DeepTag,
+) -> Option<deep::Expr> {
+    let ty = node(target_tag, vec![sym(prec)]);
+    match source.numeric_atom()? {
+        DeepAtom::Int(value) => {
+            let meta =
+                if target_tag == DeepTag::TPrim && matches!(prec, "f32" | "f64" | "bf16" | "f16") {
+                    meta_with_integer_float_type(ty, Some("unsuffixed"))
+                } else {
+                    numeric_literal_meta(ty, "unsuffixed")
+                };
+            Some(node_meta(
                 DeepTag::Lit,
                 meta,
-                vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
-            )
+                vec![deep::Expr::Atom(DeepAtom::Int(*value), sp())],
+            ))
         }
-        Literal::Float(f) => {
-            let value = if negate { -*f } else { *f };
-            node_meta(
-                DeepTag::Lit,
-                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec)]), "unsuffixed"),
-                vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
-            )
-        }
-        other => unreachable!(
-            "adopted_scalar_literal called for non-numeric literal {other:?}; \
-             scalar_literal_adopts_cast_target must gate callers"
-        ),
+        DeepAtom::Float(value) => Some(node_meta(
+            DeepTag::Lit,
+            numeric_literal_meta(ty, "unsuffixed"),
+            vec![deep::Expr::Atom(DeepAtom::Float(*value), sp())],
+        )),
+        _ => None,
     }
 }
 
@@ -3399,10 +3522,7 @@ mod tests {
                 "loss".to_string(),
                 vec!["x".to_string(), "w".to_string(), "b".to_string()],
             )]),
-            top_level_fn_tensor_param_prec: UnordMap::new(),
-            explicit_sig_names: UnordSet::new(),
-            def_effects: UnordMap::new(),
-            next_destructure_temp: std::cell::Cell::new(0),
+            ..DesugarCtx::default()
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
             .split_whitespace()

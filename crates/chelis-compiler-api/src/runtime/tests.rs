@@ -356,7 +356,7 @@ value = fold(keep_left, cast(127, int8), [cast(1, int8)])
 fn generic_cast_target_survives_every_higher_order_callback_edge() {
     let checked = checked_surf(
         r#"
-def nonnegative[p_int](value: p_int) -> bool =
+def nonnegative[p_int: Int](value: p_int) -> bool =
   gte(cast(value, p_int), cast(0, p_int))
 def keep_left_hof[p_int](left: p_int, right: p_int) -> p_int =
   cast(left, p_int)

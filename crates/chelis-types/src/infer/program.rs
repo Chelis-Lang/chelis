@@ -253,6 +253,7 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let external_input_types = collect_literal_external_input_types(&items);
     let metadata_prebound_names = UnordSet::new();
     product.function_inference_plan = FunctionInferencePlan::build(&items);
@@ -1283,6 +1284,7 @@ pub(super) fn infer_ir_program_with_state(
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let metadata_prebound_names = collected_ir_types
         .type_env
         .keys()

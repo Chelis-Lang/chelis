@@ -10,6 +10,12 @@ use crate::context::LibraryProofId;
 pub(super) struct DeclaredSigMetadata {
     pub(super) param_types: Vec<deep::Expr>,
     pub(super) binders: UnordSet<String>,
+    /// Exact dtype-family capabilities authored on this signature. Keep the
+    /// decode result rather than defaulting malformed metadata to no bounds:
+    /// declaration collection owns the diagnostic, while structural users
+    /// may proceed only through `Ok`.
+    pub(super) dtype_bounds:
+        Result<UnordMap<String, chelis_deep::DtypeFamily>, chelis_deep::DtypeBoundsError>,
 }
 
 /// Explicit annotation-time declaration context. The declared signature map
@@ -1238,7 +1244,7 @@ pub(super) fn collect_defsig_param_types(
     // keeps the "every recursive walker is bounded" invariant uniform and
     // cheap.)
     stack_guard!("collect_defsig_param_types", expr);
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
+    let Some((tag, meta, kids)) = stamped_parts(expr) else {
         return;
     };
     match tag {
@@ -1266,6 +1272,8 @@ pub(super) fn collect_defsig_param_types(
                 .or_insert_with(|| DeclaredSigMetadata {
                     param_types: param_type_exprs,
                     binders: deep_type_binder_names(&kids[1]),
+                    dtype_bounds: chelis_deep::decode_dtype_bounds(meta)
+                        .map(|bounds| bounds.into_iter().collect()),
                 });
         }
         _ => {}

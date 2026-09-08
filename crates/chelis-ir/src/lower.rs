@@ -549,7 +549,9 @@ pub fn install_chelis_panic_hook() {
 }
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_deep::{DeepTag, Span, decode_effect_kind};
+use chelis_deep::{
+    DeepTag, Span, decode_dtype_bounds, decode_effect_kind, exact_type_variable_name,
+};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{
     BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
@@ -1891,6 +1893,16 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     }
 }
 
+/// Binder name from a bare scalar `(t-var {} p)` type (#1544).
+fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
+    let stripped = if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr) {
+        kids.first()?
+    } else {
+        expr
+    };
+    exact_type_variable_name(stripped).map(str::to_string)
+}
+
 /// issue #319: the renamed type-variable name carried by a formal-
 /// parameter position of a verb's inferred `t-fn` type metadata, or
 /// `None` when the position is concrete.
@@ -2371,13 +2383,18 @@ pub fn top_level_lowering_map(
 ) -> BTreeMap<String, bool> {
     let top_level_defs = collect_top_level_defs(exprs);
     let top_level_sigs = collect_top_level_sigs(exprs);
+    let dtype_bound_names = collect_top_level_dtype_bound_names(exprs);
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
         let lowered = def_is_lowered(
             name,
             &top_level_defs,
-            &top_level_sigs,
+            &types,
             type_env,
             &mut cache,
             &mut visiting,
@@ -2405,6 +2422,7 @@ pub fn top_level_lowering_map_with_context(
         top_level_defs.insert(name, body);
     }
     let mut top_level_sigs = collect_top_level_sigs(new_exprs);
+    let dtype_bound_names = collect_top_level_dtype_bound_names(new_exprs);
     // Library declared types feed `lookup_declared_type_expr`; merge
     // them in so a library def's signature is reachable when the new
     // code's body references it.
@@ -2413,6 +2431,10 @@ pub fn top_level_lowering_map_with_context(
             .entry(name.clone())
             .or_insert_with(|| ty_expr_to_deep(ty_expr));
     }
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
     let mut cache = library.lowered_names.clone();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
@@ -2422,7 +2444,7 @@ pub fn top_level_lowering_map_with_context(
         let lowered = def_is_lowered(
             name,
             &top_level_defs,
-            &top_level_sigs,
+            &types,
             new_type_env,
             &mut cache,
             &mut visiting,
@@ -2509,12 +2531,17 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
 
     let top_level_defs = collect_top_level_defs(program.exprs());
     let top_level_sigs = collect_top_level_sigs(program.exprs());
+    let dtype_bound_names = collect_top_level_dtype_bound_names(program.exprs());
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     !expr_depends_on_nonlowerable_name(
         expr,
         &top_level_defs,
-        &top_level_sigs,
+        &types,
         program.type_env(),
         &mut cache,
         &mut visiting,
@@ -2545,11 +2572,11 @@ fn top_level_expr_is_lowered_with_names(
     };
     lowered_names.get(name).copied().unwrap_or_else(|| {
         !lookup_declared_type_expr(&top_level_sigs, type_env, name)
-            .is_some_and(type_is_never_lowerable)
+            .is_some_and(|ty| type_is_never_lowerable(ty, None))
     })
 }
 
-fn type_is_never_lowerable(expr: &Expr) -> bool {
+fn type_is_never_lowerable(expr: &Expr, bounded_dtype_names: Option<&UnordSet<String>>) -> bool {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return true;
     };
@@ -2564,7 +2591,14 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
         // precision per spec/04-type-system.md §5.8.1); we just must
         // skip the standalone top-level emission.
         DeepTag::TFn => {
-            type_expr_has_precision_var(expr)
+            // Bounded bare scalar binders, like tensor precision binders,
+            // monomorphize only through their call sites.
+            kids.iter().any(|kid| {
+                extract_scalar_precision_var_name(kid).is_some_and(|name| {
+                    bounded_dtype_names.is_some_and(|bounded| bounded.contains(&name))
+                })
+            })
+                || type_expr_has_precision_var(expr)
                 // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
                 // a t-fn carrying a `(d-rank ...)` rank variable is
                 // rank-polymorphic and has no standalone monomorphization — its
@@ -2572,9 +2606,13 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
                 // precision-var case above. Skip the standalone emission so the
                 // `(d-rank ...)` never reaches the lowering assertion.
                 || type_expr_has_rank_var(expr)
-                || kids.last().is_some_and(type_is_never_lowerable)
+                || kids
+                    .last()
+                    .is_some_and(|ty| type_is_never_lowerable(ty, bounded_dtype_names))
         }
-        DeepTag::TTuple => kids.iter().any(type_is_never_lowerable),
+        DeepTag::TTuple => kids
+            .iter()
+            .any(|ty| type_is_never_lowerable(ty, bounded_dtype_names)),
         DeepTag::TAdt | DeepTag::TUnit => true,
         DeepTag::TPrim => false,
         _ => false,
@@ -2975,6 +3013,30 @@ fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
     sigs
 }
 
+/// Exact dtype-family-bounded binder names on each `defsig`.
+fn collect_top_level_dtype_bound_names(exprs: &[Expr]) -> BTreeMap<String, UnordSet<String>> {
+    let mut bounds = BTreeMap::new();
+    for_each_top_level_item(exprs, &mut |expr| {
+        if let Some((DeepTag::Defsig, meta, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
+        {
+            let names = decode_dtype_bounds(meta)
+                .unwrap_or_else(|error| {
+                    raise_lowering_error(
+                        format!("malformed dtype_bounds reached IR lowering: {error}"),
+                        Some(expr.span()),
+                        expr.span_id().map(ToOwned::to_owned),
+                    )
+                })
+                .into_iter()
+                .map(|(binder, _)| binder)
+                .collect();
+            bounds.insert(name.to_string(), names);
+        }
+    });
+    bounds
+}
+
 fn for_each_top_level_item(exprs: &[Expr], f: &mut impl FnMut(&Expr)) {
     for expr in exprs {
         for_each_top_level_item_from_expr(expr, f);
@@ -3037,10 +3099,15 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Exp
     }
 }
 
+struct LowerabilityTypes<'a> {
+    signatures: &'a BTreeMap<String, Expr>,
+    dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+}
+
 fn def_is_lowered(
     name: &str,
     top_level_defs: &BTreeMap<String, Expr>,
-    top_level_sigs: &BTreeMap<String, Expr>,
+    types: &LowerabilityTypes<'_>,
     type_env: &BTreeMap<String, Expr>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
@@ -3049,8 +3116,8 @@ fn def_is_lowered(
         return *lowered;
     }
     if !visiting.insert(name.to_string()) {
-        return !lookup_declared_type_expr(top_level_sigs, type_env, name)
-            .is_some_and(type_is_never_lowerable);
+        return !lookup_declared_type_expr(types.signatures, type_env, name)
+            .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)));
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
@@ -3064,14 +3131,14 @@ fn def_is_lowered(
             && !expr_depends_on_nonlowerable_name(
                 body,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
                 &UnordSet::new(),
             )
-            && !lookup_declared_type_expr(top_level_sigs, type_env, name)
-                .is_some_and(type_is_never_lowerable)
+            && !lookup_declared_type_expr(types.signatures, type_env, name)
+                .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
     });
 
     visiting.remove(name);
@@ -3118,7 +3185,7 @@ fn unique_terminal_match<'a>(map: &'a BTreeMap<String, Expr>, name: &str) -> Opt
 fn expr_depends_on_nonlowerable_name(
     expr: &Expr,
     top_level_defs: &BTreeMap<String, Expr>,
-    top_level_sigs: &BTreeMap<String, Expr>,
+    types: &LowerabilityTypes<'_>,
     type_env: &BTreeMap<String, Expr>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
@@ -3130,14 +3197,7 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.contains(name)
             && top_level_defs.contains_key(name)
         {
-            return !def_is_lowered(
-                name,
-                top_level_defs,
-                top_level_sigs,
-                type_env,
-                cache,
-                visiting,
-            );
+            return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
@@ -3152,7 +3212,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3170,7 +3230,7 @@ fn expr_depends_on_nonlowerable_name(
                     if expr_depends_on_nonlowerable_name(
                         &binding_kids[index + 1],
                         top_level_defs,
-                        top_level_sigs,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3188,7 +3248,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3201,7 +3261,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     scrutinee,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3222,7 +3282,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         guard,
                         top_level_defs,
-                        top_level_sigs,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3232,7 +3292,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         body,
                         top_level_defs,
-                        top_level_sigs,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3248,7 +3308,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3258,7 +3318,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3273,7 +3333,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3284,7 +3344,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 &meta.expr,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3293,7 +3353,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3309,7 +3369,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3321,7 +3381,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3331,7 +3391,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     child,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3343,7 +3403,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3354,7 +3414,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -4411,6 +4471,45 @@ fn unique_metadata_value<'a>(expr: &'a Expr, key: &str) -> Option<Option<&'a Exp
     Some(first)
 }
 
+/// A binder-adopted decimal specialized to an integer keeps its f32 source
+/// default; all other polarities finalize at the substituted target.
+fn binder_float_literal_source_default(
+    meta: &[(String, Expr)],
+    raw: chelis_types::RawScalar,
+    substitutions: &UnordMap<String, Prim>,
+) -> Option<Prim> {
+    let single = |key: &str| {
+        let mut values = meta
+            .iter()
+            .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+        let value = values.next()?;
+        values.next().is_none().then_some(value)
+    };
+    // Round 5 P1: the DAG lane's twin of the host predicate reads the FIRST
+    // `type` entry for the same reason its sibling does. See the note on
+    // `binder_float_literal_keeps_f32_source` in `host.rs`: the checker and the
+    // interpreter both take the first entry, so a lowering reader that demands
+    // exactly one is stricter than the readers that decide acceptance and
+    // silently changes the answer when they disagree. `surf_literal_style`
+    // keeps `single`, because the checker rejects a duplicate of that key.
+    let binder = meta
+        .iter()
+        .find_map(|(candidate, value)| (candidate == "type").then_some(value))
+        .and_then(extract_scalar_precision_var_name)?;
+    let exact_unsuffixed = matches!(
+        single("surf_literal_style"),
+        Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"
+    );
+    if !exact_unsuffixed {
+        return None;
+    }
+    matches!(raw, chelis_types::RawScalar::Float(_))
+        .then(|| substitutions.get(&binder).copied())
+        .flatten()
+        .filter(Prim::is_integer)
+        .map(|_| Prim::F32)
+}
+
 /// Decode one canonical numeric `lit` under [04-LIT-1].
 ///
 /// This is the fold's only literal ingress. It jointly validates the value
@@ -5340,10 +5439,25 @@ impl LowerCtx {
         if let Some(inner) = Self::try_extract_ref_type(expr) {
             return Self::type_from_type_expr_with_subst(inner, prec_subst, rank_subst);
         }
+        // [02-SURF-P10b]: resolve a bare scalar binder stamp at the call site.
+        // Internal callees can remain unbound until inlining, so preserve the
+        // existing default when this substitution map has no entry.
+        if let Some(var_name) = Self::scalar_precision_var_name(expr)
+            && let Some(prim) = prec_subst.get(&var_name).copied()
+        {
+            return TensorType {
+                dims: vec![],
+                precision: prim,
+            };
+        }
         if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst, rank_subst) {
             return tt;
         }
         Self::default_type()
+    }
+
+    fn scalar_precision_var_name(expr: &Expr) -> Option<String> {
+        extract_scalar_precision_var_name(expr)
     }
 
     /// issue #289: call-site variant of [`Self::type_from_type_expr_with_subst`]
@@ -6177,7 +6291,32 @@ impl LowerCtx {
         // atoms travel their exact i64 (no `as f64` laundering, which
         // collapsed int64 above 2^53); an out-of-domain literal at its
         // ascribed dtype is a loud lowering diagnostic, not a wrap.
-        let prim = ty.precision;
+        let raw = if let Some(val_expr) = elems.get(2) {
+            match val_expr {
+                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
+                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
+                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
+                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
+                _ => chelis_types::RawScalar::Int(0),
+            }
+        } else {
+            chelis_types::RawScalar::Int(0)
+        };
+        // §5.6: a decimal actualized across families keeps the §5.3 f32
+        // source default; the surrounding Cast applies [04-NUM-14]. Integer
+        // atoms and same-family literals still finalize at the call-site
+        // width. The exact metadata carrier makes this value-independent.
+        let prim = elems
+            .get(1)
+            .and_then(|meta| match meta {
+                Expr::Map(meta, _) => binder_float_literal_source_default(
+                    &meta.entries,
+                    raw,
+                    &self.prec_substitutions,
+                ),
+                _ => None,
+            })
+            .unwrap_or(ty.precision);
         // A string literal is not a numeric constant and has no sealed
         // payload to finalize: `finalize_scalar`'s `Prim::String` arm is
         // an unreachable-by-construction PANIC, so reaching it here would
@@ -6194,17 +6333,6 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             )
         }
-        let raw = if let Some(val_expr) = elems.get(2) {
-            match val_expr {
-                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
-                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
-                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
-                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
-                _ => chelis_types::RawScalar::Int(0),
-            }
-        } else {
-            chelis_types::RawScalar::Int(0)
-        };
         let value = match chelis_types::finalize_scalar("const", prim, raw) {
             Ok(value) => value,
             Err(trap) => raise_lowering_error(
@@ -6218,10 +6346,14 @@ impl LowerCtx {
             ),
         };
 
+        let literal_ty = TensorType {
+            dims: ty.dims,
+            precision: prim,
+        };
         LoweredValue::Node(self.dag.add_node(
             RiscOp::Const { value },
             vec![],
-            ty,
+            literal_ty,
             self.current_span_id.clone(),
         ))
     }
@@ -12715,6 +12847,16 @@ impl LowerCtx {
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
+        } else if let Some(var_name) = Self::scalar_precision_var_name(&elems[3])
+            && let Some(prim) = self.prec_substitutions.get(&var_name).copied()
+        {
+            // [04-NUM-14] / section 5.8.1: an inlined bounded-binder cast
+            // reaches this lane with a concrete call-site substitution even
+            // though its target remains spelled `(t-var {} p)` in Deep. Use
+            // that installed monomorphization instead of misclassifying the
+            // target as a non-primitive expression. An unbound `t-var` still
+            // falls through to the deliberate [04-DTYPE-1] rejection below.
+            prim
         } else if let Expr::Atom(Atom::Name(pname), _) = &elems[3] {
             // Bare-symbol spelling (backward compat): parse or raise.
             match Prim::parse_name(pname) {
@@ -17117,6 +17259,40 @@ mod regression_tests {
             vec![DimInfo::Lit(2), DimInfo::Lit(3)]
         );
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn binder_float_literal_default_is_structural_not_value_keyed() {
+        for (literal, target) in [
+            ("16777217.0", Prim::Int64),
+            ("-16777217.0", Prim::Int64),
+            ("127.5", Prim::Int8),
+            ("128.0", Prim::Int8),
+        ] {
+            let expr = chelis_deep::parser::parse_str(&format!(
+                "(cast {{}} \
+                    (lit {{surf_literal_style: \"unsuffixed\", type: (t-var {{}} p)}} {literal}) \
+                    (t-var {{}} p))"
+            ))
+            .unwrap_or_else(|error| panic!("parse binder literal {literal}: {error}"))
+            .pop()
+            .expect("one binder cast");
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.prec_substitutions.insert("p".to_string(), target);
+            let _ = ctx.lower_expr(&expr);
+
+            let nodes = ctx.dag.nodes();
+            assert_eq!(nodes.len(), 2);
+            assert!(matches!(nodes[0].op, RiscOp::Const { .. }));
+            assert_eq!(nodes[0].output_type.precision, Prim::F32, "{literal}");
+            assert_eq!(
+                nodes[1].op,
+                RiscOp::Cast {
+                    new_precision: target
+                },
+                "{literal}"
+            );
+        }
     }
 
     #[test]

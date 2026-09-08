@@ -4840,16 +4840,19 @@ fn lower_host_expr_kind(
                     fatal: true,
                 });
             }
-            let value = lower_host_expr(
-                children(list).first().ok_or_else(|| {
-                    host_expr_lowering_error(expr, "a `cast` node has no operand")
-                })?,
-                program,
-                scope,
-                tensor_helpers,
-            )?;
-            let inferred_ty = host_expr_type(&value);
+            let operand = children(list)
+                .first()
+                .ok_or_else(|| host_expr_lowering_error(expr, "a `cast` node has no operand"))?;
             let ty = expr_host_type(expr, program, scope);
+            let mut value = lower_host_expr(operand, program, scope, tensor_helpers)?;
+            if binder_float_literal_keeps_f32_source(operand, &ty) {
+                value = HostExpr::new(HostExprKind::Builtin {
+                    name: "cast".to_string(),
+                    args: vec![value],
+                    ty: HostTypeTerm::Float32,
+                });
+            }
+            let inferred_ty = host_expr_type(&value);
             // The rung travels with the callable name so the host lane
             // and the DAG lane land on the same C guard ([05-OP-6]).
             let name = match chelis_deep::cast_mode_of(children(list)) {
@@ -11815,6 +11818,46 @@ fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim>
         return prim.is_float().then_some(prim);
     }
     None
+}
+
+/// The §5.3 source width retained when a binder-adopted decimal is
+/// specialized across families to an integer cast target.
+fn binder_float_literal_keeps_f32_source(operand: &Expr, target: &HostTypeTerm) -> bool {
+    let Some(source) = chelis_deep::classify_literal_source(operand) else {
+        return false;
+    };
+    if !matches!(source.numeric_atom(), Some(Atom::Float(_)))
+        || !source.admitted_by(chelis_deep::DtypeFamily::Numeric)
+    {
+        return false;
+    }
+    // Round 5 P1: read the FIRST `type` entry, which is what the checker
+    // (`visit_binder_literal_uses`, via `.find`) and the interpreter
+    // (`lit_meta_type_var_name`) both do. Requiring exactly one made this
+    // predicate STRICTER than the readers that decide whether the program is
+    // accepted at all, so a `lit` carrying two `type` stamps type-checked,
+    // evaluated with the narrow applied, and compiled without it: one accepted
+    // program with two answers depending on which lane read it.
+    //
+    // `surf_literal_style` keeps its exactly-one requirement, and the
+    // asymmetry is deliberate rather than an oversight: the checker consumes
+    // `has_exact_unsuffixed_style` and REJECTS a duplicated style key, so
+    // strictness there has a rejecting counterpart and cannot fail open. There
+    // is no equivalent checker guard on `type`. Whether a duplicated `type`
+    // key should be malformed Deep at the ingress under [04-TOT-3] is a
+    // well-formedness question for its own slice; until it is answered, the
+    // lanes must at least agree.
+    let binder_typed = source
+        .metadata()
+        .entries
+        .iter()
+        .find_map(|(key, value)| (key == "type").then_some(value))
+        .is_some_and(|ty| chelis_deep::exact_type_variable_name(ty).is_some());
+    binder_typed
+        && matches!(
+            target,
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)) if precision.is_integer()
+        )
 }
 
 fn should_prefer_inferred_app_type(explicit: &HostTypeTerm, inferred: &HostTypeTerm) -> bool {

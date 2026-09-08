@@ -182,6 +182,7 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
         "sig arange[p: Int]: p -> p -> tensor[n, p]",
         "def arange_values[p: Int](current: p, stop: p) -> p = current",
         "def scale[n, p: Float](x: tensor[n, p], k: p) -> tensor[n, p] = x",
+        "def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))",
     ] {
         let decls = surf_parse(source).expect("parse");
         let deep = desugar_program(&decls);
@@ -228,4 +229,78 @@ fn a_malformed_deep_bound_fails_resugaring_closed() {
     let deep = deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (t-var {} p))")
         .expect("Deep parses; the family name is a resugaring concern");
     resugar_program(&deep).expect_err("an unknown family must not resugar");
+}
+
+fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
+    deep_parse_strict(&format!(
+        "(defsig {{dtype_bounds: {{p: float}}}} scale (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
+         (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) {body}))"
+    ))
+    .expect("Deep fixture")
+}
+
+#[test]
+fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
+    let deep = desugar_program(
+        &surf_parse("def scale[p: Float](x: p) -> p = cast(-0.1, p)").expect("Surf"),
+    );
+    let printed = print_canonical(&deep);
+    assert!(
+        printed.contains("surf_literal_style: \"unsuffixed\", type: (t-var {} p)} -0.1)")
+            && !printed.contains("} neg)"),
+        "Surf unary syntax must become an unambiguous signed literal: {printed}"
+    );
+    let recovered = format_program(
+        &resugar_program(&deep).expect("the adopting cast relation is representable"),
+    );
+    assert!(recovered.contains("cast(-0.1, p)"), "{recovered}");
+
+    for source in [
+        "def concrete(x: f64) -> f64 = cast(-0.1f64, f64)",
+        "def bounded[p: Float](x: p) -> p = cast(-0.1f64, p)",
+    ] {
+        let printed = deep_text(source);
+        assert!(
+            printed.contains("} neg)") && printed.contains("} 0.1)"),
+            "a suffixed negative keeps the ordinary unary application: {printed}"
+        );
+    }
+}
+
+#[test]
+fn a_local_neg_call_is_not_a_negative_literal_source() {
+    let text = deep_text(
+        "def neg(x: f32) -> f32 = add(x, 1.0)\n\
+         def scale[p: Float](x: p) -> p = cast(neg(0.1), p)",
+    );
+    assert!(
+        text.matches("(app ").count() == 2 && text.contains("} neg)"),
+        "the authored call must survive instead of sign-folding: {text}"
+    );
+}
+
+#[test]
+fn unrepresentable_binder_literal_provenance_fails_resugaring() {
+    for deep in [
+        deep_parse_strict("(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} scale (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))").expect("Deep fixture"),
+        binder_deep("(lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)"),
+        deep_parse_strict(
+            "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
+             (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
+               (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))",
+        )
+        .expect("forged local neg Deep fixture"),
+    ] {
+        resugar_program(&deep).expect_err("unrepresentable binder provenance");
+    }
+    for marker in [
+        "surf_literal_style: \"explicit\", ",
+        "surf_literal_style: 1, ",
+        "",
+    ] {
+        let deep = binder_deep(&format!(
+            "(cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))"
+        ));
+        resugar_program(&deep).expect_err("unrepresentable binder provenance");
+    }
 }

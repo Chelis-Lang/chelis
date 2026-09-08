@@ -610,7 +610,18 @@ impl<'a> EvalContext<'a> {
         // Honor that meta where present so a context-typed literal
         // (e.g. `(lit {type: (t-prim {} int64)} 42)`) carries the
         // surrounding-position dtype, not just the bare default.
-        let meta_dtype = get_meta(list).and_then(lit_meta_prim);
+        // [02-SURF-P10b]: a literal in `cast(<literal>, p)` binds at `p`.
+        // Resolve that stamp through the call frame's precision bindings.
+        let meta = get_meta(list);
+        let meta_dtype = match meta.and_then(lit_meta_prim) {
+            Some(prim) => Some(prim),
+            None => match meta.and_then(lit_meta_type_var_name) {
+                // Internal callee binders may remain unbound until inlining;
+                // preserve the default when no call-site binding exists.
+                Some(binder) => self.precision_bindings.get(binder).copied(),
+                None => None,
+            },
+        };
         match value {
             Expr::Atom(Atom::Int(value), _) => match meta_dtype {
                 Some(dtype) if dtype.is_integer() || dtype.is_float() => {
@@ -1263,6 +1274,8 @@ impl<'a> EvalContext<'a> {
         // active dtype map. The type checker has already rejected
         // f8e4m3 (spec/04-type-system.md §1.1.1) at this point so the
         // host eval lane just needs to pick the right re-pack.
+        //
+        // Binder targets actualize from the call site's concrete precision.
         let target_prim = prim_from_name(target)
             .or_else(|| self.precision_bindings.get(target).copied())
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;

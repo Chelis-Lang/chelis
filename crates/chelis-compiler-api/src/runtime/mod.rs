@@ -999,6 +999,12 @@ fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
     extract_prim_from_type_expr(ty_expr)
 }
 
+/// Binder name from a `(lit {type: (t-var {} p)} ...)` stamp (#1544).
+fn lit_meta_type_var_name(meta: &MetaMap) -> Option<&str> {
+    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+    chelis_deep::exact_type_variable_name(ty_expr)
+}
+
 fn children(list: &List) -> &[Expr] {
     if list.elements.len() > 2 {
         &list.elements[2..]
