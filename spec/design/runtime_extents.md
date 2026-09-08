@@ -1058,7 +1058,13 @@ exposes the decision `lower_host_function` has always made for the C host
 program: a def is a kernel when its declared result is a tensor, no parameter
 is callable, no recursive, callable-parameter or summary-rejecting callee is
 reached, the body root is not on the keep-in-host list, no dynamic
-`to_tensor` is reached, no forward `fail` is reached, and, since chelis#1528,
+`to_tensor` is reached, no forward `fail` is reached, the body holds none of
+the six forms `body_form_the_dag_cannot_carry` names before any lowering (a
+string literal, chelis#856; a host-only builtin reached inside the body; a
+`match` on a runtime scrutinee, chelis#520 D1; `reduce_window_*` with a
+non-literal window or stride list, chelis#1058; `pad` with a non-static
+fill, chelis#776; a name that is neither a parameter nor a definition of the
+program), and, since chelis#1528,
 the def's checked effect row carries no effect the DAG cannot represent
 (`IO`, `Test`, `Resource`; `Random` and `Accum` are DAG-carried;
 `spec/04-type-system.md` section 7.1 names `IO` the host-side observable
