@@ -1,0 +1,343 @@
+//! Private checked host metadata authority: [04-SHAPE-1], [05-OP-31/33/44].
+
+use chelis_vocab::RuntimeDType;
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum MetadataError {
+    Domain(std::borrow::Cow<'static, str>),
+    Overflow(&'static str),
+}
+
+impl std::fmt::Display for MetadataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Domain(message) => write!(f, "Domain: {message}"),
+            Self::Overflow(message) => write!(f, "Overflow: {message}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ElementCount(i64);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ByteCount(i64);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AllocationBytes(usize);
+
+#[derive(Clone, Debug)]
+pub(crate) struct ShapeMetadata {
+    shape: Box<[i64]>,
+    strides: Box<[i64]>,
+    rank: i32,
+    elements: ElementCount,
+    bytes: ByteCount,
+    dtype: RuntimeDType,
+}
+
+pub(crate) struct AxisDecomposition {
+    outer: ElementCount,
+    extent: ElementCount,
+    inner: ElementCount,
+}
+
+/// A contraction's iteration domain need not be a materialized tensor: a
+/// zero product has no reachable index and owes no unused storage stride.
+pub(crate) struct IterationSpace {
+    shape: Box<[i64]>,
+    elements: ElementCount,
+}
+
+impl IterationSpace {
+    pub(crate) fn new(shape: &[i64]) -> Result<Self, MetadataError> {
+        ShapeMetadata::checked_rank(shape.len())?;
+        let elements = ElementCount::from_extents(shape)?;
+        Ok(Self {
+            shape: shape.into(),
+            elements,
+        })
+    }
+    pub(crate) fn elements(&self) -> ElementCount {
+        self.elements
+    }
+    pub(crate) fn unravel(&self, linear: i64, out: &mut [i64]) -> Result<(), MetadataError> {
+        unravel(&self.shape, self.elements, linear, out)
+    }
+}
+
+impl ElementCount {
+    pub(crate) fn scratch_entries(length: usize, extra: usize) -> Result<Self, MetadataError> {
+        let length = length
+            .checked_add(extra)
+            .ok_or(MetadataError::Overflow("scratch entry count exceeds usize"))?;
+        i64::try_from(length)
+            .map(Self)
+            .map_err(|_| MetadataError::Overflow("scratch entry count exceeds int64"))
+    }
+
+    pub(crate) fn from_extents(extents: &[i64]) -> Result<Self, MetadataError> {
+        if let Some((axis, extent)) = extents.iter().enumerate().find(|(_, extent)| **extent < 0) {
+            return Err(MetadataError::Domain(
+                format!("has negative extent {extent} at axis {axis}").into(),
+            ));
+        }
+        // Validate the whole domain before observing zero. A count is not a
+        // running prefix: valid empty shapes never overflow the total count.
+        if extents.contains(&0) {
+            return Ok(Self(0));
+        }
+        extents.iter().try_fold(Self(1), |product, &extent| {
+            product
+                .0
+                .checked_mul(extent)
+                .map(Self)
+                .ok_or(MetadataError::Overflow("extent product exceeds int64"))
+        })
+    }
+    pub(crate) fn get(self) -> i64 {
+        self.0
+    }
+    pub(crate) fn as_usize(self) -> Result<usize, MetadataError> {
+        usize::try_from(self.0).map_err(|_| MetadataError::Overflow("element count exceeds usize"))
+    }
+    /// Physical Rust scratch entries can include an accumulator and an index;
+    /// their allocation layout is distinct from a Chelis tensor representation.
+    pub(crate) fn scratch_len<T>(self) -> Result<usize, MetadataError> {
+        self.layout_bytes(size_of::<T>())?.allocation()?;
+        self.as_usize()
+    }
+    pub(crate) fn bytes(self, dtype: RuntimeDType) -> Result<ByteCount, MetadataError> {
+        self.layout_bytes(dtype.contract().repr().byte_width())
+    }
+    fn layout_bytes(self, width: usize) -> Result<ByteCount, MetadataError> {
+        let width = i64::try_from(width)
+            .map_err(|_| MetadataError::Overflow("representation width exceeds int64"))?;
+        self.0
+            .checked_mul(width)
+            .map(ByteCount)
+            .ok_or(MetadataError::Overflow("byte size exceeds int64"))
+    }
+}
+
+impl ByteCount {
+    pub(crate) fn from_declared(value: i64) -> Result<Self, MetadataError> {
+        if value < 0 {
+            Err(MetadataError::Domain(
+                format!("has negative byte capacity {value}").into(),
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+    pub(crate) fn get(self) -> i64 {
+        self.0
+    }
+    pub(crate) fn project_limit(self, limit: u64) -> Result<u64, MetadataError> {
+        let value = u64::try_from(self.0)
+            .map_err(|_| MetadataError::Domain("negative byte count".into()))?;
+        if value > limit {
+            Err(MetadataError::Overflow(
+                "byte size exceeds target allocation domain",
+            ))
+        } else {
+            Ok(value)
+        }
+    }
+    pub(crate) fn allocation(self) -> Result<AllocationBytes, MetadataError> {
+        // Rust pointer arithmetic and Vec allocations additionally require a
+        // single object to fit isize, even when size_t admits a larger value.
+        let value = self.project_limit(isize::MAX as u64)?;
+        usize::try_from(value)
+            .map(AllocationBytes)
+            .map_err(|_| MetadataError::Overflow("byte size exceeds usize"))
+    }
+}
+
+impl AllocationBytes {
+    pub(crate) fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl ShapeMetadata {
+    pub(crate) fn checked_rank(rank: usize) -> Result<i32, MetadataError> {
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("rank exceeds int32"))
+    }
+    pub(crate) fn contiguous(shape: &[i64], dtype: RuntimeDType) -> Result<Self, MetadataError> {
+        let rank = Self::checked_rank(shape.len())?;
+        let elements = ElementCount::from_extents(shape)?;
+        let bytes = elements.bytes(dtype)?;
+        // Suffix strides have their own domain even when the count is zero.
+        let mut strides = vec![0; shape.len()];
+        let mut stride = 1_i64;
+        for axis in (0..shape.len()).rev() {
+            strides[axis] = stride;
+            stride = stride
+                .checked_mul(shape[axis])
+                .ok_or(MetadataError::Overflow("stride product exceeds int64"))?;
+        }
+        Ok(Self {
+            shape: shape.into(),
+            strides: strides.into_boxed_slice(),
+            rank,
+            elements,
+            bytes,
+            dtype,
+        })
+    }
+    pub(crate) fn rank(&self) -> i32 {
+        self.rank
+    }
+    pub(crate) fn shape(&self) -> &[i64] {
+        &self.shape
+    }
+    pub(crate) fn strides(&self) -> &[i64] {
+        &self.strides
+    }
+    pub(crate) fn elements(&self) -> ElementCount {
+        self.elements
+    }
+    pub(crate) fn bytes(&self) -> ByteCount {
+        self.bytes
+    }
+    pub(crate) fn dtype(&self) -> RuntimeDType {
+        self.dtype
+    }
+    pub(crate) fn flat_index(&self, indices: &[i64]) -> Result<usize, MetadataError> {
+        if indices.len() != self.shape.len() {
+            return Err(MetadataError::Domain(
+                "index rank does not match tensor rank".into(),
+            ));
+        }
+        let mut flat = 0_i64;
+        for ((&index, &extent), &stride) in indices.iter().zip(&self.shape).zip(self.strides()) {
+            if index < 0 || index >= extent {
+                return Err(MetadataError::Domain("tensor index outside shape".into()));
+            }
+            flat = index
+                .checked_mul(stride)
+                .and_then(|part| flat.checked_add(part))
+                .ok_or(MetadataError::Overflow("tensor index offset exceeds int64"))?;
+        }
+        self.require_index(flat)?;
+        usize::try_from(flat).map_err(|_| MetadataError::Overflow("tensor index exceeds usize"))
+    }
+    pub(crate) fn unravel(&self, linear: i64, out: &mut [i64]) -> Result<(), MetadataError> {
+        unravel(&self.shape, self.elements, linear, out)
+    }
+    pub(crate) fn byte_offset(&self, linear: i64) -> Result<AllocationBytes, MetadataError> {
+        self.require_index(linear)?;
+        ElementCount(linear).bytes(self.dtype)?.allocation()
+    }
+    pub(crate) fn require_capacity(&self, capacity: ByteCount) -> Result<(), MetadataError> {
+        if self.bytes.0 > capacity.0 {
+            Err(MetadataError::Domain(
+                format!(
+                    "byte capacity {} is smaller than required {}",
+                    capacity.0, self.bytes.0
+                )
+                .into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn axis_decomposition(
+        &self,
+        axis: usize,
+    ) -> Result<AxisDecomposition, MetadataError> {
+        let &extent = self
+            .shape
+            .get(axis)
+            .ok_or(MetadataError::Domain("axis outside tensor rank".into()))?;
+        if self.elements.0 == 0 {
+            return Ok(AxisDecomposition {
+                outer: ElementCount(0),
+                extent: ElementCount(extent),
+                inner: ElementCount(0),
+            });
+        }
+        Ok(AxisDecomposition {
+            outer: ElementCount::from_extents(&self.shape[..axis])?,
+            extent: ElementCount(extent),
+            inner: ElementCount::from_extents(&self.shape[axis + 1..])?,
+        })
+    }
+
+    fn require_index(&self, linear: i64) -> Result<(), MetadataError> {
+        if linear < 0 || linear >= self.elements.0 {
+            Err(MetadataError::Domain(
+                "tensor index outside element count".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl AxisDecomposition {
+    pub(crate) fn outer(&self) -> ElementCount {
+        self.outer
+    }
+    pub(crate) fn extent(&self) -> ElementCount {
+        self.extent
+    }
+    pub(crate) fn inner(&self) -> ElementCount {
+        self.inner
+    }
+    pub(crate) fn linear_index(
+        &self,
+        outer: usize,
+        axis: usize,
+        inner: usize,
+    ) -> Result<usize, MetadataError> {
+        let outer_count = self.outer.as_usize()?;
+        let extent = self.extent.as_usize()?;
+        let inner_count = self.inner.as_usize()?;
+        if outer >= outer_count || axis >= extent || inner >= inner_count {
+            return Err(MetadataError::Domain("axis iteration outside shape".into()));
+        }
+        outer
+            .checked_mul(extent)
+            .and_then(|n| n.checked_add(axis))
+            .and_then(|n| n.checked_mul(inner_count))
+            .and_then(|n| n.checked_add(inner))
+            .ok_or(MetadataError::Overflow("axis index offset exceeds usize"))
+    }
+    pub(crate) fn reduced_index(&self, outer: usize, inner: usize) -> Result<usize, MetadataError> {
+        if outer >= self.outer.as_usize()? || inner >= self.inner.as_usize()? {
+            return Err(MetadataError::Domain(
+                "reduced iteration outside shape".into(),
+            ));
+        }
+        outer
+            .checked_mul(self.inner.as_usize()?)
+            .and_then(|n| n.checked_add(inner))
+            .ok_or(MetadataError::Overflow(
+                "reduced index offset exceeds usize",
+            ))
+    }
+}
+
+fn unravel(
+    shape: &[i64],
+    elements: ElementCount,
+    mut linear: i64,
+    out: &mut [i64],
+) -> Result<(), MetadataError> {
+    if out.len() != shape.len() {
+        return Err(MetadataError::Domain(
+            "index rank does not match tensor rank".into(),
+        ));
+    }
+    if linear < 0 || linear >= elements.0 {
+        return Err(MetadataError::Domain(
+            "tensor index outside element count".into(),
+        ));
+    }
+    // The checked nonempty range proves every divisor positive.
+    for (index, &extent) in out.iter_mut().zip(shape).rev() {
+        *index = linear % extent;
+        linear /= extent;
+    }
+    Ok(())
+}

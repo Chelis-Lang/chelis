@@ -190,7 +190,8 @@ fn executed_compile_controls_seal_the_owner_and_check_each_registration() {
         "#![allow(dead_code, non_camel_case_types)]\n\
          use chelis_vocab::RuntimeDType;\n\
          use chelis_runtime::{{Bool8, DtypeMismatch}};\n\
-         mod element;\npub struct chelis_tensor {{ size: i64 }}\n\
+         mod element;\npub struct chelis_tensor;\n\
+         impl chelis_tensor {{ fn count(&self) -> usize {{ unimplemented!() }} }}\n\
          unsafe fn tensor_dtype(_: *const chelis_tensor, _: &str) -> RuntimeDType {{ unimplemented!() }}\n\
          unsafe fn tensor_data(_: *const chelis_tensor) -> *mut u8 {{ unimplemented!() }}\n\
          {trait_source}"

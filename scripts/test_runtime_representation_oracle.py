@@ -377,6 +377,31 @@ class MutationContractTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_checked_host_metadata_has_paired_profiles_and_exact_width_owners(self) -> None:
+        path = "crates/chelis-runtime/src/metadata.rs"
+        self.assertIn(path, oracle.INVENTORY_SOURCES)
+        owners = {"ElementCount::bytes", "ElementCount::scratch_len"}
+        for owner in owners:
+            self.assertTrue(oracle.owner_module_final_form("width-arithmetic", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("raw-element-pointer", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path + ".other", owner))
+        self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path, "new_width"))
+        final = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        self.assertEqual(final[path], [
+            {"kind": "width-arithmetic", "owner": owner} for owner in sorted(owners)
+        ])
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "exact_tagged_c_abi",
+                     "op33_empty_tensor_axis_decomposition", "op33_tensor_validation",
+                     "op33_legal_domain_matrix", "dim_carrier_int64",
+                     "tensor_repurpose", "tensor_write_guard"):
+            self.assertTrue(any(test in command and "--release" not in command for command in commands), test)
+            self.assertTrue(any(test in command and "--release" in command for command in commands), test)
+        self.assertTrue(any(
+            probe.path == Path(path) and probe.expected_kind == "width-arithmetic"
+            for probe in oracle.phase0_mutation_probes()
+        ))
+
     def test_retired_capacity_projection_has_a_release_execution_leg(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any(
@@ -398,8 +423,8 @@ class ManifestTests(unittest.TestCase):
         )
         # The reproducers that hide in a debug profile must run in release.
         for command in commands:
-            if "chelis-runtime" in command or "chelis-ir" in command:
-                self.assertIn("--release", command)
+            if ("chelis-runtime" in command or "chelis-ir" in command) and "--release" not in command:
+                self.assertIn(command.replace("nextest run", "nextest run --release"), commands)
 
     def test_hardware_manifest_cannot_misreport_ignored_tests_as_executed(self) -> None:
         for probe in oracle.hardware_probe_manifest():
@@ -530,5 +555,5 @@ class RedTeamRegressionTests(unittest.TestCase):
         rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
         headers = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn("Sixty-three are Rust and seven are C or Objective-C headers", source)
-        self.assertEqual((rust, headers), (63, 7))
+        self.assertIn("Sixty-four are Rust and seven are C or Objective-C headers", source)
+        self.assertEqual((rust, headers), (64, 7))

@@ -424,6 +424,66 @@ Failures occur before allocation or access and retain the owning operation's
 typed `Domain`/`Overflow` behavior. Release and debug builds execute the same
 checked path.
 
+#### Host checked-metadata delivery (#889)
+
+The host slice moves the private metadata authority into `chelis-runtime`'s
+`metadata` module. The opaque tensor stores one `ShapeMetadata` rather than
+independently assignable shape, strides, count, rank, and dtype. Metadata is
+immutable after checked construction; repurpose replaces it atomically after
+the existing uniqueness, provenance, and exact-storage-capacity checks.
+Storage capacity is a validated `ByteCount`. This is metadata privacy, not the
+later descriptor/element-pointer ownership seal.
+
+`ElementCount` owns zero-aware extent products. `ShapeMetadata` additionally
+derives every canonical suffix stride using checked arithmetic: an empty
+`[MAX, MAX, 0]` is valid, while `[0, MAX, MAX]` still has an unrepresentable
+stride. No operation derives its own product from raw tensor extents. Indexed
+movement uses checked metadata indexing and byte-range projection; axis loops
+receive checked decomposition from metadata. Empty operations return before
+requesting irrelevant nonempty iteration spaces. `IterationSpace` owns contraction
+loop extents without inventing storage strides for a domain that has no tensor.
+Scratch entry counts use the same checked count/byte/target projection, but their
+width is the physical Rust entry layout (which may include an accumulator or
+index), not a second interpretation of a Chelis stored representation.
+
+Public host views remain contiguous under [05-OP-31]. This slice introduces no
+new strided-view ABI or device descriptor. Entry borrows validate the declared
+capacity against the checked contiguous range; the physical foreign allocation
+and lifetime remain caller obligations. Allocation and byte-copy submission
+receive `AllocationBytes`, never recompute count times width. Public count and
+shape observation project the validated int64 values without re-evaluation.
+
+Padding preserves its int64 width until checked shape construction, and uses
+metadata-derived offsets. Nested tensor ingress and padding write scalar bits
+through a tensor-and-index boundary that checks representation and byte range,
+not a raw data pointer plus an independently calculated offset.
+
+The host slice's acceptance surface runs `checked_metadata`,
+`checked_metadata_padding`, `metadata_compile`, and the existing
+`exact_tagged_c_abi`, `op33_empty_tensor_axis_decomposition`, and
+`op33_tensor_validation` integration suites in both debug and release, together
+with the dtype-domain matrix, int64 carrier, repurpose, and write-guard controls.
+The int64 carrier's existing greater-than-8-GiB allocation test remains an
+explicitly ignored manual gate owned by #1112; it is not an executed receipt.
+The final Phase 1 command still additionally
+requires generated-C adoption and execution-receipt/mutation integration;
+host-only green does not close #889 or #893.
+
+This delivery explicitly amends the Phase 0 coverage freeze: register the private
+`metadata.rs` source and the exact width owners `ElementCount::bytes` (the closed
+representation width) and `ElementCount::scratch_len` (physical scratch layout).
+Neither admits another owner, pointer cast, or dtype authority. Both feed checked
+byte construction and allocation projection. Optimized executable mutations must
+reject weakened extent, count, byte, stride, target, capacity, and scratch checks;
+paired compiling/noncompiling callers prove the private construction boundary and
+the field-exposure mutation proves that boundary's test sensitivity. An added
+unregistered width owner in this same module must fail the structural inventory.
+The 358 immutable foundation rows remain byte-identical. Two retired raw-index
+helper rows leave the active debt (345 to 343); no new foundation debt is added.
+The host contract suites run in both profiles through the existing Phase 0
+command and hosted job. Their addition is supporting evidence for this host
+slice, not the final Phase 1 completion oracle.
+
 ## C3. One generated host/device descriptor schema
 
 A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the

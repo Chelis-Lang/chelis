@@ -1493,7 +1493,7 @@ def validate_active_mutation_contracts(phase: str) -> None:
         "tensor_ref.header.strong.load(Ordering::Relaxed) != 1",
         "storage.header.strong.load(Ordering::Relaxed) != 1",
         "storage.provenance != TensorStorageProvenance::RuntimeOwned",
-        "    if metadata.required_bytes != storage.byte_capacity {",
+        "    if metadata.bytes() != storage.byte_capacity {",
     )
     tagged_repurpose_signature = (
         "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, "
