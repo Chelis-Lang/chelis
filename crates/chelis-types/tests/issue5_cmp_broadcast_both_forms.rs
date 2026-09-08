@@ -54,7 +54,14 @@ fn diagnostics(source: &str) -> (Vec<String>, Vec<String>) {
     let render = |errors: &[CheckError]| -> Vec<String> {
         let mut out: Vec<String> = errors
             .iter()
-            .map(|e| format!("[{:?}] {} || {}", e.kind, e.message, e.suggestions.join(" ")))
+            .map(|e| {
+                format!(
+                    "[{:?}] {} || {}",
+                    e.kind,
+                    e.message,
+                    e.suggestions.join(" ")
+                )
+            })
             .collect();
         out.sort();
         out

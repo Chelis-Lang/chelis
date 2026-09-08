@@ -6,12 +6,11 @@ use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
     ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericTrap,
-    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar,
-    compare_scalars, compare_tensors, float_binop,
-    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
-    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
-    int_tensor_unop, int_unop, reduce_tensor_groups, scalar_from_f64, scalar_from_i64,
-    tensor_from_scalars, types::Prim, uniform_sample,
+    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalars,
+    compare_tensors, float_binop, float_scalar_tensor_binop, float_tensor_binop,
+    float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
+    int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
+    scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim, uniform_sample,
 };
 
 use super::transforms::*;
@@ -494,14 +493,10 @@ pub(super) fn compare_runtime(
         // `[05-UNS-4]` says a pre-codegen gate "SHALL NOT be the sole defense
         // against an unsupported case reaching emission". Broadcasting here
         // was itself the value substitution `[05-UNS-1]` forbids.
-        (Some(RuntimeValue::Tensor(_)), Some(scalar))
-            if comparison_scalar(scalar).is_some() =>
-        {
+        (Some(RuntimeValue::Tensor(_)), Some(scalar)) if comparison_scalar(scalar).is_some() => {
             Err(mixed_comparison_surface_error())
         }
-        (Some(scalar), Some(RuntimeValue::Tensor(_)))
-            if comparison_scalar(scalar).is_some() =>
-        {
+        (Some(scalar), Some(RuntimeValue::Tensor(_))) if comparison_scalar(scalar).is_some() => {
             Err(mixed_comparison_surface_error())
         }
         other => Err(format!("comparison expects matching args, got {other:?}")),

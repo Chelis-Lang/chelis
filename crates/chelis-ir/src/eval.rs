@@ -15,9 +15,8 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
-
-use std::borrow::Cow;
 use chelis_unord::{UnordMap, UnordSet};
+use std::borrow::Cow;
 
 use crate::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
@@ -512,9 +511,13 @@ fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
 /// clean, and its polymorphic scale factor lowers to a rank-0 `Const` feeding
 /// the elementwise `Mul`; deleting the branch made
 /// `issue_1544_binder_cast_precision::scalar_and_tensor_binders_compute_at_each_instantiation`
-/// fail with `got [1] vs []`. Whether the checker should refuse that program
-/// too is chelis#1506's question for `mul`, not for the comparisons, and it is
-/// not decided here.
+/// fail with `got [1] vs []`.
+///
+/// Whether the checker should refuse that program at all is chelis#1621: a
+/// bounded-binder scalar beside a tensor under `mul` checks at 1.0 while its
+/// monomorphic twin is rejected under `[05-OP-36]`, and it runs only through
+/// this broadcast. chelis#1621 therefore decides this site's fate. Until it
+/// does, deleting the branch breaks an admitted program, so it stays.
 ///
 /// The shape check below is a third job and belongs to neither: it is what
 /// makes `[4]` against `[3]` report the interpreter's own phrase, which
@@ -552,17 +555,12 @@ fn splat_rank0(value: &TensorValue, shape: &[usize]) -> TensorValue {
 /// removed the rank-0 broadcast from this family: `[05-OP-36]` makes a scalar
 /// beside a tensor a type error, so the lane preservation B2h added for it has
 /// no admitted program left to preserve.
-fn require_matching_comparison_shapes(
-    lhs: &TensorValue,
-    rhs: &TensorValue,
-) -> Result<(), String> {
+fn require_matching_comparison_shapes(lhs: &TensorValue, rhs: &TensorValue) -> Result<(), String> {
     if lhs.shape == rhs.shape {
         return Ok(());
     }
     Err(shape_disagreement(lhs, rhs))
 }
-
-
 
 fn binary_elementwise(
     op: ElementwiseBinOp,

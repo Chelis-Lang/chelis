@@ -13,8 +13,11 @@ post-inference validator, `conv2d`'s guard included, runs on
 `issue_668_deleted_derivation_does_not_suppress_conv2d`'s
 `the_post_inference_validator_runs_only_on_the_ir_ingress` records. That
 asymmetry predates PR A and is untouched by it.
-The C emitter guards of R3 and R4 stand. PP5 stays partial until PR B's
-comparison surface lands and [#597] and [#1512] close with their owners. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
+D8 PR B has landed the comparison surface: the seven identities refuse a
+scalar beside a tensor under `[05-OP-36]`, and the diagnostic names the
+explicit replacement. The C emitter guards of R3 and R4 stand. PP5 stays
+partial until [#597] and [#1512] close with their owners, and until [#1619]
+lets the symbolic-size replacement execute on the C lane. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
 schedule, paired-ingress, and public CLI oracles are green. PR [#1406] delivered the
 separately owned [#1247] kinded nominal-application residue; the bounded
 [#1125] nominal-rank ingress repair and [#1134] forward-reference parity are
@@ -1436,11 +1439,28 @@ both lanes and asserts the trap text. What closes for them is the rest of
 0i32))` rows are [#1512]'s, for the same reason: their operand is a genuinely
 unresolved reduction result, not an `expand` one.
 
-The comparison family is PR B's, not PR A's. The seven identities still carry
-the [#1506] scalar rewrite, so a scalar beside a tensor under `gt` is accepted
-where `add` and `max_elem` reject it. Row 14 decides that it goes; until PR B
-lands, `issue_668_rank_agreement_is_unification` deliberately asserts nothing
-about them.
+The comparison family is decided and delivered by PR B: the scalar rewrite is
+gone, all seven identities refuse a scalar beside a tensor in both operand
+orders at both ingresses, and the diagnostic names `[05-OP-36]` and the
+explicit replacement. `issue_668_rank_agreement_is_unification` still asserts
+nothing about them, because `issue5_cmp_broadcast_both_forms` is their oracle.
+
+What remains unclaimed there is one lane, not the rule. The replacement the
+diagnostic names, `expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32))`,
+executes on the evaluator and traps on C, because the unit-extent claim
+attributes itself to the axis the `size` expression reads rather than to the
+`expand` operand's. That is [#1619], owned by the [#1277] stream and
+reproducible with PR B's own source files reverted. The literal-size spelling
+executes on both lanes today. `issue_1506_replacement_spelling_on_the_lanes`
+holds all three facts and flips when [#1619] closes.
+
+A second question this surfaced and PR B does not answer, now [#1621] under
+[#731]: `def scale[p: Float](x: tensor[1, p]) = mul(x, cast(0.1, p))` is a
+scalar beside a tensor under `mul`, and it checks at 1.0, while its monomorphic
+twin `add(1.5f32, t)` is rejected under `[05-OP-36]`. It runs only through the
+DAG evaluator's rank-0 broadcast, which is why PR B keeps that broadcast on the
+arithmetic site while deleting it from the comparisons. PR B touches only the
+comparison family and leaves the rule question to [#1621].
 
 What PR A does not claim: nothing here is an exhaustive statement about
 elementwise operations. The oracle covers `add`, `mul`, `eq`, `max_elem`,
@@ -3555,3 +3575,5 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1523]: https://github.com/Chelis-Lang/chelis/pull/1523
 [#1532]: https://github.com/Chelis-Lang/chelis/pull/1532
 [#1612]: https://github.com/Chelis-Lang/chelis/issues/1612
+[#1619]: https://github.com/Chelis-Lang/chelis/issues/1619
+[#1621]: https://github.com/Chelis-Lang/chelis/issues/1621
