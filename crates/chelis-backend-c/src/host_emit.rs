@@ -1290,13 +1290,7 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
         "static int64_t chelis_host_tensor_stride(const chelis_tensor *tensor, int32_t axis) {"
             .to_string(),
     );
-    out.push("    int32_t rank = chelis_tensor_rank(tensor);".to_string());
-    out.push("    int64_t stride = 1;".to_string());
-    out.push(
-        "    for (int32_t current = rank - 1; current > axis; --current) stride *= chelis_tensor_shape(tensor, current);"
-            .to_string(),
-    );
-    out.push("    return stride;".to_string());
+    out.push("    return chelis_tensor_stride(tensor, axis);".to_string());
     out.push("}".to_string());
     out.push(
         "static void chelis_host_flat_to_indices(int64_t flat, const chelis_tensor *tensor, int64_t *indices) {"
@@ -1445,66 +1439,7 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
         "static chelis_tensor* chelis_host_reshape_tensor(chelis_tensor* input, const chelis_list* shape_values) {"
             .to_string(),
     );
-    out.push("    int64_t ndim64 = chelis_list_len(shape_values);".to_string());
-    out.push("    if (ndim64 < 0 || ndim64 > INT32_MAX) {".to_string());
-    out.push(
-        "        fprintf(stderr, \"reshape rank is outside int32: %lld\\n\", (long long)ndim64);"
-            .to_string(),
-    );
-    out.push("        exit(1);".to_string());
-    out.push("    }".to_string());
-    out.push("    int ndim = (int)ndim64;".to_string());
-    out.push(
-        "    int64_t *shape = (int64_t*)calloc((size_t)(ndim > 0 ? ndim : 1), sizeof(int64_t));"
-            .to_string(),
-    );
-    out.push("    if (shape == NULL) { fprintf(stderr, \"reshape shape allocation failed\\n\"); exit(1); }".to_string());
-    out.push("    int64_t expected = 1;".to_string());
-    out.push("    for (int i = 0; i < ndim; ++i) {".to_string());
-    out.push(
-        "        int64_t dim = chelis_host_scalar_as_i64(chelis_value_unbox_scalar(chelis_list_index(shape_values, i)), CHELIS_DTYPE_I64);"
-            .to_string(),
-    );
-    out.push("        if (dim < 0) {".to_string());
-    out.push(
-        "            fprintf(stderr, \"reshape expects non-negative sizes, got %lld\\n\", (long long)dim);"
-            .to_string(),
-    );
-    out.push("            exit(1);".to_string());
-    out.push("        }".to_string());
-    out.push("        shape[i] = dim;".to_string());
-    out.push("        expected *= dim;".to_string());
-    out.push("    }".to_string());
-    out.push("    int64_t input_size = chelis_tensor_numel(input);".to_string());
-    out.push("    if (expected != input_size) {".to_string());
-    out.push(
-        "        fprintf(stderr, \"reshape expects %lld elements but tensor has %lld\\n\", (long long)expected, (long long)input_size);"
-            .to_string(),
-    );
-    out.push("        exit(1);".to_string());
-    out.push("    }".to_string());
-    out.push("    chelis_read_view input_view = chelis_tensor_read_view(input);".to_string());
-    out.push(
-        "    chelis_tensor* out_tensor = chelis_alloc(ndim, shape, input_view.dtype);".to_string(),
-    );
-    out.push("    free(shape);".to_string());
-    // RT-4 F2: size the memcpy by the actual dtype element width via
-    // chelis_dtype_size, not by hardcoded sizeof(float). Mirrors
-    // `chelis_alloc`'s element sizing (crates/chelis-runtime/src/lib.rs::
-    // tensor_elem_size), so f64/i64 reshape preserves all 8 bytes per
-    // element and i8/i16 reshape don't overrun. The dtype-aware path
-    // closes both CBackend-ReshapeMemcpy (HEAD; PR #67) and the
-    // narrow-int extensions in this cycle. See
-    // `docs/investigations/cbackend_reshape_memcpy_diagnosis.md`.
-    out.push("    size_t elem_bytes = (size_t)chelis_dtype_size(input_view.dtype);".to_string());
-    out.push("    chelis_tensor_write *guard = chelis_tensor_begin_write(out_tensor);".to_string());
-    out.push("    chelis_write_view output_view = chelis_tensor_write_view(guard);".to_string());
-    out.push(
-        "    memcpy(output_view.data, input_view.data, (size_t)input_size * elem_bytes);"
-            .to_string(),
-    );
-    out.push("    chelis_tensor_end_write(guard);".to_string());
-    out.push("    return out_tensor;".to_string());
+    out.push("    return chelis_tensor_reshape(input, shape_values);".to_string());
     out.push("}".to_string());
 }
 
@@ -8943,53 +8878,18 @@ mod expression_dispatch_tests {
         assert!(emitted.contains("chelis_host_finalize_bf16"));
     }
 
-    /// chelis#1112: the emitted reshape helper stores the exact tagged
-    /// int64 extent into a dynamically sized int64 shape buffer.
-    ///
-    /// This replaces `reshape_helper_traps_extent_above_int32_before_the_store`,
-    /// which pinned the ordering of a trap against the `(int)` store it
-    /// guarded. Both are gone: the trap existed only because the store was
-    /// lossy, and rejecting a representable extent would now itself be the
-    /// defect. Pinning the ABSENCE of the cast is what stops a later edit
-    /// from quietly reintroducing the narrowing, so several assertions
-    /// below are negative on purpose.
+    /// Extent decoding and checked allocation belong to the runtime owner.
     #[test]
-    fn reshape_helper_stores_the_extent_at_int64_with_no_truncating_cast() {
+    fn reshape_helper_delegates_exact_int64_metadata_to_runtime() {
         let mut out = Vec::new();
         append_tensor_reshape_helper(&mut out);
-        let text = out.join("\n");
-        assert!(
-            text.contains("int64_t *shape = (int64_t*)calloc("),
-            "the shape buffer must be dynamically sized for the requested rank:\n{text}"
-        );
-        let read = text
-            .find("int64_t dim = chelis_host_scalar_as_i64(chelis_value_unbox_scalar(")
-            .expect("the extent is read from an exact tagged int64 scalar");
-        let store = text
-            .find("shape[i] = dim;")
-            .expect("the extent is stored without a cast");
-        assert!(
-            read < store,
-            "the extent must be read before it is stored; read at {read}, store at {store}"
-        );
-        assert!(
-            !text.contains("shape[i] = (int)dim;"),
-            "a truncating store into the shape buffer is the defect chelis#1112 removed:\n{text}"
-        );
-        assert!(
-            !text.contains("2147483647LL"),
-            "the int32 extent trap is dead with the cast it guarded:\n{text}"
-        );
-        assert!(
-            !text.contains("CHELIS_MAX_DIM"),
-            "reshape rank must not be capped by a fixed compatibility constant:\n{text}"
-        );
-        // The negative-extent guard is NOT dead: a negative dim is invalid
-        // at every carrier width, so the widening must not have taken it
-        // along with the truncation trap.
-        assert!(
-            text.contains("if (dim < 0) {"),
-            "the negative-extent rejection survives the widening:\n{text}"
+        assert_eq!(
+            out,
+            [
+                "static chelis_tensor* chelis_host_reshape_tensor(chelis_tensor* input, const chelis_list* shape_values) {",
+                "    return chelis_tensor_reshape(input, shape_values);",
+                "}",
+            ]
         );
     }
 }

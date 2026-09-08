@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "ac9c17dfbf850589a13f1f59886ebe782b182f45f935adff5867a2004406b12e",
+  "freeze_sha256": "bd80b87111722a2f7ca4d6e396d20e961a54687efd745a2fbcf2871c84ea1579",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1577,10 +1577,6 @@
       "sample": "for (int64_t outer = 0; outer < t{g}_size; outer++) {{"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reused_slot_wrapper",
-      "sample": "chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)({extent}))"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_runtime_dim_site",
       "sample": "int64_t {name} = {extent_expr};"
     },
@@ -1775,10 +1771,6 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_print_helper",
       "sample": "static chelis_string chelis_host_string_from_f16(uint16_t value) {"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper",
-      "sample": "int64_t ndim64 = chelis_list_len(shape_values);"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_uniform_sample_helper",
@@ -3558,11 +3550,23 @@
     "release_reproducers": [
       {
         "name": "checked host metadata debug contract",
-        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked host metadata release contract",
-        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+      },
+      {
+        "name": "checked C snapshot delegation and restoration mutations",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_metadata"
+      },
+      {
+        "name": "checked C DAG reshape optimized UBSan execution",
+        "command": "cargo nextest run -p chelis-backend-c --lib -E test(checked_c_metadata_dag_reshape_executes_under_ubsan)"
+      },
+      {
+        "name": "checked C host reshape optimized UBSan execution",
+        "command": "cargo nextest run -p chelis-cli --test cbackend_reshape_memcpy"
       },
       {
         "name": "sealed runtime element contract",

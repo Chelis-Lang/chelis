@@ -505,6 +505,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_reshape ( const chelis_tensor * tensor , const chelis_list * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
       "flags": [
         "numeric-op"
@@ -739,6 +744,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_byte_count ( const chelis_tensor * tensor ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
       "flags": [
         "numeric-op"
@@ -747,6 +759,13 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_stride ( const chelis_tensor * tensor , int32_t axis ) ;",
       "flags": [
         "numeric-op"
       ]
@@ -855,6 +874,11 @@
       "id": "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
       "flags": [],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_check_reshape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",

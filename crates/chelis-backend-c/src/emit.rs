@@ -536,9 +536,8 @@ impl CEmitter {
         self.line(&format!(
             "for (int32_t __axis = 0; __axis < t{id}_rank; ++__axis) t{id}_shape[__axis] = chelis_tensor_shape(t{id}, __axis);"
         ));
-        self.line(&format!("int64_t __stride_{id} = 1;"));
         self.line(&format!(
-            "for (int32_t __axis = t{id}_rank; __axis-- > 0;) {{ t{id}_strides[__axis] = __stride_{id}; __stride_{id} *= t{id}_shape[__axis]; }}"
+            "for (int32_t __axis = 0; __axis < t{id}_rank; ++__axis) t{id}_strides[__axis] = chelis_tensor_stride(t{id}, __axis);"
         ));
         self.line(&format!("int64_t t{id}_size = chelis_tensor_numel(t{id});"));
         if writable {
@@ -558,7 +557,7 @@ impl CEmitter {
         }
         self.line(&format!("chelis_dtype t{id}_dtype = t{id}_view.dtype;"));
         self.line(&format!(
-            "int64_t t{id}_byte_capacity = t{id}_size * chelis_dtype_size(t{id}_dtype);"
+            "int64_t t{id}_byte_capacity = chelis_tensor_byte_count(t{id});"
         ));
     }
 
@@ -1820,6 +1819,25 @@ impl CEmitter {
         }
     }
 
+    fn tagged_shape_literal(ty: &TensorType) -> String {
+        let shape = ty
+            .dims
+            .iter()
+            .map(|dim| {
+                let extent = Self::emit_dim_expr(&DimExpr::from(dim));
+                // The constructor's uint64 bits parameter preserves an int64
+                // extent's bits by C's defined modulo conversion, including
+                // negative values that the metadata owner then rejects.
+                format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {extent})")
+            })
+            .collect::<Vec<_>>();
+        if shape.is_empty() {
+            "NULL".to_string()
+        } else {
+            format!("(chelis_scalar[]){{ {} }}", shape.join(", "))
+        }
+    }
+
     fn ndim(ty: &TensorType) -> usize {
         ty.dims.len()
     }
@@ -2042,19 +2060,7 @@ impl CEmitter {
             ));
         }
         self.line(&format!("chelis_tensor *t{id} = t{previous};"));
-        let shape = ty
-            .dims
-            .iter()
-            .map(|dim| {
-                let extent = Self::emit_dim_expr(&DimExpr::from(dim));
-                format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)({extent}))")
-            })
-            .collect::<Vec<_>>();
-        let shape = if shape.is_empty() {
-            "NULL".to_string()
-        } else {
-            format!("(chelis_scalar[]){{ {} }}", shape.join(", "))
-        };
+        let shape = Self::tagged_shape_literal(ty);
         self.line(&format!(
             "chelis_tensor_repurpose(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({})), {shape});",
             Self::ndim(ty)
@@ -6608,10 +6614,6 @@ impl CEmitter {
         // rank-0 bound scalar behind a negativity guard, then declared (or
         // equality-guarded) under the axis's symbolic dim name so the
         // `shape_literal` allocation below references a real C variable.
-        // When any target is runtime, the emitted numel guard below is the
-        // check that keeps the materialized copy from reading beyond the
-        // source descriptor's logical element count.
-        let has_runtime_target = new_shape.iter().any(|d| d.node_input().is_some());
         for (axis, dim) in new_shape.iter().enumerate() {
             if dim.node_input().is_none() {
                 continue;
@@ -6624,36 +6626,16 @@ impl CEmitter {
             self.emit_static_dim_guard(id, axis, &extent, ty.dims.get(axis));
             self.emit_runtime_dim_site(id, axis, &extent);
         }
-        // chelis#664: the numel guard must fire whenever static
-        // verification is incomplete — not only for Node-valued targets.
-        // A target that folds to a SYM (`[shape(x, 0)]` resolving to the
-        // Load-declared `n`) or a fully-LITERAL target over a
-        // runtime-sized input (`reshape(stride(x, 2), [6])`) previously
-        // got NO guard, so the view silently over- or under-read its
-        // input where the evaluator rejects the numel mismatch. The
-        // guard reuses exactly the dims `shape_literal` allocates from,
-        // so any variable valid for the allocation is valid here; a
-        // fully static reshape (all output and input extents literal) is
-        // checker-verified and keeps byte-identical codegen.
-        let dims_static = |dims: &[DimInfo]| dims.iter().all(|d| matches!(d, DimInfo::Lit(_)));
-        let input_static = dag
-            .get(inputs[0])
-            .is_some_and(|node| dims_static(&node.output_type.dims));
-        if has_runtime_target || !dims_static(&ty.dims) || !input_static {
-            let numel = std::iter::once("(long long)1".to_string())
-                .chain(ty.dims.iter().map(|dim| {
-                    format!("(long long)({})", Self::emit_dim_expr(&DimExpr::from(dim)))
-                }))
-                .collect::<Vec<_>>()
-                .join(" * ");
-            self.line(&format!(
-                "if (({numel}) != (long long)t{a}_size) {{ fprintf(stderr, \"chelis: runtime \
-                 reshape numel mismatch at node {id}\\n\"); abort(); }}"
-            ));
-        }
+        // The runtime's checked metadata owner validates this exact target
+        // before either allocation or capacity-proven repurpose can occur.
+        self.line(&format!(
+            "chelis_tensor_check_reshape(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({})), {});",
+            Self::ndim(ty),
+            Self::tagged_shape_literal(ty),
+        ));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
-            "memcpy(t{id}_data, t{a}_data, (size_t)t{id}_byte_capacity);"
+            "if (t{id}_byte_capacity != 0) memcpy(t{id}_data, t{a}_data, (size_t)t{id}_byte_capacity);"
         ));
     }
 
@@ -7769,7 +7751,7 @@ mod tests {
         let c = emit_test_dag(&dag, "test_exact_same_byte_slot_reuse").unwrap();
         assert!(c.contains("chelis_tensor *t2 = t0;"), "{c}");
         assert!(
-            c.contains("chelis_tensor_repurpose(t2, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){ chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)(4)) });"),
+            c.contains("chelis_tensor_repurpose(t2, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){ chelis_scalar_from_bits(CHELIS_DTYPE_I64, 4) });"),
             "same-byte slot reuse must reset the old rank-2 descriptor to rank 1; got:\n{c}"
         );
         assert!(!c.contains("chelis_tensor_release(t0);"), "{c}");

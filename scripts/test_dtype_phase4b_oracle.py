@@ -732,6 +732,23 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_checked_c_metadata_contract_cannot_rebuild_or_convert(self) -> None:
+        path = self.root / "spec/05-risc-primitives.md"
+        for old, new, message in (
+            ("excluding spare storage capacity", "including spare storage capacity", "OP-33.*excluding spare"),
+            ("takes rank and every target extent as exact tagged\n> int64 scalars", "takes unclassified integer metadata", "OP-33.*exact tagged int64"),
+            ("changes no metadata, ownership, or\n> payload", "may mutate the descriptor", "OP-33.*changes no metadata"),
+            ("preserves every stored element bit", "converts elements through f32", "OP-33.*preserves every stored element bit"),
+        ):
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_runtime_gather_adjoint_has_a_real_positive_zero_base_leaf(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (

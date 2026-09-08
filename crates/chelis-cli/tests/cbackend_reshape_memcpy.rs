@@ -67,9 +67,6 @@ fn target_debug_dir() -> PathBuf {
 /// hashed staticlib in `target/debug/deps/`; the test gcc invocation
 /// links against the conventional `target/debug/libchelis_runtime.a`.
 fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
     let deps_dir = canonical
         .parent()
         .expect("canonical lib path has no parent")
@@ -88,12 +85,21 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             }
         }
     }
-    let Some((_, hashed)) = newest else {
+    let Some((mtime, hashed)) = newest else {
         return Err(std::io::Error::other(format!(
             "no libchelis_runtime-*.a found in {}",
             deps_dir.display()
         )));
     };
+    // A warm target may retain the conventional archive from before an ABI
+    // addition. Refresh it from the current dev-dependency build when newer.
+    if canonical
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|time| time >= mtime)
+    {
+        return Ok(());
+    }
     static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = canonical.with_extension(format!(
         "a.tmp.{}.{}",
@@ -228,6 +234,125 @@ static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
     return list;
 }
 "#;
+
+/// [04-SHAPE-1]/[05-OP-33]: an empty output must not first overflow an
+/// irrelevant prefix product. Invalid metadata must fail through the checked
+/// runtime boundary before destination allocation or memcpy.
+#[test]
+fn checked_host_reshape_executes_zero_and_overflow_domains_under_ubsan() {
+    let build = chelis_build_c(
+        "module CheckedReshape\nresult = reshape(to_tensor([1.0, 2.0]), [2i64])\n",
+        "checked_reshape",
+    );
+    let kernel = build.path().join("checked_reshape.c");
+    patch_emitted_kernel(&kernel);
+    let driver = build.path().join("checked_driver.c");
+    fs::write(
+        &driver,
+        format!(
+            r#"{HARNESS_INCLUDES}
+{BUILD_SHAPE_LIST_HELPER}
+
+static void check_empty(const int64_t *dims, int32_t rank) {{
+    int64_t zero = 0;
+    chelis_tensor *input = chelis_alloc(1, &zero, CHELIS_DTYPE_F64);
+    chelis_list *shape = build_shape_list_i64(dims, rank);
+    chelis_tensor *output = chelis_host_reshape_tensor(input, shape);
+    chelis_read_view view = chelis_tensor_read_view(output);
+    if (view.count != 0 || view.data != NULL || chelis_tensor_rank(output) != rank) exit(3);
+    for (int32_t i = 0; i < rank; ++i) if (chelis_tensor_shape(output, i) != dims[i]) exit(4);
+    chelis_tensor_release(output);
+    chelis_list_release(shape);
+    chelis_tensor_release(input);
+}}
+
+int main(int argc, char **argv) {{
+    int which = argc > 1 ? atoi(argv[1]) : 0;
+    if (which == 0) {{
+        check_empty((int64_t[]){{0, 3, 4}}, 3);
+        check_empty((int64_t[]){{2, 0, 4}}, 3);
+        check_empty((int64_t[]){{2, 3, 0}}, 3);
+        check_empty((int64_t[]){{INT64_MAX, INT64_MAX, 0}}, 3);
+        puts("EMPTY METADATA PASS");
+        return 0;
+    }}
+    chelis_tensor *input = chelis_alloc(1, (int64_t[]){{6}}, CHELIS_DTYPE_F64);
+    chelis_list *shape = NULL;
+    switch (which) {{
+        case 1: shape = build_shape_list_i64((int64_t[]){{INT64_MAX, 2}}, 2); break;
+        case 2: shape = build_shape_list_i64((int64_t[]){{INT64_MAX / 8 + 1}}, 1); break;
+        case 3: shape = build_shape_list_i64((int64_t[]){{0, INT64_MAX, INT64_MAX}}, 3); break;
+        case 4: shape = build_shape_list_i64((int64_t[]){{0, -1}}, 2); break;
+        case 5: shape = build_shape_list_i64((int64_t[]){{5}}, 1); break;
+        default: return 5;
+    }}
+    chelis_tensor *output = chelis_host_reshape_tensor(input, shape);
+    chelis_tensor_release(output);
+    chelis_list_release(shape);
+    chelis_tensor_release(input);
+    return 0;
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let runtime = target_debug_dir().join("libchelis_runtime.a");
+    ensure_runtime_static_lib(&runtime).unwrap();
+    let binary = build.path().join("checked_reshape_probe");
+    let compiled = StdCommand::new("gcc")
+        .args([
+            "-O2",
+            "-std=c11",
+            "-fsanitize=undefined",
+            "-fno-sanitize-recover=undefined",
+            "-I",
+        ])
+        .arg(build.path())
+        .arg(&kernel)
+        .arg(&driver)
+        .arg(&runtime)
+        .args(["-lm", "-lpthread", "-ldl", "-o"])
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "C compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let valid = StdCommand::new(&binary).arg("0").output().unwrap();
+    assert!(
+        valid.status.success(),
+        "valid zero metadata must not overflow or access data: {}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&valid.stdout).trim(),
+        "EMPTY METADATA PASS"
+    );
+    for (case, kind) in [
+        (1, "Overflow:"),
+        (2, "Overflow:"),
+        (3, "Overflow:"),
+        (4, "Domain:"),
+        (5, "Domain:"),
+    ] {
+        let output = StdCommand::new(&binary)
+            .arg(case.to_string())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "invalid case {case} succeeded");
+        assert!(
+            stderr.contains(kind),
+            "case {case} must fail with {kind}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("runtime error:"),
+            "case {case} reached C undefined behavior: {stderr}"
+        );
+    }
+}
 
 /// f64 reshape. Source buffer is 4 f64 elements; reshape to [2, 2]
 /// must preserve all 8 bytes of each element. With the

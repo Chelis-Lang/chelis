@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "ac9c17dfbf850589a13f1f59886ebe782b182f45f935adff5867a2004406b12e"
+FREEZE_SHA256 = "bd80b87111722a2f7ca4d6e396d20e961a54687efd745a2fbcf2871c84ea1579"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1656,7 +1656,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "cargo", "nextest", "run", *flags, "-p", "chelis-runtime",
                 "--features", "ownership-ledger",
                 "--test", "checked_metadata", "--test", "metadata_compile",
-                "--test", "checked_metadata_padding",
+                "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",
@@ -1664,6 +1664,19 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--test", "tensor_repurpose", "--test", "tensor_write_guard",
             ),
         ) for profile, flags in (("debug", ()), ("release", ("--release",)))),
+        OracleLeg(
+            "checked C snapshot delegation and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata"),
+        ),
+        OracleLeg(
+            "checked C DAG reshape optimized UBSan execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib",
+             "-E", "test(checked_c_metadata_dag_reshape_executes_under_ubsan)"),
+        ),
+        OracleLeg(
+            "checked C host reshape optimized UBSan execution",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "cbackend_reshape_memcpy"),
+        ),
         OracleLeg(
             "sealed runtime element contract",
             ("cargo", "nextest", "run", "--release", "-p", "chelis-runtime", "--test", "element_contract"),

@@ -2216,6 +2216,79 @@ pub unsafe extern "C" fn chelis_tensor_numel(t: *const chelis_tensor) -> i64 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_stride(t: *const chelis_tensor, axis: i32) -> i64 {
+    let axis = tensor_normalize_axis(t, axis, "chelis_tensor_stride");
+    (*t).metadata.strides()[axis]
+}
+
+/// Logical bytes, independent of spare backing-storage capacity. Like rank and
+/// shape, this immutable observation is legal while a write guard is live.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_byte_count(t: *const chelis_tensor) -> i64 {
+    tensor_metadata_dtype(t, "chelis_tensor_byte_count");
+    (*t).metadata.bytes().get()
+}
+
+fn validate_reshape_metadata(input: &ShapeMetadata, target: &ShapeMetadata, context: &str) {
+    metadata_or_fail(target.bytes().allocation(), context);
+    if target.elements() != input.elements() {
+        runtime_fail!(
+            "Domain: {context} reshape numel mismatch: target {} but tensor has {} elements",
+            target.elements().get(),
+            input.elements().get()
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_reshape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let context = "chelis_tensor_check_reshape";
+    let dtype = tensor_metadata_dtype(tensor, context);
+    let rank_i64 = exact_i64_scalar(rank, context);
+    let rank = i32::try_from(rank_i64)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds int32"));
+    let axes = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null shape");
+    }
+    metadata_or_fail(axes.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(axes.scratch_len::<i64>(), context);
+    let mut extents = Vec::with_capacity(length);
+    for axis in 0..length {
+        extents.push(exact_i64_scalar(shape.add(axis).read(), context));
+    }
+    let target = metadata_or_fail(ShapeMetadata::contiguous(&extents, dtype), context);
+    validate_reshape_metadata(&(*tensor).metadata, &target, context);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_reshape(
+    tensor: *const chelis_tensor,
+    shape: *const chelis_list,
+) -> *mut chelis_tensor {
+    let context = "chelis_tensor_reshape";
+    let dtype = tensor_dtype(tensor, context);
+    require_live_kind(shape.cast(), ownership_ledger::Kind::List, context);
+    let items = &(*shape).items;
+    metadata_or_fail(ShapeMetadata::checked_rank(items.len()), context);
+    let axes = metadata_or_fail(ElementCount::scratch_entries(items.len(), 0), context);
+    let mut extents = Vec::with_capacity(metadata_or_fail(axes.scratch_len::<i64>(), context));
+    for &value in items {
+        extents.push(exact_i64_scalar(chelis_value_unbox_scalar(value), context));
+    }
+    let target = metadata_or_fail(ShapeMetadata::contiguous(&extents, dtype), context);
+    validate_reshape_metadata(&(*tensor).metadata, &target, context);
+    let bytes = metadata_or_fail(target.bytes().allocation(), context);
+    let output = allocate_tensor(target, context);
+    copy_bytes(tensor_data(tensor), tensor_data(output), bytes);
+    output
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_string_from_cstr(value: *const c_char) -> chelis_string {
     new_runtime_string(cstr_to_string(value))
 }

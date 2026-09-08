@@ -2020,6 +2020,166 @@ int main(void) {{
         }
     }
 
+    /// One generated DAG consumes exact runtime extents in both valid empty
+    /// domains and overflow domains. UBSan makes the retired product fold an
+    /// executable failure even where an optimizer could discard its comparison.
+    #[test]
+    fn checked_c_metadata_dag_reshape_executes_under_ubsan() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F64,
+            },
+            None,
+        );
+        let mut inputs = vec![input];
+        for name in ["a", "b", "c"] {
+            inputs.push(dag.add_node(
+                RiscOp::Load { name: name.into() },
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::Int64,
+                },
+                None,
+            ));
+        }
+        let output = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1), RtDim::Node(2), RtDim::Node(3)],
+            },
+            inputs,
+            TensorType {
+                dims: ["r", "s", "t"]
+                    .map(|name| DimInfo::Named(name.into(), None))
+                    .to_vec(),
+                precision: Prim::F64,
+            },
+            None,
+        );
+        dag.set_roots(vec![output]);
+        let result = codegen(&dag, "checked_reshape").unwrap();
+        let source = &result.c_source;
+        assert!(source.contains("chelis_tensor_stride("));
+        assert!(source.contains("chelis_tensor_byte_count("));
+        assert!(!source.contains("__stride_"));
+        let check = source
+            .find("chelis_tensor_check_reshape(")
+            .expect("checked reshape entry");
+        let allocation = source[check..]
+            .find("chelis_alloc(")
+            .expect("destination allocation");
+        let copy = source[check..].find("memcpy(").expect("reshape copy");
+        assert!(
+            allocation < copy,
+            "validation must precede allocation and copying"
+        );
+        let input_values = result
+            .input_labels
+            .iter()
+            .map(|label| match label.as_str() {
+                "x" => "x",
+                "a" => "a",
+                "b" => "b",
+                "c" => "c",
+                other => panic!("unexpected input {other}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let driver = format!(
+            r#"
+#include "chelis_runtime.h"
+void checked_reshape(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+static chelis_tensor *extent(int64_t n) {{
+    return chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)n));
+}}
+int main(int argc, char **argv) {{
+    int mode = argc > 1 ? atoi(argv[1]) : 0;
+    int64_t dims[3] = {{2, 3, 1}};
+    int64_t count = 6;
+    switch (mode) {{
+        case 1: dims[0] = INT64_MAX; dims[1] = INT64_MAX; dims[2] = 0; count = 0; break;
+        case 2: dims[0] = 0; dims[1] = 3; dims[2] = 4; count = 0; break;
+        case 3: dims[0] = 2; dims[1] = 0; dims[2] = 4; count = 0; break;
+        case 4: dims[0] = INT64_MAX; dims[1] = 2; break;
+        case 5: dims[0] = INT64_MAX / 8 + 1; dims[1] = 1; break;
+        case 6: dims[0] = 0; dims[1] = INT64_MAX; dims[2] = INT64_MAX; break;
+        case 7: dims[0] = 5; dims[1] = 1; break;
+    }}
+    chelis_tensor *x = chelis_alloc(1, &count, CHELIS_DTYPE_F64);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64, UINT64_C(0x7ff8123456789abc)));
+    chelis_tensor_end_write(guard);
+    chelis_tensor *a = extent(dims[0]), *b = extent(dims[1]), *c = extent(dims[2]);
+    chelis_tensor *inputs[] = {{ {input_values} }};
+    chelis_tensor *outputs[1] = {{NULL}};
+    checked_reshape(inputs, 4, outputs, 1);
+    if (chelis_tensor_rank(outputs[0]) != 3) return 2;
+    for (int axis = 0; axis < 3; ++axis)
+        if (chelis_tensor_shape(outputs[0], axis) != dims[axis]) return 3;
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (view.count != count || (count == 0 && view.data != NULL)) return 4;
+    for (int64_t i = 0; i < count; ++i) {{
+        uint64_t bits; memcpy(&bits, (const unsigned char*)view.data + i * 8, 8);
+        if (bits != UINT64_C(0x7ff8123456789abc)) return 5;
+    }}
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(x); chelis_tensor_release(a);
+    chelis_tensor_release(b); chelis_tensor_release(c);
+    puts("CHECKED DAG PASS");
+    return 0;
+}}
+"#
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        copy_runtime_artifacts(tmp.path());
+        write_temp_file(tmp.path(), "model.c", source);
+        write_temp_file(tmp.path(), "main.c", &driver);
+        let binary = tmp.path().join("probe");
+        let toolchain = test_toolchain(result.requirements);
+        let mut command = Command::new(&toolchain.compiler);
+        apply_c_test_flags(&mut command);
+        command.args([
+            "-O2",
+            "-fsanitize=undefined",
+            "-fno-sanitize-recover=undefined",
+        ]);
+        command.args(&toolchain.compile_flags);
+        command
+            .arg(tmp.path().join("main.c"))
+            .arg(tmp.path().join("model.c"));
+        add_runtime_link(&mut command, tmp.path());
+        command.args(&toolchain.link_flags).arg("-o").arg(&binary);
+        let compiled = command.output().unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}\n{source}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        for mode in 0..8 {
+            let run = Command::new(&binary)
+                .arg(mode.to_string())
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            if mode < 4 {
+                assert!(run.status.success(), "mode {mode}: {stderr}\n{source}");
+                assert_eq!(
+                    String::from_utf8_lossy(&run.stdout).trim(),
+                    "CHECKED DAG PASS"
+                );
+            } else {
+                assert!(!run.status.success(), "invalid mode {mode} succeeded");
+                let brand = if mode == 7 { "Domain:" } else { "Overflow:" };
+                assert!(stderr.contains(brand), "mode {mode}: {stderr}");
+            }
+            assert!(!stderr.contains("runtime error:"), "mode {mode}: {stderr}");
+        }
+    }
+
     #[test]
     fn numerical_reshape_preserves_values() {
         if !gcc_available() {
