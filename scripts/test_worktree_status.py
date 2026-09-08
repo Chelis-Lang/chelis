@@ -954,6 +954,133 @@ class OutputTests(unittest.TestCase):
                 status.parse_args(["--json", "--quiet"])
 
 
+class RenderedBlockTests(unittest.TestCase):
+    """The human block is the deliverable: a brief pastes it instead of an
+    assertion. An untested renderer is an untested deliverable, so every line
+    a reader can meet is exercised here."""
+
+    def test_process_rows_render_with_the_orphan_flag_and_a_tail_count(self):
+        procs = [
+            _proc(100 + i, 1 if i == 0 else 100, f"cargo build {PROBED}/x{i}")
+            for i in range(7)
+        ]
+        state = _collect(snapshot=lambda: procs)
+        block = status.render_human(state)
+        self.assertIn("processes: 7 scoped to this checkout", block)
+        self.assertIn("ORPHAN", block)
+        self.assertIn("and 2 more", block)
+
+    def test_git_operation_and_unknown_lines_render(self):
+        def broken_ps():
+            raise RuntimeError("ps is unavailable here")
+
+        state = _collect(
+            exists=lambda path: path.name == "MERGE_HEAD", snapshot=broken_ps
+        )
+        block = status.render_human(state)
+        self.assertIn("git op:   a merge is in progress", block)
+        self.assertIn("unknown:  processes: ps is unavailable here", block)
+
+    def test_a_block_with_no_git_facts_still_renders(self):
+        state = _collect(query=FakeGit(fail={"rev-parse": "not a repository"}))
+        block = status.render_human(state)
+        self.assertIn("git facts unavailable", block)
+        self.assertIn("head:     unknown", block)
+
+    def test_an_unidentified_holder_renders_as_such(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = _RealLease(Path(tmp), None, sidecar_text="{ not json")
+            try:
+                state = _collect(environ={gate.LEASE_DIR_ENV: tmp})
+            finally:
+                lease.close()
+        self.assertIn("held, holder unidentified", status.render_human(state))
+
+    def test_long_dirty_lists_are_sampled_with_a_tail_count(self):
+        entries = _porcelain(*[f" M src/f{i}.rs" for i in range(9)])
+        state = _collect(query=FakeGit(porcelain=entries))
+        block = status.render_human(state)
+        self.assertIn("and 6 more", block)
+
+    def test_main_json_path_prints_the_payload(self):
+        stream = io.StringIO()
+        code = status.main(
+            ["--path", PROBED, "--json"],
+            environ={gate.LEASE_DIR_ENV: "/nonexistent"},
+            output_stream=stream,
+            now=_now,
+            query=FakeGit(),
+            snapshot=_no_processes,
+            cwd_lookup=_no_cwd,
+            stat=lambda path: os.stat_result((0,) * 10),
+            exists=lambda path: False,
+        )
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(code, payload["exit_code"])
+        self.assertEqual(payload["schema_version"], status.SCHEMA_VERSION)
+
+
+class _Stat:
+    """Only the two fields `stale_index_paths` reads. `os.stat_result` built
+    from a 10-tuple leaves `st_mtime_ns` as None, which would make every
+    comparison here accidentally true."""
+
+    def __init__(self, size: int, mtime_ns: int):
+        self.st_size = size
+        self.st_mtime_ns = mtime_ns
+
+
+class StaleIndexEdgeTests(unittest.TestCase):
+    DEBUG = "{path}\0  mtime: 5:0\n  size: {size}\tflags: 0\n"
+
+    def _stale(self, *, index_size, file_size, file_mtime_ns, path="a.txt"):
+        return status.stale_index_paths(
+            Path(PROBED),
+            query=FakeGit(ls_files=self.DEBUG.format(path=path, size=index_size)),
+            stat=lambda _p: _Stat(file_size, file_mtime_ns),
+        )
+
+    def test_matching_size_and_mtime_is_fresh(self):
+        self.assertEqual(
+            self._stale(index_size=12, file_size=12, file_mtime_ns=5 * 10**9), []
+        )
+
+    def test_a_changed_mtime_is_stale(self):
+        self.assertEqual(
+            self._stale(index_size=12, file_size=12, file_mtime_ns=9 * 10**9),
+            ["a.txt"],
+        )
+
+    def test_a_racily_zeroed_index_size_counts_as_stale(self):
+        """Git zeroes a racily-clean entry's recorded size as a marker that it
+        must re-read the content, so zero against a non-empty file is
+        staleness rather than a size to compare literally."""
+        self.assertEqual(
+            self._stale(index_size=0, file_size=12, file_mtime_ns=5 * 10**9),
+            ["a.txt"],
+        )
+
+    def test_a_genuinely_empty_file_with_a_zero_index_size_is_fresh(self):
+        """The negative twin of the racy marker: zero against an empty file is
+        an ordinary match, not a marker."""
+        self.assertEqual(
+            self._stale(index_size=0, file_size=0, file_mtime_ns=5 * 10**9), []
+        )
+
+    def test_an_unreadable_path_is_left_to_git_status(self):
+        def stat(_path):
+            raise OSError("no such file")
+
+        self.assertEqual(
+            status.stale_index_paths(
+                Path(PROBED),
+                query=FakeGit(ls_files=self.DEBUG.format(path="gone.txt", size=3)),
+                stat=stat,
+            ),
+            [],
+        )
+
+
 class ImportDisciplineTests(unittest.TestCase):
     def test_importing_gate_does_not_re_execute_the_interpreter(self):
         """`gate.py` re-executes an unmanaged launcher through uv, but only
