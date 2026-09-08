@@ -698,6 +698,19 @@ def _is_undecided(
     `-c` and `-m` mean Python runs no script at all, so a linter or a `-c`
     one-liner naming the gate stays a clean FREE rather than becoming noise.
 
+    That carve-out is an assumption, but not the same kind as the one that
+    failed. The failed assumption governed TOKEN CONSUMPTION: getting `-uX`
+    wrong shifted which token was read as the script, so the walk returned a
+    real token that was the wrong one, and a wrong answer that looks like a
+    right one is indistinguishable from truth downstream, which is how it
+    produced a silent FREE. This one governs SEARCH TERMINATION, and for these
+    two options the termination is guaranteed by Python's semantics rather
+    than by any model of them: if Python parses either, there is no script
+    argument, so returning nothing is not a guess. The clustered and attached
+    spellings, `-uc` and `-mmodule`, are not recognised as terminators at all;
+    they fall through the generic skip branch and land in `undecided`. So this
+    carve-out's failure mode is UNKNOWN, never FREE.
+
     The substring test below is used deliberately, and only here. Everywhere
     else in this file containment was the wrong tool because it was asked to
     PROVE identity; here it is asked whether identity is still POSSIBLE after
@@ -708,7 +721,17 @@ def _is_undecided(
         # An absolute token that resolved elsewhere is a definite other
         # script, unless the line ALSO names this gate absolutely, which means
         # the token picked was more likely an option's value.
-        return reap.command_mentions_path(proc.command, str(expected))
+        #
+        # Both spellings are compared, because `expected` is resolved and the
+        # command line is raw. On a platform where the checkout sits under a
+        # symlinked prefix, `/var` against `/private/var` on macOS, comparing
+        # only the resolved form makes this containment test fail and the
+        # fail-safe stop failing safe. A fail-safe a spelling difference
+        # defeats is not one.
+        raw = worktree / GATE_SCRIPT_RELATIVE
+        return reap.command_mentions_path(
+            proc.command, str(expected)
+        ) or reap.command_mentions_path(proc.command, str(raw))
     cwd = cwd_lookup(proc.pid)
     if cwd is None:
         return GATE_SCRIPT_RELATIVE in proc.command
