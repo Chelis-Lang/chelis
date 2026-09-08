@@ -468,51 +468,123 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("PASS", out)
 
-    def test_find_summary_discards_only_summaries_older_than_the_handle(self):
+    def test_the_earliest_summary_at_or_after_the_start_is_this_runs(self):
+        """Red-team verification P3. Taking the newest match let a LATER run
+        that reused the pid outrank this run's own summary: measured as PASS
+        exit 0 when the real run exited 1. The earliest match at or after this
+        run started is provably this run's, because no other process can hold
+        this pid between this run's start and its exit, so an impostor's
+        summary must end later. That closes both directions at once."""
         report = Path(self.tmp)
-        old_path = report / f"20260101T120000.0Z-{self.payload['pid']}-local.json"
-        new_path = report / f"20990101T120000.0Z-{self.payload['pid']}-local.json"
-        for path in (old_path, new_path):
-            path.write_text("{}", encoding="utf-8")
-        started = self.payload["started_at"]
+        pid = self.payload["pid"]
+        stale = report / f"20260101T120000.0Z-{pid}-local.json"
+        ours = report / f"20260905T032000.0Z-{pid}-local.json"
+        later = report / f"20990101T120000.0Z-{pid}-local.json"
+        stale.write_text(json.dumps({"exit_code": 0, "termination": "pass"}), encoding="utf-8")
+        ours.write_text(json.dumps({"exit_code": 1, "termination": "stage-failure"}), encoding="utf-8")
+        later.write_text(json.dumps({"exit_code": 0, "termination": "pass"}), encoding="utf-8")
         self.assertEqual(
-            gate.find_summary(report, self.payload["pid"], "local", not_before=started),
-            new_path,
-        )
-        self.assertEqual(
-            gate.find_summary(report, self.payload["pid"], "local"),
-            new_path,
-        )
-        old_path.unlink()
-        self.assertIsNone(
             gate.find_summary(
-                report, self.payload["pid"], "local", not_before="2099-06-01T00:00:00Z"
-            )
+                report, pid, "local", not_before=self.payload["started_at"]
+            ),
+            ours,
         )
+        code, out, _err = self._status(self.handle_path, alive=lambda _pid: False)
+        self.assertEqual(code, 1)
+        self.assertIn("STAGE-FAILURE", out)
 
-    def test_an_unparseable_summary_name_is_kept_rather_than_discarded(self):
-        """Dropping it would hide a real verdict, and a name this filter
-        cannot read has not been shown to be stale."""
+    def test_without_a_usable_floor_no_summary_can_be_proven_to_be_ours(self):
+        """The filter must fail CLOSED. Degrading open would restore the exact
+        false PASS it exists to prevent, while still looking like a guard."""
+        report = Path(self.tmp)
+        pid = self.payload["pid"]
+        (report / f"20260101T120000.0Z-{pid}-local.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        for floor in (None, "", "not a timestamp"):
+            with self.subTest(floor=floor):
+                self.assertIsNone(
+                    gate.find_summary(report, pid, "local", not_before=floor)
+                )
+
+    def test_a_handle_without_a_usable_started_at_is_rejected(self):
+        """`read_handle` is where the floor is guaranteed, so a handle that
+        cannot supply one never reaches the filter."""
+        for started in (None, "", "yesterday", 12345):
+            with self.subTest(started=started):
+                payload = dict(self.payload)
+                if started is None:
+                    payload.pop("started_at")
+                else:
+                    payload["started_at"] = started
+                path = Path(self.tmp) / "probe-handle.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    gate.read_handle(path)
+                code, _out, err = self._status(path)
+                self.assertEqual(code, gate.EXIT_ENVIRONMENT)
+                self.assertIn("cannot read the detach handle", err)
+
+    def test_an_unparseable_summary_name_cannot_be_proven_to_be_ours(self):
+        """`write_summary` always produces a readable stamp, so a name this
+        reader cannot parse is not something this gate wrote and cannot be
+        proven to belong to this run."""
         odd = Path(self.tmp) / f"nostamp-{self.payload['pid']}-local.json"
         odd.write_text("{}", encoding="utf-8")
-        self.assertEqual(
+        self.assertIsNone(
             gate.find_summary(
                 Path(self.tmp),
                 self.payload["pid"],
                 "local",
                 not_before=self.payload["started_at"],
-            ),
-            odd,
+            )
         )
 
-    def test_find_summary_ignores_another_runs_summary(self):
+    def test_find_summary_ignores_another_pids_summary(self):
         self._summary()
         (Path(self.tmp) / "20260905T032000.0Z-99999-local.json").write_text(
             json.dumps({"exit_code": 1}), encoding="utf-8"
         )
-        found = gate.find_summary(Path(self.tmp), self.payload["pid"], "local")
+        found = gate.find_summary(
+            Path(self.tmp),
+            self.payload["pid"],
+            "local",
+            not_before=self.payload["started_at"],
+        )
         self.assertIsNotNone(found)
         self.assertIn(str(self.payload["pid"]), found.name)
+
+
+class SummaryNamingTests(unittest.TestCase):
+    """`find_summary` now discards a candidate whose stamp it cannot read, so
+    if `write_summary`'s naming and `_summary_stamp`'s parsing ever drift
+    apart, `--status` would silently report every run as still going. Lock the
+    writer and the reader to each other rather than to a literal format."""
+
+    def test_a_real_write_summary_name_parses_and_orders_correctly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = gate.GateReport(mode="local", started_at="2026-09-05T03:00:00.000Z")
+            report.exit_code = 0
+            path = gate.write_summary(
+                report, environ={gate.REPORT_DIR_ENV: tmp}, repo_root=Path(tmp)
+            )
+            stamp = gate._summary_stamp(path)
+            self.assertIsNotNone(
+                stamp, f"write_summary produced {path.name!r}, which _summary_stamp "
+                "cannot read; --status would report every run as still running"
+            )
+            found = gate.find_summary(
+                Path(tmp), os.getpid(), "local", not_before="2026-09-05T03:00:00.000Z"
+            )
+            self.assertEqual(found, path)
+
+    def test_iso_output_round_trips_through_the_floor_parser(self):
+        """`_iso` emits milliseconds. A seconds-resolution parse of it fails
+        silently and turns the whole filter into a no-op."""
+        moment = datetime(2026, 9, 5, 3, 15, 0, 123456, tzinfo=timezone.utc)
+        self.assertIsNotNone(gate._parse_iso(gate._iso(moment)))
+        self.assertIsNotNone(gate._parse_iso("2026-09-05T03:15:00Z"))
+        self.assertIsNone(gate._parse_iso("2026-09-05 03:15:00"))
 
 
 class NoReExecTests(unittest.TestCase):

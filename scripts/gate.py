@@ -1396,10 +1396,22 @@ def write_handle(payload: dict, path: Path) -> Path:
 
 
 def read_handle(path: Path) -> dict:
-    """Raises `OSError` or `ValueError` for a missing or malformed handle."""
+    """Raises `OSError` or `ValueError` for a missing or malformed handle.
+
+    `started_at` is validated here, not only `pid`, because `find_summary`
+    proves a summary belongs to this run by comparing against it. A handle
+    without a usable start instant would make that filter degrade OPEN, which
+    is a guard that stops guarding under exactly the conditions it exists for,
+    so the handle is rejected at the boundary instead.
+    """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or "pid" not in payload:
         raise ValueError(f"{path} is not a gate detach handle")
+    if _parse_iso(payload.get("started_at") or "") is None:
+        raise ValueError(
+            f"{path} has no usable started_at, so a run summary could not be "
+            "proven to belong to it"
+        )
     return payload
 
 
@@ -1444,30 +1456,42 @@ def find_summary(
     spawn must not re-execute through uv: a grandchild would write a summary
     this glob could never find.
 
-    A pid is not unique over time, so the pid alone is not enough. An older
-    run in the same report directory that happened to get this pid would be
-    the only match for the whole window before this run finishes, and polling
-    would report ITS verdict, which is a false PASS on the once-per-pull-request
-    gate. `not_before` is the handle's `started_at`: a run that ended before
-    this one started cannot be this one, so those candidates are discarded.
+    A pid is not unique over time, so the pid alone is not enough, and it fails
+    in BOTH directions. An older run in the same report directory that happened
+    to get this pid is the only match for the whole window before this run
+    finishes; a later run that reused the pid outranks this run's own summary
+    once it exists. Either way polling reports someone else's verdict, which is
+    a false PASS on the once-per-pull-request gate.
+
+    `not_before` is the handle's `started_at`, and the rule is: take the
+    EARLIEST summary that ended at or after this run started. That one is
+    provably this run's, because no other process can hold this pid between
+    this run's start and its exit, so any impostor's summary must end later
+    than this run's own. "Newest wins" cannot make that argument, and closing
+    only the older direction leaves the newer one open.
+
+    Without a usable floor no candidate can be proven to belong to this run, so
+    none is returned. `read_handle` rejects a handle with no usable
+    `started_at` for the same reason: a filter that degrades open is worse
+    than no filter, because it looks like a guard.
     """
+    floor = _parse_iso(not_before) if not_before else None
+    if floor is None:
+        return None
     safe_mode = re.sub(r"[^A-Za-z0-9_.-]+", "-", mode).strip("-")
     try:
-        matches = sorted(report_dir.glob(f"*-{pid}-{safe_mode}.json"))
+        candidates = sorted(report_dir.glob(f"*-{pid}-{safe_mode}.json"))
     except OSError:
         return None
-    if not_before:
-        floor = _parse_iso(not_before)
-        if floor is not None:
-            kept = []
-            for candidate in matches:
-                ended = _summary_stamp(candidate)
-                # An unparseable name is kept: it cannot be shown to be stale,
-                # and dropping it would hide a real verdict.
-                if ended is None or ended >= floor:
-                    kept.append(candidate)
-            matches = kept
-    return matches[-1] if matches else None
+    for candidate in candidates:
+        ended = _summary_stamp(candidate)
+        # A name whose stamp cannot be read cannot be proven to be this run's,
+        # and `write_summary` always produces a readable one, so it is not
+        # something this gate wrote. `SummaryNamingTests` locks the writer and
+        # this reader together so the format cannot drift apart silently.
+        if ended is not None and ended >= floor:
+            return candidate
+    return None
 
 
 def _pid_alive(pid: int) -> bool:
