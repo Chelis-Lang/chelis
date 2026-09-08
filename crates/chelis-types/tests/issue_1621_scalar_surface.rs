@@ -223,7 +223,26 @@ fn cached_library_bounds_and_lexical_aliases_preserve_the_boundary() {
         true,
     );
     accepts("def f[p: Float](x: &p, y: &p) -> bool = gt(x, y)\n");
-    accepts(
-        "def f[p: Float](xs: tensor[3, p], c: p) -> p = { gt = fn(a: tensor[3, p], b: p) -> b\n gt(xs, c) }\n",
-    );
+    accepts("def f[p: Float](xs: tensor[3, p], c: p) -> p = { gt = fn(a, b) -> b\n gt(xs, c) }\n");
+}
+
+/// #1621 does not enable the previously rejected generic tensor annotation
+/// surface. Its dimension/rank identity obligations require a separate repair.
+#[test]
+fn nested_generic_tensor_annotations_keep_their_existing_rejection_boundary() {
+    for source in [
+        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = { y: tensor[p, p] = x\n y }\n",
+        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = { y: tensor[..p, p] = x\n y }\n",
+        "def f[p: Float](x: tensor[3, p]) -> tensor[3, p] = { identity = fn(y: tensor[p, p]) -> y\n identity(x) }\n",
+        "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = { z:tensor[n,p]=y\n z }\n",
+        "def f[r,s,p:Float](x:tensor[..r,p], y:tensor[..s,p])->tensor[..s,p] = { z:tensor[..r,p]=y\n z }\n",
+        "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = (y: tensor[n,p])\n",
+        "def f[n,m,p:Float](x:tensor[n,p], y:tensor[m,p])->tensor[m,p] = { identity = fn(z:tensor[n,p]) -> z\n identity(y) }\n",
+    ] {
+        assert!(
+            !diagnostics(source).is_empty(),
+            "must not newly admit {source}"
+        );
+    }
+    accepts("def f[p: Float](x: p) -> p = { identity = fn(y: p) -> y\n identity(x) }\n");
 }

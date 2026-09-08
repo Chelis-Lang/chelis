@@ -1457,7 +1457,7 @@ executes on both lanes today. `issue_1506_replacement_spelling_on_the_lanes`
 holds all three facts and flips when [#1619] closes.
 
 The [#1621] extension preserves each declaration's instantiated type-binder
-identity in nested annotations and casts. Its existing dtype-family restriction
+identity in scalar annotations and casts. Its existing dtype-family restriction
 therefore continues to identify a scalar before operand unification. The mixed
 surface diagnostic covers the seven comparison identities and the eight binary
 arithmetic identities enumerated in `issue_1621_scalar_surface`, both operand
