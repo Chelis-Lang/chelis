@@ -121,21 +121,22 @@ def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32
 The body of a rank-polymorphic definition is restricted to operations whose effect on the
 shape can be tracked by name: elementwise and shape-identity operations, named-axis
 reductions (`sum`, `mean`, `max_reduce`, `min_reduce`, `prod_reduce`), and named-axis
-`expand`. Positional rewriters such as `permute`, `reshape`, and `matmul` are rejected
+`insert`. Positional rewriters such as `permute`, `reshape`, and `matmul` are rejected
 inside a `..r` body, which is what preserves the named-dimension safety guarantee.
 
 ## No broadcasting
 
 Chelis does not broadcast. Operands of an elementwise operation must have identical
-dimension lists. Use `expand` to add a dimension explicitly before combining tensors of
-different rank.
+dimension lists. Use `insert` to add a dimension explicitly before combining tensors of
+different rank, and `expand` to broadcast an existing size-1 axis.
 
 ```chelis-surf-fragment
 -- tensor[batch, hidden, f32] + tensor[hidden, f32] is a type error.
 biased = add(linear, insert(b, 0, batch))
 ```
 
-`expand`, `reshape`, and `permute` are the explicit tools for changing rank and shape.
+`insert`, `expand`, `reshape`, and `permute` are the explicit tools for changing rank and
+shape.
 
 ## Precision rules
 

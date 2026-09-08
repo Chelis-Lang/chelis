@@ -8,7 +8,7 @@ first. The full surface is in the [Type System Reference](type-reference.md).
 ## Primitive ideas
 
 - No implicit precision promotion. Mixed precision is an error; change it with `cast`.
-- No implicit broadcasting. Shapes must match; change rank with `expand`, `reshape`, or
+- No implicit broadcasting. Shapes must match; change rank with `insert`, `reshape`, or
   `permute`.
 - Named tensor dimensions are nominal. `batch` and `seq` match only by name, not by size.
 - Integer literals default to `int32`, float literals to `f32`.
