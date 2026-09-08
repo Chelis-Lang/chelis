@@ -308,12 +308,13 @@ fn the_decompiler_refuses_a_reserved_deep_type_variable() {
     }
 }
 
-/// REGRESSION test, and the §0.1 round-trip law itself. For every Deep the
-/// decompiler still accepts, `desugar(resugar(deep))` must reproduce that Deep.
-/// The reserved forms are excluded from the law's domain by failing closed
-/// above, which is the only way the law can hold once no Surf text desugars to
-/// them; the ordinary type variable is the control that the domain did not
-/// collapse.
+/// DISPOSITION LOCK. Green at the parent commit and green here, and the label
+/// matters: `spec/02-surf-syntax.md` §0.1's first law never broke for an
+/// ORDINARY type variable, only for the reserved spellings, which the row above
+/// removes from the law's domain by failing closed. What this row locks is that
+/// removing them did not narrow the domain any further: every Deep the
+/// decompiler still accepts must still satisfy `desugar(resugar(deep))`. A
+/// too-eager predicate would show up here and nowhere else.
 #[test]
 fn the_surf_deep_round_trip_law_holds_for_every_resugarable_type_variable() {
     for name in ["a", "p", "elem"] {
