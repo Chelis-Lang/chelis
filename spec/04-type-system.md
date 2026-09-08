@@ -2077,7 +2077,11 @@ contextually:
 > precision slot of a `tensor[...]` type that match the sig's quantifier
 > list become `(t-var {} <name>)`, not `(t-prim {} <name>)`. Names
 > matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
-> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
+> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. The four short
+> integer names stay as `t-prim` BY MAPPING to their §1.1 primitives
+> (`i8` to `int8`, and likewise for `i16`, `i32` and `i64`), so
+> canonical Deep carries one spelling per primitive; they are accepted
+> Surf input spellings, not Deep ones. Outside a sig
 > (e.g., in a value-position type annotation), no quantifier exists,
 > so the existing rule applies.
 

@@ -211,7 +211,7 @@ consumer that imports two modules exporting the same type name can annotate
 against one:
 
 ```
-def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)
+def relay(m: Demo.Dropout.Mode) -> int64 = Demo.Dropout.use(m)
 ```
 
 This is the disambiguation escape hatch when two imported modules export the
@@ -890,6 +890,15 @@ The suffix grammar is identical in Deep canonical form (`spec/03-deep-syntax.md`
 Suffixes are expression-literal syntax. A Deep `pat-lit` contains only its raw
 value and has no precision slot, so Surf literal patterns are unsuffixed and a
 suffixed literal pattern is rejected.
+
+The four short integer names `i8`, `i16`, `i32` and `i64` are also accepted in
+a TYPE position, where they name the same primitives as `int8`, `int16`,
+`int32` and `int64`. They are input spellings only: the canonical formatter
+rewrites each to its long name, canonical Deep carries the long name, and a
+Deep `(t-prim {} i64)` written by hand is not a primitive. This is the P10-P12
+pattern, a wider accepted input set than the canonical output set, and it is
+what keeps a short name from being read as an implicitly quantified type
+variable under `spec/04-type-system.md` §5.8.1.
 
 ### P10b: Contextual Tensor-Literal Inference
 

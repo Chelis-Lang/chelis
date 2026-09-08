@@ -12116,14 +12116,14 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/sd.ch"),
             "module Demo.Sd\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         // `combo` pulls in both modules qualified-access-only (`()`), so no
         // unqualified `Mode`/`Train`/`Eval`/`use` collide, and reaches each
@@ -12133,7 +12133,7 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def go() -> i64 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
+             def go() -> int32 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12230,13 +12230,13 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/combo.ch"),
             "module Demo.Combo\n\
              import Demo.Dropout\n\
-             def go() -> i64 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
+             def go() -> int32 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12299,8 +12299,8 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def classify_dropout() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
-             def classify_sd() -> i64 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+             def classify_dropout() -> int32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+             def classify_sd() -> int32 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
         );
         write(
             &root.join("reef.lock"),
@@ -12392,14 +12392,14 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/sd.ch"),
             "module Demo.Sd\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         // `relay` annotates its parameter with the qualified type and forwards
         // it to the qualified `use`. Both `Mode` ADTs are linked, so a bare
@@ -12409,7 +12409,7 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n",
+             def relay(m: Demo.Dropout.Mode) -> int32 = Demo.Dropout.use(m)\n",
         );
         write(
             &root.join("reef.lock"),
