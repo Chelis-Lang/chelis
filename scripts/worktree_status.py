@@ -745,12 +745,11 @@ def _is_undecided(
         # EFFECTIVE fix must fail it, and a green suite after an attempted fix
         # is the signature of a repair that does not work. That is exactly how
         # the dead clause above was caught. So cost is not the reason this is
-        # open. It is
-        # open because the defect needs whitespace in the checkout path AND a
-        # non-canonical spelling together, and because this branch had already
-        # taken two repairs that each introduced a defect, so its next change
-        # should be made deliberately rather than in passing. That is a live
-        # judgement call, not a settled one.
+        # open. It is open because the defect needs whitespace in the checkout
+        # path AND a non-canonical spelling together, and because this branch
+        # had already taken two repairs that each introduced a defect, so its
+        # next change should be made deliberately rather than in passing. That
+        # is a live judgement call, not a settled one.
         #
         # The command line is the ONLY input to this program whose spelling it
         # does not control; every path it compares against is canonical by
