@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-three are Rust and seven are C or Objective-C headers. A completeness
+Sixty-four are Rust and seven are C or Objective-C headers. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "b14833f0fdfaa1a6d27f8db9903ddfce6846dc6fe2755e05f0de40534f945c3d"
+FREEZE_SHA256 = "ac9c17dfbf850589a13f1f59886ebe782b182f45f935adff5867a2004406b12e"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -156,6 +156,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-runtime/src/format_shortest.rs",
     "crates/chelis-runtime/src/ieee_narrow.rs",
     "crates/chelis-runtime/src/lib.rs",
+    "crates/chelis-runtime/src/metadata.rs",
     "crates/chelis-runtime/src/ownership_ledger.rs",
     "crates/chelis-runtime/src/runtime_dtype_contract_tests.rs",
     "crates/chelis-vocab/src/lib.rs",)
@@ -180,6 +181,8 @@ CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
 CAPACITY_KEY_EXACT_PRODUCT_OWNER = "ExactLiteralProduct::include"
 VOCAB_OWNER = "crates/chelis-vocab/src/lib.rs"
 ELEMENT_OWNER = "crates/chelis-runtime/src/element.rs"
+METADATA_OWNER = "crates/chelis-runtime/src/metadata.rs"
+METADATA_FINAL_WIDTH_OWNERS = ("ElementCount::bytes", "ElementCount::scratch_len")
 ELEMENT_FINAL_CONTRACT_OWNERS = (
     "ElementStorage for f64", "ElementStorage for f32",
     "ElementStorage for F16Bits", "ElementStorage for Bf16Bits",
@@ -207,7 +210,7 @@ VOCAB_FINAL_CONTRACT_OWNERS = (
 
 
 def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
-    """Exact owners backed by the capacity, vocabulary, and element contracts."""
+    """Exact owners backed by the capacity, vocabulary, element, and metadata contracts."""
 
     return (
         kind == "exact-capacity-arithmetic"
@@ -225,6 +228,10 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
             (kind == "dtype-contract" and owner in ELEMENT_FINAL_CONTRACT_OWNERS)
             or (kind == "width-arithmetic" and owner == "assert_registration")
         )
+    ) or (
+        path == METADATA_OWNER
+        and kind == "width-arithmetic"
+        and owner in METADATA_FINAL_WIDTH_OWNERS
     )
 
 
@@ -593,6 +600,10 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": {
+                METADATA_OWNER: [
+                    {"kind": "width-arithmetic", "owner": owner}
+                    for owner in METADATA_FINAL_WIDTH_OWNERS
+                ],
                 ELEMENT_OWNER: [
                     {"kind": "dtype-contract", "owner": owner}
                     for owner in ELEMENT_FINAL_CONTRACT_OWNERS
@@ -857,6 +868,17 @@ def mutate_width_arithmetic(source: str) -> str:
         "runtime_representation_phase0_byte_width",
         """#[allow(dead_code)]
 fn runtime_representation_phase0_byte_width() -> usize {
+    size_of::<f32>()
+}""",
+    )
+
+
+def mutate_metadata_owner_width(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_unchecked_metadata_width",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_unchecked_metadata_width() -> usize {
     size_of::<f32>()
 }""",
     )
@@ -1371,6 +1393,7 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         ),
         _probe("raw-element-pointer", "crates/chelis-runtime/src/ieee_narrow.rs", mutate_raw_element_pointer),
         _probe("width-arithmetic", "crates/chelis-runtime/src/format_shortest.rs", mutate_width_arithmetic),
+        _probe("width-arithmetic", METADATA_OWNER, mutate_metadata_owner_width),
         _probe(
             "unknown-arithmetic-spelling",
             "crates/chelis-runtime/include/chelis_simd.h",
@@ -1627,6 +1650,20 @@ def run_phase0_mutations() -> None:
 
 def phase0_legs() -> tuple[OracleLeg, ...]:
     return (
+        *(OracleLeg(
+            f"checked host metadata {profile} contract",
+            (
+                "cargo", "nextest", "run", *flags, "-p", "chelis-runtime",
+                "--features", "ownership-ledger",
+                "--test", "checked_metadata", "--test", "metadata_compile",
+                "--test", "checked_metadata_padding",
+                "--test", "exact_tagged_c_abi",
+                "--test", "op33_empty_tensor_axis_decomposition",
+                "--test", "op33_tensor_validation",
+                "--test", "op33_legal_domain_matrix", "--test", "dim_carrier_int64",
+                "--test", "tensor_repurpose", "--test", "tensor_write_guard",
+            ),
+        ) for profile, flags in (("debug", ()), ("release", ("--release",)))),
         OracleLeg(
             "sealed runtime element contract",
             ("cargo", "nextest", "run", "--release", "-p", "chelis-runtime", "--test", "element_contract"),

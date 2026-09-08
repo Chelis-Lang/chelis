@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "b14833f0fdfaa1a6d27f8db9903ddfce6846dc6fe2755e05f0de40534f945c3d",
+  "freeze_sha256": "ac9c17dfbf850589a13f1f59886ebe782b182f45f935adff5867a2004406b12e",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2677,14 +2677,6 @@
       "sample": "* const i64"
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_flat_to_indices",
-      "sample": "* const i64"
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_indices_to_flat",
-      "sample": "* const i64"
-    },
-    {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_tensor_cmplt::cmp_loop",
       "sample": "* mut Bool8"
     },
@@ -2822,7 +2814,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 70,
+        "registered_sources": 71,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",
@@ -2842,6 +2834,16 @@
       "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
       "expected_success": "every hit is exact active debt from the frozen foundation",
       "owner_module_final_forms": {
+        "crates/chelis-runtime/src/metadata.rs": [
+          {
+            "kind": "width-arithmetic",
+            "owner": "ElementCount::bytes"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "ElementCount::scratch_len"
+          }
+        ],
         "crates/chelis-runtime/src/element.rs": [
           {
             "kind": "dtype-contract",
@@ -3201,6 +3203,18 @@
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
+          "witness_id": "phase0.mutate_metadata_owner_width",
+          "expected_kind": "width-arithmetic",
+          "path": "crates/chelis-runtime/src/metadata.rs",
+          "implementation_sha256": "cc5b3a468b71c33f9193cf659898b35329bd2bece94709a84f14f545540d7f4b",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
           "witness_id": "phase0.mutate_unknown_c_arithmetic_spelling",
           "expected_kind": "unknown-arithmetic-spelling",
           "path": "crates/chelis-runtime/include/chelis_simd.h",
@@ -3542,6 +3556,14 @@
       ]
     },
     "release_reproducers": [
+      {
+        "name": "checked host metadata debug contract",
+        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+      },
+      {
+        "name": "checked host metadata release contract",
+        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+      },
       {
         "name": "sealed runtime element contract",
         "command": "cargo nextest run --release -p chelis-runtime --test element_contract"
