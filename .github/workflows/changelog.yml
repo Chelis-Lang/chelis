@@ -14,7 +14,7 @@ concurrency:
 jobs:
   changelog:
     name: Changelog
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Checkout PR head and history

@@ -31,7 +31,7 @@ jobs:
   # runs the full suite, per the WS-7 spend-trim scope.
   changes:
     name: Detect docs-only changes
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       rejection_authority_changed: ${{ steps.detect.outputs.rejection_authority_changed }}
@@ -79,7 +79,7 @@ jobs:
   # blessing a closed issue, pull request, or missing object (chelis#730 §C2.1).
   rejection-authority-liveness:
     name: Rejection Authority Liveness
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     needs: [changes]
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
     permissions:
@@ -257,7 +257,7 @@ jobs:
   # Rust and Python policy workers execute in parallel.
   lint-and-unit:
     name: Lint and Unit Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, lint-rust, script-unit]
@@ -737,7 +737,7 @@ jobs:
 
   workspace-tests:
     name: Workspace Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, workspace-tests-shard]
@@ -1116,7 +1116,7 @@ jobs:
 
   generalize-sweep-oracle:
     name: Typecheck Level Generalization Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, generalize-sweep-oracle-shard]
@@ -1132,7 +1132,7 @@ jobs:
   # dependency result, including cancellation, instead of being skipped green.
   integration:
     name: Integration Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, generalize-sweep-oracle]
@@ -1275,7 +1275,7 @@ jobs:
   # disjoint full-workspace partition fails.
   macos-smoke:
     name: macOS Smoke
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, macos-workspace-shard]
@@ -1308,7 +1308,7 @@ jobs:
   # aggregates keep `always()` and stay fail-closed.
   test-telemetry:
     name: CI Test Telemetry
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, workspace-tests-shard, dtype-phase3-oracle, generalize-sweep-oracle-shard, macos-workspace-shard]
@@ -1441,7 +1441,7 @@ jobs:
 
   no-ai-authorship:
     name: No AI authorship markers
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CHELIS_CONTROL_RUNNER || 'ubuntu-latest' }}
     steps:
       # Shallow the clone to the PR's commit range instead of the whole
       # repo history (chelis#421). GitHub Actions expressions have no
