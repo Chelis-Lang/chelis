@@ -865,6 +865,13 @@ Deliverables, with phase homes:
    not inspect or redesign private runtime-dtype decoding. The typed `DeepTag`
    lane disposition and Deep stamping are outside this task entirely.
 
+   The wire leg's descriptor matching does not yet verify the complete codec
+   shape or a field's transport role. The [typed-wire membership plan](#typed-wire-transport-membership)
+   below records [#1580](https://github.com/Chelis-Lang/chelis/issues/1580)'s
+   membership definition and its #1288 enforcement follow-up.
+   Its acceptance requirements are planned work, not evidence supplied by the
+   existing wire census.
+
    Binding-baseline dispositions (each entry is the C6 review a frozen
    descriptor-manifest update cites):
 
@@ -1265,6 +1272,261 @@ to a visible, structured, reviewed point. Deferred families have only
 the explicit pre-Phase-1 hard edge until their enumerators land. This is
 the enforceable surface successor to §C3, not a claim that every public
 numeric form is type-unrepresentable.
+
+### Typed-wire transport membership
+
+**Scope and implementation status.** This is the wire-specific design for
+[#1580](https://github.com/Chelis-Lang/chelis/issues/1580), within §C6's existing
+three final authority classes. The membership definition is #1580's deliverable;
+the enforcement checklist below belongs to #1288 under #729. This clarification
+records the semantic distinction in [spec/10 §3.1](../10-serialization.md#31-numeric-values-and-structural-fields);
+this section implements that rule through the census's authority classes. It
+changes no enumerator, registry, baseline, coverage manifest, or decoder. The
+follow-up implementation is accepted only by the wire oracle below. No fourth
+class for "numeric metadata" is introduced.
+
+**Membership rule.** A numeric wire leaf receives `TaggedTransport` authority
+only through an exactly recognized carrier contract that binds its semantic
+role, complete serialized shape, and construction/admission boundary together.
+A registration verifies the contract required by spec/10 §3.1; it cannot grant
+authority merely by listing a descriptor. The numbered rule governs field
+meaning; this recognizer governs census admission.
+
+Each recognized contract identifies:
+
+- The exact carrier identity and serialized variants, discriminants, fields,
+  containers, and codecs, including every reachable numeric leaf.
+- Each leaf's domain: unit, width or exact wire representation, source/reference
+  scope where applicable, and the meaning of absence or a sentinel.
+- The controlling numbered-spec rule, and the constructors and public decode
+  boundaries that preserve it. A semantic citation is reviewed for relevance;
+  neither a registry entry nor a test invents semantic authority.
+- Paired positive and negative evidence for both the representation and its
+  admission into the declared role.
+
+This separates faithful transport from permission to consume a value. Transport
+membership does not authorize arithmetic, allocation, capacity equality, or
+source-range interpretation. Each consumer still owes its governing contract;
+numeric operations still require their exact `[05-OP-N]` registration.
+
+#### Why source coordinates qualify
+
+The existing source-location domain is defined by
+[spec/03 §1.1.1](../03-deep-syntax.md#111-external-source-spans-span-span_-namespace)
+and [04-FIT-16/17] in [spec/04](../04-type-system.md). Spec/10 §3.1 explicitly
+permits structural transport for that domain. This is why the recognizer can
+admit the diagnostic's coordinate and measured extent without treating their
+integer representation as a Chelis scalar value or tensor size.
+
+`DiagnosticSpan::Point.offset`, `Range.offset`, and `Range.len` therefore have
+specific transport roles. `Point` preserves a coordinate without an extent.
+`Range` preserves a producer-supplied measured extent, including a genuinely
+measured zero-length extent. Absence, a point, and a measured empty range remain
+distinct. A serializer must not supply a default length or offset to manufacture
+a measurement. The independently optional opaque identity is preserved, never
+parsed from `octant:30..34` or `surf:30..34` to manufacture a range, and never
+reconstructed from coordinates.
+
+The tag matters because it preserves the point/range distinction; the owning
+source contract explains why that distinction is meaningful. A byte decoder
+cannot establish that an external producer actually measured a range. Local
+measurement and source association belong to producer and consumer boundaries,
+with provenance coverage owned by
+[#1172](https://github.com/Chelis-Lang/chelis/issues/1172) and
+[#1581](https://github.com/Chelis-Lang/chelis/issues/1581). A range used to slice a
+known local buffer needs checked arithmetic and bounds at that use; transporting
+an opaque external identity does not require access to the producer's buffer.
+
+This plan does not decide new public malformed-input behavior. For example,
+[04-FIT-17]'s prohibition on fabricated serialized extents does not by itself
+require a decoder to reject every extra JSON field. A proposed strict rejection
+of `Point` plus an unexpected `len`, or a new source-coordinate domain, first
+requires the corresponding decision in the owning numbered chapter.
+
+#### Why arbitrary tagged numbers do not qualify
+
+`Metadata::Value(f64)` carrying arbitrary numeric data has only a variant name
+and a machine representation. It has neither the source-coordinate role above
+nor an exact recognized Chelis numeric-carrier contract. Calling the variant
+`Offset` or adding a `kind` tag does not repair either omission. Compiler scores,
+report counts, and performance measurements cannot inherit source-coordinate
+authority because they are compiler output.
+
+A numeric value is transported through §C3's exact dtype-tagged carrier or its
+recognized wire representation under [04-NUM-11] and the owning serialization
+contract. Integers and floats retain their source distinctions. An exact int64
+does not pass through f64; dtype and payload must agree. Recognition reuses the
+closed dtype vocabulary and canonical carrier definitions, including sanctioned
+reduced-float wire images; it does not build another dtype table or assume that
+the Rust field width alone establishes the payload dtype. A newly authored exact
+f64 carrier can qualify under this rule. A wrapper around arbitrary f64 does
+not qualify merely because the wrapper is tagged.
+
+Source coordinates are one closed role, not a wildcard for integers. A second
+existing role is a scoped input reference:
+`WireRtDim::InputAxis.tensor` selects an absolute nonzero input slot of the
+owning node under [spec/10 §3](../10-serialization.md) and
+[spec/05 §2.4.1](../05-risc-primitives.md). Reconstruction checks the owner,
+slot bounds, earlier source node, and required source kind before building IR;
+the associated axis and source rank/dtype retain their validation. The slot's
+magnitude is neither the selected extent nor a proof that two capacities agree.
+Its sibling `WireRtAxis::Lit.value` remains separately registered to [05-OP-7]
+with int32 axis semantics; the selected extent retains exact int64 semantics.
+Identical slot bytes may be valid under distinct legitimate owners; validation
+does not require a new serialized owner token. `InputAxis` reads tensor shape
+without inheriting `Node`'s rank-zero int64 source restriction.
+
+Classification is field-specific and compositional. A recognized container or
+variant cannot confer its authority on an unclassified numeric descendant. A
+new role needs an existing governing semantic contract and an exact structural
+admission rule, or a numbered-spec amendment first. There is no name heuristic,
+generic chapter citation, or maintainer override that admits it.
+
+#### Representation and enforcement
+
+The wire leg replaces bare `StaticSurfaceDescriptor` transport registrations
+with verified carrier registrations. A registration binds an exact leaf path
+to a closed role of an exact carrier contract. A private verifier consumes the
+current artifact and that contract, and constructs the only transport witness
+accepted by wire final-authority classification. Callers cannot manufacture a
+witness from a descriptor or suppress a derived capacity flag. Zero matches
+and multiple matches fail; a raw integer dtype selector cannot acquire transport
+authority through this path. Other families retain their existing authority
+rules, including the conservative C callable classification.
+
+Discovery starts from the published wire roots and follows the complete
+serialized graph through aliases, newtypes, containers, imported definitions,
+and substituted generic arguments. Private serialized helpers remain reachable.
+Recursive graphs are resolved to a fixed point; an unresolved definition,
+generic substitution, or unsupported codec fails closed. Moving a helper out of
+`schema.rs` cannot remove its capacity. Root discovery must account for public
+wire exports, rather than rely solely on the current filename/module filter;
+an additional serialization surface kind extends §C6's enumerators in the same
+change that introduces it.
+
+The derived identity includes role-discriminating serde attributes and codec
+shape, not just field type spellings. A custom serializer requires an explicit
+wire-shape adapter checked against executions of the actual serializer and
+decoder. Unsupported custom serialization is an error. The artifact owns the
+discovered shape; a hand-maintained expected list cannot stand in for discovery.
+Removing a required tag, changing a codec or width, adding a numeric field, or
+relocating a field invalidates the old admission until the new artifact satisfies
+the contract. Regenerating an identity or baseline never supplies that authority.
+
+Role-specific constructors or domain types should make validated reconstruction
+explicit. A raw wire DTO may exist before validation; it is not yet a checked IR
+reference, a measured-source witness, or checked runtime metadata. Admission
+must occur on every public path that constructs the corresponding usable object,
+including alternate codecs and caches covered by that object's contract. The
+guard suite mutates those paths as well as registry entries: exact descriptor
+matching alone cannot prove that validation executes.
+
+#### AST annotations and runtime interlocks
+
+[PR #1604](https://github.com/Chelis-Lang/chelis/pull/1604)'s dedicated annotation
+types are relevant to the same distinction, but its `MetadataValue` is not an
+umbrella transport exemption. The defined-key table in spec/03 remains the
+authority: `loc` is source location; `surf_dim_group_size` is a positive integer
+with a particular placement and surface-fidelity role; `property_seed`,
+`property_tolerance`, `property_samples`, preconditions, and invariant bodies
+retain live-expression admission and traversal. Preserved macro source is raw
+historical syntax; executing or materializing it requires normal admission.
+Unknown extension data and arbitrary `span_*` keys cannot automatically become
+measured-source authority. The wire census does not currently establish
+coverage of this separate AST codec. Adoption requires discovery of its actual
+roots and role boundaries, not registration of every numeric descendant as
+provenance. Its predecessor JSON/binary compatibility claims also do not change
+WireDag's exact-version contract.
+
+The relevant [#1362](https://github.com/Chelis-Lang/chelis/issues/1362) ledger
+dependencies constrain the implementation without expanding this design's exit:
+
+| Owner | Obligation retained at the boundary |
+|---|---|
+| [#1288](https://github.com/Chelis-Lang/chelis/issues/1288), [#1293](https://github.com/Chelis-Lang/chelis/issues/1293) | Remove surviving legacy dispositions; exact operation authority still applies to numeric constructors and callables. Four recognized wire transport fields do not dispose of other rows. |
+| [#888](https://github.com/Chelis-Lang/chelis/issues/888) | Capacity equality uses opaque `CapacityKey::prove_equal`, with exact products, partial-expression validity, program scope, and exact `Repr` at reuse. Serialized integers and runtime equality observations are not capacity proofs. |
+| [#889](https://github.com/Chelis-Lang/chelis/issues/889) | Shapes, counts, strides, and byte capacities retain [04-NUM-11], [05-OP-31/44], and mandatory checked construction/adoption from `runtime_representation.md` C2.2. Transport recognition cannot replace `ShapeMetadata`, `ElementCount`, `ByteCount`, or `AllocationBytes`. |
+| [#1172](https://github.com/Chelis-Lang/chelis/issues/1172), [#1581](https://github.com/Chelis-Lang/chelis/issues/1581) | Preserve real producer provenance and independently optional identity/coordinate data; faithful bytes do not prove a measurement's origin. |
+| [#1351](https://github.com/Chelis-Lang/chelis/issues/1351), [#1496](https://github.com/Chelis-Lang/chelis/issues/1496) | Expected results must be independent of the implementation under test, and required evidence must fail closed when execution or CI wiring is neutralized. |
+| [#1296](https://github.com/Chelis-Lang/chelis/issues/1296) | The complete #729 prerequisite composite remains the release exit; the wire leg supplies only its own evidence. |
+
+Runtime representation Phase 1 is separate from #729's dtype Phase 1. The
+[runtime plan](runtime_representation.md) retains the complete Phase 1 oracle
+obligation. #888 remains open pending exact-head acceptance and reconciliation
+with that oracle; [PR #1629](https://github.com/Chelis-Lang/chelis/pull/1629)
+addresses legacy normalization retirement. #889 still owns mandatory checked
+runtime metadata and generated-C adoption;
+[PR #1631](https://github.com/Chelis-Lang/chelis/pull/1631) covers a host slice.
+Neither those slices nor this wire design certify the complete runtime exit.
+
+#### Implementation checklist and acceptance
+
+The bounded #1288 enforcement follow-up begins with failing, spec-derived cases.
+It owns complete discovery and recognition for the existing wire roots and the
+four currently registered transport leaves: the three `DiagnosticSpan` leaves
+and `WireRtDim::InputAxis.tensor`. Its matrix is bounded as follows. Each row
+requires an executed positive case and its negative companion; malformed-input
+expectations may use only behavior decided by the controlling spec.
+
+| Boundary | Positive control | Negative control or mutation |
+|---|---|---|
+| Point/range/absence | Actual serializer preserves offset 30, measured length 4, measured length 0, and absent location distinctly. | Fabricate a zero-length range from a point, an offset from absence, or a range from an opaque ID; the relevant output assertion fails. |
+| Source identity and use | Preserve coordinate and opaque identity independently; identical offsets in distinct source contexts stay distinguishable; valid local slicing succeeds. | Reconstruct identity from offsets, treat a foreign identity as local, or overflow/exceed the known local buffer at slicing; reject at the owning use boundary. |
+| Scoped input reference | Reconstruct the intended earlier tensor input with its valid axis and retain shape-only input liveness; accept valid tensor dtypes and identical slots under distinct legitimate owners. | Zero/out-of-range slot, forbidden owner, reconstruction against the wrong owner's inputs, invalid source/axis under the owning contract, or a dropped shape-only edge fails the owning validation. |
+| Distinct numeric roles | Input reference coexists with the registered int32 axis and exact int64 extent. | Reclassify the axis or extent as reference metadata, or turn a slot into an extent without its governing operation. |
+| Numeric payload fidelity | Canonical value/wire carrier, including exact int64 `9007199254740993` and valid reduced-float images. | Arbitrary `Metadata::Value(f64)` transport registration, int64 through f64, dtype/payload mismatch, or invalid reduced-float image fails. |
+| Raw dtype selector | Canonical closed dtype carrier preserves its active/deferred disposition. | Register a raw integer dtype selector as transport, including after a rename that removes `dtype` from its field name. |
+| Shape and tags | Current Point/Range and dtype codec shapes match their recognized contracts. | Remove/change a required serde tag, add a numeric field, change width/codec, or substitute a lookalike carrier; rebaselining cannot admit it. |
+| Reachable graph | Registered transport through `Option`, `Vec`, alias, newtype, and imported helper; a nonnumeric companion stays nonnumeric. | Hide f64 behind those shapes, relocate a serialized helper, or leave a reachable generic unresolved; no numeric leaf disappears. |
+| Mixed container | Every numeric descendant has independent authority. | Use a valid source-location sibling or outer tag to admit an arbitrary numeric sibling. |
+| Admission and versions | Every registered public decode path constructs the correct validated object under its own version contract. | Bypass role validation through an alternate codec/cache or accept a wrong/missing WireDag version. |
+| Oracle effectiveness | Current producer/consumer artifacts, exact declared test selection, execution receipts, and independent expected values. | Zero selection, skipped/ignored test, stale artifact, or producer and consumer sharing the same erroneous encoding cannot produce acceptance. |
+
+When the implementation touches the corresponding consumer, include its owning
+integration controls: #1604's defined-key placement/duplicate/live-expression
+tests and raw-source admission; #889's debug/release count, byte, stride, view,
+and target-overflow tests; #888's equivalent/different large products, partial
+quotients (including zero times a partial quotient), program scope, and exact
+representation at reuse. These are non-regression evidence with their existing
+owners, not claims that the bounded wire follow-up completes those issues.
+
+Retain one authoritative aggregate for this bounded wire work:
+
+```sh
+cargo nextest run -p chelis-compiler-api --test capacity_census_wire
+```
+
+Extend that suite so its success requires the current-artifact recognition,
+codec/admission, and mutation legs in the matrix, with exact execution receipts.
+Tests within the aggregate may call supporting runners; those runners must
+return nonzero on any failed or missing expected case. Pure Python shape tests
+are supporting evidence, not replacements for real Rust-source-to-rustdoc
+mutations and actual serializer/decoder execution. Each mutation must reach and
+fail its named guard; unrelated compilation failure is not a detection receipt.
+Round trips need independent expected payloads so matching encoder/decoder bugs
+cannot certify fidelity. Changed oracle selection and hosted wiring need their
+own fail-closed controls.
+
+The implementation handoff is a checklist within #1288, not another phase plan:
+
+1. Write the matrix's positive and negative cases before implementing the guards.
+2. Implement complete wire discovery and verified carrier admission, migrating
+   the four existing transport registrations to that mechanism.
+3. Update §C6's typed `coverage_manifest()`, derived schema identity, owning
+   enumerator/classifier, and paired controls together under §B1; require the
+   aggregate's execution evidence on the implementation's exact head.
+
+This is an internal guard/registration migration; it can preserve existing wire
+bytes. The clarification requires no wire-version bump or user-data migration.
+If a later carrier redesign changes the serialized contract, it first amends the
+owning numbered chapter and follows that format's version rules.
+
+New or changed rows independently meet the final rule. Existing legacy rows keep
+their #1288 debt until individually migrated; the final contract applies to them
+too. Retiring all legacy exceptions remains #1288's broader deliverable, not an
+additional completion requirement for the membership definition. No baseline
+edit promotes coverage. This design-only change leaves the active manifest and
+guard artifacts unchanged.
 
 ---
 

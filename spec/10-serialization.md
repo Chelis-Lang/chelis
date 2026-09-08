@@ -65,6 +65,39 @@ axis range, and the exact input cardinality before IR construction.
 Every tagged variant must be known to the version 7 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
+### 3.1 Numeric Values And Structural Fields
+
+A compiler API field SHALL retain the semantic domain defined by its owning
+language contract. Its integer or floating-point representation, field name,
+or enclosing variant tag does not establish a different domain. Each field of
+a container retains its own contract; a structural field does not confer its
+meaning on a numeric sibling or descendant.
+
+A field carrying a Chelis numeric value SHALL preserve its declared dtype and
+full value set under [04-NUM-11]. An application-level variant tag SHALL NOT
+substitute for the payload's dtype contract or turn arbitrary numeric data
+into source-location or reference metadata. A tagged `f64` payload therefore
+does not acquire source-location semantics merely by being tagged; a numeric
+carrier remains subject to its exact declared dtype contract.
+
+Source coordinates and measured source extents MAY be represented as structural
+location fields rather than Chelis scalar values. Their domain is a position or
+measured extent in a source context, governed by [04-FIT-16/17] for diagnostics
+and `spec/03-deep-syntax.md` §1.1.1 for external-source identities. The source
+context may be supplied by the enclosing document or request. This permission
+does not extend to arbitrary counts or numeric payloads merely named as source
+metadata; the owning source-location contract must govern the field.
+
+A scoped input reference, such as `WireRtDim::InputAxis.tensor`, denotes a slot
+in the owning node's inputs and is resolved and validated under §3's reference
+contract. Its magnitude is not the selected tensor extent. The associated axis
+literal and the selected extent retain their separate int32 and int64 domains.
+
+Structural transport does not waive the governing requirements on a consumer.
+In particular, runtime rank, extents, strides, element counts, and byte capacities
+retain [04-NUM-11]'s descriptor domains and validation requirements; they cannot
+inherit source-location or input-reference semantics through an outer tag.
+
 ## 4. Invariant Revalidation At Decode Boundaries
 
 An opaque type may carry one declared invariant — a boolean property of
