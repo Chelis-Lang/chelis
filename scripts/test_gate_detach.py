@@ -555,6 +555,94 @@ class StatusTests(unittest.TestCase):
         self.assertIn(str(self.payload["pid"]), found.name)
 
 
+class LivenessProbeTests(unittest.TestCase):
+    """`_pid_alive` is the third and weakest liveness path, used only when a
+    summary is absent and the lease does not name this pid. Every other test
+    injects `alive`, so the real probe is exercised here."""
+
+    def test_the_current_process_is_alive(self):
+        self.assertTrue(gate._pid_alive(os.getpid()))
+
+    def test_a_reaped_child_is_not_alive(self):
+        child = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+        child.wait()
+        self.assertFalse(gate._pid_alive(child.pid))
+
+    def test_a_process_we_may_not_signal_counts_as_alive(self):
+        """`kill(pid, 0)` on another user's process raises PermissionError,
+        which proves the process EXISTS. Reading that as dead would let
+        `--status` report a live run as having died."""
+        self.assertTrue(gate._pid_alive(1))
+
+    def test_a_run_with_no_summary_and_no_lease_falls_through_to_the_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload, _ = _spawn(_isolated_environ(tmp), tmp, pid=os.getpid())
+            state = gate.detached_state(payload)
+        self.assertEqual(state["state"], "running")
+        self.assertEqual(state["evidence"], "the process is alive")
+
+
+class UnreadableSummaryTests(unittest.TestCase):
+    def test_a_summary_that_cannot_be_parsed_is_reported_not_guessed(self):
+        """The run finished, but its verdict is unreadable. Inventing one
+        would be worse than saying so."""
+        with tempfile.TemporaryDirectory() as tmp:
+            environ = _isolated_environ(tmp)
+            payload, _ = _spawn(environ, tmp)
+            handle = gate.write_handle(payload, Path(payload["handle"]))
+            stamp = (
+                gate._parse_iso(payload["started_at"])
+            ).strftime("%Y%m%dT%H%M%S.%f") + "Z"
+            (Path(tmp) / f"{stamp}-{payload['pid']}-local.json").write_text(
+                "{ truncated", encoding="utf-8"
+            )
+            state = gate.detached_state(payload)
+            self.assertEqual(state["state"], "finished")
+            self.assertIsNone(state["summary"])
+            self.assertIn("could not read the run summary", state["error"])
+            out, err = io.StringIO(), io.StringIO()
+            code = gate.run_status(
+                _parse_quietly(["--status", str(handle)]),
+                environ=environ,
+                repo_root=Path(tmp),
+                output_stream=out,
+                error_stream=err,
+            )
+        self.assertEqual(code, gate.EXIT_ENVIRONMENT)
+        self.assertIn("could not read the run summary", err.getvalue())
+
+    def test_a_log_outside_the_repo_root_prints_its_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            environ = _isolated_environ(tmp)
+            stub = _PopenStub()
+            out, err = io.StringIO(), io.StringIO()
+
+            def spawn(child_argv, **kwargs):
+                kwargs["repo_root"] = Path(tmp) / "elsewhere"
+                kwargs["repo_root"].mkdir(exist_ok=True)
+                return gate.spawn_detached(
+                    child_argv,
+                    popen=stub,
+                    now=lambda: FIXED_NOW,
+                    git_facts=lambda: {"head": "a" * 40},
+                    **kwargs,
+                )
+
+            code = gate.run_detach(
+                _parse_quietly(["--detach", "--local"]),
+                argv=["--detach", "--local"],
+                environ=environ,
+                executable=Path("/managed/python"),
+                mode="local",
+                repo_root=Path(tmp) / "unrelated",
+                output_stream=out,
+                error_stream=err,
+                spawn=spawn,
+            )
+        self.assertEqual(code, 0)
+        self.assertIn(tmp, out.getvalue())
+
+
 class SummaryNamingTests(unittest.TestCase):
     """`find_summary` now discards a candidate whose stamp it cannot read, so
     if `write_summary`'s naming and `_summary_stamp`'s parsing ever drift
