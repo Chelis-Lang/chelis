@@ -427,6 +427,11 @@ fn parity_count_bool_axes() {
 }
 
 #[test]
+fn parity_generic_explicit_shape() {
+    drive_parity(&examples_root().join("generic_explicit_shape.ch"), true);
+}
+
+#[test]
 fn parity_constraint_directed_risk_guards_library_only() {
     drive_parity(
         &examples_root().join("constraint_directed_risk_guards.ch"),
@@ -551,6 +556,7 @@ fn parity_corpus_is_complete() {
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
         "dict_foundation.ch",
+        "generic_explicit_shape.ch",
         "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",
