@@ -1082,3 +1082,11 @@ fn wi8_smt_precondition_discharge_site_stamps_discharge_tier() {
         "no preconditions => no assumption record to tier"
     );
 }
+
+#[test]
+fn producer_property_marker_has_no_discovery_authority() {
+    let source = r#"(def {c_earchin_role: "property_witness", property_source_kind: "user"} ordinary (fn {} (params {}) (lit {type: (t-prim {} bool)} false)))"#;
+    let PropertyRunResult::Ran(outcomes) =
+        run_deep_source_properties(source, &PropertyRunOptions::default()).unwrap();
+    assert!(outcomes.is_empty(), "{outcomes:?}");
+}

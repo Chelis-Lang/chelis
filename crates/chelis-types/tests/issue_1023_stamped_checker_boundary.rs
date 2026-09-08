@@ -3,7 +3,7 @@
 //! Authority: `spec/design/checker_totality.md` section C4.2 successor
 //! acceptance and `spec/design/unrepresentable_ast_domain.md` Tasks 6-8.
 
-use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span, parse_and_stamp};
+use chelis_deep::{DeepTag, Expr, Metadata, Span, parse_and_stamp};
 use chelis_types::{check_linearity, check_typed_program, errors::CheckErrorKind};
 
 fn assert_no_legacy_list(expr: &Expr) {
@@ -224,7 +224,7 @@ fn effects_only_reannotation_accepts_stamped_nodes_and_rejects_other_metadata() 
                     .extensions_mut()
                     .insert(
                         "forged".into(),
-                        Expr::Atom(Atom::Bool(true), Span::new(0, 0)),
+                        chelis_deep::ExtensionData::parse("true").unwrap(),
                     )
                     .unwrap();
                 metadata

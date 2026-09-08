@@ -110,7 +110,7 @@ fn metadata_value_span(expr: &chelis_deep::RawExpr, key: &str) -> Option<Span> {
             })
         }
         RawExpr::List(items, _) => items.iter().find_map(|v| metadata_value_span(v, key)),
-        RawExpr::Atom(..) => None,
+        RawExpr::Atom(..) | RawExpr::ExtensionData(_) => None,
     }
 }
 
@@ -190,7 +190,7 @@ fn data_and_provenance_are_not_metadata_or_expression_roles() {
     .unwrap();
     let source = "(var {source: (macro_name {surf_future: 1, span: 2} bare_name), custom: {nested: (lit {span: \"id\"} 1)}, span_future: (a b)} x)";
     parse_str(source).unwrap();
-    assert!(parse_str("(var {custom: {nested: (lit {span: 1} 1)}} x)").is_err());
+    assert!(parse_str("(var {custom: {nested: (lit {span: 1} 1)}} x)").is_ok());
 }
 
 #[test]
@@ -251,12 +251,15 @@ fn registry_and_corpus_cover_exactly_the_normative_inventory() {
 fn legacy_programmatic_carriers_cannot_hide_malformed_metadata() {
     for source in [
         "(var {span: 1} x)",
-        "(var {outer: {inner: (lit {span: 1} 2)}} x)",
-        "(future {outer: (lit {span: 1} 2)} (var {} x))",
+        "(def {property_seed: (lit {span: 1} 2)} x 1)",
+        "(future {property_seed: (lit {span: 1} 2)} (var {} x))",
         "(var {span: \"ok\", span: 2} x)",
     ] {
         let error = parse_str(source).unwrap_err().to_string();
-        assert!(error.contains("span"), "{source}: {error}");
+        assert!(
+            error.contains("span") || error.contains("property_seed"),
+            "{source}: {error}"
+        );
     }
 }
 

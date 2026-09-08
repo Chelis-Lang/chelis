@@ -219,7 +219,7 @@ impl Expander {
                 *span,
             )),
             Expr::List(list, span) => {
-                if let Some(expanded) = self.try_expand_macro_call(list, macros, scope)? {
+                if let Some(expanded) = self.try_expand_macro_call(list, *span, macros, scope)? {
                     return self.expand_expr(&expanded, macros, scope);
                 }
 
@@ -380,6 +380,7 @@ impl Expander {
     fn try_expand_macro_call(
         &mut self,
         list: &List,
+        span: Span,
         macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Option<Expr>, ExpansionError> {
@@ -421,7 +422,8 @@ impl Expander {
             &mut self.hygiene_counter,
             &UnordMap::new(),
         );
-        let substituted = replace_placeholder_vars(&hygienic, &placeholder_args);
+        let substituted = replace_placeholder_vars(&hygienic, &placeholder_args)?
+            .try_inherit_extensions(&Expr::List(list.clone(), span))?;
         Ok(Some(annotate_source_expr(
             &substituted,
             &MacroSource::try_from_expression(&invocation)?,
@@ -473,18 +475,21 @@ fn fresh_placeholder(
     }
 }
 
-fn replace_placeholder_vars(expr: &Expr, replacements: &UnordMap<String, Expr>) -> Expr {
-    match expr {
+fn replace_placeholder_vars(
+    expr: &Expr,
+    replacements: &UnordMap<String, Expr>,
+) -> Result<Expr, ExpansionError> {
+    Ok(match expr {
         Expr::Atom(_, _) => expr.clone(),
         // Metadata values are walked like children (PR #1319 review).
         Expr::Map(meta, span) => Expr::Map(
-            map_meta_entries(meta, |value| replace_placeholder_vars(value, replacements)),
+            try_map_meta_entries(meta, |value| replace_placeholder_vars(value, replacements))?,
             *span,
         ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
-            replace_placeholder_vars(&bridged, replacements)
+            replace_placeholder_vars(&bridged, replacements)?
         }
         // chelis#1087: placeholders inside either transitional variant must
         // still receive their argument, so both recurse.
@@ -492,18 +497,18 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &UnordMap<String, Expr>) 
             elements
                 .iter()
                 .map(|child| replace_placeholder_vars(child, replacements))
-                .collect(),
+                .collect::<Result<_, _>>()?,
             *span,
         ),
         Expr::UnknownForm(data) => {
-            map_unknown_form(data, |child| replace_placeholder_vars(child, replacements))
+            try_map_unknown_form(data, |child| replace_placeholder_vars(child, replacements))?
         }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                metadata: map_meta_entries(&meta.metadata, |value| {
+                metadata: try_map_meta_entries(&meta.metadata, |value| {
                     replace_placeholder_vars(value, replacements)
-                }),
-                expr: Box::new(replace_placeholder_vars(&meta.expr, replacements)),
+                })?,
+                expr: Box::new(replace_placeholder_vars(&meta.expr, replacements)?),
             },
             *span,
         ),
@@ -512,7 +517,7 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &UnordMap<String, Expr>) 
                 && let Some(name) = children(list).first().and_then(symbol_name)
                 && let Some(replacement) = replacements.get(name)
             {
-                return replacement.clone();
+                return Ok(replacement.clone().try_inherit_extensions(expr)?);
             }
             Expr::List(
                 List {
@@ -520,12 +525,12 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &UnordMap<String, Expr>) 
                         .elements
                         .iter()
                         .map(|child| replace_placeholder_vars(child, replacements))
-                        .collect(),
+                        .collect::<Result<_, _>>()?,
                 },
                 *span,
             )
         }
-    }
+    })
 }
 
 fn collect_symbols(expr: &Expr, out: &mut UnordSet<String>) {
@@ -694,7 +699,10 @@ fn substitute_expr(
                 && !shadowed.contains(name)
                 && let Some(replacement) = params.get(name)
             {
-                return replacement.clone();
+                return replacement
+                    .clone()
+                    .try_inherit_extensions(expr)
+                    .expect("fresh macro placeholders have no conflicting extensions");
             }
 
             match get_tag(list) {

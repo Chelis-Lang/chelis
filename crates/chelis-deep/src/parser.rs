@@ -67,11 +67,39 @@ use crate::raw::{RawAtom, RawExpr};
 struct RawParser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    source: Option<&'a str>,
+    preserved: bool,
 }
 
 impl<'a> RawParser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            source: None,
+            preserved: false,
+        }
+    }
+
+    fn with_source(tokens: &'a [Token], source: Option<&'a str>) -> Self {
+        Self {
+            source,
+            ..Self::new(tokens)
+        }
+    }
+
+    fn parse_metadata_value(&mut self, key: &str) -> Result<RawExpr, ParseError> {
+        if !self.preserved && crate::annotations::MetadataKey::decode(key).is_none() {
+            let (data, consumed) =
+                crate::ExtensionData::from_tokens(&self.tokens[self.pos..], self.source)?;
+            self.pos += consumed;
+            return Ok(RawExpr::ExtensionData(data));
+        }
+        let prior = self.preserved;
+        self.preserved |= matches!(key, "source" | "dtype_bounds");
+        let value = self.parse_expr();
+        self.preserved = prior;
+        value
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -262,7 +290,7 @@ impl<'a> RawParser<'a> {
                 }
             };
 
-            let value = self.parse_expr()?;
+            let value = self.parse_metadata_value(&key)?;
 
             entries.push((key, value));
         }
@@ -332,7 +360,7 @@ impl<'a> RawParser<'a> {
                 }
             }
 
-            let value = self.parse_expr()?;
+            let value = self.parse_metadata_value(&key)?;
 
             entries.push((key, value));
 
@@ -430,7 +458,11 @@ fn normalize_typed_literal_wrapper(
 /// goes through `RawParser` → `stamp_to_typed`, which produces `Expr::Node`,
 /// `Expr::BareList`, and `Expr::UnknownForm`.
 pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
-    let raw_exprs = parse_raw(tokens)?;
+    parse_with_source(tokens, None)
+}
+
+fn parse_with_source(tokens: &[Token], source: Option<&str>) -> Result<Vec<Expr>, ParseError> {
+    let raw_exprs = parse_raw_with_source(tokens, source)?;
     let typed = crate::stamp_to_typed::stamp_exprs_lenient(raw_exprs).map_err(|e| {
         ParseError::Expected {
             expected: "valid Deep structure".to_string(),
@@ -492,12 +524,19 @@ pub fn stamp_tags(exprs: &mut [Expr]) {
 
 /// The raw parser mirrors the typed parser but constructs `RawExpr`/`RawAtom`
 /// instead of `Expr`/`Atom`. No tag stamping, no typed-literal collapse.
-fn parse_raw_syntax(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
-    RawParser::new(tokens).parse_exprs()
+fn parse_raw_syntax(tokens: &[Token], source: Option<&str>) -> Result<Vec<RawExpr>, ParseError> {
+    RawParser::with_source(tokens, source).parse_exprs()
 }
 
 pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
-    let exprs = parse_raw_syntax(tokens)?;
+    parse_raw_with_source(tokens, None)
+}
+
+fn parse_raw_with_source(
+    tokens: &[Token],
+    source: Option<&str>,
+) -> Result<Vec<RawExpr>, ParseError> {
+    let exprs = parse_raw_syntax(tokens, source)?;
     crate::metadata::validate_raw(&exprs).map_err(|error| {
         if let Some((byte_in_value, code_point)) = error.forbidden_span_char {
             ParseError::ForbiddenSpanChar {
@@ -516,7 +555,7 @@ pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
 /// Parse a source string into raw expressions (lex + parse_raw).
 pub fn parse_raw_str(source: &str) -> Result<Vec<RawExpr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    parse_raw(&tokens)
+    parse_raw_with_source(&tokens, Some(source))
 }
 
 /// Error from `parse_and_stamp` — wraps both parse errors and stamp errors.
@@ -559,7 +598,7 @@ impl From<crate::stamp_to_typed::StampError> for StampOrParseError {
 /// `(module ...)` wrapper is also admissible.
 pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
     let typed = crate::stamp_to_typed::stamp_to_typed(raw_exprs)?;
     Ok(typed)
 }
@@ -569,7 +608,7 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
 /// declarations.
 pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw_syntax(&tokens)?;
+    let raw_exprs = parse_raw_syntax(&tokens, Some(source))?;
     let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
         // [03-PROG-3] puts the zero-form rejection at the position where a
         // top-level form was required, the end of the input.
@@ -595,7 +634,7 @@ pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError
 /// re-diagnose an untyped `Atom::Name`.
 pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
     let typed = crate::stamp_to_typed::stamp_runtime_exprs(raw_exprs)?;
     Ok(typed)
 }
@@ -607,7 +646,7 @@ pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrP
 /// rejected rather than retained as an untyped bare list.
 pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let mut raw_exprs = parse_raw(&tokens)?;
+    let mut raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
     if raw_exprs.len() != 1 {
         return Err(ParseError::Expected {
             expected: "exactly one type expression".to_string(),
@@ -631,7 +670,7 @@ pub fn parse_and_stamp_tagged(
     expected: crate::tag::DeepTag,
 ) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
     let typed = crate::stamp_to_typed::stamp_as_tagged(raw_exprs, expected)?;
     Ok(typed)
 }
@@ -651,7 +690,7 @@ pub fn parse_and_stamp_tagged(
 /// in-crate fixtures that build a fragment in no particular role.
 pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    let exprs = parse(&tokens)?;
+    let exprs = parse_with_source(&tokens, Some(source))?;
     Ok(exprs)
 }
 
@@ -666,7 +705,7 @@ pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
 /// stamped result.
 pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    let exprs = parse(&tokens)?;
+    let exprs = parse_with_source(&tokens, Some(source))?;
     let warnings = crate::validate::validate(&exprs);
     if let Some(w) = warnings.first() {
         return Err(ParseError::Expected {
@@ -886,7 +925,7 @@ mod tests {
                 assert_eq!(meta.metadata.extensions().iter().count(), 1);
                 assert!(matches!(
                     meta.metadata.extensions().get("pure"),
-                    Some(Expr::Atom(Atom::Bool(true), _))
+                    Some(data) if data.syntax() == "true"
                 ));
                 match meta.expr.as_ref() {
                     Expr::BareList(elems, _) => match &elems[0] {

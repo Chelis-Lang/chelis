@@ -110,7 +110,8 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 ///
 /// V8: the serialized positional-expand ledger grew the
 /// `DeferredShapeObligation` enum for comparison shape mirrors.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 9;
+// Opaque producer annotations use an explicit data wire variant.
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 10;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -608,7 +609,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 9);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 10);
     }
 
     #[test]
@@ -617,7 +618,7 @@ mod tests {
         let decls = sample_decls("preceding_version");
         let stdlib_key = key(5);
         let current_key = library_cache_key(&decls, stdlib_key);
-        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 6);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 9);
         assert_ne!(current_key, preceding_key);
 
         let context = build_library_context(&stdlib_context, &decls)
@@ -637,6 +638,10 @@ mod tests {
             "negative-control fixture must exist"
         );
         assert_ne!(current_path, preceding_path);
+        cache_envelope::save(&current_path, current_key, &context).expect("current fixture saves");
+        let current: Option<LibraryContext> =
+            cache_envelope::load(&current_path, current_key).expect("current fixture loads");
+        assert!(current.is_some(), "current producer and consumer must hit");
     }
 
     /// chelis#1156 (PR #1161 review, F5): eviction must reclaim a

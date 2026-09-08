@@ -2080,8 +2080,8 @@ mod decode_once_producer_tests {
     }
 
     #[test]
-    fn effect_annotation_reaches_live_metadata_and_preserves_source_data() {
-        let source = "(def {custom: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), source: (original (fn {} (params {}) (app {} (var {} debug) (lit {} 1))))} f (lit {} 1))";
+    fn effect_annotation_reaches_registered_expressions_and_preserves_data() {
+        let source = "(def {property_seed: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), custom: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), source: (original (fn {} (params {}) (app {} (var {} debug) (lit {} 1))))} f (lit {} 1))";
         let parsed = chelis_deep::parser::parse_str(source).unwrap();
         let Expr::Node(node, _) = &parsed[0] else {
             panic!("stamped declaration")
@@ -2111,7 +2111,8 @@ mod decode_once_producer_tests {
                 Expr::UnknownForm(data) => &data.meta,
                 _ => unreachable!(),
             };
-            let closure = metadata.extensions().get("custom").unwrap();
+            assert_eq!(metadata.extensions(), node.meta().extensions());
+            let closure = metadata.property_seed().unwrap().expression();
             let Expr::Node(closure, _) = closure else {
                 panic!("closure")
             };
@@ -2120,7 +2121,7 @@ mod decode_once_producer_tests {
                     .meta()
                     .values()
                     .any(|v| matches!(v, MetadataValue::Effects(_))),
-                "live extension closure needs inferred effects"
+                "registered expression closure needs inferred effects"
             );
             assert_eq!(
                 metadata.source(),

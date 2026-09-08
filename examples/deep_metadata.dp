@@ -3,7 +3,9 @@
   (defsig {dtype_bounds: {p: float}}
     identity
     (t-fn {} (t-var {} p) (t-var {} p)))
-  (def {source: (example_generator identity), tool_note: "producer extension"}
+  (def {source: (example_generator identity),
+         tool_note: {type: "example", original: (var {} producer_only)}
+       }
     identity
     (fn {}
       (params {} (x {type: (t-var {} p)}))

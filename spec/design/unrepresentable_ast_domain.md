@@ -1,7 +1,7 @@
 # Unrepresentable AST Domain — Design Doc
 
 **Issue:** #908  
-**Status:** Plan approved, implementation pending  
+**Delivery:** Stamped ingress and dedicated compiler annotations are implemented; #908 remains open through legacy-carrier retirement and the integration audit.
 **Prerequisite:** #855 (merged 2026-07-29)
 
 ## Class Statement
@@ -627,11 +627,11 @@ reconstruction. Preserved macro source owns raw syntax data.
 
 `Node`, `UnknownForm`, map expressions, prefix metadata and metadata inside
 legacy lists all carry the same typed representation. Private text and serde
-codecs retain the external spellings and serde entry shape, collecting raw
+codecs retain the external spellings and core serde entry shape, collecting raw
 entries before rejecting duplicates and decoding their roles. No consumer
 reconstructs or queries a registered entry with a string key. Role-aware
-visitors distinguish runtime expressions, types, binders, structural members,
-extensions and preserved source; structural roots cannot become unit literals.
+visitors distinguish runtime expressions, types, binders, structural members
+and preserved source, while opaque producer extensions are excluded; structural roots cannot become unit literals.
 Rebuilding a node replaces coupled children and annotations atomically.
 
 This representation concerns AST annotations only. It neither depends on nor
@@ -649,3 +649,58 @@ positive companions, and a source guard against iterator readers that compare re
 The #1567 scalar and tensor duplicate-stamp witnesses must reject in both
 orders before check, evaluation, compiled execution or resugaring can select
 one stamp. Exact single-stamp controls retain their numerical results.
+
+
+## Opaque producer extensions (#1637)
+
+[03-META-3] in `spec/03-deep-syntax.md` owns the data grammar and preservation
+contract. `ExtensionData` stores a validated flat token tree in canonical
+syntax, with its diagnostic span. The representation contains neither `Expr`
+nor metadata containers and has no semantic traversal API. Keeping the tree
+flat makes cloning, printing, serialization and destruction independent of
+nesting depth. Numeric token spellings are syntax, never runtime numbers.
+
+Raw parsing captures extensions before stamping and typed-literal expansion.
+The raw stage distinguishes data explicitly; stamping data as a program form
+fails. The private AST serde codec and compiler API wire output tag data
+explicitly. Old expression-valued extension checkpoints are rejected and the
+compiled-context, stdlib and library cache identities advance. Compiler-owned
+payloads retain their existing validation and role-aware transforms.
+The auxiliary Deep PEG validator sees a projection replacing admitted data
+ranges with inert scalars, preserving byte and line positions. It checks program
+structure without adding a second, narrower data grammar.
+
+Semantic visitors exclude extensions. Metadata rewrites preserve both their
+own extensions and those of originating expression/structural owners.
+`Expr::try_inherit_extensions` provides transactional replacement/combination;
+`ExtensionMap::try_merge` coalesces identical payloads and diagnoses conflicts.
+Macro substitution and expansion preserve template, argument and call-site
+owners through this boundary. Deep normalization retains data. Surf emission
+rejects extensions it cannot represent before returning output.
+
+Property discovery uses canonical `chelis_role` and `property_source_kind`;
+`c_earchin_role` is producer-owned data. Producers emitting both forms already
+have the canonical fields. Repository witnesses migrate with the compiler;
+legacy-only producers must emit the canonical property schema.
+
+The same continuously wired Deep-domain oracle remains authoritative. Its
+compiled selection includes opaque-data admission, preservation, owner
+combination and Surf rejection, with positive and negative controls. Existing
+recursive compiler-syntax witnesses use registered expression fields instead
+of relying on executable extensions. The oracle also tests CLI check/validate
+parity for nested payloads that resemble malformed program syntax.
+
+This is one dependency-coupled delivery slice: storage, ingress, wire format
+and consumers must agree when extensions cease to be expressions. It does not
+close #908, retire legacy Lists (#1029), fix macro binder representation
+(#1320), or own runtime tensor metadata (#889) or capacity identity (#888).
+
+### Structural enforcement techniques
+
+Constructor validation prevents admission of an invalid payload through a
+fallible boundary. Exhaustive dispatch forces each consumer to choose a
+handling rule but does not prove that rule correct. Domain restructuring
+removes the invalid combination from the representation: dedicated compiler
+annotations carry their required shapes, while opaque data cannot appear as
+an expression leaf. These techniques complement one another; the data/AST
+boundary relies on all three, not on a consumer convention to ignore data.

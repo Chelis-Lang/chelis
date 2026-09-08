@@ -4,6 +4,7 @@
 //! ingress and serialization boundaries; consumers observe dedicated payloads.
 use std::collections::BTreeMap;
 
+pub use crate::ExtensionData;
 pub use crate::annotations_transform::MetadataName;
 use crate::{Atom, DtypeFamily, Expr, RawExpr, Span, metadata::MetadataError};
 
@@ -762,19 +763,16 @@ impl Metadata {
                 | MetadataValue::Destructure(_) => {}
             }
         }
-        for (_, value) in self.extensions().iter() {
-            visit(value, R::Syntax);
-        }
     }
 }
 
-/// Producer-specific syntax. Reserved compiler keys cannot be inserted here.
+/// Producer-owned opaque data. Reserved compiler keys cannot be inserted here.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ExtensionMap {
-    values: BTreeMap<String, Expr>,
+    values: BTreeMap<String, ExtensionData>,
 }
 impl ExtensionMap {
-    fn validate(key: &str, value: &Expr) -> Result<(), MetadataError> {
+    fn validate(key: &str, value: &ExtensionData) -> Result<(), MetadataError> {
         let mut bytes = key.bytes();
         if !bytes
             .next()
@@ -794,10 +792,9 @@ impl ExtensionMap {
                 "a producer extension key outside compiler-owned metadata",
             ));
         }
-        crate::metadata::validate_payload_tags(key, value)?;
-        crate::metadata::validate_payload_metadata(value)
+        Ok(())
     }
-    pub fn insert(&mut self, key: String, value: Expr) -> Result<(), MetadataError> {
+    pub fn insert(&mut self, key: String, value: ExtensionData) -> Result<(), MetadataError> {
         Self::validate(&key, &value)?;
         if self.values.contains_key(&key) {
             return Err(invalid(
@@ -809,20 +806,46 @@ impl ExtensionMap {
         self.values.insert(key, value);
         Ok(())
     }
-    pub fn replace(&mut self, key: String, value: Expr) -> Result<Option<Expr>, MetadataError> {
+    pub fn replace(
+        &mut self,
+        key: String,
+        value: ExtensionData,
+    ) -> Result<Option<ExtensionData>, MetadataError> {
         Self::validate(&key, &value)?;
         Ok(self.values.insert(key, value))
     }
-    pub fn get(&self, key: &str) -> Option<&Expr> {
+    pub fn get(&self, key: &str) -> Option<&ExtensionData> {
         self.values.get(key)
     }
-    pub fn remove(&mut self, key: &str) -> Option<Expr> {
+    pub fn remove(&mut self, key: &str) -> Option<ExtensionData> {
         self.values.remove(key)
     }
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Expr)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ExtensionData)> {
         self.values.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Combine owners transactionally; different data under one key cannot be lost.
+    pub fn try_merge(&mut self, other: &Self) -> Result<(), MetadataError> {
+        for (key, value) in other.iter() {
+            if self
+                .get(key)
+                .is_some_and(|prior| !prior.same_payload(value))
+            {
+                return Err(invalid(
+                    key,
+                    value.span(),
+                    "identical extension data when combining owners",
+                ));
+            }
+        }
+        for (key, value) in other.iter() {
+            self.values
+                .entry(key.into())
+                .or_insert_with(|| value.clone());
+        }
+        Ok(())
     }
 }

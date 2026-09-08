@@ -1754,7 +1754,7 @@ fn prove_accepts_dotted_deep_symbols_for_bridge_references() {
         r#"
 (module {}
   cearchin.generated.vocabularymiss
-  (def {span: "req:MISS-001", c_earchin_role: "property_witness"}
+  (def {span: "req:MISS-001", chelis_role: "property", property_source_kind: "bridge:c-earchin", property_quantifiers: (params {}), property_preconditions: (tuple {})}
     req_MISS_001
     (fn {} (params {}) (lit {type: (t-prim {} bool)} true))))
 "#,
@@ -2531,43 +2531,8 @@ fn goal_for_a_guarded_property_is_not_the_unconditional_body() {
     );
 }
 
-// Negative parity (chelis#436 + schema §3.4 "representable as absent"): a
-// bodiless discovery-error record carries NO goal field rather than a defaulted
-// or empty one, so a consumer renders absent as absent.
-#[cfg(feature = "smt")]
-#[test]
-fn malformed_property_discovery_error_record_has_no_goal() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("bad.dp");
-    // Classified `user` (so the shared runner owns it) but missing
-    // `property_quantifiers`: a discovery error that never reaches a property
-    // body, so its error record has no proposition to carry. (Same fixture
-    // shape as prove_deep_malformed_property.rs.)
-    std::fs::write(
-        &path,
-        r#"
-(def {c_earchin_role: "property_witness",
-      property_source_kind: "user"}
-  malformed_missing_quantifiers
-  (fn {} (params {}) (lit {type: (t-prim {} bool)} true)))
-"#,
-    )
-    .expect("write deep");
-    let output = Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["prove", path.to_str().unwrap(), "--json"])
-        .output()
-        .expect("run prove");
-    let error_record = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .find(|record| record.get("kind").and_then(Value::as_str) == Some("error"))
-        .expect("a malformed property emits a discovery-error record");
-    assert!(
-        error_record.get("goal").is_none(),
-        "a bodiless discovery-error record carries no goal (representable-as-absent): {error_record}"
-    );
-}
+// Malformed property shapes reject at stamped ingress before a discovery
+// record exists; prove_deep_malformed_property.rs covers that stronger boundary.
 
 // ===================================================================
 // chelis#435 honesty contract, locked in the smt lane. The two cases the issue
@@ -3746,4 +3711,23 @@ module_prefix = "Empty"
     assert_eq!(graph["declarations"], serde_json::json!([]));
     assert_eq!(graph["edges"], serde_json::json!([]));
     assert!(graph.get("reason").is_none(), "{graph}");
+}
+
+#[test]
+fn legacy_property_marker_is_data_and_has_no_discovery_authority() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("data.dp");
+    std::fs::write(&path, r#"(def {c_earchin_role: "property_witness"} ordinary (fn {} (params {}) (lit {type: (t-prim {} bool)} false)))"#).unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["prove", path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let records: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(!records.iter().any(|v| v["kind"] == "property"), "{text}");
+    assert!(records.iter().any(|v| v["kind"] == "summary"), "{text}");
 }

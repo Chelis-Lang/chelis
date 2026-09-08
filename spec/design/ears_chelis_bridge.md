@@ -125,8 +125,10 @@ Canonical Chelis property keys emitted by v0.2 and later:
 | `property_preconditions` | `(tuple {})` | EARS v0.2 witnesses have no generated preconditions. |
 | `property_source_id` | string | Source EARS requirement ID. |
 
-The legacy `c_earchin_role: "property_witness"` key remains indefinitely for
-bridge compatibility; Chelis accepts it as a discovery synonym.
+The producer may retain `c_earchin_role: "property_witness"` as its own data.
+Chelis discovery requires the canonical property fields above; producer
+extensions grant no compilation or property-discovery authority under
+`spec/03-deep-syntax.md` [03-META-3].
 
 ## 5. EARS Patterns
 

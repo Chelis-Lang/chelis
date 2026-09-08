@@ -24,6 +24,8 @@ use crate::ast::{
 /// Failure to structurally resugar a Deep expression.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResugarError {
+    #[error("cannot preserve producer extension `{key}` in Surf (owner at byte {offset})")]
+    UnrepresentableExtension { key: String, offset: usize },
     #[error("{0}")]
     InvalidMetadata(#[from] chelis_deep::metadata::MetadataError),
     #[error("expected a canonical Deep node, found {found}")]
@@ -101,6 +103,7 @@ struct NodeRef<'a> {
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     chelis_deep::metadata::validate_metadata(std::slice::from_ref(expr))?;
+    reject_extensions(expr)?;
     validate_binder_literal_adoption(expr, &[], &[])?;
     resugar_expression_inner(expr)
 }
@@ -130,9 +133,66 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
     chelis_deep::metadata::validate_metadata(exprs)?;
+    for expr in exprs {
+        reject_extensions(expr)?;
+    }
     let declarations = resugar_declaration_sequence(exprs)?;
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
+}
+
+// Structural annotation containers can own extensions too. The typed syntax
+// visitor exposes those owners but never enters opaque extension contents.
+fn reject_extensions(expr: &DeepExpr) -> Result<(), ResugarError> {
+    fn metadata(meta: &Metadata, span: chelis_deep::Span) -> Result<(), ResugarError> {
+        if let Some((key, _)) = meta.extensions().iter().next() {
+            return Err(ResugarError::UnrepresentableExtension {
+                key: key.into(),
+                offset: span.offset,
+            });
+        }
+        let mut result = Ok(());
+        meta.visit_syntax(&mut |_, value| {
+            if result.is_ok() {
+                result = reject_extensions(value);
+            }
+        });
+        result
+    }
+    match expr {
+        DeepExpr::Atom(..) => Ok(()),
+        DeepExpr::Node(node, span) => {
+            metadata(node.meta(), *span)?;
+            for child in node.children_slice() {
+                reject_extensions(child)?;
+            }
+            Ok(())
+        }
+        DeepExpr::List(list, _) => {
+            for child in &list.elements {
+                reject_extensions(child)?;
+            }
+            Ok(())
+        }
+        DeepExpr::BareList(children, _) => {
+            for child in children {
+                reject_extensions(child)?;
+            }
+            Ok(())
+        }
+        DeepExpr::Map(meta, span) => metadata(meta, *span),
+        DeepExpr::MetaExpr(meta, span) => {
+            metadata(&meta.metadata, *span)?;
+            reject_extensions(&meta.expr)
+        }
+        DeepExpr::UnknownForm(data) => {
+            metadata(&data.meta, data.span)?;
+            for child in &data.children {
+                reject_extensions(child)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Remove Deep metadata that is explicitly derived from source location and
@@ -505,6 +565,19 @@ fn normalize_roundtrip_expr_with_context(
 }
 
 fn normalize_roundtrip_value(
+    expr: &DeepExpr,
+    context: SurfaceMetadataContext,
+    role: chelis_deep::metadata::MetadataRole,
+) -> DeepExpr {
+    let candidate = normalize_roundtrip_value_inner(expr, context, role);
+    // Normalization is optional: conflicting owner data leaves the rewrite unapplied.
+    match candidate.try_inherit_extensions(expr) {
+        Ok(candidate) => candidate,
+        Err(_) => expr.clone(),
+    }
+}
+
+fn normalize_roundtrip_value_inner(
     expr: &DeepExpr,
     context: SurfaceMetadataContext,
     role: chelis_deep::metadata::MetadataRole,

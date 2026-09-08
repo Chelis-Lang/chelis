@@ -40,6 +40,7 @@ pub enum FormClass {
     ListWithoutTagSymbol,
     MetadataMap,
     MetadataAnnotatedForm,
+    ExtensionData,
 }
 
 impl FormClass {
@@ -54,6 +55,7 @@ impl FormClass {
             Self::EmptyList => "an empty list",
             Self::ListWithoutTagSymbol => "a list without a tag symbol",
             Self::MetadataMap => "a metadata map",
+            Self::ExtensionData => "opaque extension data",
             Self::MetadataAnnotatedForm => "a metadata-annotated form",
         }
     }
@@ -69,6 +71,7 @@ impl FormClass {
             RawExpr::List(elements, _) if elements.is_empty() => Self::EmptyList,
             RawExpr::List(..) => Self::ListWithoutTagSymbol,
             RawExpr::Map(..) => Self::MetadataMap,
+            RawExpr::ExtensionData(_) => Self::ExtensionData,
             RawExpr::MetaExpr { .. } => Self::MetadataAnnotatedForm,
         }
     }
@@ -177,6 +180,19 @@ impl std::fmt::Display for StampError {
 }
 
 impl std::error::Error for StampError {}
+
+fn extension_at_program_slot(data: crate::ExtensionData) -> StampError {
+    StampError {
+        span: data.span(),
+        kind: StampErrorKind::NodeError(crate::node::NodeError::Metadata(
+            crate::annotations::invalid(
+                "extension",
+                data.span(),
+                "program syntax, not opaque extension data",
+            ),
+        )),
+    }
+}
 
 /// Convert raw parser output to typed AST using role-directed stamping.
 ///
@@ -338,6 +354,7 @@ pub(crate) fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
             kind: StampErrorKind::NameAtExprSlot { name },
             span,
         }),
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
@@ -367,6 +384,7 @@ pub(crate) fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
 /// the broader `Type` role and admit rank spreads ([04-ADT-4]).
 pub(crate) fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
@@ -459,6 +477,7 @@ fn stamp_type_in_role(raw: RawExpr, expected: TypeSyntaxRole) -> Result<Expr, St
 
 pub(crate) fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => stamp_bare_list(elements, span),
         RawExpr::Map(entries, span) => stamp_map(entries, span),
@@ -503,6 +522,7 @@ fn stamp_bare_list(elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampErro
 
 fn stamp_effect_handler(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
@@ -606,6 +626,7 @@ fn stamp_form_expecting(raw: RawExpr) -> Result<Expr, StampError> {
             kind: StampErrorKind::NameAtExprSlot { name },
             span,
         }),
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {

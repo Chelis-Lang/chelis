@@ -1480,6 +1480,11 @@ pub struct WireDeepExpr {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireDeepExprKind {
+    /// Producer data syntax, not a compiler expression. Re-ingestion validates
+    /// its lexical data format before it can enter an ExtensionMap.
+    ExtensionData {
+        syntax: String,
+    },
     Atom {
         atom: WireDeepAtom,
     },
