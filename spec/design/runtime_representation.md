@@ -225,6 +225,42 @@ these final forms and runs the contract suite; its freeze digest changes for
 that reviewed acceptance addition, not to bless a new debt row. The broader
 Phase 1 command remains unimplemented until its other deliverables are green.
 
+### C1 runtime element delivery boundary
+
+The next independently shippable slice seals the runtime's existing element
+implementations and binds their storage and arithmetic types to `DTypeContract`.
+It leaves the existing unsafe pointer methods at their frozen identities until
+Phase 3 replaces them with validated views; sealing implementations is not a
+claim that arbitrary pointer access is gone.
+
+`element.rs` owns `ElementStorage`, with a private sealing supertrait. The
+public `TensorElement` requires that sealed storage registration and has one
+blanket implementation projecting its dtype, `Repr`, and arithmetic type.
+Neither downstream crates nor sibling runtime modules can register another
+storage type. An exhaustive dtype match instantiates compile-time assertions
+for every registration: exact dtype and representation identity, storage size,
+and arithmetic representation. An equal-width float/integer pairing must fail,
+not merely an unequal-size pairing.
+
+`F16Bits` and `Bf16Bits` name the existing distinct `half::f16` and `half::bf16`
+transparent storage types, not bare `u16` aliases. Reusing those types preserves
+all existing kernel implementations and exact bit conversions. `Bool8` retains
+its checked constructors and uses `()` to denote no arithmetic type; `()` is
+not a tensor element. This slice adds no numerical operation or C ABI.
+
+Acceptance is `cargo nextest run -p chelis-runtime --test element_contract`:
+all nine storage/arithmetic rows, all narrow-float bit patterns, Bool8's complete
+byte domain, equal-width mismatch rejection, and executed compile controls for
+external and sibling-module sealing and incomplete/wrong registrations. Compile
+mutations use isolated copies of the real registration and trait declaration,
+with stubs only for the unchanged raw-access environment; positive controls
+also compile against the real runtime crate. The Phase 0 oracle executes this
+suite in release mode and enumerates every `ElementStorage` implementation. Its exact final
+owner set admits only these nine registrations, the derived blanket projection,
+and the compile-time assertion owner. The old nine unsealed bindings leave
+active debt; foundation rows remain immutable. No raw-access debt is relocated
+or reauthorized. Phase 1 still awaits checked metadata and its complete oracle.
+
 ## C2. Exact capacity identity and checked finite counts
 
 Compiler equality and runtime allocation are related but distinct domains.

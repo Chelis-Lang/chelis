@@ -94,6 +94,24 @@ fn every_registered_prefix_classifies() {
 }
 
 #[test]
+fn element_storage_bindings_are_individual_seams_even_for_unknown_markers() {
+    assert_eq!(
+        identities(
+            "crates/chelis-runtime/src/element.rs",
+            "impl ElementStorage for f32 {} impl ElementStorage for Unregistered {}"
+        ),
+        vec![
+            (
+                "dtype-contract".into(),
+                "ElementStorage for Unregistered".into()
+            ),
+            ("dtype-contract".into(), "ElementStorage for f32".into()),
+        ]
+    );
+    assert!(identities(RUNTIME, "impl OrdinaryStorage for Plain {}").is_empty());
+}
+
+#[test]
 fn unparseable_rust_fails_closed() {
     let error = scan_rust_source(RUNTIME, "pub fn f( {").expect_err("invalid Rust must fail");
     assert!(

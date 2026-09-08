@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-one are Rust and seven are C or Objective-C headers. A completeness
+Sixty-two are Rust and seven are C or Objective-C headers. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "635b8ed27e08692922c3482e5a1e5c8a63189f34dcfa2aa1a34b78492054d62a"
+FREEZE_SHA256 = "ccbbbcfa04381c7618e33b867d078b8e59bc71dafe298dfb586414d6b942c69a"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -151,6 +151,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-runtime/include/chelis_simd.h",
     "crates/chelis-runtime/src/decimal_parse.rs",
     "crates/chelis-runtime/src/dtype_header.rs",
+    "crates/chelis-runtime/src/element.rs",
     "crates/chelis-runtime/src/format_shortest.rs",
     "crates/chelis-runtime/src/ieee_narrow.rs",
     "crates/chelis-runtime/src/lib.rs",
@@ -177,6 +178,14 @@ DELETION_PHASE_BY_KIND: dict[str, int] = {
 CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
 CAPACITY_KEY_EXACT_PRODUCT_OWNER = "ExactLiteralProduct::include"
 VOCAB_OWNER = "crates/chelis-vocab/src/lib.rs"
+ELEMENT_OWNER = "crates/chelis-runtime/src/element.rs"
+ELEMENT_FINAL_CONTRACT_OWNERS = (
+    "ElementStorage for f64", "ElementStorage for f32",
+    "ElementStorage for F16Bits", "ElementStorage for Bf16Bits",
+    "ElementStorage for i64", "ElementStorage for i32",
+    "ElementStorage for i16", "ElementStorage for i8",
+    "ElementStorage for Bool8", "TensorElement for T",
+)
 VOCAB_FINAL_CONTRACT_OWNERS = (
     "ArithmeticRepr::Ieee754Binary32",
     "ArithmeticRepr::Ieee754Binary64",
@@ -188,7 +197,7 @@ VOCAB_FINAL_CONTRACT_OWNERS = (
 
 
 def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
-    """Exact owner forms backed by the capacity and vocabulary contract legs."""
+    """Exact owners backed by the capacity, vocabulary, and element contracts."""
 
     return (
         kind == "exact-capacity-arithmetic"
@@ -199,6 +208,12 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         and (
             (kind == "dtype-contract" and owner in VOCAB_FINAL_CONTRACT_OWNERS)
             or (kind == "width-arithmetic" and owner == "DTypeContract::byte_width")
+        )
+    ) or (
+        path == ELEMENT_OWNER
+        and (
+            (kind == "dtype-contract" and owner in ELEMENT_FINAL_CONTRACT_OWNERS)
+            or (kind == "width-arithmetic" and owner == "assert_registration")
         )
     )
 
@@ -568,6 +583,10 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": {
+                ELEMENT_OWNER: [
+                    {"kind": "dtype-contract", "owner": owner}
+                    for owner in ELEMENT_FINAL_CONTRACT_OWNERS
+                ] + [{"kind": "width-arithmetic", "owner": "assert_registration"}],
                 VOCAB_OWNER: [
                     {"kind": "dtype-contract", "owner": owner}
                     for owner in VOCAB_FINAL_CONTRACT_OWNERS
@@ -793,6 +812,21 @@ def mutate_incomplete_arithmetic_repr(source: str) -> str:
     if source.count(anchor) != 1:
         raise OracleFailure("incomplete-arithmetic-repr mutation anchor drifted")
     return source.replace(anchor, anchor + "    Phase0Probe,\n", 1)
+
+
+def mutate_element_binding(source: str) -> str:
+    """A fully written extra storage binding still needs exact registration."""
+
+    return _append_probe(source, "UnregisteredElement", """
+#[derive(Clone, Copy)]
+struct UnregisteredElement(f32);
+impl private::Sealed for UnregisteredElement {}
+impl ElementStorage for UnregisteredElement {
+    const STORAGE_DTYPE: RuntimeDType = RuntimeDType::F32;
+    const STORED_REPR: Repr = Repr::Ieee754Binary32;
+    type ArithmeticStorage = f32;
+}
+""")
 
 
 def mutate_raw_element_pointer(source: str) -> str:
@@ -1281,6 +1315,8 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         _probe("direct-data-access", runtime_probe, mutate_direct_data_access_after_test_module),
         _probe("dtype-contract", "crates/chelis-vocab/src/lib.rs", mutate_incomplete_dtype),
         _probe("dtype-contract", VOCAB_OWNER, mutate_incomplete_arithmetic_repr),
+        _probe("dtype-contract", ELEMENT_OWNER, mutate_element_binding,
+               expected_owners=("ElementStorage for UnregisteredElement",)),
         _probe("fixed-rank-metadata", "crates/chelis-python/src/lib.rs", mutate_fixed_rank_metadata),
         _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
         _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
@@ -1558,6 +1594,10 @@ def run_phase0_mutations() -> None:
 
 def phase0_legs() -> tuple[OracleLeg, ...]:
     return (
+        OracleLeg(
+            "sealed runtime element contract",
+            ("cargo", "nextest", "run", "--release", "-p", "chelis-runtime", "--test", "element_contract"),
+        ),
         OracleLeg(
             "closed representation vocabulary contract",
             (

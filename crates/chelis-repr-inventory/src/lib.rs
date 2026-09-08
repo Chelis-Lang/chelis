@@ -766,10 +766,10 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
             .as_ref()
             .and_then(|(_, path, _)| path.segments.last())
             .map(|segment| segment.ident.to_string());
-        // `impl TensorElement for f32` is the dtype contract: it binds a Rust
-        // element marker to a runtime dtype tag.
-        if trait_name.as_deref() == Some("TensorElement") {
-            let owner = format!("TensorElement for {self_ty}");
+        // Both the legacy accessor binding and its sealed storage owner bind
+        // a Rust marker to a runtime tag; unknown markers are still seams.
+        if let Some(name @ ("TensorElement" | "ElementStorage")) = trait_name.as_deref() {
+            let owner = format!("{name} for {self_ty}");
             self.rows
                 .push(SeamRow::new("dtype-contract", &owner, &owner));
         }

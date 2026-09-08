@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "635b8ed27e08692922c3482e5a1e5c8a63189f34dcfa2aa1a34b78492054d62a",
+  "freeze_sha256": "ccbbbcfa04381c7618e33b867d078b8e59bc71dafe298dfb586414d6b942c69a",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2065,42 +2065,6 @@
       "sample": "(* storage) . data"
     },
     {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for Bool8",
-      "sample": "TensorElement for Bool8"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for f32",
-      "sample": "TensorElement for f32"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for f64",
-      "sample": "TensorElement for f64"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for half :: bf16",
-      "sample": "TensorElement for half :: bf16"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for half :: f16",
-      "sample": "TensorElement for half :: f16"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i16",
-      "sample": "TensorElement for i16"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i32",
-      "sample": "TensorElement for i32"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i64",
-      "sample": "TensorElement for i64"
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i8",
-      "sample": "TensorElement for i8"
-    },
-    {
       "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=Repr::Bfloat16",
       "sample": "Bfloat16"
     },
@@ -2874,7 +2838,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 68,
+        "registered_sources": 69,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",
@@ -2894,6 +2858,52 @@
       "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
       "expected_success": "every hit is exact active debt from the frozen foundation",
       "owner_module_final_forms": {
+        "crates/chelis-runtime/src/element.rs": [
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for f64"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for f32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for F16Bits"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for Bf16Bits"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for i64"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for i32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for i16"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for i8"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ElementStorage for Bool8"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "TensorElement for T"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "assert_registration"
+          }
+        ],
         "crates/chelis-vocab/src/lib.rs": [
           {
             "kind": "dtype-contract",
@@ -3003,6 +3013,20 @@
             "reason_prefix": "unclassified inventory hit"
           },
           "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_element_binding",
+          "expected_kind": "dtype-contract",
+          "path": "crates/chelis-runtime/src/element.rs",
+          "implementation_sha256": "d2cca9e8fd228f5261ca942115d339fcc8515bf2e48f0c4dc0079e50539baede",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "ElementStorage for UnregisteredElement"
+          ],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3455,6 +3479,10 @@
       ]
     },
     "release_reproducers": [
+      {
+        "name": "sealed runtime element contract",
+        "command": "cargo nextest run --release -p chelis-runtime --test element_contract"
+      },
       {
         "name": "closed representation vocabulary contract",
         "command": "cargo nextest run -p chelis-vocab --test dtype_contract --test dtype_contract_compile"
