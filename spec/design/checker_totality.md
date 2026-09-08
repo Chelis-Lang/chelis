@@ -1456,7 +1456,13 @@ and §4.5.3's named-axis forms are `insert`'s. The measurements below were taken
 on the two-candidate code at
 `f5ec5ca63` and are kept as the record of what that code does; each
 conclusion is stated under the single-meaning rule, and where the two differ
-the text says which is which.
+the text says which is which. That code no longer exists: chelis#1277 S2b
+flipped the checker, the lowering and the host interpreter onto the single
+meaning, and S2c deleted the deferral ledger, the settlement executor, the
+`TensorSettlement` registry and the source-ordinal index. Every symbol the
+measurements name below (`DeferredExpandConstraint`, `candidate_types`,
+`DeferralAction`, `ShapeEvidence`) is gone from the tree, so the line
+references are archaeology rather than navigation.
 
 **D1. Rank agreement between elementwise operands is decided by unification,
 totally and at both ingresses.** Every `ShapeClass::Identity` binary builtin

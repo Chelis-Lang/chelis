@@ -325,47 +325,31 @@ is one of: the owning numbered-spec rule, for language-result selection; this
 implementation contract with a stated key order (UTF-8 byte order, `NodeId` numeric
 order), for byte and presentation order; or C4, for cache bytes.
 
-For [#1338], `spec/04-type-system.md` §4.7.2 decides the order: deferred results
-settle in the source order of their `expand` expressions in the canonical Deep
-program, a result carrying several obligations takes the position of its earliest
-`expand` and settles to the first candidate satisfying all of them (obligations in
-source order, same-rank before insertion), and the element-count relations of the
-`reshape` expressions that consume a settled result resolve in `reshape` source
-order before the next result settles. `TypeVar(u32)` allocation order is not that
-order: inference visits definitions in dependency order (`infer/declarations.rs`
-Tarjan SCCs), so the implementation records a source ordinal on each obligation: the
-pre-order index of its `expand` in the program, or, for an obligation carried out of
-a serialized library context, the index of its instantiation site in the downstream
-program, assigned at first reference and placed after every program ordinal when
-never referenced. `bind_tvar`'s obligation `extend` becomes an ordered merge.
+For [#1338], `spec/04-type-system.md` §4.7.2 decided the order: deferred results
+settled in the source order of their `expand` expressions in the canonical Deep
+program, a result carrying several obligations took the position of its earliest
+`expand`, and the element-count relations of the `reshape` expressions consuming a
+settled result resolved in `reshape` source order before the next result settled.
+`TypeVar(u32)` allocation order is not that order, because inference visits
+definitions in dependency order (`infer/declarations.rs` Tarjan SCCs), so the
+implementation recorded a source ordinal on each obligation and `bind_tvar`'s
+obligation `extend` became an ordered merge.
 
-§4.7.2 also states, with §4.7.3, that a `reshape` result is shape-bearing for its
-consumers from its shape list alone while only its input's form stays open. That
-sentence decides the [#1338] family:
-`sub(reshape(expand(a, 0, 6i64), [3i64, 2i64]), expand(b, 0, 3i64))` and its
-mirrored operand order both accept, because the `reshape` result is `tensor[3, 2]`
-under either form of `a`, so `sub` fixes `b` by rank before any default fires and
-`a` defaults to `[6]` at the freeze point. Today's
-`resolve_deferred_expand_for_reshape` instead keeps the `reshape` result as a type
-variable carrying one output per input candidate until the input settles, even
-when every candidate agrees; in the mirror, `bind_tvar` then aliases `b`'s
-obligations onto that variable and `materialize_deferred_expand_default` selects
-`[3]` from the `expand` obligations alone and rejects at the first `reshape`
-requirement. That deferral, not the settlement order, is what makes the mirror
-reject in some runs, and Phase A removes it. §4.7.2 further states that a `shape`
-read of an open result, inside a `reshape` list or elsewhere, requires the tensor
-type and selects the replacement form, so `reshape(e, [shape(e, 1), 6i64])` over
-`e = expand(to_tensor([0.0f32]), 0, 6i64)` is a type error (axis 1 on rank 1)
-rather than today's per-form acceptance as `tensor[1, 6]`; Phase A adds that
-program as a rejecting row. For an aliased pair such as
-`add(expand(x, 0, 3i64), expand(y, 0, 3i64))` with `x: tensor[2]` and
-`y: tensor[3, 2]`, today's unification-direction producer order and the rule both
-select `[3, 2]`; only the first-rejection message moves for rejecting pairs. The
-settlement order still decides which named extents and diagnostics a program
-carries, which C1 counts as observable; no program is known whose verdict changes
-with the order once a `reshape` publishes its shape. Order-independent resolution
-beyond what §4.7.2 states is the totality question that [#1277] and [#1265] own and
-remains a non-goal here.
+**That whole paragraph is superseded, and with it the defect it describes.**
+`spec/04` §4.7.2 now gives `expand` and `insert` one result shape each ([#1532]),
+so no result is deferred, there are no obligations to order, and [#1338] is
+resolved by construction rather than by ordering: with nothing recorded there is no
+order to get wrong. The stores, the ordinals and their index, the alias merge and
+the freeze loop are deleted (chelis#1277 S2b and S2c). The reproducer's own
+operands moved with the meaning. `expand(to_tensor([0.0f32]), 0, 6i64)` is now a
+same-rank broadcast of a unit axis, which is legal and has one answer, while
+`expand(to_tensor([1.0f32, 2.0f32]), 0, 3i64)` claims extent 1 at an axis carrying
+2 and is a check-time type error; `examples/hash_order_determinism.ch` therefore
+spells `insert`, and 12 of 12 `check` runs accept it at score 1.
+
+Order-independent resolution beyond what §4.7.2 states was the totality question
+[#1277] and [#1265] owned, and it is answered the same way: one meaning per
+primitive leaves nothing to resolve.
 
 #### C3.2 Ordered representation
 
@@ -373,12 +357,12 @@ The wrapper is the workspace default; `BTreeMap`/`BTreeSet` when a consumer need
 iteration and their `Ord` is the canonical order; otherwise a private newtype with
 a canonical iterator or a boundary sort. An insertion-ordered map is allowed only
 when the owning authority makes insertion order canonical. The two deferred
-constraint stores in `Subst` are newtyped with the recorded ordinal and a canonical
-iterator; raw access is private, so a new unordered walk fails at compile time.
-Tests construct equal contents through canonical, reverse, and fixed shuffled
-insertion orders and through fresh hash states, then assert the same canonical
-iterator and observable result. They never reverse the canonical settlement order:
-that would test the stronger, out-of-scope property of order-independent resolution.
+constraint stores in `Subst` were the worked example of that rule: newtyped with a
+recorded ordinal and a canonical iterator, raw access private so a new unordered
+walk failed at compile time, and tested through canonical, reverse and fixed
+shuffled insertion orders against fresh hash states. Both stores are deleted with
+their subject, so the example is historical; the rule it illustrates still binds
+every remaining ordered store.
 
 ### C4 Cache bytes
 
@@ -443,23 +427,27 @@ reproducibility but is not the authority or a prerequisite here.
 
 ### C5 Oracles
 
-Each phase names one command. Phase A's Python runner composes the compile-fail,
+Each phase names one command. Phase A's Python runner composed the compile-fail,
 source-order perturbation, cache-version, executable-example, executable eval/C
-parity, reshape-regression, and fresh-process CLI suites; the raw-store compile-fail
-leg also runs in the gate's
-`lint-and-unit` stage and the `--local` subset, whose membership
-`scripts/test_gate.py` locks. Phase B's configuration-closure check and named
+parity, reshape-regression, and fresh-process CLI suites. The legs whose subject
+was the two-candidate settlement are deleted with it, and the runner keeps the
+four that were never about it: the cache-version test, the executable-example and
+eval/C parity rows, and `issue_942_inferred_tensor_cast`. The raw-store
+compile-fail leg is gone from the gate's `lint-and-unit` stage and the `--local`
+subset with the store it probed; `scripts/test_gate.py` still locks that
+membership. Phase B's configuration-closure check and named
 cache-byte tests run in its named oracle, and two of its legs also run in the
 gate's `lint-and-unit` stage and the `--local` subset: the closure check,
 ordered after the Clippy commands that produce the dep-info it reads, and the
 disallowed-type compile-fail fixture. That fixture is the ban's liveness proof.
 Nothing else continuous reads `clippy.toml`, and no workspace source spells the
 banned types, so deleting the two `disallowed-types` entries would otherwise
-leave every job green. The fresh-process stability tests cover the [#1338] reproducer, its
-mirrored operand order, the aliased pair, and the three-way case of Phase A, and the
-existing byte-determinism regressions (`codegen_determinism.rs`,
-`rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) stay present and
-green. The Phase B command registry also pins the exact production
+leave every job green. Phase A's fresh-process stability tests covered the [#1338]
+reproducer, its mirrored operand order, the aliased pair, and the three-way case;
+they are deleted with the settlement they exercised. The existing
+byte-determinism regressions (`codegen_determinism.rs`,
+`rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) are unrelated to
+that model and stay present and green. The Phase B command registry also pins the exact production
 `stale_stdlib_byte_mutation_misses_not_stale_hit` test; it uses `cargo test --exact`
 because the repository's default nextest filter can select zero tests. Repeated
 fresh-process runs have a fixed budget of 24 and make no statistical
@@ -467,29 +455,42 @@ confidence or false-pass claim.
 
 ## Part II: phases
 
-### Phase A - the specified open sites - IMPLEMENTED
+### Phase A - the specified open sites - IMPLEMENTED, THEN SUPERSEDED WITH ITS SUBJECT
 
-**Prerequisite:** none. The settlement order and the `reshape` rule are decided in
-`spec/04` §4.7.2. This phase may land before Phase B.
+**Prerequisite:** none. The settlement order and the `reshape` rule were decided in
+`spec/04` §4.7.2. This phase could land before Phase B.
 
-**Deliver:** the two deferred-constraint stores in `Subst` newtyped over a recorded
-source ordinal exactly as §4.7.2 states; a `reshape` result that publishes the shape
-§4.7.3 assigns it at once, with its input's element-count relation the only pending
-obligation; compile-fail raw-access coverage; insertion-order perturbations;
+**Delivered:** the two deferred-constraint stores in `Subst` newtyped over a recorded
+source ordinal exactly as §4.7.2 then stated; a `reshape` result that published the
+shape §4.7.3 assigns it at once, with its input's element-count relation the only
+pending obligation; compile-fail raw-access coverage; insertion-order perturbations;
 stability rows, all accepting in 24 fresh processes, for the reproducer, its
-mirrored operand order, `add(expand(x, 0, 3i64), expand(y, 0, 3i64))`, and
-`sub(reshape(expand(a, 0, 6i64), [3i64, 2i64]), add(expand(x, 0, 3i64), expand(y, 0, 3i64)))`
-in both operand orders, and a rejecting row for `reshape(e, [shape(e, 1), 6i64])`;
-and a freeze-point rejection diagnostic that names the settlement rule and
-suggests a declared result shape. Because the ordered obligation fields change the
-serialized `TypeEnv` shape, the compiled-context, stdlib, and library cache format
-versions advance in the same phase; Phase B still owns canonical cache bytes.
+mirrored operand order, and the aliased and three-way cases; a rejecting row for
+`reshape(e, [shape(e, 1), 6i64])`; and a freeze-point rejection diagnostic naming
+the settlement rule. Because the ordered obligation fields changed the serialized
+`TypeEnv` shape, the compiled-context, stdlib, and library cache format versions
+advanced in the same phase; Phase B still owns canonical cache bytes.
+
+**Superseded.** `spec/04` §4.7.2 now gives `expand` and `insert` one result shape
+each ([#1532]), so no result is deferred, no store is populated, and nothing is
+iterated. Everything above whose subject was the ordering of that settlement is
+deleted (chelis#1277 S2b and S2c): the two stores, the source ordinals and their
+whole index, the alias merge, the freeze loop and its diagnostic, the raw-access
+compile-fail fixture with its checker script and gate stage, the perturbation and
+ordering unit rows, and the K=24 stability target. The cache formats advance once
+more for the removal. [#1338] is resolved by construction rather than by ordering:
+with nothing recorded there is no order to get wrong, measured as 12 of 12 accepts
+at score 1 on `examples/hash_order_determinism.ch`, which now spells `insert`.
 
 **Explicitly excluded:** consumer-selection totality such as [#1265]. This phase
-guarantees one specified order, not equal results under arbitrary orders.
+guaranteed one specified order, not equal results under arbitrary orders.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_phase_a_oracle.py` exits 0 with
-the final line `HASH ORDER PHASE A ORACLE: PASS`. It passed on 2026-08-31.
+the final line `HASH ORDER PHASE A ORACLE: PASS`. It passed on 2026-08-31, and
+again after the removal reduced it to its four components that were never about
+the two-candidate model: the cache-version test, the executable-example and
+eval/C parity rows over `hash_order_determinism.ch`, and
+`issue_942_inferred_tensor_cast`.
 
 ### Phase B - class closure - IMPLEMENTED
 
@@ -526,10 +527,10 @@ It must run after the gate's Clippy stages, which produce the dep-info it reads.
   `positional expand settlement order` contract) together with this document's
   definitions of the freeze point, the merged-obligation rule, the `reshape`
   publication rule, and the `shape`-read rule, and recomputes the shared
-  frozen-file digest. `runtime_extents.md` C1.4, its Freeze action, and its Slice C
-  key the deferred stores by source-introduction position and cite this document
-  for the ordered-store mechanism, which matches C3.1; its deferral-stability row 6
-  depends on the `reshape` publication rule.
+  frozen-file digest. That §4.7.2 language is itself superseded by [#1532]'s one
+  shape per primitive, so `runtime_extents.md`'s Freeze action and its Slice C are
+  withdrawn and the ordered-store mechanism they cited is deleted. C3.1 still
+  governs every ordered store that remains.
 - **[#731]:** private/unconstructible boundary precedent only.
 - **[#1198]:** owns build-script and external expansion reproducibility.
 - **Non-goals:** arbitrary-order-independent deferred resolution; language-level
@@ -621,3 +622,4 @@ expose.
 [#1338]: https://github.com/Chelis-Lang/chelis/issues/1338
 [#1341]: https://github.com/Chelis-Lang/chelis/issues/1341
 [#1343]: https://github.com/Chelis-Lang/chelis/pull/1343
+[#1532]: https://github.com/Chelis-Lang/chelis/pull/1532

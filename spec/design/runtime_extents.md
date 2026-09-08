@@ -60,11 +60,11 @@ without changing which programs the provenance walk accepts. Slice B gives
 every realized output axis one checked source, derives the equality classes
 `spec/04` requires from that and the claims the checker stamps, places the
 guards on every lane, and only then deletes the provenance rejections the
-guards replace. Slice C
-makes the one genuine deferral
-(positional `expand`) total and deterministic. One runner records the
-baseline and enforces the allowed progression from an ICE or lane divergence,
-through a typed implementation receipt, to exact execution.
+guards replace. Slice C is superseded: `spec/04` §4.7.2 gives `expand` and
+`insert` one result shape each, so the deferral that slice was to make total
+and deterministic does not exist and its machinery is deleted. One runner
+records the baseline and enforces the allowed progression from an ICE or lane
+divergence, through a typed implementation receipt, to exact execution.
 
 ## The evidence: four mechanisms, measured
 
@@ -523,18 +523,17 @@ the defect class this slice removes.
   today. Best-effort identity recognition may survive only as refinement
   whose failure result is a fresh extent plus a guard.
 - **C2.8 The deferral mechanism leaves in one cut, not in pieces.** S2b's
-  single result shape per operation removes the only root producer of a
-  deferred tensor, and the exact consequence was measured rather than
-  estimated: `cargo clippy -p chelis-types` on the non-test build then reports
-  exactly one dead item, `Subst::record_deferred_expand_constraint`. Everything
-  else stays live, because the settlement runs unconditionally and now finds no
-  obligation. That recorder's only surviving callers are sixteen `unify.rs`
-  tests, ten of them the `hash_order_*` rows [#1341]'s Phase A oracle runs, so
-  deleting the method would drag the removal slice's test cut into S2b. It is
-  `#[cfg(test)]` instead: the production build carries no unreachable recording
-  path, the dead-code lint speaks up if one reappears, and the recorder, both
-  stores, `mod deferred_order`, `builtins.rs`'s `TensorSettlement` field and
-  those sixteen tests leave together in the removal slice as one cut.
+  single result shape per operation removed the only root producer of a
+  deferred tensor and left the recorder `#[cfg(test)]`, so the production build
+  carried no unreachable recording path while sixteen `unify.rs` tests still
+  drove it. S2c made the cut. Measured on the S2b head before cutting: renaming
+  the two store fields produced errors only inside `unify.rs`, so the stores had
+  no reference outside it, and the recorder, both stores, `mod deferred_order`,
+  the settlement executor, `builtins.rs`'s registry and those sixteen tests left
+  together. The cut ran one item wider than this paragraph anticipated. The
+  `SourceOrdinal` index in `checked.rs` had no consumer that was not a store
+  producer once there was nothing to settle, so [#1341]'s Phase A ordering
+  machinery left with the stores; its Phase B is untouched.
 
 - **C2.9 The unit-extent claim is a second claim KIND, not a second answer.**
   `spec/05` §2.4.1 makes the same-rank `expand` "a claim that the operand's
@@ -576,73 +575,31 @@ the defect class this slice removes.
   never reaches HIP device codegen at all ([#616] refuses it) and the program
   is routed to the shared host lowering, which is where the guard already is.
 
-### C3 Positional expand uses one normative protocol
+### C3 Positional expand uses one normative protocol - SUPERSEDED
 
-The implementation derives its action from `spec/04` §4.7.2 rather than
-assigning semantic labels by intuition:
+C3 derived a three-action protocol from `spec/04` §4.7.2: `Constrain` selected
+the unique candidate an independently fixed rank or shape equation admitted,
+`Propagate` carried the unresolved monomorphic candidate through a context that
+required neither rank, and `Freeze` materialized the context-free default at
+the program freeze point in source order. A registry field on every builtin
+declared which action it took, with `NoTensorOperand` and `RejectsUnresolved`
+beside the three, and a tripwire test held the registry to measured behavior.
 
-- **`Constrain(expected)`** applies when the context supplies an
-  independently fixed tensor rank or shape equation: a declared result, an
-  ascription, an already-instantiated user-function parameter or generic
-  field, a branch join with independently resolved shape evidence, or a
-  builtin relation with an independently resolved operand equation. It
-  selects the unique candidate satisfying that equation. A comparison
-  constrains a pending operand only when its other operand or the
-  surrounding resolved evidence supplies an independent equation; two
-  pending operands link and propagate their shared choice even though the
-  comparison result is scalar or boolean.
-- **`Propagate`** applies when a context can carry the same unresolved
-  monomorphic candidate without requiring either rank: an anonymous tuple
-  field, a closure capture, a fresh generic field or parameter, a singleton
-  `List`, the seed element of an inferred `List`, and an undeclared closure
-  return. It adds no evidence and cannot select or clone the choice.
-- **`Freeze`** is superseded: see the Slice C paragraph below. It applied
-  only at a freeze point §4.7.2 named, when a concrete
-  tensor shape was required and no independent constraint selected a
-  candidate: an axis within the input rank selected same-rank replacement and
-  `axis == rank(input)` selected trailing insertion. When several results
-  froze together they settled in source order, which the stores
-  realize by keying deferred constraints by the result's source-introduction
-  position (a library result at its instantiation site) in a `Vec`, never a
-  `HashMap`; `TypeVar` allocation order is dependency order under the
-  callee-first SCC schedule (`crates/chelis-types/src/infer/declarations.rs`,
-  line 409) and is not the key. [#1341] owns the general mechanism and this
-  plan owns the extent verdict.
+`spec/04` §4.7.2 now gives `expand` and `insert` one result shape each. There
+is no candidate to select, propagate, or freeze, so the protocol has no
+subject: the three actions, the evidence variants, the freeze point, the
+settlement stores with their source ordinals, and the whole registry are
+deleted. What survives is the one repair that was never about candidates: the
+comparison family routes its result through unification rather than
+constructing it out of band ([#1265]).
 
-Every inference rule that consumes a tensor invokes exactly one action, and
-the comparison family stops constructing its result out of band: it routes
-through unification so that a consumer which supplies a shape necessarily
-binds its operands' pending candidates ([#1265]), and its
-`expand -> add -> eq` variant closes with it. The action is derived from
-resolved expected-shape evidence, not from container syntax: a concrete
-declared record or ADT field, an already-instantiated generic field, a
-declared `List` element type, and a later `List` element facing an
-independently resolved accumulated element shape constrain; if a later
-concrete element supplies the first independent shape, that evidence
-constrains the earlier pending seed; tuple, record, and ADT projection and
-pattern binding transfer the selected token; record update constrains an
-updated field only when its resolved schema is independent.
-
-One tripwire test walks the builtin registry and asserts that every builtin
-consuming a tensor declares which of the dispositions below it takes, and that
-one representative per inference family behaves as its family declares; a
-builtin without a disposition fails that test. The declared set is larger than
-the three actions above, because enumerating the surface found behavior they do
-not describe. Beyond `Constrains`, `Propagates` and `Freezes`, a builtin may
-declare `NoTensorOperand`, meaning no operand slot admits a tensor, or
-`RejectsUnresolved`, meaning it refuses an unresolved operand outright rather
-than considering its candidate forms. That non-conformance is superseded: see
-the Slice C paragraph below. It held while
-§4.7.2 enumerated rejection as the outcome of admitting no candidate form,
-while these routes reject before looking at the forms at all. The class is any
-checked route whose first act is a positive test on the operand, because an
-unresolved variable satisfies no positive test; it is tracked as [#1489] and
-the variant is deleted when that issue is resolved by making those routes
-defer. The three-action set was written before anyone had enumerated the
-builtin surface, which is why it did not cover these two cases. The
-semantic tests execute both candidate outcomes and a contradictory shape for
-every `Constrain` context, propagation followed by later selection for every
-`Propagate` context, and the documented default for every `Freeze` context.
+The `RejectsUnresolved` variant is deleted with the registry, and that is not
+[#1489]'s resolution. Measured against that issue's own body: its four gates
+(`copy`, `cast`, `gather`/`scatter`, `concat`) reject an unresolved type
+variable arising from inference timing, at a rate that rose with [#1318] and
+[#1328], and not one of its witnesses involves a deferred `expand`. The
+registry was a census of that class, not a fix for it. [#1489] stays open and
+loses its census artifact.
 
 ### C4 Every realized output axis has one checked source
 
@@ -848,8 +805,8 @@ state and rejects unexplained per-lane changes in every other row.
 
 ## Part III: slices
 
-Each slice names one authoritative oracle. Slice C touches `chelis-types`
-only and may land before Slice B.
+Each slice names one authoritative oracle. Slice C is withdrawn and names
+none; Slice A and Slice B keep theirs.
 
 ### Slice A - the value edge
 
@@ -1168,44 +1125,39 @@ transformation row, the positional-replacement zero rows, axis-source
 cardinality, and rebuild-survival rows asserting the derived classes after
 every pass.
 
-### Slice C - deferral totality and deterministic settlement
+### Slice C - deferral totality and deterministic settlement - WITHDRAWN
 
-**Superseded.** The language decision recorded in `spec/04` §4.7.2 gives
-`expand` and `insert` exactly one result shape each, so the two-candidate
-model this slice resolves no longer exists. Slice C's merged deliverables -
-the deferral executor, the comparison mirror, the `matmul` rank elimination,
-the carrier evidence rules, and the settlement registry - are superseded with
-it, along with its freeze point, its three-action protocol, its cancelled
-oracle phase, and its entry requirement on [#1341]'s ordered-store mechanism;
-they are scheduled for removal in the implementation work, not here. [#1338]
-is resolved by construction once that lands: coupled defaults cannot settle
-nondeterministically when there is nothing to settle. [#1512] narrows to its
-non-`expand` sources, because the unresolved-operand early return it reports
-no longer has a deferred `expand` result to be unresolved about. [#1265] and
-[#1380] need re-reading against the amended §4.7.2 before this slice is
-rewritten. `hash_order_determinism.md` and `dtype_semantics.md` record the
-superseded model and are corrected when the code is removed.
+**Withdrawn, and its machinery is deleted.** The language decision recorded in
+`spec/04` §4.7.2 gives `expand` and `insert` exactly one result shape each, so
+the two-candidate model this slice was to resolve does not exist. Slice C's
+merged deliverables (the deferral executor, the comparison mirror, the `matmul`
+rank elimination, the carrier evidence rules, and the settlement registry) go
+with it, along with its freeze point, its three-action protocol, its cancelled
+oracle phase, and its entry requirement on [#1341]'s ordered-store mechanism.
+S2b flipped the checker, the lowering and the host interpreter onto the single
+meaning; S2c deleted the ledger, the stores, the registry and the source-ordinal
+index. There is no Slice C oracle. `runtime_extent_oracle.py` still accepts
+`--phase c` and still lists `c` in `SLICE_PHASES`, so that argument fails with
+"corpus is not implemented" and `--phase final` fails on the same missing
+registration; retiring the phase from both tuples is residual work this change
+does not do. The class completion oracle remains `--phase final` with both GPU
+manual commands as platform legs.
 
-**Entry requirements:** the Slice A oracle runner; the `spec/04` §4.7.2
-settlement-order rule; [#1341]'s ordered-store mechanism, landed by its
-Phase A, which records a source ordinal on each deferred obligation and
-settles the two stores in that order.
+Verdicts on the issues this slice carried, measured on the S2b head:
 
-**Deliver:** on top of that settlement, the three-action protocol over
-resolved expected-shape evidence, the comparison-family unification route,
-the recursive composite-carrier rows, and the builtin-consumer tripwire.
-Close [#1265] when its complete reproducer is green. Use `Part of #1338`;
-close #1338 only if every remaining acceptance row owned by that issue is
-green.
-
-**Frozen at exit:** the action mapping, evidence variant set, recursive
-composite dispositions, settlement order, and K-run count.
-
-**Oracle:** `uv run --managed-python --python 3.11 --no-project python
-scripts/runtime_extent_oracle.py --phase c`; every action row and K fresh
-[#1338] processes produce one exact verdict. The same command with
-`--phase final`, plus both GPU manual commands as platform legs, is the
-class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
+- [#1338] is resolved by construction. Nothing is recorded, so no store is
+  iterated and no default settles: 12 of 12 `check` runs on
+  `examples/hash_order_determinism.ch` accept at score 1.
+- [#1530] is a check-time type error. All four declared results in its
+  reproducer reject with one `DimensionMismatch` naming §2.4.1's unit-extent
+  precondition.
+- [#1512] narrows to its non-`expand` sources. The unresolved-operand early
+  return it reports has no deferred `expand` result to be unresolved about, so
+  its tabled witnesses are unreachable. Four probe shapes on `sum(_, 1)` found
+  no residual instance, which is evidence over one of its eleven builtins
+  rather than proof the class is empty.
+- [#1489] is not resolved by this deletion; C3 above says why.
+- [#1265] and [#1380] closed under S2b.
 
 ## Part IV: bookkeeping
 
@@ -1297,8 +1249,8 @@ symbolic-dim defects not yet parented to [#1277], capacity and reuse equality
 over typed extent expressions
 ([`runtime_representation.md`](runtime_representation.md), [#888]), the four
 checker tensor gates that reject a not-yet-resolved type variable where the
-other ~71 defer ([#1489], related to Slice C's deferral totality but owned
-separately), and dtype-semantics decisions.
+other ~71 defer ([#1489], which the withdrawn Slice C's registry only
+counted and never fixed), and dtype-semantics decisions.
 
 ## Considered and rejected
 
@@ -1473,4 +1425,6 @@ decides the underlying rule, and what replaces it.
 [#1480]: https://github.com/Chelis-Lang/chelis/issues/1480
 [#1482]: https://github.com/Chelis-Lang/chelis/issues/1482
 [#1313]: https://github.com/Chelis-Lang/chelis/issues/1313
+[#1318]: https://github.com/Chelis-Lang/chelis/issues/1318
+[#1328]: https://github.com/Chelis-Lang/chelis/issues/1328
 [#1489]: https://github.com/Chelis-Lang/chelis/issues/1489
