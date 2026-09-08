@@ -103,9 +103,14 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// library-proof-identity fields. A V1 `chelis-lib-*.tc` written by a
 /// pre-extraction binary at the same compiler version is a clean miss.
 ///
+/// V9 removes both deferred-shape ledgers from the serialized `Subst`: under
+/// `spec/04-type-system.md` section 4.7.2 nothing is deferred. Bincode is
+/// positional, so a V8 entry carries two fields where the following ones are
+/// now expected.
+///
 /// V8: the serialized positional-expand ledger grew the
 /// `DeferredShapeObligation` enum for comparison shape mirrors.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 8;
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 9;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -603,7 +608,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 8);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 9);
     }
 
     #[test]

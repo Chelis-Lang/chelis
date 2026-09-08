@@ -237,7 +237,6 @@ pub(super) fn infer_program_with_product_in_session(
     let mut adt_reg = AdtRegistry::new();
     builtins::register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
     let mut product = InferenceProduct::default();
-    product.index_source_order(exprs);
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery).
@@ -437,15 +436,6 @@ pub(super) fn infer_program_with_product_in_session(
     if cancelled() {
         errors.push(crate::cancel::cancellation_check_error());
         return product;
-    }
-
-    // [04-TENSOR-EXPAND]: later roots get the first opportunity to select a
-    // positional expand's legal output shape. At the whole-program freeze
-    // point, materialize the documented context-free default for every
-    // still-unconstrained result, then refresh stamps written by earlier
-    // roots so no unresolved type escapes into checked annotations.
-    if let Err(error) = subst.materialize_deferred_expand_defaults() {
-        errors.push(error.into());
     }
     product.resolve_owner_types(&subst);
 
@@ -1043,14 +1033,6 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    // A reusable library context deliberately carries unresolved positional
-    // expand obligations into this cloned state. New code gets the first
-    // opportunity to select a legal shape; only now, when producing the final
-    // CheckedProgram, do otherwise-unselected results take the documented
-    // context-free default.
-    if let Err(error) = state.subst.materialize_deferred_expand_defaults() {
-        errors.push(error.into());
-    }
     product.resolve_owner_types(&state.subst);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
@@ -1239,7 +1221,6 @@ pub(super) fn infer_ir_program_with_state(
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
     let mut product = InferenceProduct::default();
-    product.index_source_order(exprs);
 
     // RFC v4b (RT-1 F2): reject a named module opened by more than one
     // wrapper in this check unit (module-identity forgery). Reef-linked

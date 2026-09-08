@@ -443,7 +443,7 @@ pub(super) fn infer_reshape_app(
 
             Type::Tensor(vec![Dim::Wildcard], precision)
         }
-        Type::Var(input_var) => {
+        Type::Var(_) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
@@ -505,17 +505,6 @@ pub(super) fn infer_reshape_app(
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
-                }
-                match subst.settle_deferred_tensor(
-                    input_var,
-                    DeferralAction::Constrain(ShapeEvidence::ElementCount {
-                        target_dims: &dims,
-                        ordinal: product.source_ordinal_for_list(list),
-                    }),
-                ) {
-                    Ok(Some(output)) => return output,
-                    Ok(None) => {}
-                    Err(error) => return report(errors, error.into()),
                 }
             }
             input_ty

@@ -800,18 +800,23 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V15\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V16\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
 ///
-/// V15: the serialized positional-expand ledger inside `TypeEnv` now carries
-/// a `DeferredShapeObligation` enum rather than a bare expand constraint, so
-/// that a comparison result can mirror its operand's open choice. Bincode is
-/// positional, so a V14 entry would decode into the wrong variant.
-const CACHE_FORMAT_VERSION: u32 = 15;
+/// V16 removes both deferred-shape ledgers from the serialized `Subst` inside
+/// `TypeEnv`. `spec/04-type-system.md` section 4.7.2 gives `expand` and
+/// `insert` one result shape each, so nothing is deferred and the two fields
+/// are gone. Bincode is positional, so a V15 entry carries two fields where
+/// the following ones are now expected.
+///
+/// V15: that ledger carried a `DeferredShapeObligation` enum rather than a
+/// bare expand constraint, so a comparison result could mirror its operand's
+/// open choice.
+const CACHE_FORMAT_VERSION: u32 = 16;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1329,13 +1334,13 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V15\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 15);
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V16\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 16);
     }
 
     #[test]
-    fn cache_format_version_tracks_ordered_deferred_constraints() {
-        assert_eq!(CACHE_FORMAT_VERSION, 15);
+    fn cache_format_version_tracks_the_deferred_ledger_removal() {
+        assert_eq!(CACHE_FORMAT_VERSION, 16);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
