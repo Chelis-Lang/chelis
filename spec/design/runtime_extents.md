@@ -1082,7 +1082,21 @@ naming here rather than leaving to the corpus file:
     in declared signature order and before any class guard, with the same
     context line and [04-NUM-9] rendering, so a `def main()`-free application
     such as `widened = f(seed, x)` traps on eval where its kernel traps on C.
-    The rooted half is S2b's static rejection.
+    The rooted half is NOT a static rejection. The `expand` spelling that
+    reading assumed was retired by the one-meaning decision, and in the
+    `insert` spelling S2a produced it is silent on BOTH lanes: measured at
+    `d7cb3d8df`, `check` scores 1 with no errors while `chelis eval --file`
+    and the compiled C both print `shape=[5]` under the declared
+    `tensor[4, f32]`, because the emitter gives the root its own kernel that
+    allocates at the read while the exported `f` carries the guard. The
+    recorded `lane_divergent` baseline is therefore stale for these two rows,
+    which stay at it until the fix moves them. They belong to the family
+    C2.4's literal-proof rule above leaves open, a `Literal` claim over a
+    member whose extent is statically known and DISAGREES with it, that rule
+    having settled only the matching case. The owner is B2b-0b, and whether
+    the family exits by a typed refusal at the derivation or by the
+    [04-NUM-9] trap the rows' receipts name is decided there; this paragraph
+    is amended in the same pull request as that answer.
   - [#665]'s `.c` row stays at `ice`. b2.3 routed the interface BINDING
     consumers through the derived witnesses; `symbolic_occurrences` has a
     second consumer it did not route, the C emitter's `runtime_dim_sites`,
