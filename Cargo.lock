@@ -664,6 +664,7 @@ dependencies = [
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
+ "num-bigint",
  "serde",
  "serde_json",
  "stacker",

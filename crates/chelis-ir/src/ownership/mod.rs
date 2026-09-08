@@ -375,6 +375,21 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::check_axis_sources(self.dag, stage)
     }
 
+    /// The checked extent source for each output axis of `node`.
+    ///
+    /// Kept crate-private so the exact-capacity owner can consume typed
+    /// provenance without exposing the raw DAG or a backend normalization
+    /// seam.
+    pub(crate) fn output_axis_sources(self, node: NodeId) -> Vec<crate::AxisSource> {
+        crate::axis_sources::output_axis_sources(self.dag, node)
+    }
+
+    /// The opaque program scope that makes DAG-local extent sources globally
+    /// non-interchangeable.
+    pub(crate) const fn capacity_scope(self) -> crate::capacity_key::CapacityScope {
+        self.plan.capacity_scope
+    }
+
     /// The exact verified ownership directive attached to `node`.
     ///
     /// Every retained DAG node has exactly one directive; backends use this
@@ -1694,6 +1709,7 @@ impl DagDirective {
 
 #[derive(Debug)]
 struct DagOwnershipPlan {
+    capacity_scope: crate::capacity_key::CapacityScope,
     owners: BTreeMap<NodeId, DagOwnerOrigin>,
     directives: Vec<DagDirective>,
 }
@@ -1867,7 +1883,11 @@ impl DagOwnershipPlan {
                 return Err(OwnershipError::DagMissingTerminal { owner: owner.0 });
             }
         }
-        Ok(Self { owners, directives })
+        Ok(Self {
+            capacity_scope: crate::capacity_key::fresh_capacity_scope(),
+            owners,
+            directives,
+        })
     }
 
     fn verify(&self, dag: &Dag) -> Result<(), OwnershipError> {
