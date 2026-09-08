@@ -45,7 +45,9 @@ pub(crate) fn resolve_declared_surface_in_session(
     exprs: &[deep::Expr],
     sink: &mut DiagnosticSink<'_>,
 ) -> Result<DeclaredTypeSurface, InferStats> {
+    let stack_scope = StackExhaustionScope::enter();
     fn validate_carriers(expr: &deep::Expr, sink: &mut DiagnosticSink<'_>) {
+        stack_guard!("validate_carriers", expr);
         if let Some((tag, meta, children)) = stamped_parts(expr) {
             // Node binder roles also admit patterns. Declaration collectors
             // require names here and otherwise skip the malformed declaration.
@@ -91,6 +93,7 @@ pub(crate) fn resolve_declared_surface_in_session(
         module: Option<String>,
         out: &mut Vec<(Option<String>, &'a deep::Expr)>,
     ) {
+        stack_guard!("declared_surface_items", expr);
         if let Some((DeepTag::Module, _, children)) = stamped_parts(expr) {
             let owner = children.first().and_then(symbol_name).map(str::to_string);
             for child in &children[1..] {
@@ -116,12 +119,17 @@ pub(crate) fn resolve_declared_surface_in_session(
     for expr in exprs {
         validate_carriers(expr, sink);
     }
+    stack_scope.drain_into(sink);
     if !sink.is_empty() {
         return Err(failed());
     }
     let mut declarations = Vec::new();
     for expr in exprs {
         items(expr, None, &mut declarations);
+    }
+    stack_scope.drain_into(sink);
+    if !sink.is_empty() {
+        return Err(failed());
     }
     for (_, expr) in &declarations {
         let valid = if let Some((tag, _, children)) = stamped_parts(expr) {
@@ -227,6 +235,7 @@ pub(crate) fn resolve_declared_surface_in_session(
             }
         }
     }
+    stack_scope.drain_into(sink);
     if sink.is_empty() {
         Ok(DeclaredTypeSurface {
             registry,

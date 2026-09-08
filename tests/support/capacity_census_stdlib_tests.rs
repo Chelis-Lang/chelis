@@ -349,6 +349,25 @@ fn mutually_recursive_aliases_substitute_their_payload_parameter() {
 }
 
 #[test]
+fn tensor_alias_precision_is_substituted_before_numeric_classification() {
+    for (argument, expected) in [
+        ("bool", false),
+        ("int32", true),
+        ("p", true),
+        ("Identity[p]", true),
+    ] {
+        let source = format!(
+            "module Std.Precision\nexport (read)\ntype Identity[a] = a\ntype Vector[a] = tensor[3, a]\nsig read: Vector[{argument}] -> Vector[{argument}]\ndef read(x) = x"
+        );
+        assert_eq!(
+            numeric(&sources(&[("precision", &source)]), "precision::read"),
+            expected,
+            "{argument}"
+        );
+    }
+}
+
+#[test]
 fn legacy_precision_spellings_remain_a_conservative_backstop() {
     for (binder, expected) in [
         ("p_float", true),

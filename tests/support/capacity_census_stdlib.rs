@@ -12,12 +12,24 @@ use std::collections::VecDeque;
 struct Capacity {
     prims: BTreeSet<String>,
     params: BTreeSet<usize>,
+    precision_params: BTreeSet<usize>,
+    free_variable: bool,
 }
 
 impl Capacity {
     fn extend(&mut self, other: Self) {
         self.prims.extend(other.prims);
         self.params.extend(other.params);
+        self.precision_params.extend(other.precision_params);
+        self.free_variable |= other.free_variable;
+    }
+
+    fn at_precision(mut self, bare: bool) -> Self {
+        self.precision_params.extend(&self.params);
+        if !bare && self.free_variable {
+            self.prims.insert("tensor-precision".to_string());
+        }
+        self
     }
 }
 
@@ -97,6 +109,7 @@ impl Closure {
                     reachable: Capacity {
                         prims: BTreeSet::new(),
                         params: (0..arity).collect(),
+                        ..Capacity::default()
                     },
                     bare: Capacity::default(),
                 });
@@ -205,16 +218,17 @@ impl Closure {
             Type::Var(var) | Type::Tensor(_, TensorPrec::Var(var)) => {
                 if let Some(index) = params.get(var) {
                     result.params.insert(*index);
+                } else {
+                    result.free_variable = true;
                 }
-                if !bare {
-                    if matches!(ty, Type::Tensor(..)) {
-                        result.prims.insert("tensor-precision".to_string());
-                    }
-                    if let Some(name) = names.get(var)
-                        && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "q" | "Q")
-                    {
-                        result.prims.insert(name.clone());
-                    }
+                if matches!(ty, Type::Tensor(..)) {
+                    result = result.at_precision(bare);
+                }
+                if !bare
+                    && let Some(name) = names.get(var)
+                    && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "q" | "Q")
+                {
+                    result.prims.insert(name.clone());
                 }
             }
             Type::Fn(args, ret) => {
@@ -273,6 +287,8 @@ impl Closure {
         let mut result = Capacity {
             prims: transfer.prims.clone(),
             params: BTreeSet::new(),
+            free_variable: transfer.free_variable,
+            ..Capacity::default()
         };
         // Resolve every argument even for a phantom parameter: an unused
         // argument does not authorize an unresolved name or error sentinel.
@@ -281,14 +297,20 @@ impl Closure {
             .map(|arg| arg.map(|ty| self.capacity(ty, bare, params, names)))
             .collect::<Vec<_>>();
         for &index in &transfer.params {
-            result.extend(
-                actuals
-                    .get(index)
-                    .and_then(Clone::clone)
-                    .unwrap_or_else(|| {
-                        panic!("invalid type argument {index} for `{name}` in stdlib closure")
-                    }),
-            );
+            let actual = actuals
+                .get(index)
+                .and_then(Clone::clone)
+                .unwrap_or_else(|| {
+                    panic!("invalid type argument {index} for `{name}` in stdlib closure")
+                });
+            // A formal precision is classified after substitution: bool is
+            // nonnumeric, while a remaining free precision variable keeps
+            // the conservative tensor-capacity backstop through aliases.
+            result.extend(if transfer.precision_params.contains(&index) {
+                actual.at_precision(bare)
+            } else {
+                actual
+            });
         }
         result
     }
