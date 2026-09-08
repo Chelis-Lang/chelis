@@ -228,10 +228,37 @@ fn parameter_alias_arm_retains_before_block_release() {
          fresh string_slice arm already owns its result:\n{body}"
     );
     assert_eq!(
-        count_in(body, "chelis_string_release("),
+        count_in(body, "chelis_string_release(text);"),
         2,
-        "the branch-result owner and the body-owned parameter are each \
-         released once:\n{body}"
+        "the body-owned parameter must have one release site in each mutually \
+         exclusive branch:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release(__let_0);"),
+        1,
+        "the joined branch-result owner must be released once after use:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release("),
+        3,
+        "the two exclusive parameter-release sites plus the joined-result \
+         release are the complete source-level release plan:\n{body}"
+    );
+
+    let alias_retain = body
+        .find("chelis_string_retain(text);")
+        .expect("parameter-aliasing arm retain");
+    let alias_release = alias_retain
+        + body[alias_retain..]
+            .find("chelis_string_release(text);")
+            .expect("parameter-aliasing arm release");
+    let joined_release = body
+        .find("chelis_string_release(__let_0);")
+        .expect("joined-result release");
+    assert!(
+        alias_retain < alias_release && alias_release < joined_release,
+        "the alias arm must retain before releasing its parameter owner, and \
+         the joined result must be released afterward:\n{body}"
     );
 }
 
