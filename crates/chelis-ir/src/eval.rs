@@ -2335,17 +2335,33 @@ where
                 // the site is skipped rather than compared against an invented
                 // number.
                 //
-                // The C lane does NOT match here, and saying so is the point:
-                // `emit_runtime_dim_site` consults no binding table and emits
-                // its comparison against the binder unconditionally, so where
-                // this lane skips, C would emit an identifier its prologue may
-                // never declare. Neither behaviour has a witness - a `Name`
-                // class needs two members, and every two-member class either
-                // lane can build so far has a `Load` axis that declares the
-                // binder - so this is a latent asymmetry in one derivation's
-                // two consumers, recorded rather than papered over. Closing it
-                // means giving the derivation the answer, not adding a second
-                // test in either lane.
+                // The C lane does NOT match here, and saying so is the point.
+                // Once control reaches `emit_runtime_dim_site`'s GUARD branch
+                // it consults no binding table and emits its comparison
+                // against the binder unconditionally, so where this lane
+                // skips, C would emit an identifier its prologue may never
+                // declare.
+                //
+                // What keeps that from being a live divergence is not the
+                // absence of such a class - one is easy to build, with a
+                // `Load` whose only axis is a literal and two op-declared
+                // members - but the branch above it. `runtime_dim_sites`
+                // (`chelis-backend-c/src/emit.rs`) makes the FIRST op-declared
+                // occurrence of a symbol no `Load` declares a DECLARE site, so
+                // `emit_runtime_dim_site` returns before the guard branch for
+                // exactly the symbols this lane has not bound; a later site
+                // for that symbol compares against a variable by then
+                // declared. The eval mirror is the `runtime_dims` insert at
+                // the foot of this loop, which binds the same symbol when the
+                // same node evaluates. The lanes line up case by case.
+                //
+                // The residual window is a derivation site that the legacy
+                // `symbolic_occurrences` walk records nowhere, for a symbol
+                // nothing declares. Neither this author nor a reviewer could
+                // construct one. It stays a latent asymmetry in one
+                // derivation's two consumers, recorded rather than papered
+                // over, and closing it means giving the derivation the answer
+                // rather than adding a second test in either lane.
                 let claimed = match &claim.canonical {
                     crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
                     crate::axis_sources::CanonicalExtent::Binder(name) => {
