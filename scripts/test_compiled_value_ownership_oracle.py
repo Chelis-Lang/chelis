@@ -700,6 +700,18 @@ class ManifestContractTests(unittest.TestCase):
         cases = (
             (
                 storage_path,
+                "    for slot in slots {",
+                "    for slot in slots.iter().skip(1) {",
+                "physical-byte authority",
+            ),
+            (
+                storage_path,
+                "            .checked_add(bytes)",
+                "            .wrapping_add(bytes)",
+                "physical-byte authority",
+            ),
+            (
+                storage_path,
                 "        if !self.terminal_use {",
                 "        if false && !self.terminal_use {",
                 "shared storage proof",

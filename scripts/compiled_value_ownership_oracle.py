@@ -1399,9 +1399,11 @@ def validate_active_mutation_contracts(phase: str) -> None:
         "let token = self.reusable.remove(&consumer);",
         "pub fn plan_c_storage(\n    program: VerifiedDagProgram,",
         "pub fn plan_hip_storage(\n    program: VerifiedDagProgram,",
-        "let live = intervals",
-        ".collect::<BTreeSet<_>>();",
-        "slots[slot.index].capacity.allocation_bytes",
+        "fn physical_live_byte_bound(slots: &[StorageSlotPlan])",
+        "    for slot in slots {",
+        "slot.capacity.allocation_bytes",
+        "total = total\n            .checked_add(bytes)",
+        "Ok(LiveByteBound::Exact(total))",
     )
     missing_storage = tuple(
         requirement
