@@ -264,7 +264,7 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
         "crates/chelis-types/src/unify.rs",
         1,
         1,
-        "neither is about the operations. This file held 18 and 2 for the deferred two-shape constraint machinery and its tests, which chelis#1277 S2c deleted. What is left are two substring matches in unrelated test expectations: `expanded rank reaches the older type` and `a forbidden direct insertion must fail explicitly`. The scanner counts substrings, so the English words score",
+        "one live diagnostic carries both, in one message: the chelis#339 rank-spread collision at `:1653` says `(a named-axis expand insert)` when a signature's result introduces an axis name a spread already binds. That is the site class this inventory watches, a user-facing message about the two operations, and it is unrelated to the deferral. This file held 18 and 2 for the deferred two-shape constraint machinery and its tests, which chelis#1277 S2c deleted; that row leaves, this one does not",
     ),
 ];
 

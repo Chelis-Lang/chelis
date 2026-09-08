@@ -201,7 +201,7 @@ issue it, the hosts it runs on, and its cadence:
 | row | compiles | owner | cadence |
 |---|---|---|---|
 | `default-features` | default features | `scripts/gate.py` | per pull request |
-| `solver-free-features` | `sleef`, `hip-local-gpu`, `clarabel`, `extension-module`, `ownership-ledger`, and the three `chelis-types` probe features | `scripts/gate.py` | per pull request |
+| `solver-free-features` | `sleef`, `hip-local-gpu`, `clarabel`, `extension-module`, `ownership-ledger`, and the two `chelis-types` probe features | `scripts/gate.py` | per pull request |
 | `no-default-features` | every default feature in its off-state | `scripts/gate.py` | per pull request |
 | `cvc5-features` | `smt` for `chelis-cli`, `chelis-prove`, `chelis-tide` | `ci.yml`'s `SMT Feature Build (Linux)`, which already provisions cvc5 | per pull request |
 | `all-features` | every declared feature at once | `smt-full-prove.yml`, the only runner that provisions every solver | nightly |
