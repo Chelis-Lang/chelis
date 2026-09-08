@@ -154,6 +154,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "the migration half of the inverted Coral gate: the six programs as Coral must now spell them",
     ),
     (
+        "crates/chelis-cli/tests/issue_1506_replacement_spelling_on_the_lanes.rs",
+        3,
+        "the literal-size, symbolic-size, and folded replacement controls broadcast a unit-extent operand at its existing axis",
+    ),
+    (
         "crates/chelis-types/tests/issue5_cmp_broadcast_both_forms.rs",
         5,
         "one comparison over two unit-extent broadcasts of `to_tensor([0.5f32])`, plus the four sites of the replacement spelling the rejection names",

@@ -326,15 +326,14 @@ pub(super) fn finish_unified_app(
     }
 
     // Special case: comparison ops return tensor[D, bool] when their
-    // arguments are tensor-shaped. The two operands share one dimension row,
-    // so by the time this runs they are both tensors of the same shape or
-    // both scalars: chelis#1506 removed the scalar/tensor rewrite, and
-    // `[05-OP-36]` makes a mixed pair a type error reported before
-    // unification. The search below therefore reads a shape that both
-    // operands carry. It still scans rather than taking `arg_tys[0]`, because
-    // one operand can resolve to a variable while the other is ground, which
-    // is the shape of the issue #5 defect (`gt(1.5, xs)` returned
-    // `Prim(Bool)` instead of `tensor[D, bool]`).
+    // arguments resolve to tensors. chelis#1506 removed the scalar/tensor
+    // rewrite and rejects a concrete primitive beside a tensor before
+    // unification under `[05-OP-36]`. A bounded-binder cast can still enter
+    // unification as a type variable and acquire the tensor type (chelis#1621),
+    // so resolved types alone do not prove that both source operands were
+    // tensors. Keep searching for a tensor shape: one operand can remain a
+    // variable while the other is ground, and issue #5 guards the result shape
+    // when the first operand is not the one that supplies it.
     if let Some(ref fname) = func_name
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
     {

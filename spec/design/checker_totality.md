@@ -1439,13 +1439,15 @@ both lanes and asserts the trap text. What closes for them is the rest of
 0i32))` rows are [#1512]'s, for the same reason: their operand is a genuinely
 unresolved reduction result, not an `expand` one.
 
-The comparison family is decided and delivered by PR B: the scalar rewrite is
-gone, all seven identities refuse a scalar beside a tensor in both operand
-orders at both ingresses, and the diagnostic names `[05-OP-36]` and the
-explicit replacement. `issue_668_rank_agreement_is_unification` still asserts
-nothing about them, because `issue5_cmp_broadcast_both_forms` is their oracle.
+The comparison rule is decided, and PR B delivers its concrete-dtype cases:
+the scalar rewrite is gone, and `issue5_cmp_broadcast_both_forms` proves that
+all seven identities reject the concrete scalar/tensor pairs its fixtures
+spell, in both operand orders at both ingresses. Those rejections name
+`[05-OP-36]` and the explicit replacement. This is partial enforcement of
+[#1506]; the bounded-binder cases below remain open under [#1621].
+`issue_668_rank_agreement_is_unification` asserts nothing about comparisons.
 
-What remains unclaimed there is one lane, not the rule. The replacement the
+The execution-lane gap is separate from that checker residue. The replacement the
 diagnostic names, `expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32))`,
 executes on the evaluator and traps on C, because the unit-extent claim
 attributes itself to the axis the `size` expression reads rather than to the
@@ -1454,13 +1456,20 @@ reproducible with PR B's own source files reverted. The literal-size spelling
 executes on both lanes today. `issue_1506_replacement_spelling_on_the_lanes`
 holds all three facts and flips when [#1619] closes.
 
-A second question this surfaced and PR B does not answer, now [#1621] under
-[#731]: `def scale[p: Float](x: tensor[1, p]) = mul(x, cast(0.1, p))` is a
-scalar beside a tensor under `mul`, and it checks at 1.0, while its monomorphic
-twin `add(1.5f32, t)` is rejected under `[05-OP-36]`. It runs only through the
-DAG evaluator's rank-0 broadcast, which is why PR B keeps that broadcast on the
-arithmetic site while deleting it from the comparisons. PR B touches only the
-comparison family and leaves the rule question to [#1621].
+The bounded-binder escape tracked by [#1621] under [#731] affects comparisons
+as well as arithmetic. `gt(xs, cast(0.1, p))` under `[p: Float]` with
+`xs: tensor[3, p]` still checks at 1.0, as do the measured `eq`, `cmplt`,
+integer `lt`, and nested `where` forms. Before unification the cast can have a
+type variable rather than a concrete primitive type, so PR B's detection
+does not recognize the mixed surface. The monomorphic twin rejects. A scalar
+parameter `c: p` instead rejects with `OccursCheck`, which names neither the
+atom nor the replacement and bounds the diagnostic claim too. None of these
+forms is claimed repaired by PR B; the normative no-broadcasting rule stays
+unchanged. The arithmetic witness
+`def scale[p: Float](x: tensor[1, p]) = mul(x, cast(0.1, p))` still depends on
+the DAG evaluator's rank-0 broadcast, so PR B keeps that helper at the
+arithmetic site while removing it from comparisons. [#1506] and [#668] remain
+open rather than treating this bounded delivery as PP5 completion.
 
 What PR A does not claim: nothing here is an exhaustive statement about
 elementwise operations. The oracle covers `add`, `mul`, `eq`, `max_elem`,

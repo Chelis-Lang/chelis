@@ -477,6 +477,8 @@ pub(super) fn infer_app(
     // the rewrite, and the diagnostic names the explicit replacement,
     // following the `div`/`floor_div` precedent of a rejection that says what
     // to write instead.
+    // This check recognizes concrete primitive operands. A bounded-binder cast
+    // can still present a type variable here and escape it (chelis#1621).
     if let Some(ref fname) = func_name
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
         && arg_tys.len() == 2
