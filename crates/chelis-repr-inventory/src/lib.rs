@@ -262,7 +262,7 @@ fn multiplicative_call(
 }
 
 /// Types whose variants are the dtype/representation contract.
-const DTYPE_CONTRACT_TYPES: &[&str] = &["Repr", "RuntimeDType"];
+const DTYPE_CONTRACT_TYPES: &[&str] = &["Repr", "RuntimeDType", "ArithmeticRepr"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceClass {

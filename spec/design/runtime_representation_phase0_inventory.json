@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "b661177e0d82acdd65d9880027f97b36886facf6ce297eb4b8cce67f15f58e7b",
+  "freeze_sha256": "635b8ed27e08692922c3482e5a1e5c8a63189f34dcfa2aa1a34b78492054d62a",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2862,7 +2862,7 @@
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType::byte_width",
-      "sample": "self . repr () . byte_width ()"
+      "sample": "self . contract () . byte_width ()"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=_",
@@ -2894,6 +2894,36 @@
       "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
       "expected_success": "every hit is exact active debt from the frozen foundation",
       "owner_module_final_forms": {
+        "crates/chelis-vocab/src/lib.rs": [
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticRepr::Ieee754Binary32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticRepr::Ieee754Binary64"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticRepr::ExactTwosComplement8"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticRepr::ExactTwosComplement16"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticRepr::ExactTwosComplement32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticRepr::ExactTwosComplement64"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "DTypeContract::byte_width"
+          }
+        ],
         "crates/chelis-ir/src/capacity_key.rs": [
           {
             "kind": "exact-capacity-arithmetic",
@@ -2956,6 +2986,18 @@
           "expected_kind": "dtype-contract",
           "path": "crates/chelis-vocab/src/lib.rs",
           "implementation_sha256": "f530a0c7a874ed4502a74484e4be9aec1b25a05d7d4567c6d740405bd955d543",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_incomplete_arithmetic_repr",
+          "expected_kind": "dtype-contract",
+          "path": "crates/chelis-vocab/src/lib.rs",
+          "implementation_sha256": "eefa16f8d6a548651988846c43a777cb0c4e8c41d9190d7b53db62deb2cbb195",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3413,6 +3455,10 @@
       ]
     },
     "release_reproducers": [
+      {
+        "name": "closed representation vocabulary contract",
+        "command": "cargo nextest run -p chelis-vocab --test dtype_contract --test dtype_contract_compile"
+      },
       {
         "name": "structural inventory scanner contract",
         "command": "cargo nextest run -p chelis-repr-inventory --test inventory"

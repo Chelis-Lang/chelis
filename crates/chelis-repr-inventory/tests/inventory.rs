@@ -50,6 +50,33 @@ fn an_unregistered_source_path_fails_rather_than_scanning_empty() {
 }
 
 #[test]
+fn arithmetic_contract_variants_are_individual_seams_including_unknown_ones() {
+    assert_eq!(
+        identities(
+            "crates/chelis-vocab/src/lib.rs",
+            "pub enum ArithmeticRepr { Ieee754Binary32, Unregistered }"
+        ),
+        vec![
+            (
+                "dtype-contract".into(),
+                "ArithmeticRepr::Ieee754Binary32".into()
+            ),
+            (
+                "dtype-contract".into(),
+                "ArithmeticRepr::Unregistered".into()
+            ),
+        ]
+    );
+    assert!(
+        identities(
+            "crates/chelis-vocab/src/lib.rs",
+            "pub enum Unrelated { Plain }"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
 fn every_registered_prefix_classifies() {
     for path in [
         "crates/chelis-runtime/src/lib.rs",

@@ -195,6 +195,36 @@ Adding a `RuntimeDType`, `Repr`, arithmetic representation, or element marker
 must break an exhaustive compile target until the complete registration exists.
 That mutation is a Phase 1 acceptance test, not a review convention.
 
+### C1 vocabulary delivery boundary
+
+The dependency-bottom vocabulary can ship independently of the runtime element
+seal and checked metadata: existing `RuntimeDType::repr()` and `byte_width()`
+callers immediately consume `contract()`, without changing storage, ABI IDs,
+kernel behavior, or arithmetic policy. This slice implements `DTypeContract`
+and `ArithmeticRepr`, not the whole Phase 1 or the #899 Phase 4 exit.
+
+Its executable acceptance surface is:
+
+```sh
+cargo nextest run -p chelis-vocab --test dtype_contract --test dtype_contract_compile
+```
+
+Every selected test must execute and pass. The table test covers all nine
+[04-NUM-8] rows and negative equal-width/bool cases. Compile controls admit a
+real external consumer, reject forged or rewritten private contracts, and
+mutate each vocabulary in isolated source copies. New dtype controls complete
+the other naming/decoding projections so the missing contract itself must
+fail compilation. No tracked source is mutated by these tests.
+
+The inventory gains `ArithmeticRepr` variant enumeration. Its six exact
+registered variants and `DTypeContract::byte_width` in the vocabulary owner
+are final forms, justified by this executed contract suite; another variant,
+path, or width-helper owner is not. Existing foundation rows remain unchanged,
+and no new transition debt is authorized. The Phase 0 coverage manifest binds
+these final forms and runs the contract suite; its freeze digest changes for
+that reviewed acceptance addition, not to bless a new debt row. The broader
+Phase 1 command remains unimplemented until its other deliverables are green.
+
 ## C2. Exact capacity identity and checked finite counts
 
 Compiler equality and runtime allocation are related but distinct domains.
