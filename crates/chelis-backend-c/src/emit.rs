@@ -273,15 +273,18 @@ impl CEmitter {
         //   different canonicals on one key cannot both be emitted from one
         //   comparison, so emitting either would drop a real obligation.
         //
-        // The disagreeing case is not constructible today, and the reason is
-        // structural rather than lucky: a unit claim's canonical is always the
-        // literal `1`, and a class member reaching this list is always an
-        // `InputAxis`-sourced member of a `Name` class, whose canonical is that
-        // binder. For the two to share a key the same axis would have to be
-        // both, which needs a `Name` claim whose load walk finds no `Load`
-        // while the axis is also an `expand` operand. The check stays because
-        // that is an argument about today's derivation, not an invariant the
-        // type system holds.
+        // What separates the two producers is the `claim` field, not the
+        // canonical. The class producer's `operand` is
+        // `resolved.unwrap_or(name)`, so a `Name` class the checker resolved to
+        // 1 carries `"1"` as its canonical too; the canonicals can coincide.
+        // Its `claim` is a Surf identifier, a unit claim's `claim` is the
+        // literal `1`, and no Surf identifier is `1`. Since `LocalGuardClaim`
+        // derives `PartialEq` over all three fields, equality can only merge a
+        // pair agreeing in claim, canonical AND operation, which is exactly the
+        // set one comparison discharges.
+        //
+        // The check stays regardless: that is an argument about today's two
+        // producers, not an invariant the type system holds.
         let mut local_dim_guard_sites: chelis_unord::UnordMap<
             chelis_ir::ownership::LocalGuardSite,
             chelis_ir::ownership::LocalGuardClaim,
