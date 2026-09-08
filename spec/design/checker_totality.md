@@ -3340,7 +3340,7 @@ repair that does not hold.
 | the five non-termination spellings, the two conv2d range rows, the two conv2d literal-operand rows, the vmap row, and each of their `.dp` round trips | **regression**: red before, measured ACCEPT at the typed entry on `3b701e54b` |
 | `mean`, `layer_norm`, elementwise rank, unknown tag, and their round trips | **regression**: red before, measured as a missing second diagnostic |
 | `a = b; b = a` through `infer_program` and `chelis_types::check_program` | **regression**: red before, measured score 1.000 with an empty error vector |
-| the two well-typed controls, the Deep arity row, the reduction-axis row, the [#1124] mismatch, the [#1134] ascribed self-reference, and a literal-stride conv2d that both entries accept | **disposition lock**: green in both states; they hold the agreeing behaviour in place so a repair cannot buy parity by rejecting more. The literal-stride control is what stops the literal-operand deletion from being bought by accepting every conv2d |
+| the two well-typed controls, the Deep arity row, the reduction-axis row, the [#1124] mismatch, the [#1134] ascribed self-reference, and a literal-stride conv2d that both entries accept | **disposition lock**: green in both states; they hold the agreeing behaviour in place so a repair cannot buy parity by rejecting more. What stops the literal-operand deletion from being bought by accepting every conv2d is the pair of regression rows above it: a statically proved violation stays a type error under the redrafted atom, so the zero-stride and negative-padding rows must still reject at both entries after the deletion |
 
 Acceptance is that command green with no row skipped.
 
