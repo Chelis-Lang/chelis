@@ -361,8 +361,13 @@ pub(super) fn infer_record(
             errors,
         )
         .ok();
+        // The ABSENT value child is not this class and is not claimed here.
+        // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
+        // the stamp boundary, so `(kv {} r)` is rejected as
+        // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
+        // ever runs; this arm is reachable only from the producerless legacy
+        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
         let Some(value) = kv_kids.get(1) else {
-            malformed_slot(DeepTag::Kv, 1, SlotShape::FieldValue, None, None, errors);
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
@@ -715,8 +720,13 @@ pub(super) fn infer_record_update(
             errors,
         )
         .ok();
+        // The ABSENT value child is not this class and is not claimed here.
+        // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
+        // the stamp boundary, so `(kv {} r)` is rejected as
+        // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
+        // ever runs; this arm is reachable only from the producerless legacy
+        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
         let Some(value) = kv_kids.get(1) else {
-            malformed_slot(DeepTag::Kv, 1, SlotShape::FieldValue, None, None, errors);
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);

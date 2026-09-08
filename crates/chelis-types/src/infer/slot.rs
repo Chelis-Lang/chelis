@@ -27,8 +27,7 @@
 //!   witness of a diagnostic that has already been pushed.
 //! * The diagnostic is composed here from the parent [`DeepTag`] and a
 //!   [`SlotShape`], so it always names the form and the expected shape and is
-//!   always a `MalformedForm`. A caller may append a richer description of
-//!   what it found; it cannot remove either name or change the kind.
+//!   always a `MalformedForm`. No caller supplies message text.
 //!
 //! What the seam does NOT decide is what the caller does next. Reporting a
 //! malformed slot must not stop the walk from visiting the form's other
@@ -66,7 +65,7 @@ pub(super) fn read_optional_slot<'a, T>(
     };
     match extract(child) {
         Some(value) => Ok(Some(value)),
-        None => Err(malformed_slot(tag, index, shape, Some(child), None, errors)),
+        None => Err(malformed_slot(tag, index, shape, Some(child), errors)),
     }
 }
 
@@ -82,11 +81,11 @@ pub(super) fn read_required_slot<'a, T>(
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<T, ErrorWitness> {
     let Some(child) = kids.get(index) else {
-        return Err(malformed_slot(tag, index, shape, None, None, errors));
+        return Err(malformed_slot(tag, index, shape, None, errors));
     };
     match extract(child) {
         Some(value) => Ok(value),
-        None => Err(malformed_slot(tag, index, shape, Some(child), None, errors)),
+        None => Err(malformed_slot(tag, index, shape, Some(child), errors)),
     }
 }
 
@@ -94,26 +93,23 @@ pub(super) fn read_required_slot<'a, T>(
 ///
 /// The message always names the form, the expected shape, and the child index,
 /// per [04-TOT-4]'s "a diagnostic naming the form and the shape it expected".
-/// `detail` is the caller's optional richer description.
-pub(super) fn malformed_slot(
+fn malformed_slot(
     tag: DeepTag,
     index: usize,
     shape: SlotShape,
     child: Option<&deep::Expr>,
-    detail: Option<String>,
     errors: &mut DiagnosticSink<'_>,
 ) -> ErrorWitness {
     let found = match child {
         Some(child) => describe_slot_child(child),
         None => "no child at that position".to_string(),
     };
-    let detail = detail.map(|d| format!(" ({d})")).unwrap_or_default();
     report_witness(
         errors,
         CheckError::new(
             CheckErrorKind::MalformedForm,
             format!(
-                "malformed `{}`: expected {shape} as child {index}, found {found}{detail} \
+                "malformed `{}`: expected {shape} as child {index}, found {found} \
                  (spec/03-deep-syntax.md; chelis#731 [04-TOT-3], [04-TOT-4])",
                 tag.as_str(),
             ),
@@ -126,7 +122,7 @@ pub(super) fn malformed_slot(
 ///
 /// It names what is there rather than restating what was wanted, so the two
 /// halves of the diagnostic carry different information.
-pub(super) fn describe_slot_child(expr: &deep::Expr) -> String {
+fn describe_slot_child(expr: &deep::Expr) -> String {
     match expr {
         deep::Expr::Atom(Atom::Name(name), _) => format!("symbol `{name}`"),
         deep::Expr::Atom(Atom::Tag(tag), _) => format!("the tag word `{}`", tag.as_str()),

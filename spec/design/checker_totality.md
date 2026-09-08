@@ -2855,18 +2855,24 @@ spelling of the read. So the structural fix belongs at the read:
    spellings named above do not survive it: there is no `Option` at the
    call site to default, skip, or `continue` past.
 
-   *Implementation note.* The seam owns the decision and the guarantee; the
-   caller owns only detail. It returns a `Result` whose error arm is an
-   `ErrorWitness`, which only `report_witness` can mint, so no caller can
+   *Implementation note.* The seam owns the decision, the guarantee, and the
+   message; the caller supplies no text. It returns a `Result` whose error arm
+   is an `ErrorWitness`, which only `report_witness` can mint, so no caller can
    produce a value from the unreadable branch without visibly laundering a
    witness of a diagnostic that has already been pushed. It takes the parent
-   `DeepTag` and a `SlotShape` -- an enum with a `Display`, not free text --
-   so the message always names both and the kind is always `MalformedForm`; a
-   caller may append a richer description of what it found, as `tuple-get`
-   does, but cannot omit the push, drop either name, or change the kind. This
-   is why the migration in Slice 2 changes the four already-rejecting slots'
-   diagnostic text and kind rather than preserving them: a seam that let each
-   caller supply its own message would guarantee nothing.
+   `DeepTag` and a `SlotShape` -- an enum with a `Display`, not free text -- so
+   the message always names both and the kind is always `MalformedForm`.
+
+   Slice 2 is where that becomes a live tension rather than a design
+   statement. The four slots it migrates already reject correctly, and two of
+   them say more than a shared template can: `tuple-get`'s diagnostic peels a
+   `lit` wrapper to name the found atom's family and value. Slice 2 therefore
+   adds the affordance for a caller to append its own found-shape detail, with
+   `tuple-get` as its first consumer, and changes those four slots' diagnostic
+   text and kind rather than preserving them. Slice 1 has no such caller and
+   carries no such affordance: a seam that let each caller supply its own
+   message would guarantee nothing, and one that carried the parameter before
+   any caller used it would be a mechanism ahead of its use.
 2. **Absence and unreadability become different types at the seam.** The
    `vmap(f)` default axis is legitimate and stays; it is expressed as
    `kids.get(1)` being `None`, which the seam distinguishes from a present

@@ -255,6 +255,10 @@ pub enum BypassExpectation {
 /// pass requires of a bypass child. This one classifies what a form's checker
 /// disposition reads, which is why it names families of value rather than
 /// vocabulary heads.
+///
+/// The set holds exactly the shapes a consumer reads today. A slot that joins
+/// the seam brings its own variant in the same change, so the enum never
+/// carries a spelling nothing produces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlotShape {
     /// A symbol naming a declared record field (`access`, `kv`).
@@ -263,22 +267,12 @@ pub enum SlotShape {
     ConstructorName,
     /// A symbol naming a value binding (`pat-var`, `pat-as`).
     BindingName,
-    /// A symbol naming a named operation mode (`cast`).
-    ModeSelector,
     /// An integer axis (`vmap`).
     IntegerAxis,
-    /// A non-negative integer projection index (`tuple-get`).
-    TupleIndex,
-    /// An integer parameter index, or a tuple of them (`grad`'s `wrt`).
-    ParameterIndices,
     /// A scalar literal value (`pat-lit`). spec/03-deep-syntax.md section 6.3
     /// fixes this as a value rather than an expression node: "patterns do not
     /// contain expression nodes".
     LiteralValue,
-    /// The value paired with a field name in a `kv`. Not a selector read: it
-    /// is here so a `kv` whose second child is missing entirely is reported in
-    /// the same voice as one whose key cannot be read.
-    FieldValue,
 }
 
 impl core::fmt::Display for SlotShape {
@@ -287,14 +281,8 @@ impl core::fmt::Display for SlotShape {
             SlotShape::FieldName => "a symbol field name",
             SlotShape::ConstructorName => "a symbol constructor name",
             SlotShape::BindingName => "a symbol binding name",
-            SlotShape::ModeSelector => "a symbol mode selector",
             SlotShape::IntegerAxis => "an integer axis",
-            SlotShape::TupleIndex => "a non-negative integer index",
-            SlotShape::ParameterIndices => {
-                "an integer parameter index or a tuple of integer parameter indices"
-            }
             SlotShape::LiteralValue => "a scalar literal value",
-            SlotShape::FieldValue => "a value expression",
         };
         f.write_str(text)
     }
