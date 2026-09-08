@@ -884,6 +884,38 @@ const PRIMITIVES: &[&str] = &[
     "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
 ];
 
+/// The canonical primitive spelling for a type-position name, or `None` when
+/// the name is not a primitive at all.
+///
+/// `spec/04-type-system.md` §5.8.1 lists the integer primitives by their SHORT
+/// spellings (`i8`..`i64`) while `spec/02-surf-syntax.md`'s grammar and
+/// `chelis_types::Prim::parse_name` spell them `int8`..`int64`. The short forms
+/// are accepted INPUT spellings that normalise here to the canonical long name,
+/// so canonical Deep carries one spelling per primitive and the
+/// implicit-quantifier collector never sees a primitive as a candidate.
+///
+/// Before this existed, `-> i64` failed the primitive test, fell through to the
+/// lexical case-split, and became an implicitly quantified `(t-var {} i64)`:
+/// `def ident(x: i64) -> i64 = x` accepted `ident(1.5f64)` and returned f64
+/// (chelis#1587).
+///
+/// `Prim::parse_name` deliberately gains no alias row. Deep is canonical, so a
+/// hand-written `(t-prim {} i64)` stays an unknown primitive and is rejected;
+/// the alias is a Surf input-spelling rule only. Whether one spelling should
+/// serve both the type and suffix roles is chelis#1592, not decided here.
+pub(crate) fn canonical_primitive_name(name: &str) -> Option<&'static str> {
+    match name {
+        "i8" => Some("int8"),
+        "i16" => Some("int16"),
+        "i32" => Some("int32"),
+        "i64" => Some("int64"),
+        _ => PRIMITIVES
+            .iter()
+            .copied()
+            .find(|primitive| *primitive == name),
+    }
+}
+
 /// Unsigned dtype names, deferred per `spec/04-type-system.md` §1.1.1
 /// (§1.1.2 names the `uint*` spellings canonical; the short `u*`
 /// spellings are not reserved). These are not in the active numeric
@@ -1053,7 +1085,9 @@ fn collect_top_level_fn_tensor_param_prec(
 /// Surf carry the precision as a `String` in `TypeExpr::Tensor`.
 fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
     match ty {
-        TypeExpr::Tensor(_, prec, _) => Some(prec.clone()),
+        TypeExpr::Tensor(_, prec, _) => {
+            Some(canonical_primitive_name(prec).unwrap_or(prec).to_owned())
+        }
         _ => None,
     }
 }
@@ -1810,6 +1844,9 @@ impl DesugarCtx {
             ),
 
             Expr::Cast(e, prec, mode, _) => {
+                // Normalize before choosing literal adoption as well as the
+                // target node: both denote the same primitive under §P10a.
+                let prec = canonical_primitive_name(prec).unwrap_or(prec);
                 // Position 4 (spec §P10b / §5.6): first argument of a
                 // `cast(literal, p)` expression. When the inner is a
                 // bare list literal, narrow numeric entries to `p` and
@@ -1887,6 +1924,9 @@ impl DesugarCtx {
                 let target = if binder.is_some() {
                     node(DeepTag::TVar, vec![sym(prec)])
                 } else {
+                    // A name that is not a primitive is passed through, so
+                    // the checker still surfaces its unknown-primitive
+                    // diagnostic rather than this arm inventing one.
                     node(DeepTag::TPrim, vec![sym(prec)])
                 };
                 let mut children = vec![inner, target];
@@ -2577,7 +2617,7 @@ fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &UnordSet<String>) -
 /// as `(t-prim {} <name>)`, not be quietly absorbed as a quantifier).
 fn is_candidate_tvar_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_lowercase())
-        && !PRIMITIVES.contains(&name)
+        && canonical_primitive_name(name).is_none()
         && !UNSIGNED_DTYPE_NAMES.contains(&name)
         && !DEFERRED_DTYPE_NAMES.contains(&name)
 }
@@ -2714,8 +2754,8 @@ fn desugar_type_with_scope_mode(
             //   whose binding the type checker resolves downstream.
             if name == "unit" {
                 node(DeepTag::TUnit, vec![])
-            } else if PRIMITIVES.contains(&name.as_str()) {
-                node(DeepTag::TPrim, vec![sym(name)])
+            } else if let Some(canonical) = canonical_primitive_name(name) {
+                node(DeepTag::TPrim, vec![sym(canonical)])
             } else if tvar_set.contains(name.as_str()) {
                 node(DeepTag::TVar, vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
@@ -2775,12 +2815,14 @@ fn desugar_type_with_scope_mode(
             // its name is in `tvar_set` (a sig-quantified type variable),
             // otherwise it stays as t-prim and the type checker validates
             // it against the closed primitive set via Prim::parse_name.
-            let prec_node = if tvar_set.contains(precision.as_str())
-                && !PRIMITIVES.contains(&precision.as_str())
-            {
-                node(DeepTag::TVar, vec![sym(precision)])
-            } else {
-                node(DeepTag::TPrim, vec![sym(precision)])
+            let prec_node = match canonical_primitive_name(precision) {
+                Some(canonical) => node(DeepTag::TPrim, vec![sym(canonical)]),
+                None if tvar_set.contains(precision.as_str()) => {
+                    node(DeepTag::TVar, vec![sym(precision)])
+                }
+                // Not a primitive and not quantified: still `t-prim`, so the
+                // checker surfaces its unknown-primitive diagnostic.
+                None => node(DeepTag::TPrim, vec![sym(precision)]),
             };
             children.push(prec_node);
             node(DeepTag::TTensor, children)

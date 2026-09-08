@@ -369,6 +369,35 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         self.dim_vars.get(name).copied()
     }
 
+    /// The source name bound to each type variable this resolver minted for
+    /// an authored binder, as `TypeVar -> name` (chelis#260 Site 2 and
+    /// chelis#1486, [04-INF-6]).
+    ///
+    /// `type_vars` above answers "which variable is `t`"; this answers the
+    /// inverse, "which source name is `?N`", which is what a diagnostic
+    /// reporting on an inference identity needs.
+    ///
+    /// The type twin of [`Self::dim_var_names`], and the exact set of
+    /// AUTHORED binders: `type_vars` is populated only by
+    /// [`Self::resolve_type_var`] on a named `t-var`, so an inference hole
+    /// (`(t-var {} _)`, which mints a fresh variable and stores nothing) is
+    /// absent by construction. That distinction is [04-INF-5] versus
+    /// [04-INF-6]: a hole is not a binder and is never rigid.
+    ///
+    /// These are the PRE-generalization variables, so a consumer reporting on
+    /// an instantiated signature composes this with the instantiation's
+    /// original-to-fresh mapping, exactly as the dimension side does.
+    pub(crate) fn type_var_names(&self) -> UnordMap<TypeVar, String> {
+        // `to_sorted` rather than an unordered walk, for the reason
+        // `dim_var_names` gives: hash order must not reach observable
+        // compiler behavior (chelis#1444).
+        self.type_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(name, tv)| (*tv, name.clone()))
+            .collect()
+    }
+
     pub(crate) fn type_vars(&self) -> Vec<TypeVar> {
         let mut vars = self
             .type_vars
@@ -378,24 +407,6 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             .collect::<Vec<_>>();
         vars.sort_by_key(|var| var.0);
         vars
-    }
-
-    /// The source spelling of each type variable this resolution minted
-    /// (chelis#260 Site 2).
-    ///
-    /// `type_vars` above answers "which variable is `t`"; this answers the
-    /// inverse, "which source name is `?N`", which is what a diagnostic
-    /// reporting on an inference identity needs. These are the
-    /// PRE-generalization variables, so a consumer reporting on an
-    /// instantiated signature must compose this with the instantiation's
-    /// original-to-fresh mapping, exactly as `dim_var_names` requires.
-    pub(crate) fn type_var_names(&self) -> UnordMap<TypeVar, String> {
-        // Deterministic walk for the same reason as `dim_var_names`.
-        self.type_vars
-            .to_sorted()
-            .into_iter()
-            .map(|(name, tv)| (*tv, name.clone()))
-            .collect()
     }
 
     /// The source name bound to each dimension variable this resolver

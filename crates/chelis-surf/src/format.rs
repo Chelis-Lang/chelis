@@ -660,12 +660,23 @@ fn format_effect(effect: &EffectExpr) -> String {
 fn format_type(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) if name == "unit" => "unit".to_string(),
-        TypeExpr::Named(name, _) => name.clone(),
+        // chelis#1587: `i8`..`i64` are accepted INPUT spellings for
+        // `int8`..`int64`. §P10-P12's model is that the parser accepts a wider
+        // set than the formatter emits, so the canonical formatter must rewrite
+        // them; without this the alias would be a second canonical Surf
+        // spelling and the §0.1 laws would admit two printings of one type.
+        TypeExpr::Named(name, _) => crate::desugar::canonical_primitive_name(name)
+            .unwrap_or(name)
+            .to_string(),
         TypeExpr::DimensionLiteral(value, _) => value.to_string(),
         TypeExpr::RankSpread(name, _) => format!("..{name}"),
         TypeExpr::Tensor(parts, precision, _) => {
             let mut elems = parts.iter().map(format_type).collect::<Vec<_>>();
-            elems.push(precision.clone());
+            elems.push(
+                crate::desugar::canonical_primitive_name(precision)
+                    .unwrap_or(precision)
+                    .to_string(),
+            );
             format!("tensor[{}]", elems.join(", "))
         }
         TypeExpr::Arrow(args, ret, _) => {
@@ -801,7 +812,10 @@ fn format_expr(expr: &Expr) -> String {
             }
         }
         Expr::Cast(expr, ty, mode, _) => {
-            format!("{}({}, {})", mode.keyword(), format_expr(expr), ty)
+            // A cast target is a type position, so the chelis#1587 alias
+            // normalises here too.
+            let target = crate::desugar::canonical_primitive_name(ty).unwrap_or(ty);
+            format!("{}({}, {})", mode.keyword(), format_expr(expr), target)
         }
         Expr::Grad(expr, wrt, _) => match wrt {
             None => format!("grad({})", format_expr(expr)),

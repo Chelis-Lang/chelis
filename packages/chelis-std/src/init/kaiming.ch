@@ -18,7 +18,7 @@ def kaiming_normal(template, fan_in) = {
   std = sqrt(div(2.0, fan_in))
   normal_like(template, 0.0, std)
 }
-def validate_fan_in[p: Float](fan_in: p) -> bool = validate_domain(and(finite_float(fan_in), gt(fan_in, 0.0)))
+def validate_fan_in[p: Float](fan_in: p) -> bool = validate_domain(and(finite_float(fan_in), gt(fan_in, cast(0.0, p))))
 -- Invalid maps to integer 2, so the checked bool cast traps Domain before Random; valid maps to 0. Avoiding a source `if` keeps validation in pathwise AD's forward graph.
 def validate_domain(valid: bool) -> bool = cast(mul(sub(cast(1, int64), cast(valid, int64)), cast(2, int64)), bool)
-def finite_float[p: Float](value: p) -> bool = not(or(neq(value, value), or(eq(value, div(1.0, 0.0)), eq(value, div(-1.0, 0.0)))))
+def finite_float[p: Float](value: p) -> bool = not(or(neq(value, value), or(eq(value, div(cast(1.0, p), cast(0.0, p))), eq(value, div(cast(-1.0, p), cast(0.0, p))))))

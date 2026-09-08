@@ -1524,6 +1524,69 @@ fn eager_value_definition_ordinals(
     ordinals
 }
 
+/// Does this Deep TYPE expression contain an inference hole?
+///
+/// chelis#1486 / [04-INF-5]: a wildcard slot is `(t-var {} _)` in a type
+/// position, `(d-var {} _)` in a dimension position, and `(d-rank {} _)` in a
+/// rank position. `DeepTypeResolver::resolve_type_var`, `resolve_dim_var`, and
+/// `resolve_rank_var` are the three places that mint a fresh variable for the
+/// name `_`, so these are exactly the spellings that can produce a hole.
+///
+/// The scan is syntactic on purpose: the schedule runs before any signature is
+/// resolved, so it cannot ask the resolver. A bail on a nearly-exhausted stack
+/// answers `true`, which can only ADD a precedence edge and never drop one;
+/// the guard's record still turns the bail into a hard failure at the check
+/// boundary, so the over-approximation is never observed on a passing program.
+fn deep_type_contains_hole(expr: &deep::Expr) -> bool {
+    stack_guard!("deep_type_contains_hole", expr, true);
+    if let Some((tag, _, kids)) = stamped_parts(expr) {
+        if matches!(tag, DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
+            && kids.first().and_then(symbol_name) == Some("_")
+        {
+            return true;
+        }
+        return kids.iter().any(deep_type_contains_hole);
+    }
+    match expr {
+        deep::Expr::List(list, _) => list.elements.iter().any(deep_type_contains_hole),
+        deep::Expr::BareList(elements, _) => elements.iter().any(deep_type_contains_hole),
+        deep::Expr::MetaExpr(meta, _) => deep_type_contains_hole(&meta.expr),
+        _ => false,
+    }
+}
+
+/// The declared-signature facts the schedule needs about each name, from a
+/// syntactic scan of the unit's `defsig` items (chelis#1486).
+///
+/// `signed` is every name that carries a `defsig` at all; `holed` is the
+/// subset whose signature contains an inference hole. The two answer the two
+/// halves of [04-INF-5] and [04-INF-6]: a `defsig`-less function has no header
+/// for a reader to use at all, and a hole header is not honest until the body
+/// has filled it, while a complete or authored-binder header is honest before
+/// the body and needs no edge.
+struct DeclaredSignatureScan {
+    signed: UnordSet<String>,
+    holed: UnordSet<String>,
+}
+
+fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> DeclaredSignatureScan {
+    let mut signed = UnordSet::new();
+    let mut holed = UnordSet::new();
+    for (_, expr) in items {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        signed.insert(name.to_string());
+        if kids.get(1).is_some_and(deep_type_contains_hole) {
+            holed.insert(name.to_string());
+        }
+    }
+    DeclaredSignatureScan { signed, holed }
+}
+
 /// Primary body-inference schedule: the order in which top-level declaration
 /// bodies are inferred. The returned values are original flattened ordinals,
 /// so scheduling never changes diagnostic ownership, collected-type origins,
@@ -1541,15 +1604,24 @@ fn eager_value_definition_ordinals(
 ///   `def` has been inferred). For a module function this is the barrier
 ///   that keeps the hoist from carrying it across the value;
 /// - an item at or after the earliest module-function ordinal is inferred
-///   after every module function it reads, signed or not. A declared
-///   signature is in the global header environment, but it is not yet the
-///   function's scheme: a synthesized `defsig` with a wildcard slot or an
-///   implicit binder is generalized over fresh variables, and a reader that
-///   instantiates it before the body narrows it accepts programs the checker
-///   rejects when the body is inferred first (chelis#1486). The edge therefore
-///   stays unconditional; it mirrors what the hoist supplied implicitly,
-///   bounded to the same region, so function visibility
+///   after every `defsig`-LESS module function it reads (the mirror edge). A
+///   declared signature is in the global header environment from the first
+///   pass, and under [04-INF-6] an authored binder is rigid, so a complete or
+///   authored-binder header IS the function's scheme before its body runs and
+///   a reader needs no edge. A `defsig`-less function has no header at all,
+///   which is the availability role this edge keeps; it mirrors what the hoist
+///   supplied implicitly, bounded to the same region, so function visibility
 ///   ([04-INF-2]/[04-INF-3]) is neither narrowed nor widened;
+/// - an item is inferred after every declaration it references whose `defsig`
+///   contains a wildcard slot (the hole edge, chelis#1486 / [04-INF-5]). A
+///   hole is not a binder and is not quantified as one: the slot's type is
+///   whatever the body determines, so a reader that instantiates the header
+///   early observes a variable the body has not filled and accepts programs
+///   the checker rejects when the body is inferred first. Unlike the mirror
+///   edge this one is bounded by no region: it holds below the hoist floor and
+///   in a bare unit, because the dishonest header is global from the first
+///   pass. Kahn's priority keeps the displacement minimal, so the function
+///   holds its hoist position and only its readers slide after it;
 /// - a recursive component is one vertex, because
 ///   [`primary_inference_groups`] infers it as one unit at the first member
 ///   the schedule reaches, so an edge one member earns constrains them all.
@@ -1563,13 +1635,17 @@ fn eager_value_definition_ordinals(
 /// through an eager value: a runtime initialization cycle that
 /// `detect_top_level_binding_cycles` reports as `CycleDetected` at every
 /// ingress, a runtime cycle through a lambda applied during the value's
-/// initialization that the detector does not yet see (chelis#1487), or the
-/// one legal shape, a value that names a function reading the value back
-/// (`carried = wrap(f)` with `f` reading `carried`), which cycles here because
-/// the mirror and the read edge point both ways; the stall then releases the
-/// function first and its backward read reports unbound (chelis#1485). In
-/// every case the schedule stays total by releasing the hoist-order-least
-/// remaining vertex, so a callee is still inferred before its caller.
+/// initialization that the detector does not yet see (chelis#1487), or a value
+/// that names a `defsig`-less function reading the value back
+/// (`carried = wrap(g)` with a `defsig`-less `g` reading `carried`), which
+/// cycles here because the mirror and the read edge point both ways; the stall
+/// then releases the function first and its backward read reports unbound
+/// (chelis#1485). Narrowing the mirror edge removes the signed spelling of
+/// that last shape from the cyclic class; a hole edge can close a two-cycle of
+/// its own (`r = f(2)` with `def f(n: int32) = add(r, n)`), which is an eager
+/// value cycle in the first place. In every case the schedule stays total by
+/// releasing the hoist-order-least remaining vertex, so a callee is still
+/// inferred before its caller.
 ///
 /// This is availability, not visibility. Whether a name is in scope is
 /// decided by `Env::top_level_value_visibility` from source position alone,
@@ -1639,9 +1715,26 @@ pub(super) fn primary_inference_schedule(
             module_fn_by_name.entry(name.to_string()).or_insert(index);
         }
     }
+    // chelis#1486: the hole edge is not bounded by the planner's region, so it
+    // needs every `def`'s ordinal, not only a module function's.
+    let signatures = scan_declared_signatures(items);
+    let mut hole_signature_definitions: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, (_, expr)) in items.iter().enumerate() {
+        let Some((DeepTag::Def, _, _)) = stamped_parts(expr) else {
+            continue;
+        };
+        if let Some(name) = top_level_decl_name(expr)
+            && signatures.holed.contains(name)
+        {
+            hole_signature_definitions
+                .entry(name.to_string())
+                .or_insert(index);
+        }
+    }
     let referenced_names = eager_value_ordinals
         .keys()
         .chain(module_fn_by_name.keys())
+        .chain(hole_signature_definitions.keys())
         .cloned()
         .collect::<UnordSet<_>>();
     let floor = module_fn_indices.first().copied();
@@ -1660,9 +1753,16 @@ pub(super) fn primary_inference_schedule(
                     edges.insert((vertex_of[value], reader));
                 }
                 if let Some(&function) = module_fn_by_name.get(&name)
-                    && (reader_is_module_fn || floor.is_some_and(|floor| index >= floor))
+                    && (reader_is_module_fn
+                        || (floor.is_some_and(|floor| index >= floor)
+                            && !signatures.signed.contains(&name)))
                 {
                     edges.insert((vertex_of[function], reader));
+                }
+                // The hole edge, in every region and in a bare unit too: a
+                // header with a wildcard slot is honest only after its body.
+                if let Some(&declaration) = hole_signature_definitions.get(&name) {
+                    edges.insert((vertex_of[declaration], reader));
                 }
             }
         }

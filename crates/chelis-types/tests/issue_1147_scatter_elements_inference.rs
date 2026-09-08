@@ -111,6 +111,21 @@ def apply[n, k](data: tensor[n, 3, f32], indices: tensor[k, 3, int32], updates: 
     );
 }
 
+/// chelis#1147: `check_scatter_elements` must reach the data and updates
+/// precisions through `unify_tensor_prec`, not compare their representations.
+///
+/// The vehicle is a declared precision binder `p` meeting the concrete `f32`
+/// of `updates`. Under [04-INF-6] that program is now rejected, because the
+/// body narrows an authored binder, and the rejection is what makes this a
+/// sharper test rather than a weaker one: the declaration's rigid-binder error
+/// is the ONLY diagnostic. A representation-comparing `scatter_elements` would
+/// have added its own `updates precision must match data precision` before
+/// ever reaching the declaration check, so the absence of that second
+/// diagnostic is the evidence that the unifier ran and bound `p := f32`.
+///
+/// The test previously asserted that this program was accepted, which
+/// [04-INF-6] decided otherwise; the property it was written for is unchanged
+/// and is asserted on the same source.
 #[test]
 fn precision_variable_is_unified_by_the_same_rule_as_other_tensor_ops() {
     let errors = diagnostics(
@@ -120,7 +135,34 @@ def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, int32], updates: tenso
 "#,
     );
     assert!(
+        errors
+            .iter()
+            .all(|error| !error.contains("updates precision must match data precision")),
+        "a precision variable must unify with the updates precision instead of being \
+         compared by representation: {errors:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("declared type parameter `p` of `apply` was narrowed")),
+        "the body narrows the authored binder `p` to `f32`, which [04-INF-6] rejects at \
+         the declaration: {errors:#?}"
+    );
+}
+
+/// The failure twin: a precision binder that both operands share is never
+/// narrowed, so the same builtin accepts it. Without this the assertion above
+/// could be satisfied by rejecting every polymorphic precision.
+#[test]
+fn a_precision_binder_shared_by_data_and_updates_stays_accepted() {
+    let errors = diagnostics(
+        r#"
+def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, int32], updates: tensor[2, 2, p]) -> tensor[2, 3, p] =
+  scatter_elements(data, indices, updates, 1)
+"#,
+    );
+    assert!(
         errors.is_empty(),
-        "a precision variable must unify with the updates precision instead of being compared by representation: {errors:#?}"
+        "a shared precision binder must stay polymorphic: {errors:#?}"
     );
 }

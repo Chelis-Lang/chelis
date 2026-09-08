@@ -462,20 +462,79 @@ fn issue_319_expand_precision_poly_verb_lowers() {
 // call-site precision ONLY when the call is fully precision-monomorphic.
 // =====================================================================
 
+/// chelis#1486 / [04-INF-6] INVERSION of chelis#319's two-precision-var row.
+///
+/// The original asserted that `sig f: tensor[s,d,p] -> tensor[s,d,w] ->
+/// tensor[s,d,w]`, whose body's `add` unifies `p` and `w`, GRADS when both
+/// actuals are f32. That was a statement about a program the checker accepted.
+/// Under [04-INF-6] it is no longer one: the header promises the body works for
+/// any `p` and any `w` INDEPENDENTLY, and the body does not type-check at
+/// `p = f32, w = f64`. The declaration is rejected before any call site is
+/// reached, so "both pinned to f32" never arises.
+///
+/// Regression test, red before the rigidity check. Both Surf and serialized
+/// Deep must reject this exact chelis#319 program before gradient evaluation.
 #[test]
-fn issue_319_two_precision_vars_both_pinned_same_precision_grads() {
-    // A two-precision-var verb (`p` and `w`) whose body cross-precision
-    // op (`add`) unifies them, called with both actuals `f32`. This is
-    // fully precision-monomorphic, so the renamed body precision vars —
-    // including one no longer in a single formal-parameter position after
-    // the `add` unification — concretize to `f32` and the verb grads.
+fn issue_319_two_precision_vars_unified_by_the_body_are_rejected() {
     let twovar = "sig f: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, w]\n\
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(q, b), cast(0, int32)), cast(0, int32)))\n\
                   out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
-    let result = try_eval(twovar).unwrap_or_else(|err| {
-        panic!("issue #319 [two-pvar monomorphic]: must grad when both vars pin to f32: {err}")
+    let deep =
+        chelis_compiler_api::compiler::desugar(chelis_compiler_api::schema::DesugarRequest {
+            source: twovar.to_owned(),
+        })
+        .expect("desugar")
+        .deep_text;
+    let results = [
+        (SourceKind::Surf, twovar.to_owned()),
+        (SourceKind::Deep, deep),
+    ]
+    .into_iter()
+    .map(|(source_kind, source)| {
+        eval(EvalRequest {
+            source_kind,
+            source,
+            bindings: BTreeMap::new(),
+        })
+    })
+    .collect::<Vec<_>>();
+    for result in results {
+        let error = result.expect_err("[04-INF-6]: two authored binders must stay independent");
+        assert_eq!(error.stage, "check", "{error:?}");
+        assert!(
+            error.errors.iter().any(|diagnostic| {
+                diagnostic.kind() == chelis_vocab::DiagnosticKind::TypeMismatch
+                    && diagnostic
+                        .message
+                        .contains("distinct declared type parameters")
+                    && diagnostic.message.contains("`p`")
+                    && diagnostic.message.contains("`w`")
+                    && diagnostic.message.contains("04-INF-6")
+            }),
+            "expected the collapse diagnostic naming both binders: {error:?}"
+        );
+    }
+}
+
+/// The honest-header twin, so chelis#319's guarantee survives on the shape the
+/// language now admits.
+///
+/// #319 protected the property that a precision-polymorphic verb still grads at
+/// a fully monomorphic call site. The two-binder spelling above cannot carry
+/// that any more, so this row carries it with ONE binder, which is what the
+/// body's `add` actually requires. Disposition lock: green before and after,
+/// because the property it states was never the thing [04-INF-6] changed.
+#[test]
+fn issue_319_one_precision_var_still_grads_at_a_monomorphic_call_site() {
+    let onevar = "sig f: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p]\n\
+                  def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
+                  def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
+                    tensor_to_scalar(sum(sum(f(q, b), cast(0, int32)), cast(0, int32)))\n\
+                  out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
+    let result = try_eval(onevar).unwrap_or_else(|err| {
+        panic!("issue #319: a one-precision-binder verb must still grad at a monomorphic call site: {err}")
     });
     let grad = out_tensor(&result);
     // loss = sum(add(permute_roundtrip(q), b)); d/dq = ones.
@@ -486,7 +545,7 @@ fn issue_319_two_precision_vars_both_pinned_same_precision_grads() {
             data: chelis_compiler_api::schema::TensorElements::from_f64_vec(vec![1.0; 6]),
         },
         1e-6,
-        "issue #319 two-pvar monomorphic grad = ones",
+        "issue #319 monomorphic grad = ones",
     );
 }
 

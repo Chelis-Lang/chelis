@@ -91,6 +91,15 @@ fn error_kinds(json: &Value) -> Vec<String> {
         .collect()
 }
 
+fn error_messages(json: &Value) -> Vec<String> {
+    json["errors"]
+        .as_array()
+        .expect("errors should be a json array")
+        .iter()
+        .map(|e| e["message"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
 fn fmt_inplace(path: &Path) {
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -549,6 +558,19 @@ fn borrow_of_deferred_var_resolving_to_non_carrying_adt_is_rejected() {
         "a deferred borrow that resolves to a non-tensor-carrying ADT must \
          be rejected; got clean score {json}"
     );
+    // [04-INF-6] now also reports the `[a]` header, and that error is a
+    // `TypeMismatch` too, so a kind-only assertion can no longer tell this
+    // row's subject from an unrelated rejection. Assert the subject's own
+    // diagnostic text, and record which kind carries it.
+    let messages = error_messages(&json);
+    assert!(
+        messages.iter().any(
+            |m| m.contains("borrow requires tensor or tensor-carrying input")
+                && m.contains("Config")
+        ),
+        "the carrier-set classification must reject `Config` by name, not \
+         merely leave some rejection behind; got {messages:?}"
+    );
     assert!(
         kinds
             .iter()
@@ -565,8 +587,24 @@ fn borrow_of_deferred_var_resolving_to_non_carrying_adt_is_rejected() {
 /// carrier-set classification must not over-reject a legitimate carrier
 /// reached through the deferred path. Guards against the fix degrading
 /// into "reject every deferred aggregate."
+///
+/// **DISPOSITION LOCK for the concrete-carrier case, not a regression test for
+/// the deferred path.** The header was `def use_it[a](seed: a) -> bool`, a
+/// polymorphic binder the body then pinned through the callee's signature.
+/// [04-INF-6] rejects that correctly, so the header now names the concrete
+/// carrier the callee already pins.
+///
+/// That relabel is not cosmetic. A borrow reaches
+/// `validate_deferred_borrow_vars` only when its inner type is an unresolved
+/// `Type::Var` at the borrow arm; a concrete header defers nothing, so that
+/// validator returns at its first line. This row locks that a borrow of a
+/// tensor-carrying ADT is accepted, and nothing more. **The #256 deferred-borrow
+/// classification is unexercised by the corpus on the positive side, pending
+/// chelis#1589**, which records that an inferred parameter rejects at the borrow
+/// arm instead of deferring, so no honest header reaches the path today. The
+/// negative twin below still reaches it.
 #[test]
-fn borrow_of_deferred_var_resolving_to_carrier_adt_is_accepted() {
+fn borrow_of_concrete_carrier_adt_is_accepted() {
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("deferred_carrier_adt_accepted.ch");
     write_file(
@@ -576,7 +614,7 @@ fn borrow_of_deferred_var_resolving_to_carrier_adt_is_accepted() {
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
          sig consume_bnp: &BatchNormParams[n] -> bool\n\
          def consume_bnp(p) = true\n\
-         def use_it[a](seed: a) -> bool = {\n\
+         def use_it[n](seed: BatchNormParams[n]) -> bool = {\n\
            v = seed\n\
            consume_bnp(&v)\n\
          }\n\
@@ -599,8 +637,24 @@ fn borrow_of_deferred_var_resolving_to_carrier_adt_is_accepted() {
 /// tensor[..] }` carries a tensor only transitively. A deferred borrow
 /// resolving to `Outer` must be accepted, proving the gate runs the same
 /// fixed-point closure linearity does rather than a one-level field check.
+///
+/// **DISPOSITION LOCK for the concrete-carrier case, not a regression test for
+/// the deferred path.** The header was `def use_it[a](seed: a) -> bool`, a
+/// polymorphic binder the body then pinned through the callee's signature.
+/// [04-INF-6] rejects that correctly, so the header now names the concrete
+/// carrier the callee already pins.
+///
+/// That relabel is not cosmetic. A borrow reaches
+/// `validate_deferred_borrow_vars` only when its inner type is an unresolved
+/// `Type::Var` at the borrow arm; a concrete header defers nothing, so that
+/// validator returns at its first line. This row locks that a borrow of a
+/// tensor-carrying ADT is accepted, and nothing more. **The #256 deferred-borrow
+/// classification is unexercised by the corpus on the positive side, pending
+/// chelis#1589**, which records that an inferred parameter rejects at the borrow
+/// arm instead of deferring, so no honest header reaches the path today. The
+/// negative twin below still reaches it.
 #[test]
-fn borrow_of_deferred_var_resolving_to_transitive_carrier_is_accepted() {
+fn borrow_of_concrete_transitive_carrier_is_accepted() {
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("deferred_transitive_carrier_accepted.ch");
     write_file(
@@ -610,7 +664,7 @@ fn borrow_of_deferred_var_resolving_to_transitive_carrier_is_accepted() {
          type Outer[n] = | Outer { inner: Inner[n] }\n\
          sig consume_outer: &Outer[n] -> bool\n\
          def consume_outer(o) = true\n\
-         def use_it[a](seed: a) -> bool = {\n\
+         def use_it[n](seed: Outer[n]) -> bool = {\n\
            v = seed\n\
            consume_outer(&v)\n\
          }\n\
