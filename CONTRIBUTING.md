@@ -52,6 +52,19 @@ hand-maintained copies.
 - Update the owning doc when a public language or compiler behavior changes.
 - Do not revert unrelated work already present in the repo.
 
+## Changelog Fragments
+
+After the 0.18.7 release PR (#1586) merges and the #1251 cutover lands,
+behavior-changing PRs add a Markdown fragment to `changelog.d/`. Use a filename
+such as `parser_errors.fixed.md` or `1625.changed.breaking.md`, and write the
+entry without its outer bullet. Correct pending fragments when later changes
+invalidate their claims. Reserve `CHANGELOG.md` for release assembly.
+
+The PR check starts advisory. Use `no-changelog` for internal work with no
+release-note value; this suppresses only missing-fragment warnings. See the
+[fragment contract](changelog.d/README.md) for authoring examples, the release
+commands, and the acceptance oracle.
+
 ## Declarative Naming
 
 Use declarative or informational names for branches, commits, plans, tests, files, and
