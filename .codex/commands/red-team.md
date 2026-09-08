@@ -7,7 +7,7 @@ round.
 ## `/red-team` (fresh round)
 
 1. Confirm the head is committed and pushed and that CI is running on it. Count the
-   fresh rounds this pull request has had: the default cap is two, one for a prose-only
+   fresh rounds this pull request has had: the default cap is three, one for a prose-only
    pull request, and a round past the cap needs the user's explicit approval before you
    continue.
 2. Inventory subagent handles created in your own current session. Stop or interrupt
@@ -18,17 +18,18 @@ round.
 4. Fill the round brief template from the skill: head SHA, files, in-scope claims,
    worktree, the target with the output of
    `.venv/bin/python scripts/worktree_status.py --path <target>` pasted verbatim and the
-   time you took it, the context and report-length budgets, deadline (15 minutes unless
-   you state otherwise), and delivery channel. Give a reviewer whose probes will mutate tracked source its own worktree.
+   time you took it, the report-length budget, and delivery channel. Context budgets
+   and time limits are optional, with no default; include them only when set. Give a
+   reviewer whose probes will mutate tracked source its own worktree.
    Do not tell the reviewer to read `AGENTS.md`.
 5. Spawn a **new local subagent with fresh context** with the brief as its prompt. In
    Codex, use `list_agents`, `interrupt_agent`, `spawn_agent`, `send_message` or
    `followup_task`, and `wait_agent` rather than shelling out to `claude`, `codex exec`,
    or other external agent CLIs. If the spawn routes to remote infrastructure or errors,
    retire that handle and retry, or state that the red team is blocked.
-6. Record the round in the pull request: head, verdict, deadline, commands, finding
-   classes and scope classifications, accepted-no-action observations, linked issues,
-   and residual scope. Keep the reviewer's handle for verification.
+6. Record the round in the pull request: head, verdict, commands, finding classes and
+   scope classifications, accepted-no-action observations, linked issues, residual
+   scope, and any explicit deadline. Keep the reviewer's handle for verification.
 
 ## `/red-team verify`
 

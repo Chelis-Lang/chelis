@@ -59,7 +59,8 @@ not drift.
 - Verify that inputs which should fail do fail, and with the right reason.
 - Verify that inputs which should pass do pass, with exact outputs where applicable.
 - Check docs and phase claims against the shipped behavior, not just intent.
-- Stay inside the brief: its head, files, in-scope claims, and deadline bound the round.
+- Stay inside the brief: its head, files, in-scope claims, and any explicit limits bound
+  the round.
   Record the exact reviewed commit and the worktree's baseline status, and use the
   worktree and warm target the brief hands you rather than rebuilding cold.
 - Report a P3 in one line, without reproduction. A construct no maintainer would write
@@ -67,7 +68,7 @@ not drift.
 
 ### Fresh-Context Enforcement
 
-- A pull request gets at most two fresh rounds by default; a third needs the user's
+- A pull request gets at most three fresh rounds by default; a fourth needs the user's
   explicit approval. A prose-only pull request, design documents included, gets one,
   and a second needs the same approval. Rounds run from any platform count, and the
   pull request's round record is the counter. Verification does not count against the
@@ -80,9 +81,9 @@ not drift.
   reviewer read never earns one.
 - Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
   exact head, changed files, the pull request's in-scope claims, the worktree and target
-  it may use with pasted busy-signal output for that target, the context and
-  report-length budgets, the deadline (15 minutes unless the brief says otherwise), and
-  the delivery channel. The brief does not open with "read
+  it may use with pasted busy-signal output for that target, the report-length budget,
+  and the delivery channel. Context budgets and time limits are optional, with no
+  default. When set, include them in the brief. The brief does not open with "read
   `AGENTS.md`".
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   reviewer an existing worktree and its warm target cache when the worktree is at the
@@ -200,9 +201,9 @@ not drift.
 - Route confirmed in-scope findings back to the original implementation agent when it
   is still available so the fix retains its build context. Do not fix out-of-scope
   findings in the pull request; link an existing issue or file one if the defect is not
-  already tracked. Record every round's exact head, verdict, deadline, commands, finding
-  classes and scope classifications, accepted-no-action observations, linked issues,
-  and residual scope in the pull request.
+  already tracked. Record every round's exact head, verdict, commands, finding classes
+  and scope classifications, accepted-no-action observations, linked issues, residual
+  scope, and any explicit deadline in the pull request.
 
 ## Documentation And Spec Sync
 
@@ -1110,10 +1111,11 @@ has the fleet run these numbers come from.
   detect, and give mechanical work the cheap tier: waiting on CI, polling, mirroring
   bytes between files, transcribing a result. A standing instruction to economize is
   not a substitute. The tier is named per spawn, or it was never chosen.
-- Every brief states a context budget and a report-length budget, both as numbers. An
-  agent that will exceed its context budget says so and returns what it has rather
-  than continuing silently, and a report over its length budget is a defect in the
-  report rather than evidence that the budget was too small.
+- Every brief states a numeric report-length budget. A numeric context budget is also
+  required except for red-team rounds, where it is optional. An agent that will exceed
+  an explicitly set context budget says so and returns what it has rather than
+  continuing silently, and a report over its length budget is a defect in the report
+  rather than evidence that the budget was too small.
 - An orchestrator states its own context size in the message that announces a spawn,
   so the fleet's live total is visible to the user without anyone having to ask for
   it.
