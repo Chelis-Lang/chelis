@@ -1581,12 +1581,33 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             {
                 continue;
             }
-            if !matches!(member.source, AxisSource::InputAxis { .. }) {
+            if !matches!(
+                member.source,
+                AxisSource::InputAxis { .. } | AxisSource::ScalarInput { .. }
+            ) {
                 // C2.4's literal proof is about the axis SOURCE, not about the
                 // claim: a member whose extent is a literal performs no runtime
                 // read, so there is nothing to observe and nothing to compare.
                 // A resolved claim over a runtime read is a different thing and
                 // still owes its guard.
+                //
+                // The two admitted sources are the two C1.7 carriers an
+                // operation can SET an axis from, which is what `sets_axis`
+                // already says: a folded `shape(t, k)` read (`InputAxis`) and a
+                // rank-0 computed scalar (`ScalarInput`). Section 4.7's local
+                // sentence names "an extent an operation computes" among the
+                // locally computed values, and a `Node` carrier is that extent
+                // exactly - chelis#1375 is the case where the class formed with
+                // both members and no site existed to compare them, so the
+                // claim executed unguarded on every lane.
+                //
+                // The two sources that stay out are not omissions. An
+                // `ExternalAxis` member IS the declaration each lane reads the
+                // canonical value from, so guarding it would compare a value
+                // against itself. An `OpComputed` member's guard needs the
+                // derivation narrowed first, because a claim over a statically
+                // determined operation output - a matmul's `Literal(64)` axis -
+                // would guard a value against the literal it was produced from.
                 continue;
             }
             let Some(node) = dag.get(member.node) else {

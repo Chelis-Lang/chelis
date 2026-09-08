@@ -1208,3 +1208,86 @@ fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
         "the value cast is checked arithmetic, so the cast is local too",
     );
 }
+
+// ---------------------------------------------------------------------------
+// C1.3 local guard sites over a node-valued extent (chelis#1375).
+//
+// Section 4.7 places a guard "at the source position of the operation that
+// introduces the guarded extent" when it "compares a locally computed value
+// (checked integer arithmetic, a user-function result, or an extent an
+// operation computes)". `spec/05` section 2.4.1 admits a rank-0 `Node` scalar
+// as a `reshape` target carrier, so a `reshape` whose target is computed is
+// exactly that sentence's operation, and the axis it sets is exactly that
+// sentence's extent.
+// ---------------------------------------------------------------------------
+
+/// The guard sites of `dag`, as `(node, axis, claim, op)`.
+fn guard_sites(dag: &Dag) -> Vec<(usize, usize, String, &'static str)> {
+    chelis_ir::axis_sources::local_dim_guard_sites(dag)
+        .into_iter()
+        .map(|((node, axis), claim)| (node, axis, claim.claim, claim.op))
+        .collect()
+}
+
+/// A `reshape` whose target is a computed rank-0 scalar, under a claim the
+/// operand's `Load` also declares. The class has two members and the computed
+/// one is a guard site: nothing else in the program compares the extent the
+/// operation produced against the extent the signature claimed.
+#[test]
+fn a_node_valued_reshape_target_is_a_local_guard_site() {
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let read = dag.add_node(
+        RiscOp::Shape { axis: 0 },
+        vec![x],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    let extent = dag.add_node(RiscOp::Mul, vec![read, read], ty(vec![], Prim::Int64), None);
+    let reshaped = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
+        },
+        vec![x, extent],
+        ty(vec![named("n"), DimInfo::Lit(2)], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        class_for(
+            &derive_runtime_dim_classes(&dag),
+            DimClaim::Name("n".into())
+        )
+        .placement(&dag),
+        GuardPlacement::Local,
+        "the target is produced by arithmetic, so the class is not all-interface",
+    );
+    assert_eq!(
+        guard_sites(&dag),
+        vec![(reshaped.0, 0, "n".to_string(), "reshape")],
+        "the computed axis owes a guard at the reshape that introduces it",
+    );
+}
+
+/// The discriminating twin. A `Sym` target RESTATES a symbol declared
+/// elsewhere rather than computing one, so C2.4 makes it no more a witness
+/// than a passed-through axis: it forms no member, so there is no site. A
+/// derivation that admitted every reshape target axis would pass the test
+/// above and fail this one.
+#[test]
+fn a_sym_reshape_target_is_not_a_local_guard_site() {
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    dag.add_node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Sym("n".into()), RtDim::Lit(1)],
+        },
+        vec![x],
+        ty(vec![named("n"), DimInfo::Lit(1)], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        guard_sites(&dag),
+        vec![],
+        "a restated symbol computes no extent, so it owes no comparison",
+    );
+}
