@@ -45,6 +45,7 @@ fn produced_result_stamps_v2() {
     let result = EvalResult {
         schema_version: chelis_compiler_api::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots: vec![],
+        manifest: Default::default(),
         transcript: vec![],
     };
     let json = serde_json::to_string(&result).expect("serialize");

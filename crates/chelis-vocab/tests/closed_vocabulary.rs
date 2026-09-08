@@ -63,6 +63,10 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::UnknownForm, "UnknownForm"),
         (DiagnosticKind::MalformedForm, "MalformedForm"),
         (DiagnosticKind::CheckOther, "Other"),
+        (DiagnosticKind::UnhandledEffect, "UnhandledEffect"),
+        (DiagnosticKind::InvalidHandler, "InvalidHandler"),
+        (DiagnosticKind::BuildTargetMismatch, "BuildTargetMismatch"),
+        (DiagnosticKind::TypeTotality, "TypeTotality"),
     ];
     assert_eq!(DiagnosticKind::ALL, expected.map(|(kind, _)| kind));
 
@@ -139,7 +143,11 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::BuiltinShadowing
             | DiagnosticKind::UnknownForm
             | DiagnosticKind::MalformedForm
-            | DiagnosticKind::CheckOther => "general",
+            | DiagnosticKind::CheckOther
+            | DiagnosticKind::UnhandledEffect
+            | DiagnosticKind::InvalidHandler
+            | DiagnosticKind::BuildTargetMismatch
+            | DiagnosticKind::TypeTotality => "general",
         }
     }
 
@@ -224,7 +232,7 @@ fn representation_variants_have_current_widths_and_payload_status() {
         (Repr::TwosComplement16, 2, false),
         (Repr::TwosComplement32, 4, false),
         (Repr::TwosComplement64, 8, false),
-        (Repr::BoolInBinary32, 4, true),
+        (Repr::Bool8, 1, false),
     ];
     assert_eq!(Repr::ALL, expected.map(|(repr, ..)| repr));
 
@@ -241,8 +249,7 @@ fn equal_width_representations_keep_distinct_identities() {
         Repr::TwosComplement32.byte_width()
     );
     assert_ne!(Repr::Ieee754Binary32, Repr::TwosComplement32);
-    assert_ne!(Repr::BoolInBinary32, Repr::Ieee754Binary32);
-    assert_ne!(Repr::BoolInBinary32, Repr::TwosComplement32);
+    assert_ne!(Repr::Bool8, Repr::TwosComplement8);
 }
 
 #[test]
@@ -257,7 +264,7 @@ fn representation_consumer_match_is_a_compile_time_ratchet() {
             Repr::TwosComplement16 => "twos-complement-16",
             Repr::TwosComplement32 => "twos-complement-32",
             Repr::TwosComplement64 => "twos-complement-64",
-            Repr::BoolInBinary32 => "bool-in-binary32",
+            Repr::Bool8 => "bool8",
         }
     }
 
@@ -273,7 +280,7 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::F32,
             0,
             "f32",
-            "CHELIS_F32",
+            "CHELIS_DTYPE_F32",
             Repr::Ieee754Binary32,
             4,
         ),
@@ -281,7 +288,7 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::F64,
             1,
             "f64",
-            "CHELIS_F64",
+            "CHELIS_DTYPE_F64",
             Repr::Ieee754Binary64,
             8,
         ),
@@ -289,7 +296,7 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::I32,
             2,
             "int32",
-            "CHELIS_I32",
+            "CHELIS_DTYPE_I32",
             Repr::TwosComplement32,
             4,
         ),
@@ -297,15 +304,15 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::Bool,
             3,
             "bool",
-            "CHELIS_BOOL",
-            Repr::BoolInBinary32,
-            4,
+            "CHELIS_DTYPE_BOOL",
+            Repr::Bool8,
+            1,
         ),
         (
             RuntimeDType::I64,
             4,
             "int64",
-            "CHELIS_I64",
+            "CHELIS_DTYPE_I64",
             Repr::TwosComplement64,
             8,
         ),
@@ -313,7 +320,7 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::Bf16,
             5,
             "bf16",
-            "CHELIS_BF16",
+            "CHELIS_DTYPE_BF16",
             Repr::Bfloat16,
             2,
         ),
@@ -321,7 +328,7 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::F16,
             6,
             "f16",
-            "CHELIS_F16",
+            "CHELIS_DTYPE_F16",
             Repr::Ieee754Binary16,
             2,
         ),
@@ -329,7 +336,7 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::I8,
             7,
             "int8",
-            "CHELIS_I8",
+            "CHELIS_DTYPE_I8",
             Repr::TwosComplement8,
             1,
         ),
@@ -337,7 +344,7 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             RuntimeDType::I16,
             8,
             "int16",
-            "CHELIS_I16",
+            "CHELIS_DTYPE_I16",
             Repr::TwosComplement16,
             2,
         ),

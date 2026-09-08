@@ -1,5 +1,5 @@
 [package]
 name = "nautilus"
 version = "0.7.36"
-compiler = "=0.18.4"
+compiler = "=0.18.6"
 module_prefix = "Nautilus"

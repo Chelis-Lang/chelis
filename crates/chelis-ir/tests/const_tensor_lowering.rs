@@ -442,7 +442,7 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
     .expect("eval succeeds");
 
     // Check that results contain no NaN.
-    for (root, val) in &values {
+    for (root, val) in values.to_sorted() {
         for (i, &v) in val.to_f64_lossy_vec().iter().enumerate() {
             assert!(
                 v.is_finite(),

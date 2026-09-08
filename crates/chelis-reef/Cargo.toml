@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-unord.workspace = true
+chelis-image-id.workspace = true
 chelis-deep.workspace = true
 chelis-macros.workspace = true
 chelis-pipeline-core.workspace = true
@@ -42,3 +44,6 @@ flate2 = "1"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+
+[lints]
+workspace = true

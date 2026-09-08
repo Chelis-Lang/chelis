@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+import concurrent.futures
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -47,6 +52,82 @@ FIXTURE_CELL = oracle.RedCell(
     fragment="boxed f32 elements must render shortest at their own width",
     owner="chelis#729/#686 capacity family",
 )
+
+
+class OracleEnvironmentTests(unittest.TestCase):
+    def test_explicit_cargo_target_dir_remains_authoritative(self) -> None:
+        with mock.patch.dict(
+            oracle.os.environ,
+            {"CARGO_TARGET_DIR": "/caller/owned/target"},
+            clear=True,
+        ):
+            env = oracle.oracle_environment(oracle.Path("/worktree/one"))
+        self.assertEqual(env["CARGO_TARGET_DIR"], "/caller/owned/target")
+
+    def test_distinct_worktrees_receive_distinct_defaults(self) -> None:
+        with mock.patch.dict(oracle.os.environ, {}, clear=True):
+            first = oracle.oracle_environment(oracle.Path("/worktree/one"))
+            second = oracle.oracle_environment(oracle.Path("/worktree/two"))
+        self.assertNotEqual(first["CARGO_TARGET_DIR"], second["CARGO_TARGET_DIR"])
+
+    def test_one_worktree_receives_a_stable_default_inside_its_target(self) -> None:
+        root = oracle.Path("/worktree/one")
+        with mock.patch.dict(oracle.os.environ, {}, clear=True):
+            first = oracle.oracle_environment(root)
+            second = oracle.oracle_environment(root)
+        expected = root / "target" / "oracles" / "faithful-observation-phase2"
+        self.assertEqual(oracle.Path(first["CARGO_TARGET_DIR"]), expected)
+        self.assertEqual(first["CARGO_TARGET_DIR"], second["CARGO_TARGET_DIR"])
+
+    def test_distinct_worktree_roots_run_minimal_cargo_legs_concurrently(self) -> None:
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            self.skipTest("Cargo is required for the concurrency integration probe")
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            roots = [oracle.Path(raw_directory) / name for name in ("one", "two")]
+            for index, root in enumerate(roots):
+                (root / "src").mkdir(parents=True)
+                (root / "Cargo.toml").write_text(
+                    f'[package]\nname = "phase2-target-{index}"\n'
+                    'version = "0.0.0"\nedition = "2024"\n',
+                    encoding="utf-8",
+                )
+                (root / "src/main.rs").write_text(
+                    "fn main() {}\n",
+                    encoding="utf-8",
+                )
+
+            previous_target = os.environ.pop("CARGO_TARGET_DIR", None)
+            try:
+                environments = [oracle.oracle_environment(root) for root in roots]
+            finally:
+                if previous_target is not None:
+                    os.environ["CARGO_TARGET_DIR"] = previous_target
+
+            targets = [
+                oracle.Path(environment["CARGO_TARGET_DIR"])
+                for environment in environments
+            ]
+            self.assertNotEqual(*targets)
+
+            def run_leg(index: int) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [cargo, "check", "--quiet"],
+                    cwd=roots[index],
+                    env=environments[index],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(run_leg, range(2)))
+            for result in results:
+                self.assertEqual(result.returncode, 0, result.stdout)
+            for target in targets:
+                self.assertTrue((target / ".rustc_info.json").is_file(), target)
 
 # Parser-only sample for `ignored_cells`. It is deliberately NOT checked
 # against the shipped ledger: its job is to keep both attribute spellings
@@ -373,19 +454,30 @@ class ObservationDecodeTableTests(unittest.TestCase):
         violations = oracle.observation_decode_violations(source)
         self.assertTrue(any("I16" in v for v in violations), violations)
 
-    def test_bool_is_the_only_declared_f32_view_exception(self) -> None:
+    def test_no_dtype_has_an_untyped_f32_view_exception(self) -> None:
         exceptions = [
             name
             for name, view, _ in oracle.OBSERVATION_DECODE_TABLE
             if view == "data_as_f32_const"
         ]
-        self.assertEqual(exceptions, ["Bool"])
-        why = next(
-            why
-            for name, _, why in oracle.OBSERVATION_DECODE_TABLE
+        self.assertEqual(exceptions, [])
+        view, why = next(
+            (view, why)
+            for name, view, why in oracle.OBSERVATION_DECODE_TABLE
             if name == "Bool"
         )
-        self.assertIn("chelis#894", why, "the exception must name its retirement")
+        self.assertEqual(view, "Bool8::data_ptr_unchecked")
+        self.assertIn("Repr::Bool8", why)
+
+    def test_bool_on_the_removed_f32_view_is_a_violation(self) -> None:
+        source = self._runtime().replace(
+            "let raw = *Bool8::data_ptr_unchecked(tm).add(i);",
+            "let raw = *data_as_f32_const(t).add(i);",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("Bool" in v for v in violations), violations)
+        self.assertTrue(any("untyped f32 view" in v for v in violations), violations)
 
     def test_a_deleted_decoder_is_a_violation(self) -> None:
         violations = oracle.observation_decode_violations("fn unrelated() {}\n")
@@ -474,19 +566,21 @@ class DeadExportTests(unittest.TestCase):
         declared = oracle.header_declared_functions(header)
         self.assertGreater(len(exported), 50, "no-mangle exports failed to parse")
         self.assertGreater(len(declared), 50, "header declarations failed to parse")
-        self.assertIn("chelis_format_shortest", exported)
-        self.assertIn("chelis_format_shortest", declared)
+        self.assertIn("chelis_string_from_scalar", exported)
+        self.assertIn("chelis_string_from_scalar", declared)
 
-    def test_the_scan_covers_the_whole_crate_not_only_lib_rs(self) -> None:
-        """`chelis_format_shortest` lives in a sibling module, not lib.rs.
-
-        A retired export re-added in any module is the same public exit
-        returning; scoping the scan to one file would miss it.
-        """
+    def test_the_removed_public_formatter_is_not_an_export(self) -> None:
         lib_only = (oracle.REPO_ROOT / oracle.RUNTIME_SOURCE).read_text(encoding="utf-8")
         crate = oracle.read_runtime_crate_sources(oracle.REPO_ROOT)
         self.assertNotIn("chelis_format_shortest", oracle.rust_exported_symbols(lib_only))
-        self.assertIn("chelis_format_shortest", oracle.rust_exported_symbols(crate))
+        self.assertNotIn("chelis_format_shortest", oracle.rust_exported_symbols(crate))
+
+    def test_readding_the_removed_public_formatter_is_a_violation(self) -> None:
+        violations = oracle.dead_export_violations(
+            '#[no_mangle]\npub extern "C" fn chelis_format_shortest() {}\n',
+            "void chelis_format_shortest(void);\n",
+        )
+        self.assertEqual(len(violations), 2, violations)
 
     def test_the_shipped_crate_and_header_are_clean(self) -> None:
         crate = oracle.read_runtime_crate_sources(oracle.REPO_ROOT)

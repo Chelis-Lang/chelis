@@ -136,7 +136,7 @@ fn stamped_let_bindings_enter_scope_and_unbound_names_still_reject() {
         errors
             .errors
             .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
+            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. })),
         "negative stamped let must retain the unbound-variable disposition: {:?}",
         errors.errors
     );

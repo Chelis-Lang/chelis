@@ -22,8 +22,9 @@
 //! `infer_top_level` for stamping), every hook is a no-op, so the
 //! drivers that install it remain the single source of violations.
 
+use chelis_unord::UnordSet;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,16 +45,16 @@ pub(crate) struct OpacityModuleMeta {
     /// package linker historically stripped `Export` decls during
     /// rewrite (survey section 2), and modules absent here are never
     /// the source of a sixth-rejection flag (see `bindings`).
-    pub exports: HashMap<String, BTreeSet<String>>,
+    pub exports: BTreeMap<String, BTreeSet<String>>,
     /// Top-level binding name -> defining module key, for bindings
     /// declared inside lexical module wrappers. Used by the sixth
     /// rejection; names absent from this map are never flagged
     /// (fail-open for unattributable names, so package-linked
     /// exported producers stay callable).
-    pub bindings: HashMap<String, String>,
+    pub bindings: BTreeMap<String, String>,
     /// Opaque ADT name -> formatted producer entries
     /// ("name: sig"), unioned across phases, for error text.
-    pub producer_entries: HashMap<String, BTreeSet<String>>,
+    pub producer_entries: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl OpacityModuleMeta {
@@ -87,11 +88,6 @@ pub(crate) struct OpacityContextData {
     /// Name of the top-level decl currently being inferred (message
     /// location context per the D-CHECK error contract).
     pub current_decl: Option<String>,
-    /// While true, `check_ctor_reference` is a no-op: `infer_app`
-    /// sets this around its callee inference so a positional
-    /// constructor application reports ONE violation (constructor
-    /// application), not a second one for the callee `var` node.
-    pub suppress_ctor_reference: bool,
     /// Program-shape metadata (exports, bindings, producer text).
     pub meta: OpacityModuleMeta,
 }
@@ -101,7 +97,6 @@ impl OpacityContextData {
         Self {
             current_module: None,
             current_decl: None,
-            suppress_ctor_reference: false,
             meta,
         }
     }
@@ -183,38 +178,6 @@ pub(crate) fn with_context<R>(f: impl FnOnce(&OpacityContextData) -> R) -> Optio
     OPACITY_CONTEXT.with(|cell| cell.borrow().as_ref().map(f))
 }
 
-/// Suppress `check_ctor_reference` for the duration of the returned
-/// guard (see `OpacityContextData::suppress_ctor_reference`).
-pub(crate) fn suppress_ctor_reference_check() -> CtorSuppressGuard {
-    let previous = OPACITY_CONTEXT.with(|cell| {
-        let mut borrowed = cell.borrow_mut();
-        match borrowed.as_mut() {
-            Some(data) => {
-                let prev = data.suppress_ctor_reference;
-                data.suppress_ctor_reference = true;
-                prev
-            }
-            None => false,
-        }
-    });
-    CtorSuppressGuard { previous }
-}
-
-pub(crate) struct CtorSuppressGuard {
-    previous: bool,
-}
-
-impl Drop for CtorSuppressGuard {
-    fn drop(&mut self) {
-        let previous = self.previous;
-        OPACITY_CONTEXT.with(|cell| {
-            if let Some(data) = cell.borrow_mut().as_mut() {
-                data.suppress_ctor_reference = previous;
-            }
-        });
-    }
-}
-
 // ── Inference hooks (RFC D-CHECK rejection set) ──────────────────
 
 /// Core rejection: `adt_name` was constructed/inspected via `action`
@@ -258,17 +221,14 @@ pub(crate) fn check_opaque_use(
 
 /// Bare-constructor-reference rejection (the constructor binding
 /// itself is hidden): fires when `name` resolves to a constructor of
-/// an out-of-module opaque ADT. Suppressed under `infer_app`'s callee
-/// guard so positional application reports once.
+/// an out-of-module opaque ADT. Positional applications instantiate their
+/// constructor directly from the registry and therefore do not route their
+/// callee through this bare-reference hook.
 pub(crate) fn check_ctor_reference(
     name: &str,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let suppressed = with_context(|ctx| ctx.suppress_ctor_reference).unwrap_or(false);
-    if suppressed {
-        return false;
-    }
     let Some((adt_name, _variant)) = adt_reg
         .lookup_variant(name)
         .or_else(|| adt_reg.lookup_variant_terminal_unique(name))
@@ -298,10 +258,7 @@ fn terminal_segment(name: &str) -> &str {
 /// reference's terminal segment. Terminal ambiguity yields `None`
 /// (fail-open) -- which matches inference, since an ambiguous bare
 /// reference does not resolve cleanly there either.
-fn resolve_binding_key<'a>(
-    name: &str,
-    bindings: &'a std::collections::HashMap<String, String>,
-) -> Option<&'a str> {
+fn resolve_binding_key<'a>(name: &str, bindings: &'a BTreeMap<String, String>) -> Option<&'a str> {
     if let Some((key, _)) = bindings.get_key_value(name) {
         return Some(key.as_str());
     }
@@ -458,6 +415,19 @@ pub(crate) fn demangle_type(ty: &Type) -> Type {
             demangle_ident(name),
             args.iter().map(demangle_type).collect(),
         ),
+        Type::KindedAdt(name, args) => Type::KindedAdt(
+            demangle_ident(name),
+            args.iter()
+                .map(|argument| match argument {
+                    crate::types::NominalArg::Type(ty) => {
+                        crate::types::NominalArg::Type(demangle_type(ty))
+                    }
+                    crate::types::NominalArg::Dimension(dim) => {
+                        crate::types::NominalArg::Dimension(dim.clone())
+                    }
+                })
+                .collect(),
+        ),
         Type::Fn(args, ret) => Type::Fn(
             args.iter().map(demangle_type).collect(),
             Box::new(demangle_type(ret)),
@@ -475,7 +445,7 @@ pub(crate) fn demangle_type(ty: &Type) -> Type {
 /// unexported `helper() -> WrapRec` where the non-opaque `WrapRec`
 /// carries a `Probability` field mentions `Probability`.
 pub(crate) fn type_mentions_adt(ty: &Type, target: &str, adt_reg: &AdtRegistry) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     mentions_inner(ty, target, adt_reg, &mut seen)
 }
 
@@ -483,7 +453,7 @@ fn mentions_inner(
     ty: &Type,
     target: &str,
     adt_reg: &AdtRegistry,
-    seen: &mut HashSet<String>,
+    seen: &mut UnordSet<String>,
 ) -> bool {
     match ty {
         Type::Adt(name, args) => {
@@ -494,6 +464,29 @@ fn mentions_inner(
                 .iter()
                 .any(|a| mentions_inner(a, target, adt_reg, seen))
             {
+                return true;
+            }
+            if !seen.insert(name.clone()) {
+                return false;
+            }
+            adt_reg.lookup(name).is_some_and(|def| {
+                def.variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|(_, fty)| mentions_inner(fty, target, adt_reg, seen))
+                })
+            })
+        }
+        Type::KindedAdt(name, args) => {
+            if name == target {
+                return true;
+            }
+            if args.iter().any(|argument| {
+                argument
+                    .as_type()
+                    .is_some_and(|ty| mentions_inner(ty, target, adt_reg, seen))
+            }) {
                 return true;
             }
             if !seen.insert(name.clone()) {

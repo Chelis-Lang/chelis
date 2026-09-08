@@ -114,37 +114,46 @@ fn write_harness_main_cpp(harness_path: &Path, hip_entry_symbol: &str, a: &[f32]
     lines.push("int main(void) {".to_string());
     // 8x16 input `a`
     lines.push("    int64_t a_shape[2] = { 8, 16 };".to_string());
-    lines.push("    chelis_tensor *a_t = chelis_alloc(2, a_shape, CHELIS_F32);".to_string());
+    lines.push("    chelis_tensor *a_t = chelis_alloc(2, a_shape, CHELIS_DTYPE_F32);".to_string());
+    lines.push("    chelis_tensor_write *a_guard = chelis_tensor_begin_write(a_t);".to_string());
+    lines.push("    chelis_write_view a_view = chelis_tensor_write_view(a_guard);".to_string());
     // Sibling of #250/#251/#252: exact f32 bit pattern via
     // `chelis_f32_from_bits` (from the included `chelis_runtime.h`), not a
     // lossy `{:.8}f` decimal, so the device input is byte-identical to the
     // Rust `reference_matmul_row_major` operand.
     for (idx, value) in a.iter().enumerate() {
         lines.push(format!(
-            "    a_t->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+            "    ((float *)a_view.data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
             bits = value.to_bits()
         ));
     }
+    lines.push("    chelis_tensor_end_write(a_guard);".to_string());
     // 16x4 input `b`
     lines.push("    int64_t b_shape[2] = { 16, 4 };".to_string());
-    lines.push("    chelis_tensor *b_t = chelis_alloc(2, b_shape, CHELIS_F32);".to_string());
+    lines.push("    chelis_tensor *b_t = chelis_alloc(2, b_shape, CHELIS_DTYPE_F32);".to_string());
+    lines.push("    chelis_tensor_write *b_guard = chelis_tensor_begin_write(b_t);".to_string());
+    lines.push("    chelis_write_view b_view = chelis_tensor_write_view(b_guard);".to_string());
     for (idx, value) in b.iter().enumerate() {
         lines.push(format!(
-            "    b_t->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+            "    ((float *)b_view.data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
             bits = value.to_bits()
         ));
     }
+    lines.push("    chelis_tensor_end_write(b_guard);".to_string());
     lines.push("    chelis_tensor *inputs[2] = { a_t, b_t };".to_string());
     lines.push("    chelis_tensor *outputs[1] = { NULL };".to_string());
     lines.push(format!("    {hip_entry_symbol}(inputs, 2, outputs, 1);"));
-    lines.push("    for (int i = 0; i < outputs[0]->size; i++) {".to_string());
+    lines.push(
+        "    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);".to_string(),
+    );
+    lines.push("    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {".to_string());
     lines.push("        if (i > 0) printf(\" \");".to_string());
-    lines.push("        printf(\"%.6f\", outputs[0]->data[i]);".to_string());
+    lines.push("        printf(\"%.6f\", ((const float *)output_view.data)[i]);".to_string());
     lines.push("    }".to_string());
     lines.push("    printf(\"\\n\");".to_string());
-    lines.push("    chelis_free(a_t);".to_string());
-    lines.push("    chelis_free(b_t);".to_string());
-    lines.push("    chelis_free(outputs[0]);".to_string());
+    lines.push("    chelis_tensor_release(a_t);".to_string());
+    lines.push("    chelis_tensor_release(b_t);".to_string());
+    lines.push("    chelis_tensor_release(outputs[0]);".to_string());
     lines.push("    return 0;".to_string());
     lines.push("}".to_string());
 
@@ -317,8 +326,8 @@ fn g15_user_def_manual_matmul_helper_hits_hipblas_numeric() {
     // the binary still hits hipBLAS numerically.
     let source = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                   -> tensor[8, 4, f32] = {\n  \
-                    ae = expand(a, 2, 4i64)\n  \
-                    be = expand(b, 0, 8i64)\n  \
+                    ae = insert(a, 2, 4i64)\n  \
+                    be = insert(b, 0, 8i64)\n  \
                     sum(mul(ae, be), 1)\n\
                   }\n\
                   def hip_user_def_manual_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \

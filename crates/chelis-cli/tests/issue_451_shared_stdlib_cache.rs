@@ -37,6 +37,7 @@
 //! never set in production CI.
 
 use assert_cmd::Command;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
@@ -317,6 +318,150 @@ fn run_check(file: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> Vec<
     }
     cmd.arg("check").arg(file);
     cmd.assert().get_output().stdout.clone()
+}
+
+fn check_errors(output: &[u8]) -> Vec<Value> {
+    let report: Value = serde_json::from_slice(output).unwrap_or_else(|error| {
+        panic!(
+            "`chelis check` output must be JSON ({error}); got:\n{}",
+            String::from_utf8_lossy(output)
+        )
+    });
+    report
+        .get("errors")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("check report carries an errors array")
+}
+
+#[test]
+fn public_std_test_active_float_rank_matrix_is_identical_cold_and_reused() {
+    let (guard, cache_home) = fresh_cache_home();
+    let pkg = stage_fixture(guard.path());
+    let probe = pkg.join("src/assertclosematrix.ch");
+    let mut source = String::from(
+        "module PseudoNautilus.AssertCloseMatrix\n\
+         import Std.Test (assert_close_tensor)\n\n\
+         close_alias = assert_close_tensor\n\
+         nested_alias = close_alias\n\
+         def return_close() = nested_alias\n\
+         returned_alias = return_close()\n\
+         close_pair = (returned_alias, nested_alias)\n\
+         stored_alias = close_pair.0\n\
+         def invoke(f, actual, expected, tol, label) = f(actual, expected, tol, label)\n\n",
+    );
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for (rank, tensor_type) in [
+            (0, format!("tensor[{dtype}]")),
+            (1, format!("tensor[2, {dtype}]")),
+            (2, format!("tensor[2, 3, {dtype}]")),
+            (3, format!("tensor[2, 3, 4, {dtype}]")),
+        ] {
+            source.push_str(&format!(
+                "def accept_{dtype}_r{rank}(actual: &{tensor_type}, expected: &{tensor_type}, tol: {dtype}) -> unit ! {{ Test }} = invoke(stored_alias, actual, expected, tol, \"{dtype}/r{rank}\")\n"
+            ));
+        }
+    }
+    fs::write(&probe, source).expect("write public Std.Test positive matrix");
+
+    let cold = run_check(&probe, &cache_home, &[]);
+    let warm = run_check(&probe, &cache_home, &[]);
+    assert_eq!(
+        cold, warm,
+        "a reused compiled/stdlib context must preserve the public Std.Test signature byte-for-byte"
+    );
+    assert!(
+        check_errors(&cold).is_empty(),
+        "the shipped Std.Test must accept every active float at ranks 0, 1, 2, and 3; got:\n{}",
+        String::from_utf8_lossy(&cold)
+    );
+}
+
+#[test]
+fn public_std_test_non_float_rejections_are_structural_cold_and_reused() {
+    let (guard, cache_home) = fresh_cache_home();
+    let pkg = stage_fixture(guard.path());
+    let probe = pkg.join("src/assertclosenonfloat.ch");
+    let mut source = String::from(
+        "module PseudoNautilus.AssertCloseNonFloat\n\
+         import Std.Test (assert_close_tensor)\n\n\
+         close_alias = assert_close_tensor\n\
+         nested_alias = close_alias\n\
+         def invoke(f, actual, expected, tol) = f(actual, expected, tol, \"higher-order alias\")\n\
+         def return_close() = assert_close_tensor\n\
+         returned_alias = return_close()\n\
+         close_pair = (assert_close_tensor, assert_close_tensor)\n\
+         stored_alias = close_pair.0\n\n",
+    );
+    // Keep the full dtype/route matrix in one compilation unit. Running one
+    // file per cell would spawn 30 cold + 30 warm `chelis check` processes;
+    // the two batched runs below exercise the same calls and cache states.
+    let routes = [
+        ("direct", "assert_close_tensor", false),
+        ("top_level_alias", "close_alias", false),
+        ("nested_alias", "nested_alias", false),
+        ("higher_order_alias", "close_alias", true),
+        ("returned_alias", "returned_alias", false),
+        ("stored_alias", "stored_alias", false),
+    ];
+    let dtypes = ["int8", "int16", "int32", "int64", "bool"];
+
+    for dtype in dtypes {
+        for (route, callee, higher_order) in routes {
+            let invocation = if higher_order {
+                format!("invoke({callee}, actual, expected, tol)")
+            } else {
+                format!("{callee}(actual, expected, tol, \"{route}\")")
+            };
+            source.push_str(&format!(
+                "def reject_{dtype}_{route}(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = {invocation}\n"
+            ));
+        }
+    }
+    fs::write(&probe, source).expect("write batched public Std.Test non-float probe");
+
+    let cold = run_check(&probe, &cache_home, &[]);
+    let warm = run_check(&probe, &cache_home, &[]);
+    assert_eq!(
+        cold, warm,
+        "cold/reused public diagnostics diverged for the batched non-float route matrix"
+    );
+
+    let errors = check_errors(&cold);
+    assert_eq!(
+        errors.len(),
+        dtypes.len() * routes.len(),
+        "every dtype/route cell must produce exactly one diagnostic, never an empty fallback or cascade: {errors:#?}"
+    );
+    let mut errors_per_dtype = vec![0_usize; dtypes.len()];
+    for error in &errors {
+        assert_eq!(
+            error.get("kind").and_then(Value::as_str),
+            Some("PrecisionMismatch"),
+            "every batched non-float route must reject structurally: {error:#?}"
+        );
+        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("active float dtype"),
+            "every batched route must name the active-float restriction: {message:?}"
+        );
+        let matching_dtypes: Vec<_> = dtypes
+            .iter()
+            .enumerate()
+            .filter(|(_, dtype)| message.contains(&format!("`{dtype}`")))
+            .collect();
+        assert_eq!(
+            matching_dtypes.len(),
+            1,
+            "each batched diagnostic must name exactly one matrix dtype: {message:?}"
+        );
+        errors_per_dtype[matching_dtypes[0].0] += 1;
+    }
+    assert_eq!(
+        errors_per_dtype,
+        vec![routes.len(); dtypes.len()],
+        "every non-float dtype must reject through all six direct/alias routes"
+    );
 }
 
 #[test]

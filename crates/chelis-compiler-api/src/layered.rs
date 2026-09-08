@@ -101,13 +101,14 @@ pub enum LayeredCheck {
 /// `chelis_reef::PreparedProgram`.
 pub fn check_layered(
     stdlib_decls: &[chelis_surf::ast::Decl],
+    stdlib_source_digest: [u8; 32],
     non_stdlib_decls: &[chelis_surf::ast::Decl],
 ) -> Result<Option<LayeredCheck>, CompilerError> {
     // RFC v5 (RT-1 F2 bypass): both `stdlib_decls` and `non_stdlib_decls`
     // are reef-linker output (internal-name-mangled), so the reserved
     // linker-name rejection must be off for this check.
     let _linked = chelis_types::install_linked_program_guard();
-    let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls)?;
+    let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls, stdlib_source_digest)?;
 
     // Desugar + macro-expand the non-chelis-std decls. A macro-expansion
     // failure here is a real front-end error, not a clean miss — but the
@@ -208,10 +209,11 @@ fn reconstitute_clean_fitness(
 /// path can reconstitute whole-program accounting the same way.
 pub fn stdlib_structural_stats(
     stdlib_decls: &[chelis_surf::ast::Decl],
+    stdlib_source_digest: [u8; 32],
 ) -> Result<StructuralStats, CompilerError> {
     // RFC v5: chelis-std decls are reef-linker output.
     let _linked = chelis_types::install_linked_program_guard();
-    Ok(load_or_build_stdlib_context(stdlib_decls)?.structural_stats())
+    Ok(load_or_build_stdlib_context(stdlib_decls, stdlib_source_digest)?.structural_stats())
 }
 
 /// Run the layered `chelis build` type-check stage over THREE cache
@@ -252,12 +254,13 @@ pub fn stdlib_structural_stats(
 /// - `Err(CompilerError)` — building the chelis-std sub-context failed.
 pub fn check_layered_for_build(
     stdlib_decls: &[chelis_surf::ast::Decl],
+    stdlib_source_digest: [u8; 32],
     dependency_decls: &[chelis_surf::ast::Decl],
     entry_decls: &[chelis_surf::ast::Decl],
 ) -> Result<Option<crate::pipeline::CheckedCompilation>, CompilerError> {
     // RFC v5 (RT-1 F2 bypass): linked decls; accept the linker name format.
     let _linked = chelis_types::install_linked_program_guard();
-    let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls)?;
+    let stdlib_ctx = load_or_build_stdlib_context(stdlib_decls, stdlib_source_digest)?;
 
     // Dep-free package: no middle layer to amortize. Expand the whole
     // non-chelis-std program (which is exactly `entry_decls` here) and
@@ -274,7 +277,7 @@ pub fn check_layered_for_build(
     // Layer 2: the cached dependency sub-context. `Ok(None)` (the deps did
     // not compose cleanly) falls back to the monolithic path for the
     // byte-identical error report.
-    let stdlib_key = crate::stdlib_cache::stdlib_cache_key(stdlib_decls);
+    let stdlib_key = crate::stdlib_cache::stdlib_cache_key(stdlib_decls, stdlib_source_digest);
     let library_ctx = match crate::library_cache::load_or_build_library_context(
         &stdlib_ctx,
         stdlib_key,
@@ -382,7 +385,7 @@ mod artifact_outcome_tests {
 
     fn check(source: &str) -> LayeredCheck {
         let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
-        check_layered(&[], &decls)
+        check_layered(&[], [0; 32], &decls)
             .expect("empty library context")
             .expect("the fixture must pass type analysis")
     }
@@ -431,12 +434,12 @@ mod build_layering_tests {
 
     /// Order-independent semantic equality of two checked programs.
     ///
-    /// `CheckedProgram` carries `HashMap`/`HashSet`-backed state
+    /// `CheckedProgram` carries `UnordMap`/`UnordSet`-backed state
     /// (`type_env`, the ADT registry, `library_def_names`) whose bincode
     /// serialization order is nondeterministic, so a raw byte compare is
     /// meaningless. This compares the substantive typed program: the
     /// annotated exprs (an ordered `Vec`, and the lowering input), the type
-    /// environment (a `HashMap`, compared as a set by `PartialEq`), and the
+    /// environment (a `UnordMap`, compared as a set by `PartialEq`), and the
     /// inferred signatures. The definitive whole-output byte-identity is
     /// pinned end-to-end by the CLI acceptance oracle over real C build
     /// stdout, which is invariant to the benign map ordering.

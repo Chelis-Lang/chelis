@@ -103,7 +103,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(prim, 8, 16, 4),
@@ -112,7 +112,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(prim, 8, 16, 4),
@@ -235,7 +235,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -244,7 +244,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -265,7 +265,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     let ea2 = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -274,7 +274,7 @@ fn blas_multiple_roots_synthetic_helper_emits_structured_rejection() {
     let eb2 = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -395,7 +395,7 @@ fn blas_non_load_operand_const_lhs_emits_structured_rejection() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -404,7 +404,7 @@ fn blas_non_load_operand_const_lhs_emits_structured_rejection() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -461,7 +461,7 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -470,7 +470,7 @@ fn blas_non_load_operand_const_rhs_emits_structured_rejection() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),

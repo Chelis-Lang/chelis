@@ -1,8 +1,8 @@
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -50,6 +50,14 @@ pub enum ExpansionError {
 
     #[error("failed to load standard macro prelude: {message}")]
     PreludeLoad { message: String },
+
+    #[error(
+        "`{declaration} {name}` collides with the standard prelude macro `{name}`: ordinary top-level `def`/`sig` declarations may not reuse a loaded standard-prelude macro name (spec/02-surf-syntax.md §P5b); rename the declaration or define a user macro when macro override is intended"
+    )]
+    StandardPreludeNameCollision {
+        name: String,
+        declaration: &'static str,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -66,10 +74,10 @@ pub fn expand_program(
     let prelude = if options.load_std_prelude {
         standard_prelude_macros()?
     } else {
-        HashMap::new()
+        UnordMap::new()
     };
     let mut expander = Expander::new(options.max_iterations, prelude);
-    let exprs = expander.expand_sequence(exprs, &HashMap::new())?;
+    let exprs = expander.expand_sequence(exprs, &UnordMap::new())?;
     Ok(ExpandedProgram {
         exprs,
         expansions: expander.expansions,
@@ -80,11 +88,11 @@ struct Expander {
     remaining_expansions: usize,
     hygiene_counter: usize,
     expansions: usize,
-    prelude_macros: HashMap<String, MacroDef>,
+    prelude_macros: UnordMap<String, MacroDef>,
 }
 
 impl Expander {
-    fn new(limit: usize, prelude_macros: HashMap<String, MacroDef>) -> Self {
+    fn new(limit: usize, prelude_macros: UnordMap<String, MacroDef>) -> Self {
         Self {
             remaining_expansions: limit,
             hygiene_counter: 0,
@@ -96,20 +104,22 @@ impl Expander {
     fn expand_sequence(
         &mut self,
         exprs: &[Expr],
-        inherited_macros: &HashMap<String, MacroDef>,
+        inherited_macros: &UnordMap<String, MacroDef>,
     ) -> Result<Vec<Expr>, ExpansionError> {
+        self.reject_standard_prelude_callable_collisions(exprs)?;
+
         let mut macros = inherited_macros.clone();
-        for (name, def) in &self.prelude_macros {
+        for (name, def) in self.prelude_macros.to_sorted() {
             macros.entry(name.clone()).or_insert_with(|| def.clone());
         }
 
-        let mut user_macros = HashMap::new();
+        let mut user_macros = UnordMap::new();
         for expr in exprs {
             if let Some(def) = extract_macro_def(expr)? {
                 user_macros.insert(def.name.clone(), def);
             }
         }
-        macros.extend(user_macros);
+        macros.merge(user_macros);
 
         let mut out = Vec::new();
         for expr in exprs {
@@ -121,23 +131,90 @@ impl Expander {
         Ok(out)
     }
 
+    /// Reject an ordinary declaration whose calls would be consumed by the
+    /// loaded standard macro prelude before ordinary function resolution
+    /// (spec/02-surf-syntax.md §P5b, chelis#672).
+    ///
+    /// The check reads the exact prelude map used by expansion, so adding or
+    /// removing a standard macro changes collision detection in the same
+    /// operation. An inline-annotated `def` desugars to `defsig` plus `def`;
+    /// collect the def names first so its one diagnostic names the authored
+    /// `def`, even when the synthesized `defsig` appears first.
+    fn reject_standard_prelude_callable_collisions(
+        &self,
+        exprs: &[Expr],
+    ) -> Result<(), ExpansionError> {
+        if self.prelude_macros.is_empty() {
+            return Ok(());
+        }
+
+        let def_names = exprs
+            .iter()
+            .filter_map(|expr| standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros))
+            .collect::<UnordSet<_>>();
+
+        for expr in exprs {
+            let name = standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros)
+                .or_else(|| {
+                    standard_prelude_decl_name(expr, DeepTag::Defsig, &self.prelude_macros)
+                });
+            let Some(name) = name else {
+                continue;
+            };
+            return Err(ExpansionError::StandardPreludeNameCollision {
+                name: name.to_string(),
+                declaration: if def_names.contains(name) {
+                    "def"
+                } else {
+                    "sig"
+                },
+            });
+        }
+        Ok(())
+    }
+
     fn expand_expr(
         &mut self,
         expr: &Expr,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Expr, ExpansionError> {
         match expr {
-            Expr::Atom(_, _) | Expr::Map(_, _) => Ok(expr.clone()),
+            Expr::Atom(_, _) => Ok(expr.clone()),
+            // Metadata values are full Deep expressions (spec/03 section 1.1
+            // macro boundary rule), so macro syntax inside a metadata map,
+            // including a map nested inside another metadata value, must
+            // compile away like any other position (PR #1319 review).
+            Expr::Map(meta, span) => Ok(Expr::Map(
+                MetaMap {
+                    entries: try_map_meta_entries(&meta.entries, |value| {
+                        self.expand_expr(value, macros, scope)
+                    })?,
+                },
+                *span,
+            )),
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
                 let bridged = Expr::List(node.to_list(*span), *span);
                 self.expand_expr(&bridged, macros, scope)
             }
-            Expr::BareList(_, _) | Expr::UnknownForm(_) => Ok(expr.clone()),
+            // chelis#1087: a macro invocation nested inside either
+            // transitional variant must still expand, so both recurse.
+            Expr::BareList(elements, span) => Ok(Expr::BareList(
+                elements
+                    .iter()
+                    .map(|child| self.expand_expr(child, macros, scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+                *span,
+            )),
+            Expr::UnknownForm(data) => {
+                try_map_unknown_form(data, |child| self.expand_expr(child, macros, scope))
+            }
             Expr::MetaExpr(meta, span) => Ok(Expr::MetaExpr(
                 MetaExpr {
-                    entries: meta.entries.clone(),
+                    entries: try_map_meta_entries(&meta.entries, |value| {
+                        self.expand_expr(value, macros, scope)
+                    })?,
                     expr: Box::new(self.expand_expr(&meta.expr, macros, scope)?),
                 },
                 *span,
@@ -183,7 +260,7 @@ impl Expander {
     fn expand_module(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
         let kids = children(list);
@@ -203,7 +280,7 @@ impl Expander {
     fn expand_fn(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
@@ -224,7 +301,7 @@ impl Expander {
     fn expand_let(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
@@ -262,7 +339,7 @@ impl Expander {
     fn expand_match(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
@@ -304,7 +381,7 @@ impl Expander {
     fn try_expand_macro_call(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Option<Expr>, ExpansionError> {
         let (name, args) = if internal_tag(list) == Some("macro-invoke") {
@@ -339,11 +416,11 @@ impl Expander {
         let invocation = macro_source(&def.name, &args);
         let (placeholder_params, placeholder_args) =
             macro_arg_placeholders(def, &args, self.expansions);
-        let placeholder_body = substitute_expr(&def.body, &placeholder_params, &HashSet::new());
+        let placeholder_body = substitute_expr(&def.body, &placeholder_params, &UnordSet::new());
         let hygienic = hygienize_expr(
             &placeholder_body,
             &mut self.hygiene_counter,
-            &HashMap::new(),
+            &UnordMap::new(),
         );
         let substituted = replace_placeholder_vars(&hygienic, &placeholder_args);
         Ok(Some(annotate_source_expr(&substituted, &invocation)))
@@ -365,12 +442,12 @@ fn macro_arg_placeholders(
     def: &MacroDef,
     args: &[Expr],
     expansion_id: usize,
-) -> (HashMap<String, Expr>, HashMap<String, Expr>) {
-    let mut used_symbols = HashSet::new();
+) -> (UnordMap<String, Expr>, UnordMap<String, Expr>) {
+    let mut used_symbols = UnordSet::new();
     collect_symbols(&def.body, &mut used_symbols);
 
-    let mut placeholder_params = HashMap::new();
-    let mut placeholder_args = HashMap::new();
+    let mut placeholder_params = UnordMap::new();
+    let mut placeholder_args = UnordMap::new();
     for (idx, (param, arg)) in def.params.iter().zip(args.iter()).enumerate() {
         let placeholder = fresh_placeholder(idx, expansion_id, &mut used_symbols);
         placeholder_params.insert(param.clone(), var(&placeholder));
@@ -382,7 +459,7 @@ fn macro_arg_placeholders(
 fn fresh_placeholder(
     idx: usize,
     expansion_id: usize,
-    used_symbols: &mut HashSet<String>,
+    used_symbols: &mut UnordSet<String>,
 ) -> String {
     let mut attempt = 0;
     loop {
@@ -394,18 +471,40 @@ fn fresh_placeholder(
     }
 }
 
-fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -> Expr {
+fn replace_placeholder_vars(expr: &Expr, replacements: &UnordMap<String, Expr>) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review).
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    replace_placeholder_vars(value, replacements)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
             replace_placeholder_vars(&bridged, replacements)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: placeholders inside either transitional variant must
+        // still receive their argument, so both recurse.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| replace_placeholder_vars(child, replacements))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| replace_placeholder_vars(child, replacements))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    replace_placeholder_vars(value, replacements)
+                }),
                 expr: Box::new(replace_placeholder_vars(&meta.expr, replacements)),
             },
             *span,
@@ -431,19 +530,53 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
     }
 }
 
-fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
+fn collect_symbols(expr: &Expr, out: &mut UnordSet<String>) {
     match expr {
         Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
         }
-        Expr::Atom(_, _) | Expr::Map(_, _) => {}
+        Expr::Atom(_, _) => {}
+        // Names inside metadata values are used symbols too (PR #1319
+        // review); the source provenance record stays unread like every
+        // other compiler pass (spec/03 section 1.1).
+        Expr::Map(meta, _) => {
+            for (key, value) in &meta.entries {
+                if key != PROVENANCE_KEY {
+                    collect_symbols(value, out);
+                }
+            }
+        }
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
             collect_symbols(&bridged, out);
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
-        Expr::MetaExpr(meta, _) => collect_symbols(&meta.expr, out),
+        // chelis#1087: names inside either transitional variant are used
+        // symbols. Skipping them made those names invisible to the
+        // fresh-placeholder collision check and to hygiene/capture analysis.
+        Expr::BareList(elements, _) => {
+            for element in elements {
+                collect_symbols(element, out);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (key, value) in &data.meta.entries {
+                if key != PROVENANCE_KEY {
+                    collect_symbols(value, out);
+                }
+            }
+            for child in &data.children {
+                collect_symbols(child, out);
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            for (key, value) in &meta.entries {
+                if key != PROVENANCE_KEY {
+                    collect_symbols(value, out);
+                }
+            }
+            collect_symbols(&meta.expr, out);
+        }
         Expr::List(list, _) => {
             for element in &list.elements {
                 collect_symbols(element, out);
@@ -454,7 +587,7 @@ fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
 
 #[derive(Debug, Clone, Default)]
 struct Scope {
-    blockers: HashSet<String>,
+    blockers: UnordSet<String>,
 }
 
 impl Scope {
@@ -531,20 +664,42 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
 
 fn substitute_expr(
     expr: &Expr,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
 ) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review).
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    substitute_expr(value, params, shadowed)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
             substitute_expr(&bridged, params, shadowed)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: macro parameters referenced inside either
+        // transitional variant must still substitute, so both recurse.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| substitute_expr(child, params, shadowed))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| substitute_expr(child, params, shadowed))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    substitute_expr(value, params, shadowed)
+                }),
                 expr: Box::new(substitute_expr(&meta.expr, params, shadowed)),
             },
             *span,
@@ -579,8 +734,8 @@ fn substitute_expr(
 
 fn substitute_fn(
     list: &List,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -598,8 +753,8 @@ fn substitute_fn(
 
 fn substitute_let(
     list: &List,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -637,8 +792,8 @@ fn substitute_let(
 
 fn substitute_match(
     list: &List,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
     span: Span,
 ) -> Expr {
     let mut elements = Vec::with_capacity(list.elements.len());
@@ -676,18 +831,40 @@ fn substitute_match(
     Expr::List(List { elements }, span)
 }
 
-fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String>) -> Expr {
+fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review).
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    hygienize_expr(value, counter, env)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
             hygienize_expr(&bridged, counter, env)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: binder renames must reach references inside either
+        // transitional variant, so both recurse.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| hygienize_expr(child, counter, env))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| hygienize_expr(child, counter, env))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    hygienize_expr(value, counter, env)
+                }),
                 expr: Box::new(hygienize_expr(&meta.expr, counter, env)),
             },
             *span,
@@ -723,7 +900,7 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
 fn hygienize_fn(
     list: &List,
     counter: &mut usize,
-    env: &HashMap<String, String>,
+    env: &UnordMap<String, String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -740,7 +917,7 @@ fn hygienize_fn(
 fn hygienize_let(
     list: &List,
     counter: &mut usize,
-    env: &HashMap<String, String>,
+    env: &UnordMap<String, String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -775,7 +952,7 @@ fn hygienize_let(
 fn hygienize_match(
     list: &List,
     counter: &mut usize,
-    env: &HashMap<String, String>,
+    env: &UnordMap<String, String>,
     span: Span,
 ) -> Expr {
     let kids = children(list);
@@ -816,8 +993,8 @@ fn hygienize_match(
 fn hygienize_params_expr(
     expr: &Expr,
     counter: &mut usize,
-    env: &HashMap<String, String>,
-) -> (Expr, HashMap<String, String>) {
+    env: &UnordMap<String, String>,
+) -> (Expr, UnordMap<String, String>) {
     let mut next_env = env.clone();
     let Expr::List(list, span) = expr else {
         return (expr.clone(), next_env);
@@ -859,8 +1036,8 @@ fn hygienize_params_expr(
 fn hygienize_pattern(
     expr: &Expr,
     counter: &mut usize,
-    env: &HashMap<String, String>,
-) -> (Expr, HashMap<String, String>) {
+    env: &UnordMap<String, String>,
+) -> (Expr, UnordMap<String, String>) {
     let Expr::List(list, span) = expr else {
         return (expr.clone(), env.clone());
     };
@@ -973,16 +1150,43 @@ fn hygienize_pattern(
 
 fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review), so a
+        // vocabulary node inside a metadata value carries provenance the
+        // same way one in a child position does.
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    annotate_source_expr(value, invocation)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
             annotate_source_expr(&bridged, invocation)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: expansion output nested inside either transitional
+        // variant still carries `source` metadata, so both recurse. The
+        // variant's own metadata map records no `source` entry here — only
+        // recursion, matching the recursion-only disposition of the sibling
+        // walks above.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| annotate_source_expr(child, invocation))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| annotate_source_expr(child, invocation))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    annotate_source_expr(value, invocation)
+                }),
                 expr: Box::new(annotate_source_expr(&meta.expr, invocation)),
             },
             *span,
@@ -1026,8 +1230,8 @@ fn macro_source(name: &str, args: &[Expr]) -> Expr {
     Expr::List(List { elements }, zero_span())
 }
 
-fn standard_prelude_macros() -> Result<HashMap<String, MacroDef>, ExpansionError> {
-    let mut defs = HashMap::new();
+fn standard_prelude_macros() -> Result<UnordMap<String, MacroDef>, ExpansionError> {
+    let mut defs = UnordMap::new();
     for def in [
         prelude_linear_layer(),
         prelude_residual(),
@@ -1040,6 +1244,83 @@ fn standard_prelude_macros() -> Result<HashMap<String, MacroDef>, ExpansionError
 
 fn get_tag(list: &List) -> Option<DeepTag> {
     list.tag()
+}
+
+/// The provenance metadata key (spec/03 section 1.1): its value records the
+/// original macro invocation verbatim, and the spec says every compiler pass
+/// except error reporting ignores it. The metadata walks below therefore
+/// leave it untouched; walking it would re-expand, rename, or substitute
+/// inside the historical record and destroy the "original invocation
+/// arguments" guarantee.
+const PROVENANCE_KEY: &str = "source";
+
+/// Rebuild metadata entries, applying `f` to every value except the
+/// `source` provenance record. Metadata values are full Deep expressions,
+/// so every macro walk treats them like children (PR #1319 review); a map
+/// nested inside a metadata value reaches the caller's own `Expr::Map` arm
+/// and recurses to any depth.
+fn map_meta_entries(
+    entries: &[(String, Expr)],
+    mut f: impl FnMut(&Expr) -> Expr,
+) -> Vec<(String, Expr)> {
+    entries
+        .iter()
+        .map(|(key, value)| {
+            if key == PROVENANCE_KEY {
+                (key.clone(), value.clone())
+            } else {
+                (key.clone(), f(value))
+            }
+        })
+        .collect()
+}
+
+/// Fallible twin of [`map_meta_entries`] for the expansion walk.
+fn try_map_meta_entries(
+    entries: &[(String, Expr)],
+    mut f: impl FnMut(&Expr) -> Result<Expr, ExpansionError>,
+) -> Result<Vec<(String, Expr)>, ExpansionError> {
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        if key == PROVENANCE_KEY {
+            out.push((key.clone(), value.clone()));
+        } else {
+            out.push((key.clone(), f(value)?));
+        }
+    }
+    Ok(out)
+}
+
+/// Rebuild an `UnknownForm`, applying `f` to every metadata value and every
+/// child (chelis#1087). Macro-relevant material — an invocation, a captured
+/// symbol, a binder — can sit in either position, so both recurse.
+fn map_unknown_form(data: &UnknownFormData, mut f: impl FnMut(&Expr) -> Expr) -> Expr {
+    Expr::UnknownForm(Box::new(UnknownFormData {
+        head: data.head.clone(),
+        meta: MetaMap {
+            entries: map_meta_entries(&data.meta.entries, &mut f),
+        },
+        children: data.children.iter().map(&mut f).collect(),
+        span: data.span,
+    }))
+}
+
+/// Fallible twin of [`map_unknown_form`] for the expansion walk.
+fn try_map_unknown_form(
+    data: &UnknownFormData,
+    mut f: impl FnMut(&Expr) -> Result<Expr, ExpansionError>,
+) -> Result<Expr, ExpansionError> {
+    let entries = try_map_meta_entries(&data.meta.entries, &mut f)?;
+    let mut children = Vec::with_capacity(data.children.len());
+    for child in &data.children {
+        children.push(f(child)?);
+    }
+    Ok(Expr::UnknownForm(Box::new(UnknownFormData {
+        head: data.head.clone(),
+        meta: MetaMap { entries },
+        children,
+        span: data.span,
+    })))
 }
 
 /// Compiler-internal pre-expansion tags (`defmacro` / `macro-invoke`)
@@ -1073,6 +1354,24 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
         Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
+}
+
+fn standard_prelude_decl_name<'a>(
+    expr: &'a Expr,
+    expected: DeepTag,
+    prelude: &UnordMap<String, MacroDef>,
+) -> Option<&'a str> {
+    let kids = match expr {
+        Expr::List(list, _) if get_tag(list) == Some(expected) => children(list),
+        Expr::Node(node, _) if node.tag() == expected => node.children_slice(),
+        Expr::MetaExpr(meta, _) => {
+            return standard_prelude_decl_name(&meta.expr, expected, prelude);
+        }
+        _ => return None,
+    };
+    kids.first()
+        .and_then(symbol_name)
+        .filter(|name| prelude.contains_key(*name))
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
@@ -1115,7 +1414,7 @@ fn prelude_linear_layer() -> MacroDef {
             "add",
             vec![
                 app("matmul", vec![var("x"), var("w")]),
-                app("expand", vec![var("b"), int32_lit(0), var("batch")]),
+                app("insert", vec![var("b"), int32_lit(0), var("batch")]),
             ],
         ),
     }

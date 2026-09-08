@@ -61,6 +61,14 @@ pub(super) fn infer_reduction_app(
         return err;
     }
 
+    // [05-DIM-3] / [05-OP-29]: this early variadic route bypasses the
+    // generic application's registered axis-dtype gate. Apply the same
+    // registry here so every Count axis is int32, including concrete
+    // multi-axis calls whose constant values are otherwise extractable.
+    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors) {
+        return rejected;
+    }
+
     let result_ty = Type::Var(vg.fresh_tvar());
     check_reduction_signature(fname, &kids[1..], &arg_tys, &result_ty, subst, errors)
 }
@@ -75,6 +83,7 @@ pub(super) fn infer_reduction_app(
 /// exprs.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expand_app(
+    callee: &'static str,
     list: &deep::List,
     env: &mut Env,
     vg: &mut VarGen,
@@ -90,7 +99,7 @@ pub(super) fn infer_expand_app(
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
                 format!(
-                    "expand expects (tensor, axis, size) or the named-axis form \
+                    "{callee} expects (tensor, axis, size) or the named-axis form \
                  (tensor, name, size, anchor), got {} arguments",
                     kids.len() - 1
                 ),
@@ -152,7 +161,7 @@ pub(super) fn infer_expand_app(
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!(
-                            "expand expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
+                            "{callee} expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
                         ),
                     ),
                     vec![],
@@ -167,7 +176,7 @@ pub(super) fn infer_expand_app(
     // chelis#397/#469: classify the size slot by PROVENANCE, following
     // `let`/`cast`/arithmetic to a tensor shape source. The positive-rank
     // path would otherwise stamp a sourceless runtime scalar as a `Dim::Name`,
-    // type-check clean, and then die at build/eval with the §4.7.2 Form-3
+    // type-check clean, and then die at build/eval with the §4.7.2
     // sourceless-size rejection (chelis#469: "no tensor in scope carries it").
     // Rejecting it at CHECK keeps check↔build↔eval in sync (a check-clean
     // program must build); a literal/static/shape-sourced size is materializable
@@ -179,6 +188,7 @@ pub(super) fn infer_expand_app(
         .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
+        callee,
         &kids[1..],
         &arg_tys,
         &result_ty,
@@ -287,7 +297,7 @@ pub(super) fn infer_permute_app(
         );
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     let mut reordered = Vec::with_capacity(dims.len());
     for axis in axes {
         if axis < 0 || axis as usize >= dims.len() {
@@ -433,7 +443,7 @@ pub(super) fn infer_reshape_app(
 
             Type::Tensor(vec![Dim::Wildcard], precision)
         }
-        Type::Var(input_var) => {
+        Type::Var(_) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
@@ -458,47 +468,43 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
-                let shape_subst = subst.clone();
-                let output_var = vg.fresh_tvar();
-                match subst.resolve_deferred_expand_for_reshape(
-                    input_var,
-                    output_var,
-                    |input_dims| {
-                        reshape_output_dims_for_candidate(
-                            shape_expr,
-                            input_var_name.as_deref(),
-                            input_dims,
-                            &shape_subst,
-                        )
-                        .and_then(|dims| {
-                            validate_reshape_target_dims(&dims, &shape_subst)?;
-                            Ok(dims)
-                        })
-                    },
-                ) {
-                    Ok(Some(output)) => return output,
-                    Ok(None) => {}
-                    Err(error) => return report(errors, error.into()),
+                // Inferring the shape list may have bound the input's own
+                // type through a `shape(input, axis)` element. Re-read the
+                // input before deriving the output.
+                if let Type::Tensor(input_dims, precision) = subst.apply(&input_ty) {
+                    let dims = reshape_output_dims(
+                        shape_expr,
+                        input_var_name.as_deref(),
+                        &input_dims,
+                        subst,
+                    );
+                    if let Err(error) = validate_reshape_target_dims(&dims, subst) {
+                        return report(errors, error.into());
+                    }
+                    if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
+                        let input_numel = subst.static_dim_product(&input_dims);
+                        let target_numel = subst.static_dim_product(&dims);
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::DimensionMismatch,
+                                match (target_numel, input_numel) {
+                                    (Some(target), Some(input)) => format!(
+                                        "reshape target has {target} elements but input tensor has {input}"
+                                    ),
+                                    _ => "reshape target element count does not match input tensor"
+                                        .to_string(),
+                                },
+                                vec![],
+                            ),
+                        );
+                    }
+                    return Type::Tensor(dims, precision);
                 }
-                match subst.resolve_deferred_reshape_for_reshape(
-                    input_var,
-                    output_var,
-                    |input_dims| {
-                        reshape_output_dims_for_candidate(
-                            shape_expr,
-                            input_var_name.as_deref(),
-                            input_dims,
-                            &shape_subst,
-                        )
-                        .and_then(|dims| {
-                            validate_reshape_target_dims(&dims, &shape_subst)?;
-                            Ok(dims)
-                        })
-                    },
-                ) {
-                    Ok(Some(output)) => return output,
-                    Ok(None) => {}
-                    Err(error) => return report(errors, error.into()),
+
+                let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
+                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
+                    return report(errors, error.into());
                 }
             }
             input_ty
@@ -1601,41 +1607,6 @@ pub(super) fn reshape_output_dims(
     elements
         .into_iter()
         .map(|elem| reshape_output_dim(elem, input_var_name, input_dims, subst))
-        .collect()
-}
-
-/// Derive reshape dims against one deferred-expand candidate. A shape read
-/// from the reshape input is shape-bearing context, so an axis outside this
-/// candidate rejects it while another legal candidate may still satisfy it.
-fn reshape_output_dims_for_candidate(
-    shape_expr: &deep::Expr,
-    input_var_name: Option<&str>,
-    input_dims: &[Dim],
-    subst: &Subst,
-) -> Result<Vec<Dim>, TypeError> {
-    let elements = match collect_shape_list_elements(shape_expr) {
-        Some(elems) => elems,
-        None => {
-            let rank = list_literal_len(shape_expr).unwrap_or(1);
-            return Ok(vec![Dim::Wildcard; rank]);
-        }
-    };
-    elements
-        .into_iter()
-        .map(|elem| {
-            if let Some(axis) = extract_shape_axis_of(elem, input_var_name)
-                && axis >= input_dims.len()
-            {
-                return Err(TypeError {
-                    kind: TypeErrorKind::DimensionMismatch,
-                    message: format!(
-                        "shape axis {axis} is out of bounds for rank {} tensor",
-                        input_dims.len()
-                    ),
-                });
-            }
-            Ok(reshape_output_dim(elem, input_var_name, input_dims, subst))
-        })
         .collect()
 }
 

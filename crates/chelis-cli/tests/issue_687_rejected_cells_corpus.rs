@@ -4,7 +4,7 @@
 //!
 //! One table-driven file collecting the EXISTING loud-failure locks - the
 //! HIP narrow-float rejection, the Metal f64 rejection, the Metal rank-2
-//! abort stub, and the runtime aborts - so the Phase 1 message migration
+//! typed build rejection, and the runtime aborts - so the Phase 1 message migration
 //! to the section C2 `unsupported:` format has a single file to update.
 //!
 //! The strings asserted here mirror (never replace) their original locks;
@@ -14,7 +14,7 @@
 //! - HIP: `narrow_dtype_matrix.rs::hip_rejects_f16_bf16_compute_ops_cleanly`
 //! - Metal: `metal_dtype_emission_and_bool_add.rs::
 //!   metal_rejects_f64_with_a_specific_diagnostic` and
-//!   `::metal_rank2_fallback_is_a_named_abort_stub`
+//!   `::metal_rank2_is_a_typed_error_without_an_artifact`
 //! - runtime int-div guard: `ws2b_numeric_identifier_divergence.rs`'s
 //!   `INT_DIV_ZERO_DIAGNOSTIC` rows (chelis#387 family)
 //!
@@ -51,15 +51,6 @@ fn c_toolchain_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-fn assert_emission_fragment(observation: &str, expected: &str, context: &str) {
-    let candidate = observation
-        .find(expected)
-        .map(|start| &observation[start..start + expected.len()])
-        .unwrap_or("");
-    compare_exact_observations(context, expected, candidate)
-        .unwrap_or_else(|error| panic!("{context}: {error}; complete observation: {observation}"));
 }
 
 /// `chelis build` to `target`; (ok, stderr, concatenated emitted files).
@@ -144,8 +135,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "hip",
         "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `f16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `f16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
@@ -154,8 +145,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "hip",
         "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `bf16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `bf16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
@@ -167,8 +158,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          not a direct load of a helper input; callsite=<no-span>, helper-body=surf:95..115\n\
          error: unsupported: narrow-float compute at lowered node 3 (`Add` with `f16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `f16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
@@ -180,8 +171,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          not a direct load of a helper input; callsite=<no-span>, helper-body=surf:99..119\n\
          error: unsupported: narrow-float compute at lowered node 3 (`Add` with `bf16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `bf16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
@@ -283,23 +274,19 @@ fn rejected_cells_fail_the_build_with_their_pinned_diagnostics() {
     }
 }
 
-/// The Metal rank-2 fallback is a SELF-NAMING abort stub in the emitted
-/// source - the loud fallback shape section C1 asks for. Build succeeds;
-/// the loudness lives in the emission.
+/// The Metal rank-2 gap is a typed build rejection. No aborting artifact may
+/// be presented as a successful build.
 #[test]
-fn metal_rank2_abort_stub_names_itself_in_the_emission() {
+fn metal_rank2_gap_rejects_without_an_artifact() {
     let (ok, stderr, emitted) = build_target(
         "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, 2, f32] = add(a, b)\n",
         "metal_rank2_corpus",
         "metal",
     );
-    assert!(
-        ok,
-        "rank-2 metal must build (the stub is loud, not fatal): {stderr}"
-    );
-    for expect in ["fallback stub", "abort()"] {
-        assert_emission_fragment(&emitted, expect, "metal rank-2 fallback emission fragment");
-    }
+    assert!(!ok, "rank-2 metal must reject instead of writing a stub");
+    assert!(stderr.contains("unsupported:"), "{stderr}");
+    assert!(stderr.contains("codegen:metal"), "{stderr}");
+    assert!(emitted.is_empty(), "rejected Metal build wrote: {emitted}");
 }
 
 // ===========================================================================

@@ -29,7 +29,7 @@
 //! is not refinement typing; the checker records it, never evaluates it.
 
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::{Atom, Expr};
 use chelis_pred::{PredAmenability, PredGrammarError};
@@ -91,13 +91,13 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
     // predicate may freely reference these (RFC D-WF). A constant def is
     // a `(def {} name <value>)` whose body is a bare value or a `fn` with
     // an empty params node.
-    let mut constants: HashMap<Option<String>, HashSet<String>> = HashMap::new();
+    let mut constants: UnordMap<Option<String>, UnordSet<String>> = UnordMap::new();
     // Resolve nested `t-adt` field references against the program's own
     // `deftype` declarations: a field typed as a single-variant record of
     // value-class types is in the value class. Builtin ADTs (`List`,
     // `Option`, ...) are not in this map, so they reject (correct: they
     // are multi-variant, outside the value class).
-    let mut deftypes: HashMap<String, &Expr> = HashMap::new();
+    let mut deftypes: UnordMap<String, &Expr> = UnordMap::new();
     for (module, item) in &items {
         if let Some((name, body)) = as_def(item)
             && is_zero_arg_constant(body)
@@ -118,7 +118,7 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
         if tag(item) != Some(DeepTag::Deftype) {
             continue;
         }
-        let empty = HashSet::new();
+        let empty = UnordSet::new();
         let in_module_constants = constants.get(module).unwrap_or(&empty);
         validate_one_deftype(item, in_module_constants, &deftypes, errors);
     }
@@ -127,8 +127,8 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
 /// Validate one `deftype` node carrying (or lacking) invariant metadata.
 fn validate_one_deftype(
     deftype: &Expr,
-    in_module_constants: &HashSet<String>,
-    deftypes: &HashMap<String, &Expr>,
+    in_module_constants: &UnordSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
     errors: &mut impl DiagnosticOutput,
 ) {
     let invariant = meta_value(deftype, "invariant");
@@ -168,7 +168,7 @@ fn validate_one_deftype(
 fn validate_representation(
     deftype: &Expr,
     type_name: &str,
-    deftypes: &HashMap<String, &Expr>,
+    deftypes: &UnordMap<String, &Expr>,
     errors: &mut impl DiagnosticOutput,
 ) {
     let variants: Vec<&Expr> = children(deftype)
@@ -203,7 +203,7 @@ fn validate_representation(
         let Some(field_ty) = field_kids.get(1) else {
             continue;
         };
-        let mut visiting = HashSet::new();
+        let mut visiting = UnordSet::new();
         if !is_value_class_type(field_ty, deftypes, &mut visiting) {
             errors.push_error(err(format!(
                 "field `{field_name}` of opaque type `{type_name}` is not in the V1 \
@@ -221,8 +221,8 @@ fn validate_representation(
 /// type cycles (a recursive ADT is not value-class anyway).
 fn is_value_class_type(
     ty: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
     match tag(ty) {
         // Only the numeric/boolean scalar prims an invariant can be verified
@@ -282,8 +282,8 @@ fn is_value_class_type(
 /// field is in the value class.
 fn is_single_record_of_value_class(
     deftype: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
     let variants: Vec<&Expr> = children(deftype)
         .iter()
@@ -313,7 +313,7 @@ fn validate_predicate(
     invariant_fn: &Expr,
     deftype: &Expr,
     type_name: &str,
-    in_module_constants: &HashSet<String>,
+    in_module_constants: &UnordSet<String>,
     errors: &mut impl DiagnosticOutput,
 ) {
     // Grammar (D-WF).
@@ -382,7 +382,7 @@ fn is_boolean_shaped(body: &Expr) -> bool {
             let callee = kids.first().and_then(var_name);
             matches!(
                 callee,
-                Some("eq" | "neq" | "cmplt" | "lte" | "gte" | "and" | "or" | "not")
+                Some("eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" | "and" | "or" | "not")
             )
         }
         Some(DeepTag::If) => {
@@ -426,20 +426,32 @@ fn describe_grammar_error(e: &PredGrammarError) -> String {
 // Deep node helpers (local to this module to stay decoupled from infer.rs)
 // ===========================================================================
 
+// chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: these three
+// readers are the whole module's view of a Deep node, and they were
+// `Expr::List`-only. On the stamped ingress every node arrives as an
+// `Expr::Node`, so `tag` returned `None` for the `module` wrapper,
+// `flatten_with_modules` never descended into it, and NO `deftype` was ever
+// validated -- the entire D-WF opaque-invariant pass was inert on
+// `check_typed_program` while `check_ir_program` ran it. That is PP7's "axis
+// A, not axis B" case: the pass IS invoked from the typed entry; its readers
+// could not decode the carrier. Every other helper below (`var_name`,
+// `meta_value`, `has_true_meta`, `as_def`, `is_zero_arg_constant`, `fn_body`,
+// `flatten_with_modules`) is defined in terms of these three, so repairing
+// them repairs the module.
+
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
+        Expr::Node(node, _) => Some(node.tag()),
         Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
@@ -459,12 +471,13 @@ fn var_name(expr: &Expr) -> Option<&str> {
 }
 
 fn meta_map(expr: &Expr) -> Option<&chelis_deep::MetaMap> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Map(map, _)) = list.elements.get(1)
-    {
-        Some(map)
-    } else {
-        None
+    match expr {
+        Expr::Node(node, _) => Some(node.meta()),
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(map, _)) => Some(map),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -535,11 +548,11 @@ fn flatten_with_modules(exprs: &[Expr]) -> Vec<(Option<String>, &Expr)> {
                 (None, Some(n)) => Some(n.to_string()),
                 (p, None) => p.map(str::to_string),
             };
-            if let Expr::List(list, _) = expr {
-                // `(module {} name children...)`: skip tag, meta, name.
-                for child in list.elements.iter().skip(3) {
-                    push(child, key.as_deref(), out);
-                }
+            // `(module {} name children...)`: `children` already drops the
+            // tag and the metadata map on either carrier, so `skip(1)` drops
+            // the module name and leaves the declarations.
+            for child in children(expr).iter().skip(1) {
+                push(child, key.as_deref(), out);
             }
             return;
         }

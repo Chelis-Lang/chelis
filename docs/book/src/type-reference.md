@@ -78,6 +78,28 @@ A wildcard dimension `*` marks a size that is not statically known, for example 
 produced by a `concat` whose length depends on runtime data. It unifies with anything but
 is never generalized. Add an explicit annotation to restore named checking.
 
+### Dtype-family bounds
+
+A binder in the `[...]` clause may name one dtype family, which restricts every dtype it
+can be instantiated at. The families are `Float` (the four active floats), `Int` (the four
+active signed integers), and `Numeric` (their union). `bool` and `string` belong to no
+family.
+
+```chelis-surf-fragment
+sig arange[p: Int]: p -> p -> tensor[n, p]
+sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+```
+
+Calling `arange` at `f32`, or `linspace` at `int32`, is a `PrecisionMismatch` naming the
+required family. The bound is part of the function's type, not a check on the callee name,
+so it survives aliases, wrappers, higher-order values, and imports. Two bounded variables
+that unify keep the intersection of their families; `Float` and `Int` share nothing, so
+identifying one with the other is an error.
+
+A binder with no bound is still an ordinary type variable that admits any type, not only a
+dtype. A bound goes on the declaration's `sig` when it has one, and on its `def` otherwise
+- never on both.
+
 ### Rank polymorphism
 
 A rank variable `..r` is a name-preserving spread over a run of dimensions, so one
@@ -99,21 +121,22 @@ def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32
 The body of a rank-polymorphic definition is restricted to operations whose effect on the
 shape can be tracked by name: elementwise and shape-identity operations, named-axis
 reductions (`sum`, `mean`, `max_reduce`, `min_reduce`, `prod_reduce`), and named-axis
-`expand`. Positional rewriters such as `permute`, `reshape`, and `matmul` are rejected
+`insert`. Positional rewriters such as `permute`, `reshape`, and `matmul` are rejected
 inside a `..r` body, which is what preserves the named-dimension safety guarantee.
 
 ## No broadcasting
 
 Chelis does not broadcast. Operands of an elementwise operation must have identical
-dimension lists. Use `expand` to add a dimension explicitly before combining tensors of
-different rank.
+dimension lists. Use `insert` to add a dimension explicitly before combining tensors of
+different rank, and `expand` to broadcast an existing size-1 axis.
 
 ```chelis-surf-fragment
 -- tensor[batch, hidden, f32] + tensor[hidden, f32] is a type error.
-biased = add(linear, expand(b, 0, batch))
+biased = add(linear, insert(b, 0, batch))
 ```
 
-`expand`, `reshape`, and `permute` are the explicit tools for changing rank and shape.
+`insert`, `expand`, `reshape`, and `permute` are the explicit tools for changing rank and
+shape.
 
 ## Precision rules
 

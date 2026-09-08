@@ -406,10 +406,14 @@ more C-side ownership risk exactly where the language is getting broader.
 
 **ABI cleanup decision:**
 
-- `chelis_tensor` stays layout-visible and stable because generated tensor code
+- The shipped Phase 3 runtime kept `chelis_tensor` layout-visible because generated tensor code
   dereferences tensor fields directly
-- `chelis_string`, `chelis_list`, `chelis_tuple`, and `chelis_dict` become opaque
-  handles
+- chelis#1286 supersedes that historical choice: the next ownership cut makes the tensor
+  opaque and moves generated code to tagged read/unique-write access plus a shared
+  unique-storage proof; see `compiled_value_ownership.md`
+- the chelis#1286 target keeps `chelis_string`, `chelis_list`, `chelis_tuple`,
+  `chelis_dict`, `chelis_adt`, `chelis_option`, and `chelis_mapped_file` behind
+  opaque handles and deletes the by-value option-carrier split
 - generated host code must use runtime accessors and retain/release APIs rather than
   peeking into `.data`, `->len`, `->items`, or `->entries`
 
@@ -481,7 +485,7 @@ Pragmatic surface. IO effect on everything.
 | `read_lines` | `String -> List[String]` | IO | Read file, split by newline |
 | `read_bytes` | `String -> List[Int]` | IO | Read raw bytes as integer list |
 | `file_exists` | `String -> Bool` | IO | Check file existence |
-| `list_dir` | `String -> List[String]` | IO | List directory contents |
+| `list_dir` | `String -> List[String]` | IO | List directory entry names, in [05-HOST-4] byte order |
 | `mmap_file` | `String -> MappedFile` | IO | Memory-map a file for zero-copy random access |
 | `mmap_read` | `(MappedFile, Int, Int) -> List[Int]` | Pure | Read bytes from offset+length after open |
 | `mmap_len` | `MappedFile -> Int` | Pure | File size in bytes |

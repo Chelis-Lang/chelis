@@ -98,6 +98,33 @@ class ParseJunitTests(unittest.TestCase):
                 tc.parse_junit(p)
             self.assertIn("non-numeric time", str(cm.exception))
 
+    def test_nonfinite_and_negative_times_fail_closed(self):
+        for seconds in ("NaN", "Infinity", "-Infinity", "-0.001"):
+            with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as tmp:
+                p = Path(tmp) / "junit.xml"
+                p.write_text(
+                    _junit(
+                        [("bin_a", "test_one", seconds)]  # type: ignore[list-item]
+                    )
+                )
+                with self.assertRaises(tc.TimingError) as cm:
+                    tc.parse_junit(p)
+                self.assertIn("finite, non-negative time", str(cm.exception))
+
+    def test_duplicate_test_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "junit.xml"
+            p.write_text(
+                _junit(
+                    [
+                        ("bin_a", "same", 1.0),
+                        ("bin_a", "same", 2.0),
+                    ]
+                )
+            )
+            with self.assertRaisesRegex(tc.TimingError, "duplicate test identity"):
+                tc.parse_junit(p)
+
 
 class EvaluateTests(unittest.TestCase):
     def test_all_under_budget_is_empty(self):
@@ -196,13 +223,24 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(len(flags), 1)
 
     def test_new_test_over_absolute_ceiling_is_flagged(self):
-        # Not in baseline + over the 30s ceiling -> flagged as new.
+        # Not in baseline + over the 30s ceiling -> flagged.
         timings = {"bin_a::brand_new": 45.0}
         baseline = {"bin_a::existing": 1.0}
         flags = tc.evaluate(timings, baseline, tolerance=2.0, absolute_ceiling=30.0)
         self.assertEqual(len(flags), 1)
-        self.assertEqual(flags[0].kind, tc.Flag.NEW_OVER_CEILING)
+        self.assertEqual(flags[0].kind, tc.Flag.OVER_CEILING)
         self.assertEqual(flags[0].key, "bin_a::brand_new")
+
+    def test_baselined_test_over_absolute_ceiling_is_always_flagged(self):
+        # A fresh baseline must not legalize an ordinary test above the
+        # absolute ceiling. This observation is below its 2x relative budget
+        # (40s) but is still classified by the 30s diagnostic threshold.
+        timings = {"bin_a::existing": 31.0}
+        baseline = {"bin_a::existing": 20.0}
+        flags = tc.evaluate(timings, baseline, tolerance=2.0, absolute_ceiling=30.0)
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0].kind, tc.Flag.OVER_CEILING)
+        self.assertEqual(flags[0].key, "bin_a::existing")
 
     def test_new_test_under_absolute_ceiling_is_not_flagged(self):
         # A fast new test is fine; it gets absorbed at the next
@@ -263,6 +301,20 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(tc.TimingError):
                 tc.load_config(p)
 
+    def test_nonfinite_config_values_fail_closed(self):
+        for key in ("tolerance", "absolute_ceiling", "min_regression_delta"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                payload = {
+                    "tolerance": 2.0,
+                    "absolute_ceiling": 30.0,
+                    "min_regression_delta": 0.05,
+                }
+                payload[key] = "NaN"
+                p = self._write_config(tmp, payload)
+                with self.assertRaises(tc.TimingError) as cm:
+                    tc.load_config(p)
+                self.assertIn("must be finite", str(cm.exception))
+
     def test_missing_config_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(tc.TimingError):
@@ -321,6 +373,15 @@ class BaselineTests(unittest.TestCase):
             with self.assertRaises(tc.TimingError):
                 tc.load_baseline(p)
 
+    def test_nonfinite_and_negative_baseline_values_fail_closed(self):
+        for seconds in ("NaN", "Infinity", "-1"):
+            with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as tmp:
+                p = Path(tmp) / "baseline.json"
+                p.write_text(json.dumps({"bin_a::t": seconds}))
+                with self.assertRaises(tc.TimingError) as cm:
+                    tc.load_baseline(p)
+                self.assertIn("finite and non-negative", str(cm.exception))
+
     def test_committed_baseline_is_valid(self):
         # The committed scripts/test_timing_baseline.json must load and
         # be non-empty (a real current-state baseline).
@@ -376,6 +437,106 @@ class MainExitCodeTests(unittest.TestCase):
                 tc.CONFIG_PATH, tc.BASELINE_PATH = saved
             self.assertEqual(rc, 1)
             self.assertIn("over budget", buf.getvalue())
+
+    def test_informational_relative_regression_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(_junit([("bin_a", "slow", 5.0)]))
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_text(json.dumps({"bin_a::slow": 1.0}))
+            config = Path(tmp) / "config.json"
+            config.write_text(
+                json.dumps({"tolerance": 2.0, "absolute_ceiling": 30.0})
+            )
+            saved = (tc.CONFIG_PATH, tc.BASELINE_PATH)
+            tc.CONFIG_PATH, tc.BASELINE_PATH = config, baseline
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = tc.main(
+                        [
+                            "--junit",
+                            str(junit),
+                            "--informational-relative",
+                        ]
+                    )
+            finally:
+                tc.CONFIG_PATH, tc.BASELINE_PATH = saved
+            self.assertEqual(rc, 0)
+            self.assertIn("informational", buf.getvalue())
+            self.assertIn("regressed past", buf.getvalue())
+
+    def test_informational_relative_keeps_absolute_ceiling_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(_junit([("bin_a", "slow", 31.0)]))
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_text(json.dumps({"bin_a::slow": 20.0}))
+            config = Path(tmp) / "config.json"
+            config.write_text(
+                json.dumps({"tolerance": 2.0, "absolute_ceiling": 30.0})
+            )
+            saved = (tc.CONFIG_PATH, tc.BASELINE_PATH)
+            tc.CONFIG_PATH, tc.BASELINE_PATH = config, baseline
+            try:
+                rc = tc.main(
+                    [
+                        "--junit",
+                        str(junit),
+                        "--informational-relative",
+                    ]
+                )
+            finally:
+                tc.CONFIG_PATH, tc.BASELINE_PATH = saved
+            self.assertEqual(rc, 1)
+
+    def test_informational_all_reports_absolute_and_relative_without_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(
+                _junit(
+                    [
+                        ("bin_a", "over_ceiling", 31.0),
+                        ("bin_a", "relative_only", 5.0),
+                    ]
+                )
+            )
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "bin_a::over_ceiling": 20.0,
+                        "bin_a::relative_only": 1.0,
+                    }
+                )
+            )
+            config = Path(tmp) / "config.json"
+            config.write_text(
+                json.dumps({"tolerance": 2.0, "absolute_ceiling": 30.0})
+            )
+            saved = (tc.CONFIG_PATH, tc.BASELINE_PATH)
+            tc.CONFIG_PATH, tc.BASELINE_PATH = config, baseline
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = tc.main(
+                        ["--junit", str(junit), "--informational"]
+                    )
+            finally:
+                tc.CONFIG_PATH, tc.BASELINE_PATH = saved
+            self.assertEqual(rc, 0)
+            self.assertIn("over the 30.00s absolute ceiling", buf.getvalue())
+            self.assertIn("regressed past", buf.getvalue())
+            self.assertIn("timing findings are informational", buf.getvalue())
+
+    def test_informational_all_keeps_malformed_junit_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text("<broken")
+            rc = tc.main(
+                ["--junit", str(junit), "--informational"]
+            )
+            self.assertEqual(rc, 2, "invalid telemetry must still fail closed")
 
     def test_missing_junit_exits_two(self):
         with tempfile.TemporaryDirectory() as tmp:

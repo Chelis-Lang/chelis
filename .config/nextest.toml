@@ -6,6 +6,9 @@
 #              Fast suite plus JUnit timing XML. Complete test binaries named
 #              by the parallel required dtype oracle's `--test` arguments run
 #              only in that job.
+#   ci-full  - the default per-PR scope plus JUnit output. Explicit-filter
+#              lanes use `--ignore-default-filter` with this profile, while
+#              macOS inherits the ordinary default scope unchanged.
 #   nightly  - the `Heavy E2E` workflow (.github/workflows/heavy-e2e.yml), which
 #              runs on a nightly `schedule:` and on `workflow_dispatch:` ONLY.
 #              Runs exactly the heavy e2e suite the other two profiles exclude.
@@ -47,6 +50,7 @@ default-filter = '''
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+        + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
     )
 '''
 
@@ -66,6 +70,7 @@ default-filter = '''
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+        + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
         + binary_id(/^chelis-backend-c::exec_compile$/)
         + binary_id(/^chelis-backend-c::host_emit_dtype_dispatch$/)
         + binary_id(/^chelis-cli::capacity_census_tripwire$/)
@@ -103,6 +108,15 @@ default-filter = '''
 # reports under `target/nextest/<profile>/<path>`.
 path = "junit.xml"
 
+[profile.ci-full]
+inherits = "default"
+fail-fast = false
+
+[profile.ci-full.junit]
+# Explicit-filter and macOS lanes write one report per hosted runner without
+# changing their selection contract.
+path = "junit.xml"
+
 [profile.nightly]
 fail-fast = false
 # The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
@@ -118,6 +132,7 @@ default-filter = '''
     + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
     + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
     + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+    + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
 '''
 # A transient gcc/CPU-contention hiccup should not fail a nightly job; retry
 # the heavy tests rather than capping their concurrency (which would slow the

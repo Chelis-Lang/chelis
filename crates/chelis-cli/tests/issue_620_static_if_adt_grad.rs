@@ -596,12 +596,18 @@ fn issue_620_static_if_grad_matches_c_backend() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[1] = {2};
-    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     float xd[2] = {1.0f, 2.0f};
-    memcpy(x->data, xd, sizeof(xd));
+    chelis_tensor_write* x_guard = chelis_tensor_begin_write(x);
+    chelis_write_view x_view = chelis_tensor_write_view(x_guard);
+    memcpy(x_view.data, xd, sizeof(xd));
+    chelis_tensor_end_write(x_guard);
     chelis_tensor* g = out(x);
-    if (g->size != 2) { printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }
-    for (int i = 0; i < 2; i++) printf("%.6f\n", g->data[i]);
+    chelis_read_view g_view = chelis_tensor_read_view(g);
+    if (g_view.count != 2) { printf("FAIL_SIZE %lld\n", (long long)g_view.count); return 1; }
+    for (int i = 0; i < 2; i++) printf("%.6f\n", ((const float *)g_view.data)[i]);
+    chelis_tensor_release(g);
+    chelis_tensor_release(x);
     return 0;
 }
 "#;

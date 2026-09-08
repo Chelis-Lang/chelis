@@ -211,6 +211,14 @@ class TupleUnitAdtTests(unittest.TestCase):
         t = {"kind": "adt", "name": "Box", "args": [PRIM_F32]}
         self.assertEqual(wire_to_canonical(t, []), "(t-adt {} Box (t-prim {} f32))")
 
+    def test_adt_with_dimension_argument(self):
+        t = {
+            "kind": "adt",
+            "name": "Column",
+            "args": [{"kind": "dimension", "dim": {"kind": "lit", "size": 2}}],
+        }
+        self.assertEqual(wire_to_canonical(t, []), "(t-adt {} Column (d-lit {} 2))")
+
 
 class UnrepresentableTests(unittest.TestCase):
     def test_var_is_none(self):

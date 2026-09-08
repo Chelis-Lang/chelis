@@ -235,7 +235,8 @@ fn phase3_oracles_use_the_shared_comparator_without_f64_fallbacks() {
     assert!(parity.contains("compare_exact_observations"));
     assert!(eval_agreement.contains("compare_rendered_elements"));
     assert!(eval_agreement.contains("ArithmeticWidthStatus::Nonconforming { issue: 897 }"));
-    assert!(eval_agreement.contains("chelis_format_shortest"));
+    assert!(eval_agreement.contains("chelis_string_from_scalar"));
+    assert!(!eval_agreement.contains("chelis_format_shortest"));
     assert!(rejected.contains("compare_exact_observations"));
 
     for forbidden in [

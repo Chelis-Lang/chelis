@@ -202,12 +202,15 @@ pub(super) enum SizeClass {
     Unknown,
 }
 
-/// The §4.7.2 Form-3 sourceless-size diagnostic (chelis#469), emitted by
+/// The §4.7.2 sourceless-size diagnostic (chelis#469), emitted by
 /// `check_expand_signature` when an `expand` size resolves to `Sourceless`.
 /// Factored out so the diagnostic text has a single source of truth.
 /// `size_expr` is the size sub-expression (used only to name a symbolic
 /// dimension when the size is a bare `var`).
-pub(super) fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> CheckError {
+pub(super) fn sourceless_expand_size_error(
+    builtin: &'static str,
+    size_expr: Option<&deep::Expr>,
+) -> CheckError {
     let described = size_expr
         .and_then(symbolic_dim_ref_name)
         .map(|name| format!("the symbolic dimension `{name}`"))
@@ -215,18 +218,16 @@ pub(super) fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> Ch
     CheckError::new(
         CheckErrorKind::DimensionMismatch,
         format!(
-            "`expand` size resolves to {described}, but no tensor in scope carries \
-             it: a \u{00a7}4.7.2 Form-3 runtime size must be a literal/`cast(N, \
-             int32)`, an in-scope tensor dimension, or a `shape(tensor, axis)` read \
-             (followed through `let`, `cast`, and integer arithmetic). A bare \
-             runtime scalar (e.g. an `int32`/`int64` parameter) has no shape source \
-             the backend can emit, so the extent cannot be materialized. Tracked by \
+            "`{builtin}` size resolves to {described}, but no tensor in scope carries \
+             it. Runtime extents use exact `int64`; source the value from an in-scope \
+             tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime \
+             scalar has no shape identity to attach to the result yet. Tracked by \
              Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
         ),
         vec![
-            "Source the extent from a tensor in scope: read it with \
-             `shape(x, cast(axis, int32))` (the `bias_broadcast` form), bind that \
-             read to a `let` and pass it, or use a literal/`cast(N, int32)` size."
+            "Source the extent from a tensor in scope with \
+             `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an \
+             exact `int64` literal extent."
                 .to_string(),
         ],
     )
@@ -242,12 +243,12 @@ pub(super) fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> Ch
 /// the check-time accept set matches what the backends can materialize.
 pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
     stack_guard!("classify_expand_size", expr, SizeClass::Unknown);
-    // A statically-extractable literal/`cast(N,_)` size is always Static.
-    if extract_int_for_dim(expr).is_some() {
+    // The checker and lowerer share one checked static folder.
+    if fold_static_int_expr(expr, |name| env.static_size_value(name)).is_some() {
         return SizeClass::Static;
     }
     // An inline `shape(t, axis)` read (possibly `cast`-wrapped) of an
-    // in-scope tensor is the canonical Form-3 shape source (`bias_broadcast`).
+    // in-scope tensor is the canonical shape source (`bias_broadcast`).
     if let Some(operand) = shape_read_operand(expr) {
         return if shape_operand_is_in_scope_tensor(operand, env) {
             SizeClass::ShapeSourced
@@ -444,6 +445,27 @@ pub(super) fn describe_axis_arg(axis_expr: Option<&deep::Expr>) -> String {
     }
 }
 
+/// Render a declared dimension parameter's identity for a diagnostic
+/// (chelis#260, spec/04 [04-FIT-9] and [04-FIT-10]).
+///
+/// The source spelling when the signature recorded one, quoted the way this
+/// chapter's diagnostics quote authored names. Otherwise the internal
+/// `DimVar` id, bare: [04-FIT-10] admits a synthesized identity only where
+/// provenance genuinely does not exist, and requires it be distinguishable
+/// from a spelling the user wrote. The absence of the quoting is that
+/// distinction, so the two arms may not converge on one form.
+///
+/// Rendering is per variable, not per message. A signature that recorded
+/// some of its parameters names those and falls back for the rest, rather
+/// than suppressing the whole diagnostic or attaching a recorded name to a
+/// variable it does not belong to.
+pub(super) fn render_declared_dim(dim_names: &UnordMap<DimVar, String>, dv: DimVar) -> String {
+    match dim_names.get(&dv) {
+        Some(name) => format!("`{name}`"),
+        None => format!("d{}", dv.0),
+    }
+}
+
 /// Post-body rigidity check for a def's declared dimension parameters.
 ///
 /// `declared_dvars` are the dim variables introduced by the declared
@@ -471,20 +493,23 @@ pub(super) fn describe_axis_arg(axis_expr: Option<&deep::Expr>) -> String {
 /// never trips the collapse check.
 pub(super) fn check_declared_dvars_rigid(
     declared_dvars: &[DimVar],
+    dim_names: &UnordMap<DimVar, String>,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
     // First resolved dim seen -> the declared dvar that produced it.
     // A second declared dvar resolving to the same dim is a collapse.
-    let mut seen: HashMap<Dim, DimVar> = HashMap::new();
+    let mut seen: Vec<(Dim, DimVar)> = Vec::new();
     for dv in declared_dvars {
         let resolved = subst.apply_dim(&Dim::Var(*dv));
         if let Dim::Lit(n) = resolved {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "polymorphic dim variable forced to concrete Lit({n}) by function body: \
-                     declared dim parameters must remain polymorphic"
+                    "polymorphic dim parameter {} forced to concrete Lit({n}) by function \
+                     body: declared dim parameters must remain polymorphic",
+                    render(*dv)
                 ),
                 vec![
                     "Replace the polymorphic dim with the concrete literal in the signature, or \
@@ -497,15 +522,16 @@ pub(super) fn check_declared_dvars_rigid(
         // A declared dim parameter that resolves to itself (still
         // unbound) is the legitimate polymorphic case; it cannot
         // collide with another declared dvar's distinct identity.
-        if let Some(&prev) = seen.get(&resolved) {
-            if prev != *dv {
+        if let Some((_, prev)) = seen.iter().find(|(candidate, _)| candidate == &resolved) {
+            if *prev != *dv {
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "distinct declared dim parameters d{} and d{} were unified by the \
+                        "distinct declared dim parameters {} and {} were unified by the \
                          function body: declared dim parameters are rigid and must remain \
                          distinct",
-                        prev.0, dv.0
+                        render(*prev),
+                        render(*dv)
                     ),
                     vec![
                         "The body returns or constrains a value whose dimension differs from \
@@ -517,7 +543,7 @@ pub(super) fn check_declared_dvars_rigid(
                 ));
             }
         } else {
-            seen.insert(resolved, *dv);
+            seen.push((resolved, *dv));
         }
     }
 }
@@ -564,9 +590,11 @@ pub(super) fn check_declared_dvars_rigid(
 pub(super) fn check_return_only_dvars_rigid(
     decl_ty: &Type,
     param_dvars: &[DimVar],
+    dim_names: &UnordMap<DimVar, String>,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
         return;
     };
@@ -591,12 +619,12 @@ pub(super) fn check_return_only_dvars_rigid(
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "return-position dim parameter d{} was pinned to concrete \
+                        "return-position dim parameter {} was pinned to concrete \
                          Lit({n}) flowing from a declared parameter dimension: a dim \
                          parameter that appears only in the return type promises an \
                          output dimension the body must not derive from the inputs \
                          (spec/04-type-system.md \u{00a7}4.4.1)",
-                        dv.0
+                        render(*dv)
                     ),
                     vec![
                         "Name the input dimension in the return type (reuse the \
@@ -614,11 +642,12 @@ pub(super) fn check_return_only_dvars_rigid(
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "return-position dim parameter d{} was unified with the distinct \
-                     declared dim parameter d{} from a parameter position: declared \
+                    "return-position dim parameter {} was unified with the distinct \
+                     declared dim parameter {} from a parameter position: declared \
                      dim parameters are rigid and must remain distinct \
                      (spec/04-type-system.md \u{00a7}4.4.1)",
-                    dv.0, pdv.0
+                    render(*dv),
+                    render(*pdv)
                 ),
                 vec![
                     "Use the same dim parameter in both positions if the return \
@@ -662,12 +691,13 @@ pub(super) fn check_return_only_dvars_rigid(
 pub(super) fn check_list_elem_rigid_dim_vs_wildcard(
     decl_ty: &Type,
     body_ty: &Type,
+    dim_names: &UnordMap<DimVar, String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     match (decl_ty, body_ty) {
         // Descend through the function type to its return position.
         (Type::Fn(_, decl_ret), Type::Fn(_, body_ret)) => {
-            check_list_elem_rigid_dim_vs_wildcard(decl_ret, body_ret, errors);
+            check_list_elem_rigid_dim_vs_wildcard(decl_ret, body_ret, dim_names, errors);
         }
         // `List[T]`: check the element type. The list element is where
         // the uniformity promise lives. When the element is a tensor we
@@ -683,7 +713,9 @@ pub(super) fn check_list_elem_rigid_dim_vs_wildcard(
                         let rigid = matches!(dd, Dim::Var(_) | Dim::Name(_));
                         if rigid && matches!(bd, Dim::Wildcard) {
                             let promised = match dd {
-                                Dim::Var(v) => format!("dim parameter d{}", v.0),
+                                Dim::Var(v) => {
+                                    format!("dim parameter {}", render_declared_dim(dim_names, *v))
+                                }
                                 Dim::Name(n) => format!("named dimension `{n}`"),
                                 _ => unreachable!(),
                             };
@@ -711,10 +743,68 @@ pub(super) fn check_list_elem_rigid_dim_vs_wildcard(
                 // rigid dim under `List[List[tensor[k]]]` is still checked
                 // (chelis#276).
                 (decl_elem, body_elem) => {
-                    check_list_elem_rigid_dim_vs_wildcard(decl_elem, body_elem, errors);
+                    check_list_elem_rigid_dim_vs_wildcard(decl_elem, body_elem, dim_names, errors);
                 }
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+
+    fn names(pairs: &[(DimVar, &str)]) -> UnordMap<DimVar, String> {
+        pairs
+            .iter()
+            .map(|(dv, name)| (*dv, (*name).to_string()))
+            .collect()
+    }
+
+    /// spec/04 [04-FIT-9]: where provenance exists, the source spelling is
+    /// the identity. The inference id does not accompany it.
+    #[test]
+    fn a_recorded_parameter_renders_its_source_spelling() {
+        let recorded = names(&[(DimVar(1), "n"), (DimVar(2), "m")]);
+        assert_eq!(render_declared_dim(&recorded, DimVar(1)), "`n`");
+        assert_eq!(render_declared_dim(&recorded, DimVar(2)), "`m`");
+        assert!(
+            !render_declared_dim(&recorded, DimVar(1)).contains('1'),
+            "a known spelling carries no inference id"
+        );
+    }
+
+    /// spec/04 [04-FIT-10]: with no provenance the inference id is rendered
+    /// as synthesized, and no name is invented for it.
+    ///
+    /// Distinguishability is the requirement, so it is asserted as a relation
+    /// against the authored rendering rather than against a hard-coded
+    /// spelling: a future synthesized form stays correct as long as it cannot
+    /// be read as something the user wrote.
+    #[test]
+    fn an_unrecorded_parameter_renders_a_distinguishable_synthesized_id() {
+        let synthesized = render_declared_dim(&UnordMap::new(), DimVar(1));
+        assert_eq!(synthesized, "d1", "the fallback renders the internal id");
+        assert!(
+            !synthesized.contains('`'),
+            "the synthesized form must not borrow the authored form's quoting, or a \
+             reader cannot tell an invented identity from a written one; got {synthesized}"
+        );
+        assert_ne!(
+            synthesized,
+            render_declared_dim(&names(&[(DimVar(1), "n")]), DimVar(1)),
+            "a synthesized identity must not render identically to an authored one"
+        );
+    }
+
+    /// Rendering is per variable. A signature that recorded only some of its
+    /// parameters names those and falls back for the rest, rather than
+    /// suppressing the message or misattributing a recorded name.
+    #[test]
+    fn a_partially_recorded_signature_renders_each_variable_from_its_own_provenance() {
+        let partial = names(&[(DimVar(2), "m")]);
+        assert_eq!(render_declared_dim(&partial, DimVar(1)), "d1");
+        assert_eq!(render_declared_dim(&partial, DimVar(2)), "`m`");
     }
 }

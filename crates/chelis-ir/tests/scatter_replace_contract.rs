@@ -29,7 +29,7 @@
 //!    coverage of duplicate-index accumulation must not regress
 //!    because this branch added a sibling op.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, RiscOp};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
@@ -101,7 +101,7 @@ fn scatter_replace_forward_last_write_wins_with_deterministic_order() {
         "forward DAG verification errors: {fwd_errs:?}"
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "target".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0]),
@@ -177,7 +177,7 @@ fn scatter_replace_forward_distinct_indices_writes_each_cell_once() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "target".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0]),
@@ -451,7 +451,7 @@ fn scatter_add_ad_path_unchanged_after_scatter_landed() {
     );
 
     // Verify the duplicate-index accumulation contract numerically.
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),

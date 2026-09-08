@@ -5,6 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
@@ -14,3 +15,6 @@ half = { workspace = true }
 chelis-runtime = { path = "../chelis-runtime" }
 serde_json = "1"
 tempfile = "3"
+
+[lints]
+workspace = true

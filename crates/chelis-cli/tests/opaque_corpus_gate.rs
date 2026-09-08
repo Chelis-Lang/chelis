@@ -19,12 +19,15 @@
 //!      companion (the obligation surface only compiles under `smt`).
 //!
 //! The corpus is committed; this test runs it against the live binary, so a
-//! regression in the shipped diagnostics fails the gate. If the uv-managed
-//! `.venv` is absent the test fails with a clear message (it is a documented
-//! build prerequisite, AGENTS.md).
+//! regression in the shipped diagnostics fails the gate. Python selection
+//! follows the repository's managed-interpreter contract: an explicit
+//! `PYO3_PYTHON` is authoritative, otherwise `.venv/bin/python` is used.
 
 use std::path::PathBuf;
 use std::process::Command;
+
+#[path = "../../../tests/support/managed_python.rs"]
+mod managed_python;
 
 /// Repo root = crates/chelis-cli/../.. .
 fn repo_root() -> PathBuf {
@@ -33,12 +36,6 @@ fn repo_root() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("crate is two levels below the repo root")
         .to_path_buf()
-}
-
-fn venv_python() -> PathBuf {
-    std::env::var_os("PYO3_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root().join(".venv/bin/python"))
 }
 
 fn corpus_dir() -> PathBuf {
@@ -51,20 +48,13 @@ fn chelis_bin() -> PathBuf {
     assert_cmd::cargo_bin!("chelis").to_path_buf()
 }
 
-fn require_venv() -> PathBuf {
-    let py = venv_python();
-    assert!(
-        py.exists(),
-        "the configured managed Python is a documented build prerequisite (AGENTS.md); \
-         set valid `PYO3_PYTHON` or create `.venv` with `uv venv --python 3.11`. Missing: {}",
-        py.display()
-    );
-    py
+fn require_managed_python() -> PathBuf {
+    managed_python::managed_python(&repo_root()).unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Run a corpus Python runner, returning (success, stdout, stderr).
 fn run_runner(script: &str, args: &[&str]) -> (bool, String, String) {
-    let py = require_venv();
+    let py = require_managed_python();
     let out = Command::new(py)
         .arg(corpus_dir().join(script))
         .args(args)
@@ -143,7 +133,7 @@ fn corpus_is_in_sync_with_the_generator() {
     // means the committed programs/manifest are stale vs generate_corpus.py.
     // Generated into a TEMP dir so this test never mutates the committed tree
     // (and cannot race other tests reading the corpus).
-    let py = require_venv();
+    let py = require_managed_python();
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = Command::new(&py)
         .arg(corpus_dir().join("generate_corpus.py"))

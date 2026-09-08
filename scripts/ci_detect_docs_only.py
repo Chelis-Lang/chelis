@@ -69,7 +69,19 @@ DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/", "openspec/changes/")
 # when every changed path otherwise matches the documentation allowlist.
 EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
     {
+        "docs/investigations/remediation_status_2026_08_04.md",
+        "spec/02-surf-syntax.md",
+        "spec/03-deep-syntax.md",
+        "spec/04-type-system.md",
+        "spec/05-risc-primitives.md",
+        "spec/11-ffi.md",
+        "spec/design/capability_table.md",
+        "spec/design/compiled_value_ownership.md",
+        "spec/design/dtype_semantics.md",
         "spec/design/faithful_observation.md",
+        "spec/design/loud_unsupported.md",
+        "spec/design/remediation_roadmap.md",
+        "spec/design/spec_provenance.md",
     }
 )
 

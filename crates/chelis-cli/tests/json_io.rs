@@ -14,11 +14,10 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
-use tempfile::tempdir;
 
-fn write_file(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write file");
-}
+#[path = "common/mod.rs"]
+mod common;
+use common::{make_app, write_file};
 
 const INPUT_JSON: &str = r#"{
   "portfolio": {"base_currency": "GEN"},
@@ -30,26 +29,54 @@ const INPUT_JSON: &str = r#"{
 }
 "#;
 
-/// The full pipeline in pure chelis: parse -> dot-path accessors ->
+/// The full pipeline in pure chelis: parse -> explicit ADT accessors ->
 /// tensor compute (to_tensor / mul / sum) -> round_to -> nested output
-/// assembly (jdict / json_set / jnum) -> to_json -> write_file.
+/// assembly (JsonObject / JsonFloat) -> to_json -> write_file.
 fn solve_source(input_path: &Path, output_path: &Path) -> String {
     let input = input_path.to_str().expect("utf8 path");
     let output = output_path.to_str().expect("utf8 path");
     format!(
-        r#"doc = parse_json(read_file("{input}"))
-ccy = json_str(doc, "portfolio.base_currency")
-rows = json_list(doc, "instruments")
-rates = map(fn (row) -> json_f64(row, "rate"), rows)
-notionals = map(fn (row) -> json_f64(row, "notional"), rows)
-weights = json_f64s(doc, "weights")
+        r#"module Demo.Main
+import Std.Io.Json (Json, JsonFloat, JsonObject, JsonString, json_array, json_float, json_get, json_object, json_string, parse_json, to_json)
+def required_object(value: Json, key: string) -> Dict[string, Json] = match json_object(json_get(value, key)) with {{
+  | Some(entries) => entries
+  | None => fail(string_concat("required JSON object missing at key `", string_concat(key, "`")))
+}}
+def required_string(value: Json, key: string) -> string = match json_string(json_get(value, key)) with {{
+  | Some(text) => text
+  | None => fail(string_concat("required JSON string missing at key `", string_concat(key, "`")))
+}}
+def required_float(value: Json, key: string) -> f64 = match json_float(json_get(value, key)) with {{
+  | Some(number) => number
+  | None => fail(string_concat("required JSON number missing at key `", string_concat(key, "`")))
+}}
+doc = parse_json(read_file("{input}"))
+portfolio = JsonObject(required_object(doc, "portfolio"))
+ccy = required_string(portfolio, "base_currency")
+rows = match json_array(json_get(doc, "instruments")) with {{
+  | Some(items) => items
+  | None => fail("required JSON array missing at key `instruments`")
+}}
+rates = map(fn (row: Json) -> required_float(row, "rate"), rows)
+notionals = map(fn (row: Json) -> required_float(row, "notional"), rows)
+weights = match json_array(json_get(doc, "weights")) with {{
+  | Some(items) => map(fn (item: Json) -> match json_float(Some(item)) with {{
+    | Some(number) => number
+    | None => fail("weights contains a non-numeric JSON value")
+  }}, items)
+  | None => fail("required JSON array missing at key `weights`")
+}}
 total_exposure = tensor_to_scalar(sum(mul(to_tensor(notionals), to_tensor(rates)), 0))
 blended_rate = tensor_to_scalar(sum(mul(to_tensor(weights), to_tensor(rates)), 0))
-out = jdict([("base_currency", jstr(ccy))])
-out2 = json_set(out, "results.total_exposure", jnum(round_to(total_exposure, 2)))
-out3 = json_set(out2, "results.blended_rate", jnum(round_to(blended_rate, 6)))
-out4 = json_set(out3, "meta.instrument_count", jnum(cast(len(rows), f64)))
-done = write_file("{output}", to_json(out4))
+out = JsonObject(dict_of([
+  ("base_currency", JsonString(ccy)),
+  ("results", JsonObject(dict_of([
+    ("total_exposure", JsonFloat(round_to(total_exposure, 2))),
+    ("blended_rate", JsonFloat(round_to(blended_rate, 6)))
+  ]))),
+  ("meta", JsonObject(dict_of([("instrument_count", JsonFloat(cast(len(rows), f64)))])))
+]))
+done = write_file("{output}", to_json(out))
 "#
     )
 }
@@ -68,18 +95,18 @@ fn expected_output() -> String {
     let round =
         |x: f64, places: usize| -> f64 { format!("{x:.places$}").parse().expect("round parse") };
     format!(
-        r#"{{"base_currency":"GEN","results":{{"total_exposure":{:?},"blended_rate":{:?}}},"meta":{{"instrument_count":2.0}}}}"#,
-        round(total_exposure, 2),
+        r#"{{"base_currency":"GEN","meta":{{"instrument_count":2.0}},"results":{{"blended_rate":{:?},"total_exposure":{:?}}}}}"#,
         round(blended_rate, 6),
+        round(total_exposure, 2),
     )
 }
 
 #[test]
 fn json_io_end_to_end_is_exact_and_byte_stable() {
-    let dir = tempdir().expect("tempdir");
-    let input_path = dir.path().join("input.json");
-    let output_path = dir.path().join("output.json");
-    let solve_path = dir.path().join("solve.ch");
+    let (_dir, reef_home, app_pkg) = make_app("json-io-end-to-end");
+    let input_path = app_pkg.join("input.json");
+    let output_path = app_pkg.join("output.json");
+    let solve_path = app_pkg.join("src/main.ch");
     write_file(&input_path, INPUT_JSON);
     write_file(&solve_path, &solve_source(&input_path, &output_path));
 
@@ -89,12 +116,16 @@ fn json_io_end_to_end_is_exact_and_byte_stable() {
     // acceptance.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["fmt", "--inplace", solve_path.to_str().unwrap()])
         .assert()
         .success();
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .success();
@@ -109,6 +140,8 @@ fn json_io_end_to_end_is_exact_and_byte_stable() {
     fs::remove_file(&output_path).expect("remove output");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .success();
@@ -125,15 +158,24 @@ fn json_io_end_to_end_is_exact_and_byte_stable() {
 /// "silently missing output key" class becomes structurally loud).
 #[test]
 fn json_io_missing_path_fails_eval_loudly() {
-    let dir = tempdir().expect("tempdir");
-    let input_path = dir.path().join("input.json");
-    let output_path = dir.path().join("output.json");
-    let solve_path = dir.path().join("solve.ch");
+    let (_dir, reef_home, app_pkg) = make_app("json-io-missing-path");
+    let input_path = app_pkg.join("input.json");
+    let output_path = app_pkg.join("output.json");
+    let solve_path = app_pkg.join("src/main.ch");
     write_file(&input_path, INPUT_JSON);
     let source = format!(
-        r#"doc = parse_json(read_file("{}"))
-value = json_f64(doc, "portfolio.settlement_days")
-done = write_file("{}", to_json(jnum(value)))
+        r#"module Demo.Main
+import Std.Io.Json (JsonFloat, JsonObject, json_float, json_get, json_object, parse_json, to_json)
+doc = parse_json(read_file("{}"))
+portfolio = match json_object(json_get(doc, "portfolio")) with {{
+  | Some(entries) => JsonObject(entries)
+  | None => fail("required JSON object missing at key `portfolio`")
+}}
+value = match json_float(json_get(portfolio, "settlement_days")) with {{
+  | Some(number) => number
+  | None => fail("json_float: key `settlement_days` not found; available key: `base_currency`")
+}}
+done = write_file("{}", to_json(JsonFloat(value)))
 "#,
         input_path.to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -142,52 +184,23 @@ done = write_file("{}", to_json(jnum(value)))
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["fmt", "--inplace", solve_path.to_str().unwrap()])
         .assert()
         .success();
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("json_f64"))
+        .stderr(predicate::str::contains("json_float"))
         .stderr(predicate::str::contains("key `settlement_days` not found"))
         .stderr(predicate::str::contains("`base_currency`"));
     assert!(
         !output_path.exists(),
         "a failed pipeline must not leave a partial output file"
     );
-}
-
-/// The JSON builtins are eval-only: `chelis build` rejects them when the
-/// retained compile target reaches them, instead of emitting a silently-wrong
-/// compiled value. Build checks selected definitions before pruning.
-#[test]
-fn json_io_builtins_are_rejected_by_build() {
-    let dir = tempdir().expect("tempdir");
-    let solve_path = dir.path().join("solve.ch");
-    let out_dir = dir.path().join("out");
-    write_file(
-        &solve_path,
-        "doc = parse_json(\"{\\\"a\\\": 1.5}\")\nvalue = json_f64(doc, \"a\")\n",
-    );
-
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args(["fmt", "--inplace", solve_path.to_str().unwrap()])
-        .assert()
-        .success();
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .args([
-            "build",
-            solve_path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("unsupported: builtin"));
 }

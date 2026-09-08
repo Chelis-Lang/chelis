@@ -5,11 +5,13 @@
 //! `let alias = x` as an aliasing consume (`ConsumeKind::Aliasing`
 //! once Linearity-F1 lands). The discrimination keeps later borrow
 //! reads of `x` alive because the IR-level `lower_let` aliases both
-//! names to the same `Load` node. But `LinearScope.bindings` is keyed
-//! by name only (see `crates/chelis-types/src/linearity.rs:39-42`),
-//! so a structural consume on `alias` did not propagate to `x`'s
-//! scope entry. The V3 final red team filed this as
-//! `Linearity-AliasedConsume-F1` in `docs/gap_synthesis.md`.
+//! names to the same `Load` node. But at the time `LinearScope`'s
+//! state was keyed by name only, so a structural consume on `alias`
+//! did not propagate to `x`'s scope entry. The V3 final red team
+//! filed this as `Linearity-AliasedConsume-F1` in
+//! `docs/gap_synthesis.md`. (Since chelis#1209, checker state is
+//! keyed by per-binding generation id and the alias link stores the
+//! id it was taken against.)
 //!
 //! W1 PR #83 forwards alias-consumes to the source name's scope
 //! entry so the underlying-value lineage is the unit of tracking.
@@ -42,11 +44,11 @@ fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
 /// `UseAfterConsume` on `w`. Before W1.3 the consume on `y` did
 /// not propagate to `w`'s scope entry, so the check silently passed.
 ///
-/// After W1.3, `LinearScope.aliases` records `y -> w` from the
-/// `let y = w` bind; `consume_var_expr` forwards the structural
-/// consume on `y` through `resolve_alias_chain` to `w`; the
-/// borrow of `w` in `add(w, z)` then trips `read_or_error` on the
-/// underlying source.
+/// After W1.3, the alias link (`BindingOrigin.alias`) records
+/// `y -> w` from the `let y = w` bind; `consume_var_expr` forwards
+/// the structural consume on `y` through `resolve_alias_chain` to
+/// `w`; the borrow of `w` in `add(w, z)` then trips `read_or_error`
+/// on the underlying source.
 #[test]
 fn aliased_consume_bypass_errors_after_fix() {
     let errors = linearity_errors(
@@ -77,8 +79,9 @@ def f(w: tensor[4, f32]) -> tensor[4, f32] =
 /// consume on `realize(y)` was dispatched through the untyped
 /// path; (ii) the aliased-consume bypass was independent of
 /// destructure and tracked per-name.  W1.3 wired both
-/// `tuple_get_element_type` and `LinearScope.aliases`. The
-/// W2-cascade flips the surfaced violation from warning to error.
+/// `tuple_get_element_type` and the alias link
+/// (`BindingOrigin.alias`). The W2-cascade flips the surfaced
+/// violation from warning to error.
 #[test]
 fn destructure_then_alias_consume_errors() {
     let errors = linearity_errors(

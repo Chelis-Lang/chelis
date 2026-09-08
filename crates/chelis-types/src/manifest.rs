@@ -11,11 +11,21 @@ use chelis_deep::ast::Expr;
 use crate::CheckedProgram;
 use crate::types::{Lane, Target};
 
+/// One structural lookup from a top-level root to a dotted leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootPathStep {
+    Tuple(usize),
+    Adt(usize),
+}
+
 /// A single root entry in the manifest.
 #[derive(Debug, Clone)]
 pub struct RootEntry {
     /// The rendered name (dotted for tuple/ADT components, e.g. "result.0").
     pub name: String,
+    /// Structural lookup path from `def_name` to this leaf. Empty for a bare
+    /// root, including an ADT whose constructor is not statically fixed.
+    pub path: Vec<RootPathStep>,
     /// The originating def name (for realizability lookup when expanded).
     pub def_name: String,
     /// The declared type expression.
@@ -48,8 +58,9 @@ pub struct RootManifest {
 
 impl RootManifest {
     /// Does this program have an observation boundary?
-    /// True iff entries is non-empty. An all-[05-UNS-1] program still
-    /// requires main (prints diagnostics). Empty = object.
+    /// True iff entries is non-empty. Empty manifests produce objects;
+    /// non-empty manifests require an observation entry point. An unavailable
+    /// owed root fails before an artifact is returned.
     pub fn requires_main(&self) -> bool {
         !self.entries.is_empty()
     }
@@ -75,12 +86,20 @@ impl RootManifest {
 
 /// A checked program with its root manifest attached. Enforces the phase
 /// boundary: you cannot observe roots until the manifest is computed.
-/// Carries the target it was computed for.
+/// Carries the target it was computed for. Its fields are deliberately private,
+/// so consumers cannot bypass the constructor with an unchecked program.
+///
+/// ```compile_fail
+/// use chelis_types::{CheckedProgram, manifest::{ManifestedProgram, RootManifest}, types::Target};
+/// fn bypass(checked: CheckedProgram, manifest: RootManifest) -> ManifestedProgram {
+///     ManifestedProgram { checked, manifest, target: Target::Eval }
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ManifestedProgram {
-    pub checked: CheckedProgram,
-    pub manifest: RootManifest,
-    pub target: Target,
+    checked: CheckedProgram,
+    manifest: RootManifest,
+    target: Target,
 }
 
 impl ManifestedProgram {
@@ -90,5 +109,17 @@ impl ManifestedProgram {
             manifest,
             target,
         }
+    }
+
+    pub fn checked(&self) -> &CheckedProgram {
+        &self.checked
+    }
+
+    pub fn manifest(&self) -> &RootManifest {
+        &self.manifest
+    }
+
+    pub fn target(&self) -> Target {
+        self.target
     }
 }

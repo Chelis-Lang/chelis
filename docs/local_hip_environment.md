@@ -1,8 +1,63 @@
 # Local HIP Environment
 
-This repository is currently being worked on from a real AMD/ROCm machine, not a
-CPU-only dev box. HIP manual gates are locally runnable when the environment below is
-intact.
+This runbook describes the AMD/ROCm workstation. HIP manual gates run there when
+the environment below is intact; it does not imply that every developer machine
+has that GPU or toolchain.
+
+## Ownership Phase 3 in CI
+
+`.github/workflows/ownership-hip.yml` exposes the existing authoritative command
+as a manual GitHub Actions job. Default pull-request CI still runs the Phase 2
+ownership and launch oracles; it does not execute the Phase 3 hardware gate.
+Phase 3 hardware acceptance remains open under #1286 and #1214 even when the
+implementation PR lands.
+
+Register a Linux x64 self-hosted runner with the additional label
+`chelis-hip-gfx1151`. The runner account must have the ROCm wheel environment
+documented below, working GPU device permissions, `hipcc` and `rocminfo` on
+PATH, and the normal C build prerequisites (C compiler, Clang, OpenBLAS,
+ASan/UBSan). The two hardware fixtures invoke `scripts/hip_test.py`, so the
+wheel paths must exist under that account's home directory. The label names
+this specific configured environment; it does not make an arbitrary AMD host
+compatible with the wheel wrapper. Runner registration and provisioning are
+separate from committing the workflow. A job without a matching online runner
+will wait in the queue and supplies no acceptance evidence.
+
+After the workflow lands on the default branch, a maintainer can dispatch it
+for a reviewed commit in this repository:
+
+```text
+gh workflow run ownership-hip.yml --ref main -f commit=<full-40-character-SHA>
+```
+
+GitHub requires a manually dispatched workflow to exist on the default branch
+([workflow dispatch documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)).
+The job has read-only repository access and never runs automatically for PRs.
+Its `.yml` file deliberately uses JSON syntax (a YAML subset), so the Python
+guard validates decoded event keys and rejects duplicate keys or other spellings.
+Use a dedicated runner for trusted repository commits, without workstation
+credentials or unrelated jobs sharing its GPU/build directory.
+
+The same CI entry point works directly on the documented workstation or in
+another CI service after checking out that exact commit and provisioning the
+checkout's managed Python:
+
+```text
+.venv/bin/python scripts/ownership_hip_ci.py --expected-head <full-40-character-SHA>
+```
+
+It runs `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 3 --require-hip`
+through the selected managed interpreter. Success requires exit zero and the
+final line `COMPILED VALUE OWNERSHIP PHASE 3: PASS`. The oracle's existing test
+receipt checks require execution of both `hip-caller-bytes-unchanged-hardware`
+and `hip-program-owned-reuse-hardware`; ignored, skipped, and zero-match
+results do not count. Missing hardware fails the command.
+
+The workflow uploads `target/ownership-hip-ci/oracle.log` and `receipt.json`,
+including the requested/observed commit, platform, tool paths, timestamps,
+command, exit code, and verdict. Attach the run link and artifact to #1286 and
+#1214. The complete oracle must pass on the implementation being accepted;
+the wrapper's unit tests or a queued workflow cannot close the hardware gate.
 
 ## Quick reference (run HIP tests this way)
 

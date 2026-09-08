@@ -1,0 +1,49 @@
+#!/bin/sh
+{
+# The whole file is one brace group opened on line 2, so any truncated copy
+# is an unterminated compound command that sh rejects loudly. Without it, a
+# prefix cut anywhere in the header below parses as a valid program that does
+# nothing, and git accepts a commit whose hook exits 0. Truncation is
+# reachable whenever this file is being written or checked out.
+#
+# Tracked template for the commit-msg hook. Devenv copies this file into the
+# COMMON git hooks directory, which every worktree of a clone shares.
+#
+# The point is that this script names no worktree: it resolves its repository
+# at run time, so the single installed copy is correct from every worktree and
+# on every branch, including branches that predate it. The defect it replaces
+# was a hook that baked an absolute --config path naming one worktree, which
+# broke every other worktree and then all of them once that one was deleted
+# (chelis#1409).
+#
+# It is installed by copy rather than reached through core.hooksPath because
+# that config is repository-scoped while a tracked file is branch-scoped: a
+# worktree on a branch without this file would then run no hook at all and
+# accept the commit silently.
+#
+# Runs scripts/check_commit_message.py with the interpreter precedence
+# AGENTS.md documents. Minimal POSIX sh: this runs before any project
+# environment is guaranteed to exist.
+
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+checker="$repo_root/scripts/check_commit_message.py"
+
+if [ ! -f "$checker" ]; then
+    printf '%s\n' "commit-msg hook: $checker is missing" >&2
+    exit 2
+fi
+
+if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
+    exec "$repo_root/.devenv/state/venv/bin/python" "$checker" "$@"
+elif [ -x "$repo_root/.venv/bin/python" ]; then
+    exec "$repo_root/.venv/bin/python" "$checker" "$@"
+elif command -v uv >/dev/null 2>&1; then
+    exec uv run --managed-python --python 3.11 --no-project python "$checker" "$@"
+fi
+
+printf '%s\n' 'commit-msg hook: no managed Python interpreter is available.' >&2
+printf '%s\n' 'Enter Devenv, run: uv venv --python 3.11, or install uv.' >&2
+exit 2
+}

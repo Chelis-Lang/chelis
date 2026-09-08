@@ -239,6 +239,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                             Type::Ref(_) => resolved,
                             Type::Tensor(_, _)
                             | Type::Adt(_, _)
+                            | Type::KindedAdt(_, _)
                             | Type::Tuple(_)
                             | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             // Issue #256: when the borrow inner is still an
@@ -499,6 +500,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                             Type::Ref(_) => resolved,
                             Type::Tensor(_, _)
                             | Type::Adt(_, _)
+                            | Type::KindedAdt(_, _)
                             | Type::Tuple(_)
                             | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             Type::Var(tv) => {
@@ -719,8 +721,13 @@ pub(super) fn infer_handle_effect(
             // Open question 1 (decided 2026-07-17): the seed is semantically
             // int64, and a seed written as an integer LITERAL must carry the
             // `i64` suffix (the reject-diagnostic half chelis#771 left to Phase
-            // 1). A negative int64 literal is additionally rejected: the RNG
-            // lanes cannot honor it today (chelis#731 red team F2).
+            // 1). A negative int64 literal is additionally rejected. That is a
+            // deliberate narrowing of the accepted FRONT-END surface, held until
+            // chelis#735 authors the `with seed` contract, and not a lane
+            // limitation: both the DAG lowering (`extract_u64_value`,
+            // chelis#794) and the evaluator reinterpret a signed int64 seed as
+            // its uint64 two's-complement bits per [05-RNG-1] (chelis#731 red
+            // team F2).
             match seed_literal_form(handler) {
                 SeedLiteralForm::Unsuffixed => {
                     errors.push(CheckError::new(
@@ -739,11 +746,12 @@ pub(super) fn infer_handle_effect(
                 SeedLiteralForm::NegativeInt64 => {
                     errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        "`with seed(...)` requires a non-negative seed literal; the RNG \
-                         lanes cannot honor a negative seed today (the DAG lowering folds \
-                         it to seed 0, so distinct-stream determinism ([05-RNG-1]) would \
-                         fail for a negative seed vs 0). Negative-seed semantics are \
-                         chelis#735's territory (spec/design/checker_totality.md §C1.5)"
+                        "`with seed(...)` requires a non-negative seed literal. This \
+                         is a deliberate narrowing of the accepted front-end surface, \
+                         held until chelis#735 authors the `with seed` contract, not a \
+                         lane limitation: the DAG and eval lowerings both reinterpret a \
+                         signed int64 seed as its uint64 two's-complement bits per \
+                         [05-RNG-1] (spec/design/checker_totality.md §C1.5)"
                             .to_string(),
                         vec![
                             "Use a non-negative int64-suffixed seed, e.g. \
@@ -796,11 +804,14 @@ pub(super) enum SeedLiteralForm {
     /// An unsuffixed integer literal (a bare `Atom::Int`, or `(lit {type:
     /// int32} N)`). The seed is semantically int64, so this is a type error.
     Unsuffixed,
-    /// An int64-suffixed but NEGATIVE literal (`(lit {type: int64} -N)`). The
-    /// RNG lanes cannot honor a negative seed today (the DAG lane's
-    /// `extract_usize_value` rejects it and silently falls back to seed 0), so
-    /// distinct-stream determinism ([05-RNG-1]) would fail for `-1` vs `0`.
-    /// Rejected until chelis#735 authors negative-seed semantics.
+    /// An int64-suffixed but NEGATIVE literal (`(lit {type: int64} -N)`).
+    /// [05-RNG-1] already fixes its meaning: reinterpret the signed int64 seed
+    /// as its uint64 two's-complement bits. The DAG lane does that in
+    /// `extract_u64_value` (chelis#794, which replaced the old
+    /// `extract_usize_value` fold to seed 0) and the evaluator already did.
+    /// The rejection here is therefore a deliberate narrowing of the
+    /// accepted front-end surface, held until chelis#735 authors the
+    /// `with seed` contract, not a lane limitation.
     NegativeInt64,
     /// A valid non-negative int64-suffixed literal (`Ni64` desugars to
     /// `(lit {type: (t-prim {} int64)} N)`, N >= 0). Accepted.
@@ -812,31 +823,34 @@ pub(super) enum SeedLiteralForm {
 /// unsuffixed by construction, a `(lit ...)` carries its width in the `type`
 /// metadata.
 pub(super) fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
+    // chelis#1125 PP7 / [04-TOT-5]: both reads below are carrier-preserving.
+    // This function had the `infer_lit` defect twice over -- an
+    // `Expr::List`-only match on the seed `lit` itself, and an
+    // `Expr::List`-only read of the `t-prim` under its `type:` metadata -- so
+    // on the stamped ingress the handler `Expr::Node` fell straight to the
+    // default arm, the seed classified as `NotIntLiteral`, and the §P10a
+    // int64-suffix rejection never fired at all.
     let int_lit = match expr {
         // A bare integer atom has no suffix metadata: unsuffixed by construction.
         deep::Expr::Atom(deep::Atom::Int(value), _) => Some((false, *value)),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match list.elements.get(2) {
+        _ => match stamped_parts(expr) {
+            Some((DeepTag::Lit, meta, lit_kids)) => match lit_kids.first() {
                 Some(deep::Expr::Atom(deep::Atom::Int(value), _)) => {
-                    let is_int64 = get_meta(list).is_some_and(|meta| {
-                        meta.entries.iter().any(|(key, meta_value)| {
-                            key == "type"
-                                && matches!(
-                                    meta_value,
-                                    deep::Expr::List(inner, _)
-                                        if get_tag(inner) == Some(DeepTag::TPrim)
-                                            && children(inner).first().and_then(symbol_name)
-                                                == Some("int64")
-                                )
-                        })
+                    let is_int64 = meta.entries.iter().any(|(key, meta_value)| {
+                        key == "type"
+                            && matches!(
+                                stamped_parts(meta_value),
+                                Some((DeepTag::TPrim, _, prim_kids))
+                                    if prim_kids.first().and_then(symbol_name) == Some("int64")
+                            )
                     });
                     Some((is_int64, *value))
                 }
                 // A `(lit ...)` wrapping a non-int value is not an int seed.
                 _ => None,
-            }
-        }
-        _ => None,
+            },
+            _ => None,
+        },
     };
     match int_lit {
         None => SeedLiteralForm::NotIntLiteral,
@@ -938,9 +952,11 @@ pub(super) fn infer_var(
         // to a foreign module's same-terminal tag via the registry's fuzzy
         // fallback. Check exact scope first; the fuzzy `lookup_terminal_unique`
         // is the mis-resolution path the issue reports.
-        if constructor_out_of_scope(name, env) {
+        if bare_constructor_out_of_scope(name, env) {
             let mut err = CheckError::new(
-                CheckErrorKind::UnknownConstructor,
+                CheckErrorKind::UnknownConstructor {
+                    identifier: name.to_string(),
+                },
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unknown constructor: {name}"),
@@ -958,22 +974,28 @@ pub(super) fn infer_var(
             }
             return report(errors, err);
         }
-        if let Some(scheme) = env
-            .lookup(name)
-            .or_else(|| env.lookup_terminal_unique(name))
-        {
-            let scheme = scheme.clone();
+        // [04-INF-4]: a top-level eager value is visible only from its own
+        // declaration onward. The test is on source position, never on
+        // whether a binding happens to exist: the body schedule reorders
+        // function declarations, so binding presence answers a different
+        // question. When the not-yet-declared name shadows an outer import,
+        // that outer binding is still the one in scope here.
+        let resolved_scheme = match env.top_level_value_visibility(name) {
+            TopLevelValueVisibility::Visible => env.lookup(name).cloned(),
+            TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed.cloned(),
+        };
+        if let Some(scheme) = resolved_scheme {
             // spec/04 §3.1.1: inside a recursive binding group, record the
             // instantiation minted for an in-group reference so the group
             // can be validated for uniform recursive instantiation.
             let ty = if super::recursion::should_record_occurrence(name, &scheme) {
-                let (ty, mapping) = env.instantiate_with_tvar_mapping(&scheme, vg);
+                let (ty, mapping) = env.instantiate_with_tvar_mapping(&scheme, vg, subst);
                 let span_id = list_span_id(list).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
                 super::recursion::record_occurrence(name, &mapping, span_id, span_offset);
                 ty
             } else {
-                env.instantiate(&scheme, vg)
+                env.instantiate(&scheme, vg, subst)
             };
             let resolved = subst.apply(&ty);
             // RFC D-CHECK: a bare reference to an out-of-module
@@ -987,7 +1009,9 @@ pub(super) fn infer_var(
             resolved
         } else {
             let mut err = CheckError::new(
-                CheckErrorKind::UnboundVariable,
+                CheckErrorKind::UnboundVariable {
+                    identifier: name.to_string(),
+                },
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unbound variable: {name}"),
@@ -1036,13 +1060,19 @@ pub(super) fn infer_lit(
     // int8 (range [-128, 127]) and silently wraps to -56 if not
     // diagnosed here. Mirror the i32 check for the i8 and i16 rows.
     let value_atom = kids.first();
+    // chelis#1125 PP7 / [04-TOT-5]: read the `type:` metadata VALUE through
+    // the carrier-preserving `stamped_parts`. `Node::to_list` clones the
+    // metadata map verbatim, so on the stamped ingress this value is still an
+    // `Expr::Node` even though the enclosing `lit` arrived here as a rebuilt
+    // `List`. The old `Expr::List`-only destructure therefore selected no
+    // range-check row at all, and `(lit {type: (t-prim {} int8)} 200)` was
+    // accepted by `check_typed_program` while `check_ir_program` rejected it.
     let meta_prim_name = meta.and_then(|m| {
         m.entries.iter().find_map(|(k, v)| {
             if k == "type"
-                && let deep::Expr::List(inner, _) = v
-                && get_tag(inner) == Some(DeepTag::TPrim)
+                && let Some((DeepTag::TPrim, _, prim_kids)) = stamped_parts(v)
             {
-                children(inner).first().and_then(symbol_name)
+                prim_kids.first().and_then(symbol_name)
             } else {
                 None
             }
@@ -1109,11 +1139,12 @@ pub(super) fn infer_lit(
                          suffix (`{n}i64`) or an explicit cast({n}, int64) \
                          (spec/04-type-system.md §5.3, §5.5)"
                     ),
-                    vec![format!(
+                    vec![
                         "spec/04-type-system.md §5.3: integer literals default to int32; \
                          the lexer parses at i64 so out-of-range tokens can be diagnosed \
                          before the narrowing rather than wrapping silently"
-                    )],
+                            .to_string(),
+                    ],
                 ));
             } else {
                 errors.push(CheckError::new(
@@ -1242,7 +1273,7 @@ pub(super) fn infer_lit(
                 // gate is not scoped to `.dp` ingestion.
                 // `resolve_deep_type` expands transparent
                 // aliases, so `0.5 : P2` cannot launder the gate.
-                if let Type::Adt(adt_name, _) = &resolved {
+                if let Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) = &resolved {
                     crate::opacity::check_opaque_use(
                         crate::opacity::OpaqueAction::LitForge,
                         adt_name,
@@ -1288,12 +1319,13 @@ pub(super) fn infer_lit(
                              `{n}i64` literal suffix or an explicit cast({n}, int64) \
                              (spec/04-type-system.md §5.3, §5.5)"
                             ),
-                            vec![format!(
+                            vec![
                                 "spec/04-type-system.md §5.3: integer literals default \
                              to int32; the lexer parses at i64 so out-of-range \
                              tokens can be diagnosed before the narrowing rather \
                              than wrapping silently"
-                            )],
+                                    .to_string(),
+                            ],
                         ),
                     )
                 } else {

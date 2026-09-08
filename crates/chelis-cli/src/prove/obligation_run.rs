@@ -98,11 +98,12 @@ pub(super) fn check_unlinked_decls(
 /// names as unbound even though the linker resolved them (chelis#923/#924).
 pub(super) fn check_linked_decls(
     stdlib_decls: &[Decl],
+    stdlib_source_digest: [u8; 32],
     non_stdlib_decls: &[Decl],
     options: &ProveOptions<'_>,
     totals: &mut Summary,
 ) -> Status {
-    match chelis_compiler_api::check_layered(stdlib_decls, non_stdlib_decls) {
+    match chelis_compiler_api::check_layered(stdlib_decls, stdlib_source_digest, non_stdlib_decls) {
         Ok(Some(_)) => Status::Passed,
         Ok(None) => {
             let mut decls = stdlib_decls.to_vec();

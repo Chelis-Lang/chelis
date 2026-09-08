@@ -19,3 +19,6 @@ cc = "1"
 chelis-surf = { path = "../crates/chelis-surf" }
 ryu.workspace = true
 tempfile = "3"
+
+[lints]
+workspace = true

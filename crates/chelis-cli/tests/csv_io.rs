@@ -14,11 +14,12 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
+
 use tempfile::tempdir;
 
-fn write_file(path: &Path, contents: &str) {
-    fs::write(path, contents).expect("write file");
-}
+#[path = "common/mod.rs"]
+mod common;
+use common::{make_app, write_file};
 
 /// LF line endings; the first instrument name is quoted with an embedded
 /// comma to exercise RFC 4180 parsing through the real CLI path.
@@ -35,7 +36,7 @@ const PARAMS_JSON: &str = r#"{"base_currency": "GEN", "haircut": 0.97}
 "#;
 
 /// The full pipeline in pure chelis: parse two CSVs + one JSON params
-/// file -> column accessors -> tensor compute -> round_to -> nested JSON
+/// file -> explicit string-cell parsing -> tensor compute -> round_to -> nested JSON
 /// output AND a CSV table output (to_csv), both via write_file.
 fn solve_source(dir: &Path) -> String {
     let positions = dir.join("positions.csv");
@@ -44,29 +45,53 @@ fn solve_source(dir: &Path) -> String {
     let results = dir.join("results.json");
     let valued = dir.join("valued.csv");
     format!(
-        r#"positions = parse_csv(read_file("{positions}"))
-factors = parse_csv(read_file("{factors}"))
-params = parse_json(read_file("{params}"))
-qty = csv_f64s(positions, "quantity")
-px = csv_f64s(positions, "mid_price")
-rf = csv_f64s(factors, "risk_factor")
+        r#"module Demo.Main
+import Std.Io.Csv (read_csv, to_csv)
+import Std.Io.Json (Json, JsonFloat, JsonObject, JsonString, json_float, json_get, json_string, load_json, to_json)
+def required_cell(row: Dict[string, string], column: string) -> string = match dict_get(row, column) with {{
+  | Some(text) => text
+  | None => fail(string_concat("required CSV column missing: `", string_concat(column, "`")))
+}}
+def float_cell(row: Dict[string, string], column: string) -> f64 = match to_float(required_cell(row, column)) with {{
+  | Some(number) => number
+  | None => fail(string_concat("CSV cell is not a float in column `", string_concat(column, "`")))
+}}
+def float_column(rows: List[Dict[string, string]], column: string) -> List[f64] = map(fn (row: Dict[string, string]) -> float_cell(row, column), rows)
+def required_json_float(value: Json, key: string) -> f64 = match json_float(json_get(value, key)) with {{
+  | Some(number) => number
+  | None => fail(string_concat("required JSON number missing at key `", string_concat(key, "`")))
+}}
+def required_json_string(value: Json, key: string) -> string = match json_string(json_get(value, key)) with {{
+  | Some(text) => text
+  | None => fail(string_concat("required JSON string missing at key `", string_concat(key, "`")))
+}}
+positions = read_csv("{positions}")
+factors = read_csv("{factors}")
+params = load_json("{params}")
+qty = float_column(positions, "quantity")
+px = float_column(positions, "mid_price")
+rf = float_column(factors, "risk_factor")
 values = mul(to_tensor(qty), to_tensor(px))
 gross = tensor_to_scalar(sum(values, 0))
 risk = tensor_to_scalar(sum(mul(values, to_tensor(rf)), 0))
-net = mul(gross, json_f64(params, "haircut"))
-out = jdict([("base_currency", jstr(json_str(params, "base_currency")))])
-out2 = json_set(out, "portfolio.gross_value", jnum(round_to(gross, 2)))
-out3 = json_set(out2, "portfolio.net_value", jnum(round_to(net, 2)))
-out4 = json_set(out3, "portfolio.risk_weighted", jnum(round_to(risk, 4)))
-out5 = json_set(out4, "meta.positions", jnum(cast(csv_nrows(positions), f64)))
-done_json = write_file("{results}", to_json(out5))
-val0 = round_to(mul(csv_f64(positions, 0, "quantity"), csv_f64(positions, 0, "mid_price")), 2)
-val1 = round_to(mul(csv_f64(positions, 1, "quantity"), csv_f64(positions, 1, "mid_price")), 2)
-val2 = round_to(mul(csv_f64(positions, 2, "quantity"), csv_f64(positions, 2, "mid_price")), 2)
-crow0 = jdict([("instrument", jstr(csv_str(positions, 0, "instrument"))), ("value", jnum(val0))])
-crow1 = jdict([("instrument", jstr(csv_str(positions, 1, "instrument"))), ("value", jnum(val1))])
-crow2 = jdict([("instrument", jstr(csv_str(positions, 2, "instrument"))), ("value", jnum(val2))])
-table = jdict([("columns", jlist([jstr("instrument"), jstr("value")])), ("rows", jlist([crow0, crow1, crow2]))])
+net = mul(gross, required_json_float(params, "haircut"))
+out = JsonObject(dict_of([
+  ("base_currency", JsonString(required_json_string(params, "base_currency"))),
+  ("portfolio", JsonObject(dict_of([
+    ("gross_value", JsonFloat(round_to(gross, 2))),
+    ("net_value", JsonFloat(round_to(net, 2))),
+    ("risk_weighted", JsonFloat(round_to(risk, 4)))
+  ]))),
+  ("meta", JsonObject(dict_of([("positions", JsonFloat(cast(len(positions), f64)))])))
+]))
+done_json = write_file("{results}", to_json(out))
+val0 = round_to(mul(float_cell(index(positions, 0), "quantity"), float_cell(index(positions, 0), "mid_price")), 2)
+val1 = round_to(mul(float_cell(index(positions, 1), "quantity"), float_cell(index(positions, 1), "mid_price")), 2)
+val2 = round_to(mul(float_cell(index(positions, 2), "quantity"), float_cell(index(positions, 2), "mid_price")), 2)
+crow0 = dict_of([("instrument", required_cell(index(positions, 0), "instrument")), ("value", to_string(val0))])
+crow1 = dict_of([("instrument", required_cell(index(positions, 1), "instrument")), ("value", to_string(val1))])
+crow2 = dict_of([("instrument", required_cell(index(positions, 2), "instrument")), ("value", to_string(val2))])
+table = [crow0, crow1, crow2]
 done_csv = write_file("{valued}", to_csv(table))
 "#,
         positions = positions.to_str().expect("utf8 path"),
@@ -95,7 +120,7 @@ fn expected_outputs() -> (String, String) {
     let round =
         |x: f64, places: usize| -> f64 { format!("{x:.places$}").parse().expect("round parse") };
     let results = format!(
-        r#"{{"base_currency":"GEN","portfolio":{{"gross_value":{:?},"net_value":{:?},"risk_weighted":{:?}}},"meta":{{"positions":3.0}}}}"#,
+        r#"{{"base_currency":"GEN","meta":{{"positions":3.0}},"portfolio":{{"gross_value":{:?},"net_value":{:?},"risk_weighted":{:?}}}}}"#,
         round(gross, 2),
         round(net, 2),
         round(risk, 4),
@@ -110,14 +135,14 @@ fn expected_outputs() -> (String, String) {
 
 #[test]
 fn csv_io_end_to_end_is_exact_and_byte_stable() {
-    let dir = tempdir().expect("tempdir");
-    let solve_path = dir.path().join("solve.ch");
-    let results_path = dir.path().join("results.json");
-    let valued_path = dir.path().join("valued.csv");
-    write_file(&dir.path().join("positions.csv"), POSITIONS_CSV);
-    write_file(&dir.path().join("factors.csv"), FACTORS_CSV);
-    write_file(&dir.path().join("params.json"), PARAMS_JSON);
-    write_file(&solve_path, &solve_source(dir.path()));
+    let (_dir, reef_home, app_pkg) = make_app("csv-io-end-to-end");
+    let solve_path = app_pkg.join("src/main.ch");
+    let results_path = app_pkg.join("results.json");
+    let valued_path = app_pkg.join("valued.csv");
+    write_file(&app_pkg.join("positions.csv"), POSITIONS_CSV);
+    write_file(&app_pkg.join("factors.csv"), FACTORS_CSV);
+    write_file(&app_pkg.join("params.json"), PARAMS_JSON);
+    write_file(&solve_path, &solve_source(&app_pkg));
 
     // Canonicalize through the real formatter, then run through the real
     // style gate (no CHELIS_STYLE_GATE_DISABLE): this is exactly the
@@ -125,12 +150,16 @@ fn csv_io_end_to_end_is_exact_and_byte_stable() {
     // acceptance.
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["fmt", "--inplace", solve_path.to_str().unwrap()])
         .assert()
         .success();
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .success();
@@ -154,6 +183,8 @@ fn csv_io_end_to_end_is_exact_and_byte_stable() {
     fs::remove_file(&valued_path).expect("remove valued");
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .success();
@@ -175,31 +206,44 @@ fn csv_io_end_to_end_is_exact_and_byte_stable() {
 /// becomes structurally loud).
 #[test]
 fn csv_io_missing_column_fails_eval_loudly() {
-    let dir = tempdir().expect("tempdir");
-    let solve_path = dir.path().join("solve.ch");
-    let output_path = dir.path().join("results.json");
-    write_file(&dir.path().join("positions.csv"), POSITIONS_CSV);
+    let (_dir, reef_home, app_pkg) = make_app("csv-io-missing-column");
+    let solve_path = app_pkg.join("src/main.ch");
+    let output_path = app_pkg.join("results.json");
+    write_file(&app_pkg.join("positions.csv"), POSITIONS_CSV);
     let source = format!(
-        r#"positions = parse_csv(read_file("{}"))
-px = csv_f64s(positions, "px")
-done = write_file("{}", to_json(jnum(index(px, 0))))
+        r#"module Demo.Main
+import Std.Io.Csv (read_csv)
+import Std.Io.Json (JsonFloat, to_json)
+positions = read_csv("{}")
+px = map(fn (row: Dict[string, string]) -> match dict_get(row, "px") with {{
+  | Some(text) => match to_float(text) with {{
+    | Some(number) => number
+    | None => fail("float_column: column `px` is not numeric")
+  }}
+  | None => fail("float_column: column `px` not found; available column: `mid_price`")
+}}, positions)
+done = write_file("{}", to_json(JsonFloat(index(px, 0))))
 "#,
-        dir.path().join("positions.csv").to_str().unwrap(),
+        app_pkg.join("positions.csv").to_str().unwrap(),
         output_path.to_str().unwrap(),
     );
     write_file(&solve_path, &source);
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["fmt", "--inplace", solve_path.to_str().unwrap()])
         .assert()
         .success();
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("csv_f64s"))
+        .stderr(predicate::str::contains("float_column"))
         .stderr(predicate::str::contains("column `px` not found"))
         .stderr(predicate::str::contains("`mid_price`"));
     assert!(
@@ -242,36 +286,54 @@ fn csv_io_builtins_are_rejected_by_build() {
 }
 
 /// Integer columns end-to-end ([05-OP-3] / [04-NUM-11]): an int64 ID
-/// column above 2^53 reads exactly through `csv_ints`/`csv_int`, survives
-/// `jint` -> `to_json`/`to_csv` output assembly bit-exactly, and the same
-/// column read through `csv_f64s` is the *named* lossy widening -- the
+/// column above 2^53 reads exactly through `to_int`, survives
+/// `JsonInt` -> `to_json`/`to_csv` output assembly bit-exactly, and the same
+/// column read through `to_float` is the *named* lossy widening -- the
 /// silent-collapse class the integer accessors exist to prevent.
 #[test]
 fn csv_io_integer_ids_are_exact_end_to_end() {
-    let dir = tempdir().expect("tempdir");
-    let solve_path = dir.path().join("solve.ch");
-    let results_path = dir.path().join("results.json");
-    let ids_path = dir.path().join("ids.csv");
+    let (_dir, reef_home, app_pkg) = make_app("csv-io-integer-ids");
+    let solve_path = app_pkg.join("src/main.ch");
+    let results_path = app_pkg.join("results.json");
+    let ids_path = app_pkg.join("ids.csv");
     write_file(
-        &dir.path().join("trades.csv"),
+        &app_pkg.join("trades.csv"),
         "trade_id,qty\n9007199254740993,250\n9007199254740995,750\n",
     );
     let source = format!(
-        r#"trades = parse_csv(read_file("{trades}"))
-ids = csv_ints(trades, "trade_id")
-qty = csv_ints(trades, "qty")
+        r#"module Demo.Main
+import Std.Io.Csv (read_csv, to_csv)
+import Std.Io.Json (JsonFloat, JsonInt, JsonObject, to_json)
+def required_cell(row: Dict[string, string], column: string) -> string = match dict_get(row, column) with {{
+  | Some(text) => text
+  | None => fail(string_concat("required CSV column missing: `", string_concat(column, "`")))
+}}
+def integer_cell(row: Dict[string, string], column: string) -> int64 = match to_int(required_cell(row, column)) with {{
+  | Some(number) => number
+  | None => fail(string_concat("integer_column: column `", string_concat(column, "` contains a value that is not an integer; use to_float for a named lossy conversion")))
+}}
+def integer_column(rows: List[Dict[string, string]], column: string) -> List[int64] = map(fn (row: Dict[string, string]) -> integer_cell(row, column), rows)
+def float_column(rows: List[Dict[string, string]], column: string) -> List[f64] = map(fn (row: Dict[string, string]) -> match to_float(required_cell(row, column)) with {{
+  | Some(number) => number
+  | None => fail(string_concat("float_column: column `", string_concat(column, "` contains a non-numeric value")))
+}}, rows)
+trades = read_csv("{trades}")
+ids = integer_column(trades, "trade_id")
+qty = integer_column(trades, "qty")
 total_qty = fold(fn (acc, q) -> add(acc, q), 0i64, qty)
-first_widened = index(csv_f64s(trades, "trade_id"), 0)
-out = jdict([("first_id", jint(csv_int(trades, 0, "trade_id")))])
-out2 = json_set(out, "totals.qty", jint(total_qty))
-out3 = json_set(out2, "lossy.first_id_f64", jnum(first_widened))
-done_json = write_file("{results}", to_json(out3))
-row0 = jdict([("trade_id", jint(index(ids, 0)))])
-row1 = jdict([("trade_id", jint(index(ids, 1)))])
-table = jdict([("columns", jlist([jstr("trade_id")])), ("rows", jlist([row0, row1]))])
+first_widened = index(float_column(trades, "trade_id"), 0)
+out = JsonObject(dict_of([
+  ("first_id", JsonInt(integer_cell(index(trades, 0), "trade_id"))),
+  ("totals", JsonObject(dict_of([("qty", JsonInt(total_qty))]))),
+  ("lossy", JsonObject(dict_of([("first_id_f64", JsonFloat(first_widened))])))
+]))
+done_json = write_file("{results}", to_json(out))
+row0 = dict_of([("trade_id", to_string(index(ids, 0)))])
+row1 = dict_of([("trade_id", to_string(index(ids, 1)))])
+table = [row0, row1]
 done_csv = write_file("{ids_out}", to_csv(table))
 "#,
-        trades = dir.path().join("trades.csv").to_str().unwrap(),
+        trades = app_pkg.join("trades.csv").to_str().unwrap(),
         results = results_path.to_str().unwrap(),
         ids_out = ids_path.to_str().unwrap(),
     );
@@ -279,11 +341,15 @@ done_csv = write_file("{ids_out}", to_csv(table))
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["fmt", "--inplace", solve_path.to_str().unwrap()])
         .assert()
         .success();
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .success();
@@ -294,7 +360,7 @@ done_csv = write_file("{ids_out}", to_csv(table))
     // visibly distinct in the same output document.
     assert_eq!(
         results,
-        r#"{"first_id":9007199254740993,"totals":{"qty":1000},"lossy":{"first_id_f64":9007199254740992.0}}"#
+        r#"{"first_id":9007199254740993,"lossy":{"first_id_f64":9007199254740992.0},"totals":{"qty":1000}}"#
     );
     let ids_csv = fs::read_to_string(&ids_path).expect("ids.csv written");
     assert_eq!(ids_csv, "trade_id\n9007199254740993\n9007199254740995\n");
@@ -305,34 +371,47 @@ done_csv = write_file("{ids_out}", to_csv(table))
 /// remedy; the output file is never written.
 #[test]
 fn csv_io_integer_accessor_refuses_float_cells_loudly() {
-    let dir = tempdir().expect("tempdir");
-    let solve_path = dir.path().join("solve.ch");
-    let output_path = dir.path().join("results.json");
-    write_file(&dir.path().join("trades.csv"), "trade_id,px\n12,101.5\n");
+    let (_dir, reef_home, app_pkg) = make_app("csv-io-integer-refusal");
+    let solve_path = app_pkg.join("src/main.ch");
+    let output_path = app_pkg.join("results.json");
+    write_file(&app_pkg.join("trades.csv"), "trade_id,px\n12,101.5\n");
     let source = format!(
-        r#"trades = parse_csv(read_file("{}"))
-xs = csv_ints(trades, "px")
-done = write_file("{}", to_json(jint(index(xs, 0))))
+        r#"module Demo.Main
+import Std.Io.Csv (read_csv)
+import Std.Io.Json (JsonInt, to_json)
+trades = read_csv("{}")
+xs = map(fn (row: Dict[string, string]) -> match dict_get(row, "px") with {{
+  | Some(text) => match to_int(text) with {{
+    | Some(number) => number
+    | None => fail("integer_column: column `px` contains `101.5`, which is not an integer; use to_float for float cells")
+  }}
+  | None => fail("integer_column: column `px` not found")
+}}, trades)
+done = write_file("{}", to_json(JsonInt(index(xs, 0))))
 "#,
-        dir.path().join("trades.csv").to_str().unwrap(),
+        app_pkg.join("trades.csv").to_str().unwrap(),
         output_path.to_str().unwrap(),
     );
     write_file(&solve_path, &source);
 
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["fmt", "--inplace", solve_path.to_str().unwrap()])
         .assert()
         .success();
     Command::cargo_bin("chelis")
         .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
         .args(["eval", "--file", solve_path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("csv_ints"))
+        .stderr(predicate::str::contains("integer_column"))
         .stderr(predicate::str::contains("column `px`"))
         .stderr(predicate::str::contains("not an integer"))
-        .stderr(predicate::str::contains("csv_f64/csv_f64s"));
+        .stderr(predicate::str::contains("to_float"));
     assert!(
         !output_path.exists(),
         "a failed pipeline must not leave a partial output file"

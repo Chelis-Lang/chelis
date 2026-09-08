@@ -22,7 +22,7 @@ pub(super) fn infer_app(
     }
 
     // Check if func is a comparison op (for special return type handling)
-    let func_name = stamped_parts(&kids[0]).and_then(|(tag, _, callee_kids)| {
+    let source_func_name = stamped_parts(&kids[0]).and_then(|(tag, _, callee_kids)| {
         (tag == DeepTag::Var)
             .then(|| {
                 callee_kids
@@ -32,13 +32,36 @@ pub(super) fn infer_app(
             })
             .flatten()
     });
+    // Builtin-specific application rules are selected only after ordinary
+    // lexical lookup. A parameter, block binding, or pattern binding with the
+    // same builtin spelling owns the call; its inferred function type, rather
+    // than the builtin's name-keyed checker route, decides whether the
+    // application is valid (spec/04-type-system.md §8.6; chelis#1076).
+    //
+    // Keep the override exact to the closed builtin vocabulary. In particular,
+    // applied uppercase heads retain constructor classification under
+    // spec/01-nomenclature.md §3.2 even when a single-letter value binder with
+    // the same spelling is in scope.
+    let func_name = source_func_name.clone().filter(|name| {
+        !builtins::BUILTIN_NAMES.contains(&name.as_str()) || !env.is_lexically_bound(name)
+    });
 
     if matches!(func_name.as_deref(), Some("permute")) {
         return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        return infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
+        let inferred = infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
+        if let Some(expected) = env.exact_stdlib_expected_result()
+            && matches!(expected, Type::Tensor(_, _))
+        {
+            // #1298 owns the general runtime-axis shape relation. The exact
+            // [05-OP-35] stdlib graph is structurally locked and its declared
+            // result is authoritative at this package-reserved boundary; the
+            // ordinary reshape checker still traverses and stamps every child.
+            return expected.clone();
+        }
+        return inferred;
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {
@@ -59,8 +82,16 @@ pub(super) fn infer_app(
     // check before the procedural arm. Dispatch it here (the
     // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
     // which reaches `check_expand_signature` with the scheme intact.
-    if matches!(func_name.as_deref(), Some("expand")) && kids.len() >= 5 {
-        return infer_expand_app(list, env, vg, subst, adt_reg, errors, product);
+    if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
+        && kids.len() >= 5
+    {
+        // `&'static str`, not the borrow, so the callee outlives `func_name`.
+        let callee = if callee == "insert" {
+            "insert"
+        } else {
+            "expand"
+        };
+        return infer_expand_app(callee, list, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -74,6 +105,7 @@ pub(super) fn infer_app(
         func_name.as_deref(),
         Some(
             "sum"
+                | "count"
                 | "mean"
                 | "max_reduce"
                 | "min_reduce"
@@ -113,17 +145,61 @@ pub(super) fn infer_app(
         );
     }
 
-    let ctor_lookup_name = match prepare_constructor_application(&func_name, env, adt_reg, errors) {
-        Ok(name) => name,
+    match prepare_constructor_application(&func_name, env, adt_reg, errors) {
+        Ok(_) => {}
         Err(rejected) => return rejected,
-    };
+    }
 
-    let func_ty = {
-        let _ctor_guard = ctor_lookup_name
-            .as_ref()
-            .map(|_| crate::opacity::suppress_ctor_reference_check());
+    // Applied uppercase heads are constructor syntax, even when a value
+    // binder with the same spelling is present (spec/01 §3.2). Do not send a
+    // resolved constructor back through the string-keyed value environment:
+    // a parameter named `N` would replace the constructor scheme there.
+    // Conversely, do not rediscover an owner by scanning the ADT registry:
+    // two positional constructors may share a name (`Option::Some` and a
+    // local `Wrapper::Some`), and registry order is not scope. The separate
+    // constructor authority preserves the active declaration/import owner
+    // and scheme across ordinary lexical shadowing.
+    let applied_constructor_head = source_func_name.as_deref().is_some_and(is_constructor_name);
+    let func_ty = if applied_constructor_head {
+        let source_name = source_func_name.as_deref().unwrap();
+        let resolved_constructor = if constructor_out_of_scope(source_name, env) {
+            None
+        } else {
+            constructor_for_shape(source_name, CallShape::Positional, env, adt_reg)
+                .map(|(_, scheme, _)| env.instantiate(scheme, vg, subst))
+        };
+        match resolved_constructor {
+            Some(constructor_type) => constructor_type,
+            None => {
+                let name = source_func_name.as_deref().unwrap();
+                report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::UnknownConstructor {
+                            identifier: name.to_string(),
+                        },
+                        with_macro_provenance(&kids[0], format!("unknown constructor: {name}")),
+                        vec![format!(
+                            "Constructor '{name}' is not in scope. Declare it locally or add it \
+                             to an import (e.g. `import Mod ({name})`)"
+                        )],
+                    ),
+                )
+            }
+        }
+    } else {
         infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
+    // The constructor callee no longer passes through `infer_expr`, but it is
+    // still a runtime expression owner and must contribute the same fitness
+    // and annotation receipt as every other callee.
+    if applied_constructor_head {
+        product.total_nodes += 1;
+        if !matches!(func_ty, Type::Error(_)) {
+            product.typed_nodes += 1;
+        }
+        product.record_canonical(&kids[0], func_ty.clone());
+    }
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
     // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
@@ -134,6 +210,7 @@ pub(super) fn infer_app(
         func_name.as_deref(),
         Some(
             "sum"
+                | "count"
                 | "mean"
                 | "max_reduce"
                 | "min_reduce"
@@ -155,7 +232,7 @@ pub(super) fn infer_app(
             // keep flowing through ordinary inference into the
             // compile-time-constant rejection. The 4-arg anchored form routes
             // through `infer_expand_app` instead and never reaches this loop.
-            let is_expand = matches!(func_name.as_deref(), Some("expand"));
+            let is_expand = matches!(func_name.as_deref(), Some("expand") | Some("insert"));
             let is_expand_size = is_expand && index == 2;
             let is_expand_inserted_name = is_expand
                 && index == 1
@@ -182,6 +259,18 @@ pub(super) fn infer_app(
         return Type::Unit;
     }
 
+    // The builtin signature structurally shares one precision variable across
+    // both tensors and the tolerance. Preserve the operation-specific direct
+    // mismatch diagnostics by inspecting concrete operands before generic
+    // unification reports its lower-level precision pair. Unresolved generic
+    // wrappers pass this precheck and are constrained by the shared variable.
+    if matches!(func_name.as_deref(), Some("test_assert_close_tensor"))
+        && let Some(rejected) =
+            reject_test_assert_close_tensor_operand_dtypes(list, &arg_tys, subst, errors)
+    {
+        return rejected;
+    }
+
     // [05-DIM-3]: the semantic registry owns axis dtype slots. `concat`
     // is overloaded with ordinary list concatenation and therefore runs
     // the same shared gate only after its tensor-list arm is identified in
@@ -197,7 +286,7 @@ pub(super) fn infer_app(
     // size dtype would otherwise surface as the scheme unification's bare
     // `precision mismatch` pair. Pre-check the resolved size type here so
     // the rejection names the fix, mirroring shrink/pad/stride/reshape.
-    if matches!(func_name.as_deref(), Some("expand"))
+    if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
         && arg_tys.len() >= 3
         && let Type::Prim(p) = subst.apply(&arg_tys[2])
         && p != Prim::Int64
@@ -209,7 +298,8 @@ pub(super) fn infer_app(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "expand expects an int64 size (write Ni64 or cast(N, int64)), got {}",
+                        "{callee} expects an int64 size (write Ni64 or cast(N, int64)), \
+                         got {}",
                         Type::Prim(p)
                     ),
                 ),

@@ -1,0 +1,36 @@
+{
+  "include": [
+    ".github/scripts",
+    "assets/mascot",
+    "benchmarks/pytorch",
+    "bindings/python",
+    "crates/chelis-cli/tests/fixtures/pseudo_nautilus/parity",
+    "docs/investigations/probes",
+    "py/src",
+    "py/tests",
+    "scripts",
+    "tests"
+  ],
+  "exclude": [
+    "**/.devenv",
+    "**/.git",
+    "**/.venv",
+    "**/__pycache__",
+    "**/node_modules",
+    "**/target"
+  ],
+  "pythonVersion": "3.11",
+  "executionEnvironments": [
+    {
+      "root": "py",
+      "extraPaths": ["py/src"]
+    },
+    {
+      "root": "bindings/python",
+      "extraPaths": ["bindings/python"]
+    },
+    {
+      "root": "."
+    }
+  ]
+}

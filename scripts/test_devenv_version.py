@@ -17,16 +17,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT_HOOKS_MODULE = REPO_ROOT / "devenv/git-hooks.nix"
 SMOKE_TEST_MODULE = REPO_ROOT / "devenv/smoke-tests.nix"
 TOOLCHAIN_MODULE = REPO_ROOT / "devenv/toolchains.nix"
-EXPECTED_URL = "github:cachix/devenv/v2.2?dir=src/modules"
-EXPECTED_REF = "v2.2"
-EXPECTED_REVISION = "ffce215a42d09c6375c3d60dd9c4110438fc4d87"
+EXPECTED_URL = "github:cachix/devenv/v2.2.2?dir=src/modules"
+EXPECTED_REF = "v2.2.2"
+EXPECTED_REVISION = "b8030c58deafc013fc51791377fe8fea4dadcb00"
+EXPECTED_CLI_VERSION = "2.2.2"
+EXPECTED_CLI_REQUIREMENT = ">=2.2.0, <=2.2.2"
 EXPECTED_TEST_TASKS = (
     "chelis:cargo-nix-fresh",
     "chelis:toolchain-test",
     "chelis:python-test",
     "chelis:c-compiler-test",
     "chelis:cpp-compiler-test",
+    "chelis:kache-test",
+    "chelis:pyright-test",
+    "chelis:docs-test",
+    "chelis:darwin-tree-sitter-test",
 )
+EXPECTED_TEST_TASK_PREREQUISITES = {
+    "chelis:cargo-nix-fresh": frozenset({"devenv:python:virtualenv"}),
+    "chelis:toolchain-test": frozenset(),
+    "chelis:python-test": frozenset({"devenv:python:virtualenv"}),
+    "chelis:c-compiler-test": frozenset({"devenv:files"}),
+    "chelis:cpp-compiler-test": frozenset({"devenv:files"}),
+    "chelis:kache-test": frozenset({"devenv:python:virtualenv"}),
+    "chelis:pyright-test": frozenset({"devenv:python:virtualenv"}),
+    "chelis:docs-test": frozenset(),
+    "chelis:darwin-tree-sitter-test": frozenset({"devenv:python:virtualenv"}),
+}
 EXPECTED_GIT_HOOKS_URL = "github:cachix/git-hooks.nix"
 # Shared inputs must pin an exact revision so `devenv update` cannot
 # drift them away from the flake pins that check_nix_lock_parity.py
@@ -36,10 +53,15 @@ SHARED_INPUT_URL_PREFIXES = {
     "nixpkgs": "github:cachix/devenv-nixpkgs/",
     "rust-overlay": "github:oxalica/rust-overlay/",
 }
-EXPECTED_ACTIVE_GIT_HOOKS = frozenset({"no-ai-authorship"})
+# The authorship check no longer runs as a devenv-installed prek hook: devenv
+# copies the tracked `.githooks/commit-msg` into the shared hooks directory
+# (chelis#1409). The install-task assertions in `parse_git_hook_catalog` are
+# what now keep it from being silently dropped.
+EXPECTED_ACTIVE_GIT_HOOKS: frozenset[str] = frozenset()
 EXPECTED_DISABLED_GIT_HOOKS = frozenset(
     {
         "actionlint",
+        "no-ai-authorship",
         "check-added-large-files",
         "check-case-conflicts",
         "check-executables-have-shebangs",
@@ -74,12 +96,13 @@ class DevenvPin:
 
 @dataclass(frozen=True)
 class DevenvCliVersionRequirement:
-    matches_modules: bool
+    constraint: str
 
 
 @dataclass(frozen=True)
 class DevenvTestTasks:
     names: frozenset[str]
+    prerequisites: dict[str, frozenset[str]]
 
 
 @dataclass(frozen=True)
@@ -125,14 +148,18 @@ def parse_rust_development_tools(text: str) -> RustDevelopmentTools:
 
 
 def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
-    raw_names = re.findall(r'(?m)^\s{2}tasks\."([^"]+)" = \{$', text)
+    task_blocks = re.findall(
+        r'(?ms)^  tasks\."([^"]+)" = \{\n(.*?)^  \};$',
+        text,
+    )
+    raw_names = [name for name, _ in task_blocks]
     names = frozenset(raw_names)
     if len(raw_names) != len(names):
         raise ValueError("the smoke-test module must not define a duplicate task")
     if names != frozenset(EXPECTED_TEST_TASKS):
         raise ValueError(f"the smoke-test module must define the named tasks: {names!r}")
-    if text.count('after = [ "devenv:enterShell" ];') != len(names):
-        raise ValueError("each named test task must run after devenv:enterShell")
+    if 'after = [ "devenv:enterShell" ];' in text:
+        raise ValueError("test tasks must not run during ordinary shell entry")
     if text.count('before = [ "devenv:enterTest" ];') != len(names):
         raise ValueError("each named test task must run before devenv:enterTest")
     if re.search(r"(?m)^\s*enterTest\s*=", text):
@@ -141,7 +168,8 @@ def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
         raise ValueError("the Devenv smoke check must not define a service or process")
 
     toolchain_contract = (
-        "rustc cargo rust-analyzer uv cmake git pkg-config mdbook openspec",
+        "rustc cargo rust-analyzer uv cmake git pkg-config mdbook openspec "
+        "pyright kache",
         "rust-analyzer --version",
         "mdbook --version",
     )
@@ -161,7 +189,26 @@ def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
         raise ValueError(
             f"the OpenSpec smoke contract is incomplete: {missing_openspec!r}"
         )
-    return DevenvTestTasks(names=names)
+
+    prerequisites: dict[str, frozenset[str]] = {}
+    for name, body in task_blocks:
+        after_values = re.findall(r'(?m)^    after = \[([^]]*)\];$', body)
+        if len(after_values) > 1:
+            raise ValueError(f"test task {name} must define at most one after list")
+        parsed = (
+            frozenset(re.findall(r'"([^"]+)"', after_values[0]))
+            if after_values
+            else frozenset()
+        )
+        expected = EXPECTED_TEST_TASK_PREREQUISITES[name]
+        if parsed != expected:
+            raise ValueError(
+                f"test task {name} must follow its generated prerequisites: "
+                f"expected {sorted(expected)!r}, got {sorted(parsed)!r}"
+            )
+        prerequisites[name] = parsed
+
+    return DevenvTestTasks(names=names, prerequisites=prerequisites)
 
 
 def parse_git_hook_catalog(text: str) -> GitHookCatalog:
@@ -234,21 +281,38 @@ def parse_git_hook_catalog(text: str) -> GitHookCatalog:
     )
     if whitespace is None:
         raise ValueError("the whitespace hook must preserve Markdown line breaks")
-    custom = re.search(
-        (
-            r"(?ms)^    no-ai-authorship = \{\n"
-            r".*?^      enable = true;$"
-            r".*?^      entry = \"\$\{config\.languages\.python\.package\}"
-            r"/bin/python \$\{commitMessageChecker\}\";$"
-            r".*?^      language = \"system\";$"
-            r".*?^      pass_filenames = true;$"
-            r".*?^      stages = \[ \"commit-msg\" \];$"
-            r".*?^    \};$"
-        ),
+    revived = re.search(
+        r"(?ms)^    no-ai-authorship = \{\n.*?^      enable = true;$",
         body,
     )
-    if custom is None:
-        raise ValueError("the active authorship hook must use the commit-msg stage")
+    if revived is not None:
+        raise ValueError(
+            "no-ai-authorship must stay disabled here: installing it writes an "
+            "absolute --config path into the shared .git/hooks (chelis#1409)"
+        )
+    install = re.search(
+        r'(?ms)^  tasks\."chelis:install-commit-hook" = \{\n.*?^  \};$',
+        text,
+    )
+    if install is None:
+        raise ValueError(
+            "the Git hook module must define the chelis:install-commit-hook task"
+        )
+    task = install.group(0)
+    for fragment, why in (
+        ('after = [ "devenv:enterShell" ];', "run on shell entry"),
+        ("--path-format=absolute --git-common-dir", "resolve the shared hooks directory absolutely"),
+        (".githooks/commit-msg", "install from the tracked template"),
+        ('cp "$template"', "copy the template rather than reference it"),
+        ('mktemp "$hooks_dir/commit-msg.XXXXXX"', "stage under a unique name"),
+        ('mv "$staged"', "install by atomic rename"),
+        ("fi\n      # Unconditionally", "chmod outside the copy branch"),
+        ("core.hooksPath", "warn when core.hooksPath would override the install"),
+    ):
+        if fragment not in task:
+            raise ValueError(
+                f"the commit-hook install task must {why}: missing {fragment!r}"
+            )
     return GitHookCatalog(
         disabled_names=EXPECTED_DISABLED_GIT_HOOKS,
         active_names=EXPECTED_ACTIVE_GIT_HOOKS,
@@ -288,9 +352,13 @@ def parse_cli_version_requirement(text: str) -> DevenvCliVersionRequirement:
     declarations = tuple(
         line for line in text.splitlines() if line.lstrip().startswith("require_version:")
     )
-    if declarations != ("require_version: true",):
-        raise ValueError("devenv.yaml must require CLI and module version parity")
-    return DevenvCliVersionRequirement(matches_modules=True)
+    expected = f'require_version: "{EXPECTED_CLI_REQUIREMENT}"'
+    if declarations != (expected,):
+        raise ValueError(
+            "devenv.yaml must require the reviewed CLI range "
+            f"{EXPECTED_CLI_REQUIREMENT}"
+        )
+    return DevenvCliVersionRequirement(constraint=EXPECTED_CLI_REQUIREMENT)
 
 
 def parse_git_hooks_input(text: str) -> str:
@@ -427,33 +495,54 @@ def require_v22(pin: DevenvPin) -> None:
 
 
 class DevenvVersionTests(unittest.TestCase):
+    def test_local_module_corrects_the_release_cli_version_metadata(self) -> None:
+        module = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        self.assertIn(
+            f'devenv.latestVersion = "{EXPECTED_CLI_VERSION}";',
+            module,
+        )
+
     def test_repository_pins_devenv_v22(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
         require_v22(parse_devenv_pin(yaml_text, lock_data))
 
-    def test_repository_requires_cli_and_module_version_parity(self) -> None:
+    def test_repository_requires_the_reviewed_cli_range(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        self.assertTrue(parse_cli_version_requirement(yaml_text).matches_modules)
+        self.assertEqual(
+            parse_cli_version_requirement(yaml_text).constraint,
+            EXPECTED_CLI_REQUIREMENT,
+        )
 
     def test_absent_cli_version_requirement_fails_at_the_parse_boundary(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        mutated = yaml_text.replace("require_version: true\n", "")
-        with self.assertRaisesRegex(ValueError, "must require CLI"):
+        mutated = yaml_text.replace(
+            f'require_version: "{EXPECTED_CLI_REQUIREMENT}"\n',
+            "",
+        )
+        with self.assertRaisesRegex(ValueError, "reviewed CLI range"):
             parse_cli_version_requirement(mutated)
 
     def test_false_cli_version_requirement_fails_at_the_parse_boundary(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        mutated = yaml_text.replace("require_version: true", "require_version: false")
-        with self.assertRaisesRegex(ValueError, "must require CLI"):
+        mutated = yaml_text.replace(
+            f'require_version: "{EXPECTED_CLI_REQUIREMENT}"',
+            "require_version: false",
+        )
+        with self.assertRaisesRegex(ValueError, "reviewed CLI range"):
+            parse_cli_version_requirement(mutated)
+
+    def test_different_cli_range_fails_at_the_parse_boundary(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        mutated = yaml_text.replace(EXPECTED_CLI_REQUIREMENT, ">=2.2.1, <=2.2.2", 1)
+        with self.assertRaisesRegex(ValueError, re.escape(EXPECTED_CLI_REQUIREMENT)):
             parse_cli_version_requirement(mutated)
 
     def test_repository_uses_named_tasks_for_the_devenv_test_contract(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
-        self.assertEqual(
-            parse_devenv_test_tasks(config).names,
-            frozenset(EXPECTED_TEST_TASKS),
-        )
+        tasks = parse_devenv_test_tasks(config)
+        self.assertEqual(tasks.names, frozenset(EXPECTED_TEST_TASKS))
+        self.assertEqual(tasks.prerequisites, EXPECTED_TEST_TASK_PREREQUISITES)
 
     def test_repository_uses_the_devenv_rust_toolchain_options(self) -> None:
         config = TOOLCHAIN_MODULE.read_text(encoding="utf-8")
@@ -539,13 +628,39 @@ class DevenvVersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must define the hook catalog"):
             parse_git_hook_catalog(mutated)
 
-    def test_inactive_custom_hook_fails_at_the_parse_boundary(self) -> None:
+    def test_reactivating_the_prek_authorship_hook_fails_at_the_parse_boundary(
+        self,
+    ) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
         mutated = config.replace(
-            "      enable = true;\n      name = \"Reject AI authorship markers\";",
-            "      enable = false;\n      name = \"Reject AI authorship markers\";",
+            '      enable = false;\n      name = "Reject AI authorship markers";',
+            '      enable = true;\n      name = "Reject AI authorship markers";',
         )
-        with self.assertRaisesRegex(ValueError, "must remain active"):
+        with self.assertRaisesRegex(ValueError, "must remain inactive"):
+            parse_git_hook_catalog(mutated)
+
+    def test_gutting_the_install_task_fails_at_the_parse_boundary(self) -> None:
+        """Each fragment is one way the install could be silently defeated."""
+        config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
+        for fragment in (
+            'after = [ "devenv:enterShell" ];',
+            "--path-format=absolute --git-common-dir",
+            ".githooks/commit-msg",
+            'cp "$template"',
+            'mktemp "$hooks_dir/commit-msg.XXXXXX"',
+            'mv "$staged"',
+        ):
+            with self.subTest(fragment=fragment):
+                mutated = config.replace(fragment, "")
+                with self.assertRaises(ValueError):
+                    parse_git_hook_catalog(mutated)
+
+    def test_removing_the_install_task_fails_at_the_parse_boundary(self) -> None:
+        config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            'tasks."chelis:install-commit-hook"', 'tasks."chelis:something-else"'
+        )
+        with self.assertRaisesRegex(ValueError, "install-commit-hook"):
             parse_git_hook_catalog(mutated)
 
     def test_git_hooks_input_without_nixpkgs_follow_fails_at_parse_boundary(
@@ -606,14 +721,38 @@ class DevenvVersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must define the named tasks"):
             parse_devenv_test_tasks(mutated)
 
-    def test_missing_enter_shell_dependency_fails_at_the_parse_boundary(self) -> None:
+    def test_shell_entry_dependency_fails_at_the_parse_boundary(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
         mutated = config.replace(
-            'after = [ "devenv:enterShell" ];\n',
+            'before = [ "devenv:enterTest" ];',
+            'after = [ "devenv:enterShell" ];\n    before = [ "devenv:enterTest" ];',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "must not run during ordinary shell entry"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_missing_python_virtualenv_dependency_fails_at_the_parse_boundary(
+        self,
+    ) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            '    after = [ "devenv:python:virtualenv" ];\n',
             "",
             1,
         )
-        with self.assertRaisesRegex(ValueError, "must run after devenv:enterShell"):
+        with self.assertRaisesRegex(ValueError, "generated prerequisites"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_missing_generated_files_dependency_fails_at_the_parse_boundary(
+        self,
+    ) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            '    after = [ "devenv:files" ];\n',
+            "",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "generated prerequisites"):
             parse_devenv_test_tasks(mutated)
 
     def test_missing_devenv_input_fails_at_the_parse_boundary(self) -> None:

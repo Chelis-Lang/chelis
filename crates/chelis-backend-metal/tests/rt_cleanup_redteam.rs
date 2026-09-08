@@ -13,10 +13,11 @@
 //!     `host_sizeof_expr` agree on host-safe typing for every active
 //!     Metal dtype
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_backend_metal::dtype;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_prec(n: usize, prec: Prim) -> TensorType {
     TensorType {

@@ -9,9 +9,10 @@
 //! same Surf programs through the IR evaluator path. The IR evaluator
 //! is the authoritative oracle per `spec/05-risc-primitives.md` §6.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen;
 
 fn tensor_4d(shape: [usize; 4]) -> TensorType {
     TensorType {
@@ -85,7 +86,7 @@ fn issue254_emit_reduce_window_sum_uses_plus_equals() {
     let dag = build_dag(ReduceWindowKind::Sum);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += t"),
+        src.contains("acc += ((const float*)t"),
         "Sum emit must use `acc += ...`, got:\n{src}"
     );
     assert!(
@@ -105,7 +106,7 @@ fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
     let dag = build_dag(ReduceWindowKind::Mean);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += t"),
+        src.contains("acc += ((const float*)t"),
         "Mean emit must combine with sum, got:\n{src}"
     );
     // Window volume = 2 * 2 = 4.

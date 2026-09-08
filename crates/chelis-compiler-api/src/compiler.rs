@@ -1,10 +1,14 @@
 use chelis_deep::DeepTag;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{
+    Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim,
+    TensorType,
+};
 use chelis_ir::eval;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
@@ -12,13 +16,15 @@ use chelis_surf::ast::{
 };
 use chelis_types::{
     CheckedProgram,
-    errors::{CheckError, CheckErrorKind},
+    errors::CheckError,
+    manifest::{ManifestedProgram, RootEntry, RootManifest},
+    types::{Lane, Target},
 };
 use sha2::{Digest, Sha256};
 
 use crate::runtime::{
     RuntimeTensorValue, evaluate_host_program_filtered,
-    evaluate_host_program_with_library_and_types, lookup_runtime_value_for_root,
+    evaluate_host_program_with_library_and_types, lookup_runtime_value_for_manifest_root,
     runtime_value_to_schema,
 };
 use crate::schema::{
@@ -27,16 +33,18 @@ use crate::schema::{
     CompileRequest, CompileResult, CompileTarget, DecompileRequest, DecompileResult,
     DeepCallGraphRequest, DeepCallGraphResult, DeepFunctionOutline, DeepOutlineRequest,
     DeepOutlineResult, DeepReference, DeepReferencesRequest, DeepReferencesResult, DesugarRequest,
-    DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents,
-    GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest,
-    ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult,
-    SourceKind, Span, ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag,
-    WireDagNode, WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr,
-    WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding,
-    WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern,
-    WirePropertyOption, WireRecordExprField, WireRecordPatternField, WireRecordTypeField,
-    WireRiscOp, WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
-    WireTypeInvariant, WireUnaryOp, WireVariant, WireVariantFields,
+    DesugarResult, Diagnostic, DiagnosticSpan, EvalRequest, EvalResult, EvaluatedRoot,
+    FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest,
+    LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
+    ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
+    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
+    WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
+    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
+    WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
+    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 
@@ -217,54 +225,26 @@ pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
 pub fn replace_function_body(
     request: crate::schema::ReplaceFunctionBodyRequest,
 ) -> Result<crate::schema::ReplaceFunctionBodyResult> {
-    // The new body must be exactly one Deep expression. Zero or many is a
-    // parse-stage rejection, not a check failure.
-    let new_body_exprs =
-        chelis_deep::parser::parse_str_strict(&request.new_body).map_err(|err| {
-            stage_error_with_span(
-                "replace",
-                err.to_string(),
-                GeneralKind::DeepParseError,
-                parse_error_span_deep(&err),
-            )
-        })?;
-    let new_body = match new_body_exprs.as_slice() {
-        [single] => single,
-        other => {
-            return Err(stage_error(
-                "replace",
-                format!(
-                    "`new_body` must be exactly one Deep expression, got {}",
-                    other.len()
-                ),
-                GeneralKind::DeepParseError,
-            ));
-        }
-    };
+    // The new body must be exactly one Deep expression, stamped in the
+    // RuntimeExpr role it will occupy. Zero or many is a parse-stage
+    // rejection, not a check failure.
+    let new_body = parse_one_deep_runtime_expr("replace", "new_body", &request.new_body)?;
 
-    // The module is parsed strictly too: a malformed `.dp` is a parse error.
-    let module = chelis_deep::parser::parse_str_strict(&request.module).map_err(|err| {
-        stage_error_with_span(
-            "replace",
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })?;
+    // The module goes through the stamped `.dp` ingress too: a malformed or
+    // role-invalid `.dp` is a parse error.
+    let module = parse_deep_authoring_module("replace", &request.module)?;
 
     // Whole-module body-replacement check: full `chelis check` of the rewritten
     // module. On rejection the error is tagged by the failing pass; on success
     // the report carries the full rewritten module the verdict equals.
-    let report = crate::fragment::check_body_replacement(&module, &request.function_name, new_body)
-        .map_err(replacement_error_to_compiler_error)?;
+    let report =
+        crate::fragment::check_body_replacement(&module, &request.function_name, &new_body)
+            .map_err(replacement_error_to_compiler_error)?;
 
     // The single rewritten def, for `changed_def_deep`. `spliced_function_def`
     // returns just the one `(def ...)` node; print it on its own line.
-    let changed_def =
-        chelis_deep::spliced_function_def(&module, &request.function_name, new_body.clone())
-            .map_err(|err| {
-                stage_error("replace", err.to_string(), GeneralKind::NameResolutionError)
-            })?;
+    let changed_def = chelis_deep::spliced_function_def(&module, &request.function_name, new_body)
+        .map_err(|err| stage_error("replace", err.to_string(), GeneralKind::NameResolutionError))?;
 
     Ok(crate::schema::ReplaceFunctionBodyResult {
         changed_def_deep: chelis_deep::printer::print_expr(&changed_def),
@@ -281,24 +261,9 @@ pub fn replace_function_body(
 /// duplicate `defsig`, type errors, effects, and linearity violations are
 /// surfaced from that whole-module pipeline.
 pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
-    let module = chelis_deep::parser::parse_str_strict(&request.module).map_err(|err| {
-        stage_error_with_span(
-            "add-function",
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })?;
+    let module = parse_deep_authoring_module("add-function", &request.module)?;
 
-    let new_decl_exprs =
-        chelis_deep::parser::parse_str_strict(&request.new_decls).map_err(|err| {
-            stage_error_with_span(
-                "add-function",
-                err.to_string(),
-                GeneralKind::DeepParseError,
-                parse_error_span_deep(&err),
-            )
-        })?;
+    let new_decl_exprs = parse_deep_authoring_decls("add-function", &request.new_decls)?;
     let parsed = parse_add_function_decls(new_decl_exprs)?;
 
     let rewritten = chelis_deep::insert_function_decls(
@@ -319,7 +284,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
 }
 
 pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
-    let module = parse_deep_authoring("deep-outline", &request.module)?;
+    let module = parse_deep_authoring_module("deep-outline", &request.module)?;
     let outline = chelis_deep::authoring::outline(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-outline", err))?;
     Ok(DeepOutlineResult {
@@ -346,7 +311,7 @@ pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
 }
 
 pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesResult> {
-    let module = parse_deep_authoring("deep-references", &request.module)?;
+    let module = parse_deep_authoring_module("deep-references", &request.module)?;
     let refs = chelis_deep::authoring::references(&module, &request.symbol)
         .map_err(|err| authoring_error_to_compiler_error("deep-references", err))?;
     Ok(DeepReferencesResult {
@@ -360,7 +325,7 @@ pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesR
 }
 
 pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphResult> {
-    let module = parse_deep_authoring("deep-call-graph", &request.module)?;
+    let module = parse_deep_authoring_module("deep-call-graph", &request.module)?;
     let graph = chelis_deep::authoring::call_graph(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-call-graph", err))?;
     Ok(DeepCallGraphResult {
@@ -369,13 +334,13 @@ pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphRes
 }
 
 pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFunctionResult> {
-    let module = parse_deep_authoring("replace-function", &request.module)?;
+    let module = parse_deep_authoring_module("replace-function", &request.module)?;
     check_preimage(
         &module,
         &request.function_name,
         request.preimage_sha256.as_deref(),
     )?;
-    let new_decls = parse_deep_authoring("replace-function", &request.new_decls)?;
+    let new_decls = parse_deep_authoring_decls("replace-function", &request.new_decls)?;
     let edited =
         chelis_deep::authoring::replace_function(&module, &request.function_name, &new_decls)
             .map_err(|err| authoring_error_to_compiler_error("replace-function", err))?;
@@ -392,7 +357,7 @@ pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFuncti
 }
 
 pub fn rename(request: RenameRequest) -> Result<RenameResult> {
-    let module = parse_deep_authoring("rename", &request.module)?;
+    let module = parse_deep_authoring_module("rename", &request.module)?;
     check_preimage(
         &module,
         &request.function_name,
@@ -415,16 +380,20 @@ pub fn rename(request: RenameRequest) -> Result<RenameResult> {
 }
 
 pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatureResult> {
-    let module = parse_deep_authoring("change-signature", &request.module)?;
+    let module = parse_deep_authoring_module("change-signature", &request.module)?;
     check_preimage(
         &module,
         &request.function_name,
         request.preimage_sha256.as_deref(),
     )?;
     let new_defsig =
-        parse_one_deep_authoring("change-signature", "new_defsig", &request.new_defsig)?;
-    let new_params =
-        parse_one_deep_authoring("change-signature", "new_params", &request.new_params)?;
+        parse_one_deep_authoring_decl("change-signature", "new_defsig", &request.new_defsig)?;
+    let new_params = parse_one_deep_authoring_tagged(
+        "change-signature",
+        "new_params",
+        &request.new_params,
+        DeepTag::Params,
+    )?;
     let param_renames: Vec<(String, String)> = request.param_renames.into_iter().collect();
     let edited = chelis_deep::authoring::change_signature(
         &module,
@@ -446,8 +415,8 @@ pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatu
 }
 
 pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
-    let module = parse_deep_authoring("add-property", &request.module)?;
-    let new_decl_exprs = parse_deep_authoring("add-property", &request.new_decls)?;
+    let module = parse_deep_authoring_module("add-property", &request.module)?;
+    let new_decl_exprs = parse_deep_authoring_decls("add-property", &request.new_decls)?;
     let parsed = parse_add_function_decls(new_decl_exprs)?;
     if !deep_def_has_role(&parsed.def, "property") {
         return Err(stage_error(
@@ -471,28 +440,82 @@ pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
     })
 }
 
-fn parse_deep_authoring(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
-    chelis_deep::parser::parse_str_strict(source).map_err(|err| {
-        stage_error_with_span(
-            stage,
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })
+/// Stamped whole-module text ingress for the authoring APIs (chelis#1088).
+///
+/// A `module` field is a `.dp` program, so a top-level `(module ...)` wrapper
+/// and bare declarations are both admissible and nothing else is. The
+/// tag-vocabulary sweep that `parse_str_strict` used to supply is applied
+/// explicitly afterwards, so an authoring request naming an unknown tag is
+/// still rejected at its own boundary rather than reaching a rewriter.
+fn parse_deep_authoring_module(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
+    let exprs =
+        chelis_deep::parse_and_stamp_file(source).map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    Ok(exprs)
 }
 
-fn parse_one_deep_authoring(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
-    let exprs = parse_deep_authoring(stage, source)?;
-    match exprs.as_slice() {
-        [single] => Ok(single.clone()),
-        other => Err(stage_error(
+/// Stamped declaration-bundle text ingress for the authoring APIs
+/// (chelis#1088). Every top-level form must be a declaration.
+fn parse_deep_authoring_decls(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
+    let exprs =
+        chelis_deep::parse_and_stamp(source).map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    Ok(exprs)
+}
+
+/// Stamped ingress for a field whose contract names one exact Deep tag.
+fn parse_one_deep_authoring_tagged(
+    stage: &str,
+    field: &str,
+    source: &str,
+    expected: DeepTag,
+) -> Result<DeepExpr> {
+    let exprs = chelis_deep::parse_and_stamp_tagged(source, expected)
+        .map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    exactly_one_deep(stage, field, exprs)
+}
+
+/// Stamped ingress for a field that must be exactly one declaration.
+fn parse_one_deep_authoring_decl(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
+    let exprs = parse_deep_authoring_decls(stage, source)?;
+    exactly_one_deep(stage, field, exprs)
+}
+
+/// Stamped ingress for a field that must be exactly one runtime expression.
+fn parse_one_deep_runtime_expr(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
+    let exprs = chelis_deep::parse_and_stamp_runtime_exprs(source)
+        .map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    exactly_one_deep(stage, field, exprs)
+}
+
+fn exactly_one_deep(stage: &str, field: &str, exprs: Vec<DeepExpr>) -> Result<DeepExpr> {
+    let count = exprs.len();
+    match exprs.into_iter().next() {
+        Some(single) if count == 1 => Ok(single),
+        _ => Err(stage_error(
             stage,
-            format!(
-                "`{field}` must be exactly one Deep expression, got {}",
-                other.len()
-            ),
+            format!("`{field}` must be exactly one Deep expression, got {count}"),
             GeneralKind::DeepParseError,
+        )),
+    }
+}
+
+/// Apply the Deep structural/vocabulary sweep the editing surfaces have
+/// always run, now on the stamped carrier.
+fn require_valid_deep(stage: &str, exprs: &[DeepExpr]) -> Result<()> {
+    match chelis_deep::validate::validate(exprs).into_iter().next() {
+        None => Ok(()),
+        Some(warning) => Err(stage_error_with_span(
+            stage,
+            warning.message,
+            GeneralKind::DeepParseError,
+            // chelis#1395: `validate` reports a coordinate and no end, so
+            // the location travels as a point rather than an invented range.
+            Some(DiagnosticSpan::Point {
+                offset: warning.offset,
+            }),
         )),
     }
 }
@@ -827,6 +850,7 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         request.source_kind,
         &request.source,
         request.entry.as_deref(),
+        Target::Eval,
     )?;
     let dag = wire_dag(&compiled.dag);
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
@@ -908,9 +932,9 @@ enum EntryStrictness {
 /// characters -> `_`, and prefixes a digit-leading or empty name with
 /// `chelis_`, but guards NEITHER a libc collision (`free`, `malloc`, …)
 /// NOR the runtime's own `chelis_*` namespace (`chelis_runtime.h`
-/// declares `chelis_free`, `chelis_tuple_get`, …): a single-def program
+/// declares `chelis_tensor_release`, `chelis_tuple_get`, …): a single-def program
 /// whose def is named `free`, compiled via the free-form path, still
-/// emits `void free(...)`, and an `entry_name` of `chelis_free` emits
+/// emits `void free(...)`, and an `entry_name` of `chelis_tensor_release` emits
 /// verbatim. Both gaps are documented in `spec/11-ffi.md` §5a. The
 /// entry-scoped metadata lane — which claims multi-def tensor programs
 /// and single-def programs whose body needs host lowering (e.g. `concat`)
@@ -946,7 +970,7 @@ fn execution_c_symbol(entry_name: Option<&str>) -> String {
 /// `entry_name` is now a def *selector* the user must supply, so the selected
 /// name can be anything — `main` (collides with the reserved program entry),
 /// `free`/`malloc` (collide with libc), or a name in the runtime's own
-/// `chelis_*` namespace (`chelis_runtime.h` declares `chelis_free`,
+/// `chelis_*` namespace (`chelis_runtime.h` declares `chelis_tensor_release`,
 /// `chelis_tuple_get`, …). To be collision-free against ALL of those, the
 /// entry-scoped artifact ALWAYS emits the fixed symbol `chelis_main`. This is
 /// safe because each artifact is scoped to exactly one entry def, so there is
@@ -980,8 +1004,8 @@ fn project_host_program_to_entry(
 
     fn collect_callback(
         callback: &ConcreteHostCallback,
-        bound: &HashSet<String>,
-        out: &mut HashSet<String>,
+        bound: &UnordSet<String>,
+        out: &mut UnordSet<String>,
     ) {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
@@ -997,7 +1021,7 @@ fn project_host_program_to_entry(
         }
     }
 
-    fn collect_expr(expr: &ConcreteHostExpr, bound: &HashSet<String>, out: &mut HashSet<String>) {
+    fn collect_expr(expr: &ConcreteHostExpr, bound: &UnordSet<String>, out: &mut UnordSet<String>) {
         match &expr.kind {
             ConcreteHostExprKind::Call { function, args, .. } => {
                 if !bound.contains(function) {
@@ -1111,7 +1135,7 @@ fn project_host_program_to_entry(
         }
     }
 
-    let function_names: HashSet<&str> = program
+    let function_names: UnordSet<&str> = program
         .functions
         .iter()
         .map(|function| function.name.as_str())
@@ -1120,7 +1144,7 @@ fn project_host_program_to_entry(
         return None;
     }
 
-    let mut reachable = HashSet::from([entry.to_string()]);
+    let mut reachable = UnordSet::from([entry.to_string()]);
     let mut pending = vec![entry.to_string()];
     while let Some(name) = pending.pop() {
         let function = program
@@ -1133,9 +1157,9 @@ fn project_host_program_to_entry(
             .iter()
             .map(|param| param.name.clone())
             .collect();
-        let mut referenced = HashSet::new();
+        let mut referenced = UnordSet::new();
         collect_expr(&function.body, &bound, &mut referenced);
-        for referenced_name in referenced {
+        for referenced_name in referenced.into_sorted() {
             if function_names.contains(referenced_name.as_str())
                 && reachable.insert(referenced_name.clone())
             {
@@ -1461,7 +1485,7 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    let declared_params: HashSet<&str> = host_program
+    let declared_params: UnordSet<&str> = host_program
         .functions
         .iter()
         .find(|function| function.name == entry)
@@ -1501,7 +1525,11 @@ fn compile_for_execution_impl(
     request: CompileRequest,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_source(request.source_kind, &request.source)?;
+    let compiled = compile_source_for_target(
+        request.source_kind,
+        &request.source,
+        manifest_target(request.target),
+    )?;
     execution_artifact_from_compiled(
         compiled,
         request.target,
@@ -1533,7 +1561,7 @@ pub fn compile_for_execution_in_context(
     target: CompileTarget,
     entry_name: Option<&str>,
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, manifest_target(target))?;
     // The in-context lane is a callable surface: strict entry integrity.
     execution_artifact_from_compiled(compiled, target, entry_name, EntryStrictness::Strict)
 }
@@ -1706,14 +1734,14 @@ fn execution_artifact_from_compiled(
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
-    reject_host_only_builtins_before_host_lowering(&compiled.checked, build_target)?;
-    let host_compiled =
-        chelis_ir::host::try_lower_compiled_program(&compiled.checked).map_err(|diagnostic| {
+    reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
+    let mut host_compiled = chelis_ir::host::try_lower_manifested_program(&compiled.program)
+        .map_err(|diagnostic| {
             stage_error_with_span(
                 "lower",
                 diagnostic.to_string(),
                 GeneralKind::LowerError,
-                deep_span_to_schema(diagnostic.span),
+                deep_span_to_diagnostic(diagnostic.span),
             )
         })?;
     let func_name = execution_c_symbol(entry_name);
@@ -1812,7 +1840,7 @@ fn execution_artifact_from_compiled(
             } else if let Some(host_program) = host_compiled.host.as_ref() {
                 match entry_lane_decision(
                     entry_name,
-                    &compiled.checked,
+                    compiled.checked(),
                     host_program,
                     host_only,
                     strictness,
@@ -1837,20 +1865,27 @@ fn execution_artifact_from_compiled(
                 reject_unsized_named_dims(&entry_dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                let result = chelis_backend_c::codegen_with_options(
-                    &fused,
-                    entry_symbol,
-                    chelis_backend_c::CodegenOptions {
-                        use_blas: true,
-                        ..chelis_backend_c::CodegenOptions::default()
-                    },
+                let options = chelis_backend_c::CodegenOptions {
+                    use_blas: true,
+                    ..chelis_backend_c::CodegenOptions::default()
+                };
+                let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?,
                 )
-                .map_err(unsupported_stage_error)?;
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result =
+                    chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
+                        .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
-                    target,
                     entry_symbol,
                     None,
                     compile_result_c(target, entry_symbol, &result),
+                    manifest_result(&compiled.program),
                     execution_input_specs(&entry_dag, &result.input_labels)?,
                     execution_output_specs(&entry_dag, &result.output_labels)?,
                     result.symbolic_dims,
@@ -1919,13 +1954,43 @@ fn execution_artifact_from_compiled(
                     host_program,
                     BuildTarget::C,
                 )?;
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                let scalar_only_globals = host_program
+                    .globals
+                    .iter()
+                    .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
+                let selected = projected_host_program
+                    .unwrap_or_else(|| host_compiled.host.take().expect("host branch selected"));
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
                     .map_err(unsupported_stage_error)?;
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                        .map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?,
+                )
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
+                    .map_err(unsupported_stage_error)?;
+                // Preserve a more specific host-emitter rejection (for
+                // example the function-value ABI) when one exists. The
+                // scalar-global shape is the one strict #817 fallback that
+                // remains unsafe here: source-level detection sees the global,
+                // while host lowering has no global product to expose. Real
+                // host globals and GradLike entries retain their established
+                // host-lane artifact with an explicit decline reason.
+                if strictness == EntryStrictness::Strict
+                    && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
+                    && scalar_only_globals
+                {
+                    return Err(strict_entry_decline_error(EntryLaneDecline::HasGlobals));
+                }
                 let mut artifact = compiled_execution_artifact(
-                    target,
                     &func_name,
                     None,
                     compile_result_c(target, &func_name, &result),
+                    manifest_result(&compiled.program),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -1939,20 +2004,26 @@ fn execution_artifact_from_compiled(
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
             let fused = chelis_ir::fuse::fuse(&specialized);
-            let result = chelis_backend_c::codegen_with_options(
-                &fused,
-                &func_name,
-                chelis_backend_c::CodegenOptions {
-                    use_blas: true,
-                    ..chelis_backend_c::CodegenOptions::default()
-                },
+            let options = chelis_backend_c::CodegenOptions {
+                use_blas: true,
+                ..chelis_backend_c::CodegenOptions::default()
+            };
+            let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
+            let verified = chelis_ir::ownership::verify_ownership(
+                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?,
             )
-            .map_err(unsupported_stage_error)?;
+            .map_err(|error| {
+                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+            })?;
+            let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
+                .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
-                target,
                 &func_name,
                 None,
                 compile_result_c(target, &func_name, &result),
+                manifest_result(&compiled.program),
                 execution_input_specs(&compiled.dag, &result.input_labels)?,
                 execution_output_specs(&compiled.dag, &result.output_labels)?,
                 result.symbolic_dims,
@@ -2003,7 +2074,7 @@ fn execution_artifact_from_compiled(
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| {
-                    chelis_ir::host::lower_named_tensor_entry_dag(&compiled.checked, name)
+                    chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
                 });
             if compiled.dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
@@ -2011,13 +2082,26 @@ fn execution_artifact_from_compiled(
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                reject_unsupported_hip_ops_in_host_program(host_program)?;
+                let selected = host_compiled.host.take().expect("host branch selected");
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                    .map_err(unsupported_stage_error)?;
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                        .map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?,
+                )
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
-                    target,
                     &func_name,
                     None,
                     compile_result_hip_host(target, &func_name, &result),
+                    manifest_result(&compiled.program),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -2036,13 +2120,22 @@ fn execution_artifact_from_compiled(
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
             reject_unsupported_hip_ops(&specialized)?;
             let fused = chelis_ir::fuse::fuse(&specialized);
-            let result = chelis_backend_hip::codegen_hip(&fused, &func_name)
+            let selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
+            let verified = chelis_ir::ownership::verify_ownership(
+                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?,
+            )
+            .map_err(|error| {
+                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+            })?;
+            let result = chelis_backend_hip::codegen_hip(verified, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
-                target,
                 &func_name,
                 Some(format!("{func_name}_device")),
                 compile_result_hip(target, &func_name, &result),
+                manifest_result(&compiled.program),
                 execution_input_specs(&hip_dag, &result.input_labels)?,
                 execution_output_specs(&hip_dag, &result.output_labels)?,
                 result.symbolic_dims,
@@ -2052,12 +2145,27 @@ fn execution_artifact_from_compiled(
 }
 
 pub fn eval(request: EvalRequest) -> Result<EvalResult> {
-    let compiled = compile_source(request.source_kind, &request.source)?;
+    eval_for_target(request, Target::Eval)
+}
+
+/// Evaluate through a manifest computed for `target`. Execution still uses
+/// the local evaluator, but lane assignment, required inputs, and surfaced
+/// roots are exactly the contract the requested backend would consume.
+pub fn eval_for_target(request: EvalRequest, target: Target) -> Result<EvalResult> {
+    let compiled = compile_source_for_target(request.source_kind, &request.source, target)?;
     eval_compiled(&compiled, request.bindings, None)
 }
 
 pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
-    let compiled = compile_source(request.source_kind, &request.source)?;
+    eval_selected_for_target(request, selected_root_names, Target::Eval)
+}
+
+pub fn eval_selected_for_target(
+    request: EvalRequest,
+    selected_root_names: &[String],
+    target: Target,
+) -> Result<EvalResult> {
+    let compiled = compile_source_for_target(request.source_kind, &request.source, target)?;
     eval_compiled(&compiled, request.bindings, Some(selected_root_names))
 }
 
@@ -2180,6 +2288,7 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
 fn compile_new_source_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
+    target: Target,
 ) -> Result<CompiledSource> {
     // RFC v5 (RT-1 F2 bypass): the new entry decls are reef-rewritten
     // (`rewrite_entry_decls_with_reef_graph` mangles them) before this
@@ -2206,8 +2315,21 @@ fn compile_new_source_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
+    compile_rewritten_decls_in_context(context, &rewritten, target)
+}
+
+/// Compile declarations whose module identity and imports have already been
+/// resolved by Reef. Keeping this boundary separate prevents an isolated
+/// multi-entry batch from being flattened back into the synthetic eval module
+/// and rewritten a second time.
+fn compile_rewritten_decls_in_context(
+    context: &crate::context::CompiledContext,
+    rewritten: &[Decl],
+    target: Target,
+) -> Result<CompiledSource> {
+    let _linked = chelis_types::install_linked_program_guard();
     bail_if_cancelled("desugar")?;
-    let prepared = crate::pipeline::prepare_surf_decls(&rewritten, None).map_err(|error| {
+    let prepared = crate::pipeline::prepare_surf_decls(rewritten, None).map_err(|error| {
         pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
     })?;
     bail_if_cancelled("check")?;
@@ -2236,8 +2358,18 @@ fn compile_new_source_in_context(
     .map_err(|error| cancelled_or("lower", error))?;
     let lowered_parts = lowered.into_parts();
     let (_, _, new_checked, root_metadata) = lowered_parts.checked.into_parts();
-    let all_root_names = root_metadata.all_names().clone();
     let new_tensor_root_names = root_metadata.tensor_names().clone();
+    let realizability = chelis_effects::realizability::infer_realizability(
+        &new_checked,
+        crate::target_capability::tensor_capable_prims(target),
+    );
+    let mut manifest =
+        chelis_effects::realizability::compute_root_manifest(&new_checked, &realizability);
+    route_tensor_inputs_from_dag(
+        &mut manifest,
+        &lowered_parts.dag,
+        &lowered_parts.named_roots,
+    );
 
     // Phase G' — carry the library defs + lowered classification into
     // the runtime. Without this, the host evaluator's `top_level_defs`
@@ -2254,9 +2386,8 @@ fn compile_new_source_in_context(
     };
 
     Ok(CompiledSource {
-        checked: new_checked,
+        program: ManifestedProgram::new(new_checked, manifest, target),
         dag: lowered_parts.dag,
-        all_root_names,
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
@@ -2273,7 +2404,15 @@ pub fn eval_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<EvalResult> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    eval_in_context_for_target(context, new_source, Target::Eval)
+}
+
+pub fn eval_in_context_for_target(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+    target: Target,
+) -> Result<EvalResult> {
+    let compiled = compile_new_source_in_context(context, new_source, target)?;
     eval_compiled(&compiled, BTreeMap::new(), None)
 }
 
@@ -2287,7 +2426,7 @@ pub fn eval_in_context_with_bindings(
     new_source: &str,
     bindings: BTreeMap<String, crate::schema::TensorValue>,
 ) -> Result<EvalResult> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
     eval_compiled(&compiled, bindings, None)
 }
 
@@ -2299,12 +2438,12 @@ pub fn check_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<CheckResult> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
     // Mirror `check`'s shape: derive a fitness-style report from the
     // composed checked program. The total/typed counts only cover
     // new-code nodes — library nodes are checked once at context build
     // time and counted there.
-    let total_nodes = compiled.checked.exprs().len();
+    let total_nodes = compiled.checked().exprs().len();
     Ok(CheckResult {
         score: 1.0,
         components: FitnessComponents {
@@ -2330,7 +2469,7 @@ pub fn eval_many_in_context(
     new_source: &str,
     roots: &[String],
 ) -> Vec<(String, Result<EvalResult>)> {
-    let compiled = match compile_new_source_in_context(context, new_source) {
+    let compiled = match compile_new_source_in_context(context, new_source, Target::Eval) {
         Ok(compiled) => compiled,
         Err(err) => {
             return roots
@@ -2383,7 +2522,20 @@ pub fn prepare_eval_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<PreparedEvalInContext> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
+    Ok(PreparedEvalInContext {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
+/// Prepare an independently Reef-rewritten entry batch against a cached
+/// context. The batch is consumed as linked declarations; it never re-enters
+/// `rewrite_entry_decls_with_reef_graph` as one flat eval scope.
+pub fn prepare_rewritten_entry_batch_in_context(
+    context: &crate::context::CompiledContext,
+    batch: &chelis_reef::RewrittenEntryBatch,
+) -> Result<PreparedEvalInContext> {
+    let compiled = compile_rewritten_decls_in_context(context, batch.declarations(), Target::Eval)?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -2394,22 +2546,42 @@ fn eval_compiled(
     bindings: BTreeMap<String, crate::schema::TensorValue>,
     selected_root_names: Option<&[String]>,
 ) -> Result<EvalResult> {
-    let selected = selected_root_names.map(|roots| {
-        roots
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<String>>()
-    });
-    if compiled.dag.roots().is_empty() && compiled.all_root_names.is_empty() {
-        return Err(stage_error(
-            "eval",
-            "program produced no evaluable roots",
-            GeneralKind::Other,
-        ));
-    }
+    // A parameterized tensor entry is a callable declaration in the checked
+    // manifest until evaluation selects it and supplies all of its runtime
+    // inputs. Specialize that selection into a new manifested program before
+    // consuming any roots, so the legacy in-context `main(x)` surface remains
+    // manifest-authoritative instead of bypassing the phase boundary.
+    let effective_program = manifested_program_for_eval(
+        compiled,
+        bindings.keys().map(String::as_str),
+        selected_root_names,
+    );
+    let manifest = effective_program.manifest();
+    let selected =
+        selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
+    let observed_entries = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            selected.as_ref().is_none_or(|set| {
+                set.contains(entry.name.as_str())
+                    || set.iter().any(|root| {
+                        entry
+                            .name
+                            .strip_prefix(root.as_str())
+                            .is_some_and(|suffix| suffix.starts_with('.'))
+                    })
+            })
+        })
+        .collect::<Vec<_>>();
+    let required_inputs = observed_entries
+        .iter()
+        .flat_map(|entry| entry.required_inputs.iter().cloned())
+        .collect::<UnordSet<_>>();
 
     let bindings = bindings
         .into_iter()
+        .filter(|(name, _)| required_inputs.contains(name))
         .map(|(name, value)| {
             let tensor = crate::decode::wire_tensor_to_ir(&value).map_err(|message| {
                 stage_error(
@@ -2420,24 +2592,27 @@ fn eval_compiled(
             })?;
             Ok((name, tensor))
         })
-        .collect::<Result<HashMap<_, _>>>()?;
+        .collect::<Result<UnordMap<_, _>>>()?;
 
-    let roots = compiled
-        .tensor_root_names
+    let tensor_entries = observed_entries
         .iter()
-        .enumerate()
-        .filter_map(|(index, name)| {
-            if selected
-                .as_ref()
-                .is_some_and(|set| !set.contains(name.as_str()))
-            {
-                return None;
-            }
-            compiled.dag.roots().get(index).copied()
-        })
+        .copied()
+        .filter(|entry| entry.lane == Lane::Tensor)
         .collect::<Vec<_>>();
+    let roots = tensor_entries
+        .iter()
+        .map(|entry| {
+            let name = crate::pipeline::IrName::new(entry.name.as_str());
+            compiled.named_roots.get(&name).copied().ok_or_else(|| {
+                unavailable_root_error(
+                    entry,
+                    "the Tensor-lane root is absent from the lowered named-root map",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let tensor_values = if roots.is_empty() {
-        HashMap::new()
+        UnordMap::new()
     } else {
         eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
@@ -2445,22 +2620,19 @@ fn eval_compiled(
         .map_err(eval_stage_error)?
     };
 
-    let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
-    for name in compiled.tensor_root_names.iter() {
-        if selected
-            .as_ref()
-            .is_some_and(|set| !set.contains(name.as_str()))
-        {
-            continue;
-        }
-        let Some(node_id) = compiled.named_roots.get(name) else {
-            continue;
-        };
+    let mut tensor_values_by_name = UnordMap::<String, RuntimeTensorValue>::new();
+    for entry in &tensor_entries {
+        let name = crate::pipeline::IrName::new(entry.name.as_str());
+        let node_id = compiled.named_roots.get(&name).ok_or_else(|| {
+            unavailable_root_error(
+                entry,
+                "the Tensor-lane root is absent from the lowered named-root map",
+            )
+        })?;
         let value = tensor_values.get(node_id).ok_or_else(|| {
-            stage_error(
-                "eval",
-                format!("missing tensor root `{name}`"),
-                GeneralKind::EvalError,
+            unavailable_root_error(
+                entry,
+                "the Tensor evaluator returned no value for the owed root",
             )
         })?;
         let precision = compiled
@@ -2479,10 +2651,7 @@ fn eval_compiled(
             precision,
             "the DAG evaluator finalizes at the root's declared dtype"
         );
-        tensor_values_by_name.insert(
-            name.as_str().to_string(),
-            RuntimeTensorValue::new(value.clone()),
-        );
+        tensor_values_by_name.insert(entry.name.clone(), RuntimeTensorValue::new(value.clone()));
     }
 
     // When a selected-roots filter is set (eval_selected / eval_many), push it
@@ -2496,52 +2665,87 @@ fn eval_compiled(
     // chelis-std functions) are reachable from new-code calls. Without
     // this carry-over, the runtime errored
     // `unknown runtime name pkg__chelis__std__...`.
+    let host_selected_root_names = observed_entries
+        .iter()
+        .map(|entry| entry.def_name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let host_selected_root_names = Some(host_selected_root_names.as_slice());
+    let manifested_lowered_names = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.def_name.clone(), entry.lane == Lane::Tensor))
+        .collect::<BTreeMap<_, _>>();
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
-            &compiled.checked,
+            compiled.checked(),
             &library.exprs,
             &library.type_env,
             Some(&library.lowered_names),
             &tensor_values_by_name,
-            selected_root_names,
+            host_selected_root_names,
+            Some(&manifested_lowered_names),
         )
     } else {
         evaluate_host_program_filtered(
-            &compiled.checked,
+            compiled.checked(),
             &tensor_values_by_name,
-            selected_root_names,
+            host_selected_root_names,
+            Some(&manifested_lowered_names),
         )
     }
     .map_err(eval_stage_error)?;
 
-    let roots = compiled
-        .all_root_names
+    let roots = observed_entries
         .iter()
+        .copied()
         .enumerate()
-        .filter(|(_, name)| {
-            selected
-                .as_ref()
-                .is_none_or(|set| set.contains(name.as_str()))
-        })
-        .filter_map(|(index, name)| {
-            // Host value bindings and tensor-lane roots first; then fall
-            // back to a host-lane *zero-argument fn* root's applied value
-            // (arrow-form `def name() -> T = body`), which is a display root
-            // but not a value binding, so it never lands in
-            // `host_bindings` (chelis blocker2).
-            let value = lookup_runtime_value_for_root(
-                name.as_str(),
-                &host_outcome.host_bindings,
-                &tensor_values_by_name,
-            )
-            .or_else(|| host_outcome.host_root_values.get(name.as_str()).cloned())?;
+        .map(|(index, entry)| {
+            // A host-lane *zero-argument fn* root is the result of applying
+            // the callable, never the closure stored in `host_bindings` when
+            // another root resolved that declaration. Prefer the applied
+            // root value, then fall back to ordinary host value bindings and
+            // tensor-lane roots.
+            let value = host_outcome
+                .host_root_values
+                .get(entry.def_name.as_str())
+                .cloned()
+                .and_then(|value| {
+                    let synthetic_bindings = UnordMap::from([(entry.def_name.clone(), value)]);
+                    lookup_runtime_value_for_manifest_root(
+                        entry,
+                        &synthetic_bindings,
+                        &tensor_values_by_name,
+                    )
+                })
+                .or_else(|| {
+                    lookup_runtime_value_for_manifest_root(
+                        entry,
+                        &host_outcome.host_bindings,
+                        &tensor_values_by_name,
+                    )
+                })
+                .ok_or_else(|| {
+                    let reason = host_outcome
+                        .host_root_errors
+                        .get(entry.def_name.as_str())
+                        .map(|error| format!("the Host-lane nullary root failed: {error}"))
+                        .unwrap_or_else(|| {
+                            "the assigned lane returned no value for the owed root".to_string()
+                        });
+                    unavailable_root_error(entry, &reason)
+                })?;
+            let ir_name = crate::pipeline::IrName::new(entry.name.as_str());
             let node_id = compiled
                 .named_roots
-                .get(name)
+                .get(&ir_name)
                 .map(|id| id.0)
                 .unwrap_or(index);
-            Some((node_id, name.as_str().to_string(), value))
+            Ok((node_id, entry.name.clone(), value))
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
                 node_id,
@@ -2558,8 +2762,29 @@ fn eval_compiled(
     Ok(EvalResult {
         schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots,
+        manifest: manifest_result(&effective_program),
         transcript: host_outcome.transcript,
     })
+}
+
+fn unavailable_root_error(entry: &RootEntry, reason: &str) -> CompilerError {
+    let routing_reason = entry
+        .reasons
+        .first()
+        .map(|reason| format!("; routing evidence: {reason:?}"))
+        .unwrap_or_default();
+    unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(format!(
+            "[05-UNS-1] unavailable root `{}`",
+            entry.name
+        )),
+        format!("{:?} lane: {reason}{routing_reason}", entry.lane),
+        chelis_types::unsupported::Stage::Runtime,
+        chelis_types::unimplemented_rejection!(
+            912,
+            "this is a root-realization defect; file a bug with the program and target"
+        ),
+    ))
 }
 
 pub fn grad(request: GradRequest) -> Result<GradResult> {
@@ -2687,16 +2912,11 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
                 "parse",
                 error.to_string(),
                 GeneralKind::SurfParseError,
-                parse_error_span_surf(&source, &error),
+                Some(parse_error_span_surf(&source, &error)),
             )
         }
         PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
-            stage_error_with_span(
-                "parse",
-                error.to_string(),
-                GeneralKind::DeepParseError,
-                parse_error_span_deep(&error),
-            )
+            deep_ingress_error("parse", &error)
         }
         PipelineRejection::Preparation(PreparationError::Expansion(error)) => {
             stage_error("desugar", error.to_string(), GeneralKind::MacroError)
@@ -2722,7 +2942,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             "lower",
             diagnostic.to_string(),
             GeneralKind::LowerError,
-            deep_span_to_schema(diagnostic.span),
+            deep_span_to_diagnostic(diagnostic.span),
         ),
         PipelineRejection::RootCount {
             context,
@@ -2752,9 +2972,11 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 }
 
 struct CompiledSource {
-    checked: CheckedProgram,
+    program: ManifestedProgram,
     dag: Dag,
-    all_root_names: crate::pipeline::AllRootNames,
+    // Callable function-entry selection is a separate surface from value-root
+    // observation. Keep the pipeline's typed set for that API; eval/build
+    // observation below consumes `program.manifest` exclusively.
     tensor_root_names: crate::pipeline::TensorRootNames,
     named_roots: crate::pipeline::NamedRoots,
     forward_node_index: crate::pipeline::ForwardNodeIndex,
@@ -2764,6 +2986,327 @@ struct CompiledSource {
     /// path (no separate library to merge); `Some` on the in-context
     /// path produced by `compile_new_source_in_context`.
     library_runtime: Option<LibraryRuntime>,
+}
+
+impl CompiledSource {
+    fn checked(&self) -> &CheckedProgram {
+        self.program.checked()
+    }
+
+    fn manifest(&self) -> &RootManifest {
+        self.program.manifest()
+    }
+}
+
+fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
+    RootManifestResult {
+        target: program.target(),
+        entries: program
+            .manifest()
+            .entries
+            .iter()
+            .map(|entry| RootManifestEntryResult {
+                name: entry.name.clone(),
+                lane: entry.lane,
+                required_inputs: entry.required_inputs.iter().cloned().collect(),
+            })
+            .collect(),
+        requires_main: program.manifest().requires_main(),
+    }
+}
+
+/// Specialize callable tensor entries selected for evaluation into owed
+/// roots once all authored parameters have bindings. The checked manifest
+/// intentionally excludes parameterized declarations in the abstract; this
+/// produces a new `ManifestedProgram` for the concrete evaluation request
+/// rather than reaching around the manifest to the legacy named-root map.
+fn manifested_program_for_eval<'a>(
+    compiled: &CompiledSource,
+    binding_names: impl Iterator<Item = &'a str>,
+    selected_root_names: Option<&[String]>,
+) -> ManifestedProgram {
+    let available = binding_names.collect::<UnordSet<_>>();
+    let candidate_names = selected_root_names
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.split('.').next())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_else(|| BTreeSet::from(["main"]));
+    let mut manifest = compiled.manifest().clone();
+    let realizability = chelis_effects::realizability::infer_realizability(
+        compiled.checked(),
+        crate::target_capability::tensor_capable_prims(compiled.program.target()),
+    );
+
+    for candidate in candidate_names {
+        if manifest
+            .entries
+            .iter()
+            .any(|entry| entry.def_name == candidate)
+        {
+            continue;
+        }
+        let Some(signature) = compiled
+            .checked()
+            .signature_inference()
+            .functions
+            .get(candidate)
+        else {
+            continue;
+        };
+        if signature.params.is_empty() {
+            continue;
+        }
+        let Some(function_ty) = compiled.checked().type_env().get(candidate) else {
+            continue;
+        };
+        let Some(return_ty) = deep_tagged_children(function_ty)
+            .filter(|(tag, _)| *tag == DeepTag::TFn)
+            .and_then(|(_, children)| children.last())
+            .cloned()
+        else {
+            continue;
+        };
+        let template = RootEntry {
+            name: candidate.to_string(),
+            path: Vec::new(),
+            def_name: candidate.to_string(),
+            ty: return_ty,
+            lane: Lane::Tensor,
+            required_inputs: BTreeSet::new(),
+            reasons: Vec::new(),
+        };
+        let Some(body) = selected_callable_result_expr(compiled.checked(), candidate) else {
+            continue;
+        };
+        let mut selected_entries = chelis_effects::realizability::expand_manifest_root(
+            template,
+            Some(body),
+            compiled.checked().adt_registry(),
+        );
+        let selected_roots = selected_entries
+            .iter()
+            .filter_map(|entry| {
+                compiled
+                    .named_roots
+                    .get(&crate::pipeline::IrName::new(entry.name.as_str()))
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        let parameter_names = signature
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<BTreeSet<_>>();
+        let live_parameter_names =
+            chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names);
+        if live_parameter_names.iter().any(|name| {
+            signature
+                .params
+                .iter()
+                .find(|param| param.name == *name)
+                .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
+        }) {
+            // EvalRequest bindings carry tensors. A live scalar/container
+            // parameter therefore has not been supplied through this API and
+            // the callable remains a declaration.
+            continue;
+        }
+        let mut required_inputs = selected_roots
+            .iter()
+            .flat_map(|root| required_inputs_for_dag_root(&compiled.dag, *root))
+            .collect::<BTreeSet<_>>();
+        required_inputs.extend(live_parameter_names);
+        if let Some(top_level_inputs) = realizability.required_inputs_by_def.get(candidate) {
+            required_inputs.extend(top_level_inputs.iter().cloned());
+        }
+        if !required_inputs
+            .iter()
+            .all(|input| available.contains(input.as_str()))
+        {
+            continue;
+        }
+        let unsupported_prim = selected_roots.iter().find_map(|root| {
+            compiled
+                .dag
+                .get(*root)
+                .map(|node| node.output_type.precision)
+                .filter(|prim| {
+                    !crate::target_capability::tensor_capable_prims(compiled.program.target())
+                        .contains(prim)
+                })
+        });
+        let lane = if unsupported_prim.is_some() || selected_roots.len() != selected_entries.len() {
+            Lane::Host
+        } else {
+            Lane::Tensor
+        };
+        for entry in &mut selected_entries {
+            entry.lane = lane;
+            entry.required_inputs.clone_from(&required_inputs);
+            if let Some(prim) = unsupported_prim {
+                entry
+                    .reasons
+                    .push(chelis_types::manifest::HostReason::PrecisionExceedsCapability { prim });
+            } else if lane == Lane::Host {
+                entry
+                    .reasons
+                    .push(chelis_types::manifest::HostReason::StructuralForm {
+                        tag: "selected-callable-result".to_string(),
+                    });
+            }
+        }
+        manifest.entries.extend(selected_entries);
+    }
+
+    route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
+    let declaration_order = checked_def_order(compiled.checked());
+    manifest.entries.sort_by_key(|entry| {
+        declaration_order
+            .get(entry.def_name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    ManifestedProgram::new(
+        compiled.checked().clone(),
+        manifest,
+        compiled.program.target(),
+    )
+}
+
+fn type_is_tensor_runtime_input(ty: &chelis_types::types::Type) -> bool {
+    match ty {
+        chelis_types::types::Type::Tensor(_, _) => true,
+        chelis_types::types::Type::Ref(inner) => type_is_tensor_runtime_input(inner),
+        _ => false,
+    }
+}
+
+fn selected_callable_result_expr<'a>(
+    program: &'a CheckedProgram,
+    selected: &str,
+) -> Option<&'a DeepExpr> {
+    fn find<'a>(expr: &'a DeepExpr, selected: &str) -> Option<&'a DeepExpr> {
+        let (tag, children) = deep_tagged_children(expr)?;
+        if tag == DeepTag::Module {
+            return children
+                .iter()
+                .skip(1)
+                .find_map(|child| find(child, selected));
+        }
+        if tag != DeepTag::Def || children.first().and_then(symbol_name) != Some(selected) {
+            return None;
+        }
+        let body = children.get(1)?;
+        deep_tagged_children(body)
+            .filter(|(body_tag, _)| *body_tag == DeepTag::Fn)
+            .and_then(|(_, fn_children)| fn_children.last())
+    }
+
+    program
+        .annotated_exprs()
+        .iter()
+        .find_map(|expr| find(expr, selected))
+}
+
+fn checked_def_order(program: &CheckedProgram) -> UnordMap<&str, usize> {
+    fn collect<'a>(expr: &'a DeepExpr, names: &mut Vec<&'a str>) {
+        let Some((tag, children)) = deep_tagged_children(expr) else {
+            return;
+        };
+        if tag == DeepTag::Module {
+            for child in children.iter().skip(1) {
+                collect(child, names);
+            }
+        } else if tag == DeepTag::Def
+            && let Some(name) = children.first().and_then(symbol_name)
+        {
+            names.push(name);
+        }
+    }
+
+    let mut names = Vec::new();
+    for expr in program.annotated_exprs() {
+        collect(expr, &mut names);
+    }
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| (name, index))
+        .collect()
+}
+
+fn deep_tagged_children(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
+    match expr {
+        DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        DeepExpr::List(list, _) => {
+            let tag = list.tag()?;
+            let children = if list.elements.len() > 2
+                && matches!(list.elements.get(1), Some(DeepExpr::Map(_, _)))
+            {
+                &list.elements[2..]
+            } else if list.elements.len() > 1 {
+                &list.elements[1..]
+            } else {
+                &[]
+            };
+            Some((tag, children))
+        }
+        _ => None,
+    }
+}
+
+/// Replace the checked walk's conservative input set with the exact Load
+/// closure of every root which has a lowered representation. Host-only roots
+/// have no named DAG root and keep the checked top-level dependency closure.
+/// Sibling roots cannot make an unrelated binding or symbolic dimension live.
+fn route_tensor_inputs_from_dag(
+    manifest: &mut RootManifest,
+    dag: &Dag,
+    named_roots: &crate::pipeline::NamedRoots,
+) {
+    let mut required_by_def = BTreeMap::<String, BTreeSet<String>>::new();
+    for entry in &manifest.entries {
+        if entry.lane != Lane::Tensor {
+            continue;
+        }
+        let name = crate::pipeline::IrName::new(entry.name.as_str());
+        let Some(root) = named_roots.get(&name).copied() else {
+            continue;
+        };
+        required_by_def
+            .entry(entry.def_name.clone())
+            .or_default()
+            .extend(required_inputs_for_dag_root(dag, root));
+    }
+    for entry in &mut manifest.entries {
+        if entry.lane == Lane::Tensor
+            && let Some(required_inputs) = required_by_def.get(entry.def_name.as_str())
+        {
+            entry.required_inputs.clone_from(required_inputs);
+        }
+    }
+}
+
+fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
+    let mut stack = vec![root];
+    let mut seen = UnordSet::new();
+    let mut required = BTreeSet::new();
+    while let Some(node_id) = stack.pop() {
+        if !seen.insert(node_id) {
+            continue;
+        }
+        let Some(node) = dag.get(node_id) else {
+            continue;
+        };
+        if let RiscOp::Load { name } = &node.op {
+            required.insert(name.as_str().to_string());
+        }
+        stack.extend(node.inputs.iter().copied());
+    }
+    required
 }
 
 /// The library payload threaded through `eval_compiled` so the host
@@ -2779,16 +3322,24 @@ struct LibraryRuntime {
     /// expects the merged library + new-code Deep type-env so a
     /// library-name reference inside a `grad` body resolves the same
     /// way it does in the monolithic compile.
-    type_env: HashMap<String, DeepExpr>,
+    type_env: BTreeMap<String, DeepExpr>,
     /// Library-side lowered-vs-host classification. Threaded through
     /// so `evaluate_host_program_with_library`'s "is this a tensor
     /// root vs a host-init" decision is byte-identical to what the
     /// monolithic pipeline would have computed.
-    lowered_names: HashMap<String, bool>,
+    lowered_names: BTreeMap<String, bool>,
 }
 
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
-    compile_source_scoped(source_kind, source, None)
+    compile_source_for_target(source_kind, source, Target::Eval)
+}
+
+fn compile_source_for_target(
+    source_kind: SourceKind,
+    source: &str,
+    target: Target,
+) -> Result<CompiledSource> {
+    compile_source_scoped(source_kind, source, None, target)
 }
 
 /// Like [`compile_source`], but when `entry` is `Some`, prune the expanded
@@ -2803,6 +3354,7 @@ fn compile_source_scoped(
     source_kind: SourceKind,
     source: &str,
     entry: Option<&str>,
+    target: Target,
 ) -> Result<CompiledSource> {
     bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
@@ -2817,51 +3369,29 @@ fn compile_source_scoped(
         unreachable!("the lower goal returns only a lowered outcome")
     };
     bail_if_cancelled("lower")?;
-    // Issue #912: compute realizability and manifest alongside existing
-    // routing. This is observe-only. The manifest will replace the old
-    // root classification at Task 8.
+    // chelis#1079: realizability is a production phase boundary. The target
+    // is chosen before inference, and the checked program cannot proceed to
+    // root observation without its manifest attached.
     let checked_program = lowered.checked().program();
     let realizability_result = chelis_effects::realizability::infer_realizability(
         checked_program,
-        crate::target_capability::tensor_capable_prims(chelis_types::types::Target::C),
+        crate::target_capability::tensor_capable_prims(target),
     );
-    let _manifest = chelis_effects::realizability::compute_root_manifest(
+    let mut manifest = chelis_effects::realizability::compute_root_manifest(
         checked_program,
         &realizability_result,
     );
-    // Task 8 migration diff: compare manifest lane assignments against
-    // the old predicate's root classification. Log disagreements.
-    #[cfg(debug_assertions)]
-    {
-        use chelis_types::types::Lane;
-        let old_tensor_set = lowered
-            .checked()
-            .root_metadata()
-            .tensor_names()
-            .iter()
-            .map(|name| name.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        for entry in &_manifest.entries {
-            let old_is_tensor = old_tensor_set.contains(entry.name.as_str());
-            let new_is_tensor = entry.lane == Lane::Tensor;
-            if old_is_tensor != new_is_tensor {
-                eprintln!(
-                    "[#912 migration-diff] def `{}`: old={} new={}",
-                    entry.name,
-                    if old_is_tensor { "Tensor" } else { "Host" },
-                    if new_is_tensor { "Tensor" } else { "Host" },
-                );
-            }
-        }
-    }
-
     let lowered_parts = lowered.into_parts();
     let (_, _, checked, root_metadata) = lowered_parts.checked.into_parts();
+    route_tensor_inputs_from_dag(
+        &mut manifest,
+        &lowered_parts.dag,
+        &lowered_parts.named_roots,
+    );
 
     Ok(CompiledSource {
-        checked,
+        program: ManifestedProgram::new(checked, manifest, target),
         dag: lowered_parts.dag,
-        all_root_names: root_metadata.all_names().clone(),
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
@@ -2895,20 +3425,42 @@ fn parse_surf(source: &str) -> Result<Vec<Decl>> {
             "parse",
             err.to_string(),
             GeneralKind::SurfParseError,
-            parse_error_span_surf(source, &err),
+            Some(parse_error_span_surf(source, &err)),
         )
     })
 }
 
+/// The generic Deep text ingress for `parse` and `decompile` (chelis#1088).
+///
+/// Routes through the stamped `.dp` ingress, so a top-level form that is
+/// neither a `(module ...)` wrapper nor a declaration is a loud ingress
+/// rejection instead of an untyped `Expr::BareList` the consumer has to
+/// re-diagnose. Tag-vocabulary validation is deliberately NOT applied here:
+/// an unknown head stays an `Expr::UnknownForm` so the wire AST preserves it
+/// and the checker owns the rejection.
 fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
-    chelis_deep::parser::parse_str(source).map_err(|err| {
-        stage_error_with_span(
-            "parse",
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })
+    chelis_deep::parse_and_stamp_file(source).map_err(|err| deep_ingress_error("parse", &err))
+}
+
+/// Render a stamped-ingress failure as a staged compiler error.
+///
+/// Both halves are Deep ingress rejections, so both carry
+/// [`GeneralKind::DeepParseError`]; the stamp half contributes the exact
+/// offending span rather than the whole-input offset a re-wrapped parse
+/// error would report.
+fn deep_ingress_error(stage: &str, error: &chelis_deep::StampOrParseError) -> CompilerError {
+    let span = match error {
+        chelis_deep::StampOrParseError::Parse(parse_error) => {
+            Some(parse_error_span_deep(parse_error))
+        }
+        // The stamp half carries a measured extent, so it reports a range
+        // where the parse half above can only report a point (chelis#1395).
+        chelis_deep::StampOrParseError::Stamp(stamp_error) => Some(DiagnosticSpan::Range {
+            offset: stamp_error.span.offset,
+            len: stamp_error.span.len,
+        }),
+    };
+    stage_error_with_span(stage, error.to_string(), GeneralKind::DeepParseError, span)
 }
 
 fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
@@ -2917,7 +3469,7 @@ fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
             "decompile",
             format!("decompiler emitted Surf that the parser rejected: {err}"),
             GeneralKind::SurfParseError,
-            parse_error_span_surf(source, &err),
+            Some(parse_error_span_surf(source, &err)),
         )
     })?;
     Ok(chelis_surf::format::format_program(&decls))
@@ -2965,14 +3517,15 @@ fn symbol_name(expr: &DeepExpr) -> Option<&str> {
 }
 
 fn compiled_execution_artifact(
-    _target: CompileTarget,
     host_entry_name: &str,
     device_entry_name: Option<String>,
-    compile_result: CompileResult,
+    mut compile_result: CompileResult,
+    manifest: RootManifestResult,
     inputs: Vec<ExecutionTensorSpec>,
     outputs: Vec<ExecutionTensorSpec>,
     symbolic_dims: Vec<String>,
 ) -> CompiledExecutionArtifact {
+    compile_result.manifest = manifest;
     CompiledExecutionArtifact {
         compile_result,
         host_entry_name: host_entry_name.to_string(),
@@ -3021,6 +3574,7 @@ fn compile_result_c(
         compile_flags: toolchain.compile_flags,
         link_flags: toolchain.link_flags,
         peak_device_bytes_estimate: None,
+        manifest: RootManifestResult::default(),
     }
 }
 
@@ -3057,6 +3611,7 @@ fn compile_result_hip(
         compile_flags: result.compile_flags.clone(),
         link_flags: result.link_flags.clone(),
         peak_device_bytes_estimate: result.peak_device_bytes_estimate,
+        manifest: RootManifestResult::default(),
     }
 }
 
@@ -3096,11 +3651,12 @@ fn compile_result_hip_host(
         compile_flags: toolchain.compile_flags,
         link_flags: toolchain.link_flags,
         peak_device_bytes_estimate: None,
+        manifest: RootManifestResult::default(),
     }
 }
 
 fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTensorSpec>> {
-    let mut load_types = HashMap::<String, TensorType>::new();
+    let mut load_types = UnordMap::<String, TensorType>::new();
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
             load_types
@@ -3148,7 +3704,7 @@ fn execution_output_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionT
 }
 
 fn execution_output_nodes(dag: &Dag) -> Vec<NodeId> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     let mut nodes = Vec::new();
 
     for node in dag.nodes() {
@@ -3359,6 +3915,13 @@ impl From<CompileTarget> for BuildTarget {
             CompileTarget::C => Self::C,
             CompileTarget::Hip => Self::Hip,
         }
+    }
+}
+
+const fn manifest_target(target: CompileTarget) -> Target {
+    match target {
+        CompileTarget::C => Target::C,
+        CompileTarget::Hip => Target::Hip,
     }
 }
 
@@ -3671,12 +4234,98 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
     })
 }
 
+fn guard_count_for_device(
+    dag: &Dag,
+    target: &'static str,
+) -> std::result::Result<(), CompilerError> {
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Count { .. }) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target {target}` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated {target} kernel; use `--target c`.",
+                    node.id.0
+                ),
+                target,
+                chelis_types::unimplemented_rejection!(
+                    1291,
+                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject Count in every tensor-helper DAG emitted with a HIP host program.
+/// Other helper operations retain their C-host fallback semantics; full HIP
+/// capability policy applies only to DAGs emitted as HIP device code.
+pub fn reject_unsupported_hip_ops_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "hip"))
+}
+
+/// Reject Count in every tensor-helper DAG emitted with a Metal host program.
+/// Other helper operations retain their C-host fallback semantics; full Metal
+/// capability policy applies only to DAGs emitted as Metal device code.
+pub fn reject_unsupported_metal_ops_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "metal"))
+}
+
 /// Metal-specific early capability policy. The IR verifier and backend
 /// emitter independently enforce the same target boundary; this shared gate
 /// provides the typed public diagnostic without allowing CLI/compiler-api
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    guard_count_for_device(dag, "metal")?;
     for node in dag.nodes() {
+        let direct_arithmetic = match &node.op {
+            RiscOp::Sub => Some("sub"),
+            RiscOp::MaxElem => Some("max_elem"),
+            RiscOp::MinElem => Some("min_elem"),
+            RiscOp::ExtremaAdjoint { .. } => Some("extrema adjoint"),
+            RiscOp::FusedElem { ops }
+                if ops.iter().any(|step| {
+                    matches!(
+                        step.op,
+                        FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                    )
+                }) =>
+            {
+                Some("fused direct arithmetic")
+            }
+            _ => None,
+        };
+        if let Some(op) = direct_arithmetic {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target metal` does not yet support exact `{op}` at lowered node {}; use `--target c` or `--target hip` for the implemented cells",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "the Metal direct-subtraction/extrema kernel and exact trap/bit-selection cells are not implemented"
+                ),
+            ));
+        }
+
+        if matches!(&node.op, RiscOp::Expand { size, .. } if size.node_input().is_some()) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "runtime (node-valued) `expand` extent at lowered node {}",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    1383,
+                    "the Metal device scalar path for runtime expand extents is not implemented; use `--target c`"
+                ),
+            ));
+        }
+
         let node_valued = match &node.op {
             RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
             RiscOp::Pad { padding, .. } => padding.iter().any(pair_has_node_bound),
@@ -3741,7 +4390,10 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
 #[cfg(test)]
 mod metal_runtime_dim_reject_tests {
     use super::reject_unsupported_metal_ops;
-    use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+    use chelis_ir::dag::{
+        Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
+        RiscOp, RtAxis, RtDim, TensorType,
+    };
     use chelis_types::types::Prim;
 
     fn ty(dims: &[usize], precision: Prim) -> TensorType {
@@ -3762,7 +4414,7 @@ mod metal_runtime_dim_reject_tests {
         let m = dag.add_node(
             RiscOp::Load { name: "m".into() },
             vec![],
-            ty(&[], Prim::Int32),
+            ty(&[], Prim::Int64),
             None,
         );
         (dag, x, m)
@@ -3831,10 +4483,230 @@ mod metal_runtime_dim_reject_tests {
         );
         reject_unsupported_metal_ops(&dag).expect("literal bounds must pass the Metal seam");
     }
+
+    #[test]
+    fn metal_seam_accepts_input_axis_expand_extent() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            ty(&[], Prim::F32),
+            None,
+        );
+        let witness = dag.add_node(
+            RiscOp::Load {
+                name: "witness".into(),
+            },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![value, witness],
+            ty(&[4], Prim::F32),
+            None,
+        );
+
+        reject_unsupported_metal_ops(&dag)
+            .expect("InputAxis is a metadata read admitted by the Metal capability seam");
+    }
+
+    #[test]
+    fn metal_seam_rejects_node_valued_expand_with_issue_1383_receipt() {
+        let (mut dag, x, size) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            vec![x, size],
+            ty(&[4, 4], Prim::F32),
+            None,
+        );
+
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal must reject a device scalar expand extent");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1383:"), "{message}");
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
+
+    #[test]
+    fn metal_seam_rejects_count_with_issue_1291_receipt() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[2, 3], Prim::Bool),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Count { axes: vec![1] },
+            vec![input],
+            ty(&[2], Prim::Int64),
+            None,
+        );
+
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal must reject Count until its dedicated kernel lands");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
+        assert!(
+            message.contains("count") && message.contains("--target c"),
+            "{message}"
+        );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
+
+    fn direct_arithmetic_dag(op: RiscOp) -> Dag {
+        let mut dag = Dag::new();
+        let lhs = dag.add_node(
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let gradient = dag.add_node(
+            RiscOp::Load {
+                name: "gradient".into(),
+            },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let inputs = match op {
+            RiscOp::Relu => vec![lhs],
+            RiscOp::ReluAdjoint => vec![lhs, gradient],
+            RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
+            _ => vec![lhs, rhs],
+        };
+        dag.add_node(op, inputs, ty(&[4], Prim::F32), None);
+        dag
+    }
+
+    #[test]
+    fn metal_seam_rejects_every_direct_arithmetic_identity_with_issue_1306() {
+        let ops = [
+            RiscOp::Sub,
+            RiscOp::MaxElem,
+            RiscOp::MinElem,
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Max,
+                operand: ExtremaOperand::Left,
+            },
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Min,
+                operand: ExtremaOperand::Right,
+            },
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Sub,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::MinElem,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+        ];
+
+        for op in ops {
+            let dag = direct_arithmetic_dag(op);
+            let error = reject_unsupported_metal_ops(&dag)
+                .expect_err("Metal must reject every unimplemented direct arithmetic identity");
+            let message = &error.errors[0].message;
+            assert!(message.contains("unimplemented chelis#1306:"), "{message}");
+        }
+    }
+
+    #[test]
+    fn metal_seam_accepts_dedicated_relu() {
+        for op in [RiscOp::Relu, RiscOp::ReluAdjoint] {
+            reject_unsupported_metal_ops(&direct_arithmetic_dag(op))
+                .expect("Metal ReLU must reach the typed kernel");
+        }
+    }
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    guard_count_for_device(dag, "hip")?;
     for node in dag.nodes() {
+        let fused_direct_ops = match &node.op {
+            RiscOp::FusedElem { ops } => Some(ops),
+            _ => None,
+        };
+        let has_direct_sub = matches!(node.op, RiscOp::Sub)
+            || fused_direct_ops
+                .is_some_and(|ops| ops.iter().any(|step| matches!(step.op, FusedStepOp::Sub)));
+        let has_direct_arithmetic = matches!(
+            node.op,
+            RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem | RiscOp::ExtremaAdjoint { .. }
+        ) || fused_direct_ops.is_some_and(|ops| {
+            ops.iter().any(|step| {
+                matches!(
+                    step.op,
+                    FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                )
+            })
+        });
+
+        if has_direct_sub && node.output_type.precision.is_integer() {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target hip` cannot execute checked `{}` subtraction at lowered node {} without a device numeric-trap channel; use `--target c`",
+                    node.output_type.precision.name(),
+                    node.id.0
+                ),
+                "hip",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "checked signed-integer subtraction needs an exact HIP overflow-trap channel; the C target implements this cell"
+                ),
+            ));
+        }
+        if has_direct_arithmetic
+            && matches!(
+                node.output_type.precision,
+                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
+            )
+        {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target hip` does not yet support exact `{}` direct arithmetic at lowered node {}",
+                    node.output_type.precision.name(),
+                    node.id.0
+                ),
+                "hip",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented"
+                ),
+            ));
+        }
+
         match &node.op {
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
@@ -3924,6 +4796,19 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     chelis_types::deliberate_rejection!(
                         "[05-SHAPE-1]",
                         "runtime shape-value reads are intentionally excluded from the HIP device lane; use the C target"
+                    ),
+                ));
+            }
+            RiscOp::Expand { size, .. } if size.node_input().is_some() => {
+                return Err(unsupported_gate_error(
+                    format!(
+                        "runtime (node-valued) `expand` extent at lowered node {}",
+                        node.id.0
+                    ),
+                    "hip",
+                    chelis_types::unimplemented_rejection!(
+                        1298,
+                        "the HIP device scalar path for runtime movement bounds is not implemented; use `--target c`"
                     ),
                 ));
             }
@@ -4130,9 +5015,10 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
 
     // The shared gate follows the backend's exact dtype surface. f64 and
     // the integer family have typed kernel templates. bf16/f16 are narrower:
-    // storage and hipBLAS matmul are implemented, while an ordinary compute
-    // node would still reach the elementwise suffix rejection.
-    let narrow_float_admissible: HashSet<NodeId> = dag
+    // storage and hipBLAS matmul are implemented, and [05-OP-43]'s dedicated
+    // ReLU identities have exact raw-bit kernels. Other compute nodes would
+    // still reach an unsupported narrow-float path.
+    let narrow_float_admissible: UnordSet<NodeId> = dag
         .nodes()
         .iter()
         .filter(|node| {
@@ -4142,7 +5028,11 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             )
         })
         .filter_map(|node| match &node.op {
-            RiscOp::Load { .. } | RiscOp::Store { .. } | RiscOp::BlasMatmul { .. } => Some(node.id),
+            RiscOp::Load { .. }
+            | RiscOp::Store { .. }
+            | RiscOp::BlasMatmul { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint => Some(node.id),
             _ => None,
         })
         .collect();
@@ -4162,12 +5052,12 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     {
                         chelis_types::unimplemented_rejection!(
                             729,
-                            "`f16` is implemented only for HIP tensor load/store and `BlasMatmul` operands; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                            "`f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
                         )
                     } else {
                         chelis_types::unimplemented_rejection!(
                             729,
-                            "`bf16` is implemented only for HIP tensor load/store and `BlasMatmul` operands; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                            "`bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
                         )
                     };
                     return Err(unsupported_gate_error(
@@ -4187,8 +5077,9 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     format!(
                         "`chelis build --target hip` DAG path does not support tensor precision \
                          `{}` (node {}). Supported: f32/f64/bool plus the integer family \
-                         (int8/int16/int32/int64), with bf16/f16 admitted on matmul and \
-                         load/store nodes. See spec/04-type-system.md §5.7.1.",
+                         (int8/int16/int32/int64), with bf16/f16 admitted on matmul, \
+                         load/store, and dedicated ReLU nodes. See \
+                         spec/04-type-system.md §5.7.1.",
                         other.name(),
                         node.id.0,
                     ),
@@ -4245,83 +5136,114 @@ pub(crate) fn schema_stage_check(
     result: std::result::Result<(), WireDagSchemaError>,
 ) -> Result<()> {
     result.map_err(|err| {
-        let WireDagSchemaError::UnknownSchemaVersion { found, supported } = err;
+        let (found, supported) = match &err {
+            WireDagSchemaError::MissingSchemaVersion { supported } => {
+                ("missing".to_string(), *supported)
+            }
+            WireDagSchemaError::UnsupportedSchemaVersion { found, supported } => {
+                (found.to_string(), *supported)
+            }
+        };
         let mut error = stage_error("schema", err.to_string(), GeneralKind::UnknownSchemaVersion);
         if let Some(diagnostic) = error.errors.first_mut() {
-            diagnostic.expected = Some(format!("schema_version <= {supported}"));
-            diagnostic.got = Some(found.to_string());
+            diagnostic.expected = Some(format!("schema_version = {supported}"));
+            diagnostic.got = Some(found);
         }
         error
     })
 }
 
-fn deep_span_to_schema(span: Option<chelis_deep::Span>) -> Option<Span> {
-    span.map(|span| Span {
+/// A Deep node span as a DIAGNOSTIC location (chelis#1395).
+///
+/// Always a `Range`: `chelis_deep::Span` carries both an offset and a length,
+/// so this producer never has to report a bare coordinate. The AST wire types
+/// keep their own converter, `span`, because their spans are structurally
+/// ranges and stay on `Span`.
+fn deep_span_to_diagnostic(span: Option<chelis_deep::Span>) -> Option<DiagnosticSpan> {
+    span.map(|span| DiagnosticSpan::Range {
         offset: span.offset,
         len: span.len,
     })
 }
 
-fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) -> Option<Span> {
+/// The byte offset a Surf lexer error carries.
+///
+/// Exhaustive by construction rather than a catch-all: a new `LexError`
+/// variant stops this compiling until its coordinate is chosen, which is what
+/// the previous `return None` arm silently avoided (chelis#1395). Every
+/// variant carries one, so the return type is `usize`, not `Option`.
+fn surf_lex_error_offset(err: &chelis_surf::lexer::LexError) -> usize {
+    use chelis_surf::lexer::LexError as Lex;
+    match err {
+        Lex::UnterminatedString { offset }
+        | Lex::InvalidEscape { offset, .. }
+        | Lex::UnescapedControl { offset, .. }
+        | Lex::InvalidNumber { offset, .. }
+        | Lex::UnexpectedChar { offset, .. }
+        | Lex::ReservedForFuture { offset, .. }
+        | Lex::UnterminatedBlockComment { offset }
+        | Lex::DeferredSuffix { offset, .. }
+        | Lex::UnsignedSuffix { offset, .. }
+        | Lex::IntegerSuffixOnFloat { offset, .. }
+        | Lex::HexFloatSuffix { offset, .. }
+        | Lex::UnknownSuffix { offset, .. } => *offset,
+    }
+}
+
+/// The byte offset a Deep lexer error carries. See `surf_lex_error_offset`.
+fn deep_lex_error_offset(err: &chelis_deep::lexer::LexError) -> usize {
+    use chelis_deep::lexer::LexError as Lex;
+    match err {
+        Lex::UnterminatedString { offset }
+        | Lex::InvalidEscape { offset, .. }
+        | Lex::InvalidNumber { offset, .. }
+        | Lex::UnexpectedChar { offset, .. }
+        | Lex::DeferredSuffix { offset, .. }
+        | Lex::UnsignedSuffix { offset, .. }
+        | Lex::IntegerSuffixOnFloat { offset, .. }
+        | Lex::HexFloatSuffix { offset, .. }
+        | Lex::UnknownSuffix { offset, .. } => *offset,
+    }
+}
+
+fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) -> DiagnosticSpan {
     let offset = match err {
-        chelis_surf::parser::ParseError::Lex(_) => return None,
+        chelis_surf::parser::ParseError::Lex(lex) => surf_lex_error_offset(lex),
         chelis_surf::parser::ParseError::UnexpectedEof => source.len(),
         chelis_surf::parser::ParseError::Expected { offset, .. }
         | chelis_surf::parser::ParseError::ReservedWordBinding { offset, .. }
         | chelis_surf::parser::ParseError::NonAssocChain { offset }
         | chelis_surf::parser::ParseError::BareStatementInBlock { offset }
+        | chelis_surf::parser::ParseError::SemicolonBlockSeparator { offset }
         | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
         | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
         | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
             offset, ..
         } => *offset,
     };
-    Some(Span { offset, len: 0 })
+    DiagnosticSpan::Point { offset }
 }
 
-fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> {
+fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpan {
     let offset = match err {
-        chelis_deep::parser::ParseError::Lex(_) => return None,
+        chelis_deep::parser::ParseError::Lex(lex) => deep_lex_error_offset(lex),
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
         | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
     };
-    Some(Span { offset, len: 0 })
+    DiagnosticSpan::Point { offset }
 }
 
+/// Project a check diagnostic onto the wire carrier.
+///
+/// chelis#886 consolidated this with the CLI report's producer: there were
+/// two independent 24-arm projections of the same type onto the same
+/// carrier, which is the drift the issue exists to remove. The one
+/// implementation lives beside `Diagnostic`; this keeps the name its callers
+/// already use.
 pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
-    let kind = match error.kind {
-        CheckErrorKind::TypeMismatch => GeneralKind::TypeMismatch,
-        CheckErrorKind::PrecisionMismatch => GeneralKind::PrecisionMismatch,
-        CheckErrorKind::DimensionMismatch => GeneralKind::DimensionMismatch,
-        CheckErrorKind::ArityMismatch => GeneralKind::ArityMismatch,
-        CheckErrorKind::UnboundVariable => GeneralKind::UnboundVariable,
-        CheckErrorKind::UnknownConstructor => GeneralKind::UnknownConstructor,
-        CheckErrorKind::NotAFunction => GeneralKind::NotAFunction,
-        CheckErrorKind::NonExhaustiveMatch => GeneralKind::NonExhaustiveMatch,
-        CheckErrorKind::OccursCheck => GeneralKind::OccursCheck,
-        CheckErrorKind::CastNonTensor => GeneralKind::CastNonTensor,
-        CheckErrorKind::TupleIndexOutOfBounds => GeneralKind::TupleIndexOutOfBounds,
-        CheckErrorKind::UseAfterConsume => GeneralKind::UseAfterConsume,
-        CheckErrorKind::UnconsumedLinear => GeneralKind::UnconsumedLinear,
-        CheckErrorKind::InvalidBorrow => GeneralKind::InvalidBorrow,
-        CheckErrorKind::CycleDetected => GeneralKind::CycleDetected,
-        CheckErrorKind::UnsupportedTensorPrecision => GeneralKind::UnsupportedTensorPrecision,
-        CheckErrorKind::DuplicateDefinition => GeneralKind::DuplicateDefinition,
-        CheckErrorKind::DuplicateModule => GeneralKind::DuplicateModule,
-        CheckErrorKind::OpaqueTypeViolation => GeneralKind::OpaqueTypeViolation,
-        CheckErrorKind::ReservedLinkerName => GeneralKind::ReservedLinkerName,
-        CheckErrorKind::BuiltinShadowing => GeneralKind::BuiltinShadowing,
-        CheckErrorKind::UnknownForm => GeneralKind::UnknownForm,
-        CheckErrorKind::MalformedForm => GeneralKind::MalformedForm,
-        CheckErrorKind::Other => GeneralKind::CheckOther,
-    };
-    let mut diagnostic = Diagnostic::general(kind, error.message.clone(), error.severity);
-    diagnostic.expected = error.expected.clone();
-    diagnostic.got = error.got.clone();
-    diagnostic.suggestions = error.suggestions.clone();
-    diagnostic
+    Diagnostic::from_check_error(error)
 }
 
 fn span(span: chelis_deep::Span) -> Span {
@@ -4405,7 +5327,7 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         },
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             body,
@@ -4413,7 +5335,13 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             ..
         } => WireSurfDecl::FunDef {
             name: name.clone(),
-            dim_params: dim_params.clone(),
+            type_binders: type_binders
+                .iter()
+                .map(|binder| crate::schema::WireTypeBinder {
+                    name: binder.name.clone(),
+                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                })
+                .collect(),
             params: params.iter().map(wire_param).collect(),
             ret_ty: ret_ty.as_ref().map(wire_type_expr),
             body: wire_expr(body),
@@ -4800,6 +5728,10 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
             name: name.clone(),
             span: span(*s),
         },
+        TypeExpr::DimensionLiteral(value, s) => WireSurfTypeExpr::DimensionLiteral {
+            digits: value.to_string(),
+            span: span(*s),
+        },
         TypeExpr::Tensor(dims, precision, s) => WireSurfTypeExpr::Tensor {
             dims: dims.iter().map(wire_type_expr).collect(),
             precision: precision.clone(),
@@ -4899,12 +5831,42 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
             },
             span: Some(span(*s)),
         },
-        DeepExpr::UnknownForm(data) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: data.children.iter().map(wire_deep_expr).collect(),
-            },
-            span: Some(span(data.span)),
-        },
+        DeepExpr::UnknownForm(data) => {
+            // Unknown forms retain the same canonical list-shaped wire
+            // representation as known nodes: head, metadata, then children.
+            // Dropping either of the first two elements erases the identity
+            // and diagnostic context that UnknownForm exists to preserve
+            // (chelis#1088; salvaged from PR #1036).
+            let wire_span = Some(span(data.span));
+            let mut elements = Vec::with_capacity(data.children.len() + 2);
+            elements.push(WireDeepExpr {
+                kind: WireDeepExprKind::Atom {
+                    atom: WireDeepAtom::Symbol {
+                        value: data.head.clone(),
+                    },
+                },
+                span: wire_span,
+            });
+            elements.push(WireDeepExpr {
+                kind: WireDeepExprKind::Map {
+                    entries: data
+                        .meta
+                        .entries
+                        .iter()
+                        .map(|(key, value)| WireMetaEntry {
+                            key: key.clone(),
+                            value: wire_deep_expr(value),
+                        })
+                        .collect(),
+                },
+                span: wire_span,
+            });
+            elements.extend(data.children.iter().map(wire_deep_expr));
+            WireDeepExpr {
+                kind: WireDeepExprKind::List { elements },
+                span: wire_span,
+            }
+        }
     }
 }
 
@@ -4965,18 +5927,39 @@ fn wire_bound(b: &RtDim) -> WireRtDim {
         RtDim::ToEnd => WireRtDim::ToEnd,
         RtDim::Node(i) => WireRtDim::Node { input: *i },
         RtDim::Sym(name) => WireRtDim::Sym { name: name.clone() },
+        RtDim::InputAxis {
+            tensor,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRtDim::InputAxis {
+            tensor: *tensor,
+            axis: WireRtAxis::Lit { value: *axis },
+        },
     }
 }
 
 fn wire_op(op: &RiscOp) -> WireRiscOp {
     match op {
         RiscOp::Add => WireRiscOp::Add,
+        RiscOp::Sub => WireRiscOp::Sub,
         RiscOp::Mul => WireRiscOp::Mul,
         RiscOp::Div => WireRiscOp::Div,
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
         RiscOp::CmpLt => WireRiscOp::CmpLt,
         RiscOp::MaxElem => WireRiscOp::MaxElem,
+        RiscOp::MinElem => WireRiscOp::MinElem,
+        RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {
+            extrema: match kind {
+                ExtremaKind::Max => WireExtremaKind::Max,
+                ExtremaKind::Min => WireExtremaKind::Min,
+            },
+            operand: match operand {
+                ExtremaOperand::Left => WireExtremaOperand::Left,
+                ExtremaOperand::Right => WireExtremaOperand::Right,
+            },
+        },
+        RiscOp::Relu => WireRiscOp::Relu,
+        RiscOp::ReluAdjoint => WireRiscOp::ReluAdjoint,
         RiscOp::Neg => WireRiscOp::Neg,
         RiscOp::Recip => WireRiscOp::Recip,
         RiscOp::Exp => WireRiscOp::Exp,
@@ -5003,6 +5986,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             axis: *axis,
             accumulator: accumulator.name().to_string(),
         },
+        RiscOp::Count { axes } => WireRiscOp::Count { axes: axes.clone() },
         RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
         RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
         RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },
@@ -5042,7 +6026,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Permute { axes } => WireRiscOp::Permute { axes: axes.clone() },
         RiscOp::Expand { axis, size } => WireRiscOp::Expand {
             axis: *axis,
-            size: size.to_string(),
+            size: wire_bound(size),
         },
         RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
@@ -5085,11 +6069,13 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 .map(|step| WireFusedStep {
                     op: match step.op {
                         FusedStepOp::Add => WireFusedStepOp::Add,
+                        FusedStepOp::Sub => WireFusedStepOp::Sub,
                         FusedStepOp::Mul => WireFusedStepOp::Mul,
                         FusedStepOp::Div => WireFusedStepOp::Div,
                         FusedStepOp::FloorDiv => WireFusedStepOp::FloorDiv,
                         FusedStepOp::TruncDiv => WireFusedStepOp::TruncDiv,
                         FusedStepOp::MaxElem => WireFusedStepOp::MaxElem,
+                        FusedStepOp::MinElem => WireFusedStepOp::MinElem,
                         FusedStepOp::CmpLt => WireFusedStepOp::CmpLt,
                         FusedStepOp::Neg => WireFusedStepOp::Neg,
                         FusedStepOp::Recip => WireFusedStepOp::Recip,
@@ -5149,10 +6135,69 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    /// chelis#1395 [04-FIT-16]: a lexer error carries a byte offset, so the
+    /// carrier transports it.
+    ///
+    /// Both languages previously matched `ParseError::Lex(_) => return None`,
+    /// discarding a coordinate the producer held -- the exact loss the tagged
+    /// carrier exists to stop, left in place at the one producer that cannot
+    /// reach the parser to be given a span.
+    #[test]
+    fn a_surf_lex_error_retains_its_point() {
+        let source = "x=\"unterminated";
+        let error = chelis_surf::parser::parse_str(source)
+            .expect_err("an unterminated string is a lex error");
+        assert!(
+            matches!(error, chelis_surf::parser::ParseError::Lex(_)),
+            "fixture must reach the lexer arm, got: {error:?}"
+        );
+        let span = parse_error_span_surf(source, &error);
+        assert_eq!(
+            span.extent(),
+            None,
+            "a lexer coordinate is a point, not a measured range"
+        );
+        assert_eq!(
+            span,
+            DiagnosticSpan::Point {
+                offset: source.find('"').expect("the fixture has a quote"),
+            },
+            "the point must be the offset the lexer reported"
+        );
+    }
+
+    /// The Deep half of the same omission. Kept as a separate test because the
+    /// two languages have separate `LexError` enums and separate projections;
+    /// one passing proved nothing about the other.
+    #[test]
+    fn a_deep_lex_error_retains_its_point() {
+        let source = "(x \"unterminated";
+        // `parse_raw_str` is the lex-then-parse entry; the stamped entries
+        // wrap the same `ParseError` in `StampOrParseError`.
+        let error = chelis_deep::parser::parse_raw_str(source)
+            .expect_err("an unterminated string is a lex error");
+        assert!(
+            matches!(error, chelis_deep::parser::ParseError::Lex(_)),
+            "fixture must reach the lexer arm, got: {error:?}"
+        );
+        let span = parse_error_span_deep(&error);
+        assert_eq!(span.extent(), None);
+        assert_eq!(
+            span,
+            DiagnosticSpan::Point {
+                offset: source.find('"').expect("the fixture has a quote"),
+            }
+        );
+    }
+
     #[test]
     fn decompile_maps_resugaring_rejection_to_the_validation_kind() {
+        // The unknown form sits at a RuntimeExpr slot, so the stamped ingress
+        // admits it as an `UnknownForm` and the resugaring boundary is what
+        // rejects it (chelis#1088 moved the top-level spelling of this input
+        // to an ingress rejection; see the sibling test below).
         let error = decompile(DecompileRequest {
-            source: "(future-form {} value)".to_string(),
+            source: "(def {} value (future-form {} 1))".to_string(),
         })
         .expect_err("an unknown Deep form must fail closed during resugaring");
 
@@ -5161,6 +6206,28 @@ mod tests {
         assert_eq!(
             error.errors[0].kind(),
             chelis_vocab::DiagnosticKind::ValidationError
+        );
+    }
+
+    #[test]
+    fn decompile_rejects_a_non_declaration_top_level_at_ingress() {
+        // chelis#1088: `decompile` shares the stamped `.dp` ingress, so a
+        // top-level form that is not a declaration never reaches resugaring.
+        let error = decompile(DecompileRequest {
+            source: "(future-form {} value)".to_string(),
+        })
+        .expect_err("a non-declaration top-level form must fail at ingress");
+
+        assert_eq!(error.stage, "parse");
+        assert_eq!(error.errors.len(), 1);
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::DeepParseError
+        );
+        assert!(
+            error.errors[0].message.contains("expected declaration"),
+            "{}",
+            error.errors[0].message
         );
     }
 
@@ -5290,6 +6357,160 @@ mod tests {
         }
     }
 
+    fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_types::types::Prim) -> Dag {
+        let mut dag = Dag::new();
+        let lhs = dag.add_node(
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let gradient = dag.add_node(
+            RiscOp::Load {
+                name: "gradient".into(),
+            },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let inputs = match op {
+            RiscOp::Relu => vec![lhs],
+            RiscOp::ReluAdjoint => vec![lhs, gradient],
+            RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
+            _ => vec![lhs, rhs],
+        };
+        let result = dag.add_node(op, inputs, tensor_type(vec![4], precision), None);
+        dag.add_root(result);
+        dag
+    }
+
+    #[test]
+    fn hip_seam_accepts_supported_direct_arithmetic_cells() {
+        for precision in [
+            chelis_types::types::Prim::F32,
+            chelis_types::types::Prim::F64,
+        ] {
+            for op in [
+                RiscOp::Sub,
+                RiscOp::MaxElem,
+                RiscOp::MinElem,
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Max,
+                    operand: ExtremaOperand::Left,
+                },
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Min,
+                    operand: ExtremaOperand::Right,
+                },
+                RiscOp::Relu,
+                RiscOp::ReluAdjoint,
+            ] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP f32/f64 direct arithmetic must reach implemented codegen");
+            }
+        }
+
+        for precision in [
+            chelis_types::types::Prim::F32,
+            chelis_types::types::Prim::F64,
+            chelis_types::types::Prim::F16,
+            chelis_types::types::Prim::Bf16,
+        ] {
+            for op in [RiscOp::Relu, RiscOp::ReluAdjoint] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP ReLU must reach the typed kernel at every float width");
+            }
+        }
+
+        for precision in [
+            chelis_types::types::Prim::Int8,
+            chelis_types::types::Prim::Int16,
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::Int64,
+        ] {
+            for op in [RiscOp::MaxElem, RiscOp::MinElem] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP signed-integer extrema must reach implemented codegen");
+            }
+        }
+    }
+
+    #[test]
+    fn hip_seam_rejects_unimplemented_direct_arithmetic_cells_with_issue_1306() {
+        for precision in [
+            chelis_types::types::Prim::Int8,
+            chelis_types::types::Prim::Int16,
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::Int64,
+        ] {
+            let error =
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
+                    .expect_err("HIP integer subtraction needs a device trap channel");
+            assert!(
+                error.errors[0]
+                    .message
+                    .contains("unimplemented chelis#1306:"),
+                "{}",
+                error.errors[0].message
+            );
+        }
+
+        for precision in [
+            chelis_types::types::Prim::F16,
+            chelis_types::types::Prim::Bf16,
+        ] {
+            for op in [
+                RiscOp::Sub,
+                RiscOp::MaxElem,
+                RiscOp::MinElem,
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Max,
+                    operand: ExtremaOperand::Left,
+                },
+            ] {
+                let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect_err("HIP narrow-float direct arithmetic is not implemented");
+                assert!(
+                    error.errors[0]
+                        .message
+                        .contains("unimplemented chelis#1306:"),
+                    "{}",
+                    error.errors[0].message
+                );
+            }
+        }
+
+        let fused_sub = RiscOp::FusedElem {
+            ops: vec![chelis_ir::dag::FusedStep {
+                op: FusedStepOp::Sub,
+                input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+            }],
+        };
+        for precision in [
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::F16,
+        ] {
+            let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
+                fused_sub.clone(),
+                precision,
+            ))
+            .expect_err("fused subtraction inherits the direct target disposition");
+            assert!(
+                error.errors[0]
+                    .message
+                    .contains("unimplemented chelis#1306:"),
+                "{}",
+                error.errors[0].message
+            );
+        }
+    }
+
     #[test]
     fn hip_sparse_gather_is_supported_with_integer_indices() {
         let mut dag = Dag::new();
@@ -5318,6 +6539,111 @@ mod tests {
         dag.add_root(gather);
 
         reject_unsupported_hip_ops(&dag).expect("HIP should allow sparse gather");
+    }
+
+    #[test]
+    fn hip_rejects_count_with_issue_1291_receipt() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![2, 3], chelis_types::types::Prim::Bool),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Count { axes: vec![1] },
+            vec![input],
+            tensor_type(vec![2], chelis_types::types::Prim::Int64),
+            None,
+        );
+
+        let error = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject Count until its dedicated kernel lands");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
+        assert!(
+            message.contains("count") && message.contains("--target c"),
+            "{message}"
+        );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
+
+    #[test]
+    fn hip_seam_accepts_input_axis_expand_extent() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::F32),
+            None,
+        );
+        let witness = dag.add_node(
+            RiscOp::Load {
+                name: "witness".into(),
+            },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: chelis_ir::dag::RtAxis::Lit(0),
+                },
+            },
+            vec![value, witness],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+
+        reject_unsupported_hip_ops(&dag)
+            .expect("InputAxis is a metadata read implemented by HIP expand codegen");
+    }
+
+    #[test]
+    fn hip_seam_rejects_node_valued_expand_with_issue_1298_receipt() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::F32),
+            None,
+        );
+        let size = dag.add_node(
+            RiscOp::Load {
+                name: "size".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::Int64),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            vec![value, size],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+
+        let error = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject a device scalar expand extent");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1298:"), "{message}");
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
     }
 
     #[test]
@@ -5796,7 +7122,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
 
         assert_eq!(
             compiled
-                .all_root_names
+                .tensor_root_names
                 .iter()
                 .map(crate::pipeline::IrName::as_str)
                 .collect::<Vec<_>>(),
@@ -5814,17 +7140,19 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     }
 
     #[test]
-    fn compile_source_arrow_form_def_appears_in_all_root_names() {
+    fn compile_source_arrow_form_def_appears_in_manifest() {
         // Issue #947: arrow-form `def n() -> T = body` must appear in
-        // all_root_names so eval_compiled can surface it.
+        // the production manifest so eval_compiled can surface it.
         let source = "def n() -> int32 = add(cast(20, int32), cast(22, int32))\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         assert!(
             compiled
-                .all_root_names
-                .contains(&crate::pipeline::IrName::new("n")),
-            "arrow-form def `n` must be in all_root_names; got: {:?}",
-            compiled.all_root_names
+                .manifest()
+                .entries
+                .iter()
+                .any(|entry| entry.name == "n"),
+            "arrow-form def `n` must be in the manifest; got: {:?}",
+            compiled.manifest().entries
         );
     }
 
@@ -5940,11 +7268,12 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
 
         assert_eq!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .map(crate::pipeline::IrName::as_str)
+                .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
-            ["label", "logits"]
+            ["label"]
         );
         assert_eq!(
             compiled
@@ -5985,6 +7314,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             &context,
             "module App.Eval\nimport Mylib.Copy (consume)\n\n\
              def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))\n",
+            Target::Eval,
         )
         .expect("compile new source in context");
         let context_root = *compiled
@@ -6071,6 +7401,13 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         );
         let eval_result = eval_in_context_with_bindings(&context, source, bindings)
             .expect("eval in context succeeds");
+        assert_eq!(eval_result.manifest.entries.len(), 1);
+        assert_eq!(eval_result.manifest.entries[0].name, "main");
+        assert_eq!(
+            eval_result.manifest.entries[0].required_inputs,
+            ["x".to_string()],
+            "the concrete bound callable must be promoted into the consumed eval manifest"
+        );
         let main_root = eval_result
             .roots
             .iter()
@@ -6100,6 +7437,187 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             vec![Some(2)],
             "compiled output shape agrees with the [2] eval value"
         );
+    }
+
+    #[test]
+    fn manifested_callable_requires_only_reachable_runtime_inputs() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "live".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            },
+        );
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "def main(dead: tensor[2, f32], live: tensor[2, f32]) \
+                     -> tensor[2, f32] = add(live, live)\n"
+                .to_string(),
+            bindings,
+        })
+        .expect("a dead authored parameter is not a required runtime input");
+
+        assert_eq!(result.manifest.entries.len(), 1);
+        assert_eq!(result.manifest.entries[0].name, "main");
+        assert_eq!(
+            result.manifest.entries[0].required_inputs,
+            ["live".to_string()]
+        );
+        assert_eq!(result.roots.len(), 1);
+    }
+
+    #[test]
+    fn manifested_callable_expands_tuple_roots_with_originating_inputs() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        bindings.insert(
+            "y".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            },
+        );
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "def main(x: tensor[2, f32], y: tensor[2, f32]) \
+                     -> (tensor[2, f32], tensor[2, f32]) = (x, y)\n"
+                .to_string(),
+            bindings,
+        })
+        .expect("a fully supplied tuple-returning callable is observable");
+
+        let manifest = result
+            .manifest
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.required_inputs.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            manifest,
+            vec![
+                ("main.0", ["x".to_string(), "y".to_string()].as_slice()),
+                ("main.1", ["x".to_string(), "y".to_string()].as_slice()),
+            ],
+            "[05-OBS-7..9] require selected callable products to use dotted \
+             topology and inherit the originating call's reachable input closure"
+        );
+        assert_eq!(
+            result
+                .roots
+                .iter()
+                .map(|root| root.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("main.0"), Some("main.1")]
+        );
+    }
+
+    #[test]
+    fn manifested_callable_tuple_stays_a_declaration_when_an_input_is_missing() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "def main(x: tensor[2, f32], y: tensor[2, f32]) \
+                     -> (tensor[2, f32], tensor[2, f32]) = (x, y)\n"
+                .to_string(),
+            bindings,
+        })
+        .expect("an incompletely supplied callable remains a declaration");
+
+        assert!(result.manifest.entries.is_empty());
+        assert!(result.roots.is_empty());
+    }
+
+    #[test]
+    fn manifested_callable_expands_static_record_adt_roots() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        bindings.insert(
+            "y".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            },
+        );
+        let source = "type Pair =\n\
+                     \x20 | Pair { left: tensor[2, f32], right: tensor[2, f32] }\n\n\
+                     def main(x: tensor[2, f32], y: tensor[2, f32]) -> Pair = \
+                     Pair { left: x, right: y }\n";
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings,
+        })
+        .expect("a fully supplied static-ADT callable is observable");
+
+        assert_eq!(
+            result
+                .manifest
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main.left", "main.right"]
+        );
+        assert!(
+            result
+                .manifest
+                .entries
+                .iter()
+                .all(|entry| { entry.required_inputs == vec!["x".to_string(), "y".to_string()] })
+        );
+        assert_eq!(
+            result
+                .roots
+                .iter()
+                .map(|root| root.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("main.left"), Some("main.right")]
+        );
+    }
+
+    #[test]
+    fn manifested_callable_static_adt_stays_a_declaration_when_an_input_is_missing() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        let source = "type Pair =\n\
+                     \x20 | Pair { left: tensor[2, f32], right: tensor[2, f32] }\n\n\
+                     def main(x: tensor[2, f32], y: tensor[2, f32]) -> Pair = \
+                     Pair { left: x, right: y }\n";
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings,
+        })
+        .expect("an incompletely supplied static-ADT callable remains a declaration");
+
+        assert!(result.manifest.entries.is_empty());
+        assert!(result.roots.is_empty());
     }
 
     // In-context scalar-entry rejection: a scalar-signature entry has no
@@ -6241,21 +7759,24 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         assert!(compiled.named_roots.is_empty());
         assert!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .any(|name| name.as_str() == "status")
+                .any(|entry| entry.name == "status")
         );
         assert!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .any(|name| name.as_str() == "loss")
+                .any(|entry| entry.name == "loss")
         );
         assert!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .any(|name| name.as_str() == "should_stop")
+                .any(|entry| entry.name == "should_stop")
         );
     }
 
@@ -6266,7 +7787,7 @@ def id(let: int64) -> int64 = let
 "#;
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
-        let deep = chelis_deep::printer::print_canonical(compiled.checked.exprs());
+        let deep = chelis_deep::printer::print_canonical(compiled.checked().exprs());
         assert!(deep.contains("^{:type (t-prim {} int64)} let"));
     }
 
@@ -6643,15 +8164,15 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
         )
         .expect("compile");
 
-        let host = chelis_ir::host::try_lower_compiled_program(&compiled.checked)
+        let host = chelis_ir::host::try_lower_compiled_program(compiled.checked())
             .expect("checked host program must lower")
             .host
             .expect("host lowering");
         let lowered = chelis_ir::lower::top_level_lowering_map(
-            compiled.checked.exprs(),
-            compiled.checked.type_env(),
+            compiled.checked().exprs(),
+            compiled.checked().type_env(),
         );
-        let checked_text = chelis_deep::printer::print_canonical(compiled.checked.exprs());
+        let checked_text = chelis_deep::printer::print_canonical(compiled.checked().exprs());
 
         let find_ret = |suffix: &str| {
             host.functions
@@ -6755,6 +8276,74 @@ b: tensor[2, f32] = b
             "expected eval error mentioning `b`, got {:?}",
             b_err.errors
         );
+    }
+
+    #[test]
+    fn manifested_tensor_roots_carry_only_their_own_lowered_inputs() {
+        let compiled = compile_source(
+            SourceKind::Surf,
+            "a: tensor[2, f32] = a\nb: tensor[2, f32] = b\n",
+        )
+        .expect("compile independent input roots");
+        let inputs_for = |name: &str| {
+            compiled
+                .manifest()
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing manifest entry {name}"))
+                .required_inputs
+                .clone()
+        };
+        assert_eq!(inputs_for("a"), ["a".to_string()].into_iter().collect());
+        assert_eq!(inputs_for("b"), ["b".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn manifested_host_root_inherits_only_its_top_level_input_dependency() {
+        let compiled = compile_source_for_target(
+            SourceKind::Surf,
+            "input: tensor[2, f64] = input\nother: tensor[2, f64] = other\n\
+             values = to_list(input)\n",
+            Target::C,
+        )
+        .expect("compile Host root with one runtime input");
+        let entry = compiled
+            .manifest()
+            .entries
+            .iter()
+            .find(|entry| entry.name == "values")
+            .expect("values manifest entry");
+        assert_eq!(entry.lane, Lane::Host);
+        assert_eq!(
+            entry.required_inputs,
+            ["input".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn unavailable_owed_root_fails_with_named_lane_and_authority() {
+        let mut compiled = compile_source(SourceKind::Surf, "answer = cast(42, int32)\n")
+            .expect("compile fault-injection fixture");
+        let mut manifest = compiled.manifest().clone();
+        let mut unavailable = manifest.entries[0].clone();
+        unavailable.name = "missing_root".to_string();
+        unavailable.lane = Lane::Tensor;
+        manifest.entries.push(unavailable);
+        compiled.program =
+            ManifestedProgram::new(compiled.checked().clone(), manifest, Target::Eval);
+
+        let error = eval_compiled(&compiled, BTreeMap::new(), None)
+            .expect_err("an owed root absent from its assigned lane must fail loudly");
+        let diagnostic = error.errors.first().expect("one typed diagnostic");
+        assert_eq!(
+            diagnostic.kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+        assert!(diagnostic.message.contains("[05-UNS-1]"));
+        assert!(diagnostic.message.contains("missing_root"));
+        assert!(diagnostic.message.contains("Tensor lane"));
+        assert!(diagnostic.message.contains("unimplemented chelis#912"));
     }
 
     #[test]
@@ -6874,12 +8463,22 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
     }
 
     #[test]
-    fn schema_stage_check_accepts_legacy_lower_version() {
-        // A strictly-lower (pre-versioning) payload is forward-compatible under
-        // the additive-default guarantee and must not be rejected.
+    fn schema_stage_check_rejects_legacy_lower_version() {
         let legacy = wire_dag_at_version(0);
-        schema_stage_check(legacy.validate_schema_version())
-            .expect("a lower-than-baseline version is accepted");
+        let error = schema_stage_check(legacy.validate_schema_version())
+            .expect_err("a lower-than-current version is rejected");
+        let diagnostic = &error.errors[0];
+        assert_eq!(diagnostic.got.as_deref(), Some("0"));
+        assert_eq!(
+            diagnostic.expected.as_deref(),
+            Some(
+                format!(
+                    "schema_version = {}",
+                    crate::schema::WIRE_DAG_SCHEMA_VERSION
+                )
+                .as_str()
+            )
+        );
     }
 
     #[test]
@@ -6907,7 +8506,7 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
             diagnostic.expected.as_deref(),
             Some(
                 format!(
-                    "schema_version <= {}",
+                    "schema_version = {}",
                     crate::schema::WIRE_DAG_SCHEMA_VERSION
                 )
                 .as_str()

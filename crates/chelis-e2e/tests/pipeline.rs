@@ -89,21 +89,18 @@ fn pipeline_transformer_model_lowers() {
 }
 
 #[test]
-fn pipeline_tier2_relu_decomposes() {
-    // Verify relu desugars through the pipeline and lowers to MaxElem + Const
+fn pipeline_tier2_relu_preserves_identity() {
+    // ReLU reaches the DAG as the [05-OP-43] identity so AD can attach its
+    // zero-boundary convention before any backend lowering.
     let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let result = compile_surf(src).unwrap();
     let dag = result.dag;
 
-    // Should contain MaxElem (from relu decomposition) and Const(0)
-    let has_max_elem = dag
+    let has_relu = dag
         .nodes()
         .iter()
-        .any(|n| matches!(n.op, chelis_ir::dag::RiscOp::MaxElem));
-    assert!(
-        has_max_elem,
-        "relu should decompose to MaxElem but DAG has no MaxElem node"
-    );
+        .any(|n| matches!(n.op, chelis_ir::dag::RiscOp::Relu));
+    assert!(has_relu, "pipeline erased the dedicated ReLU identity");
 }
 
 #[test]

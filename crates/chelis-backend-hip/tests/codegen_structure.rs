@@ -3,14 +3,17 @@
 //! These verify the generated C/HIP source is well-formed WITHOUT requiring
 //! a GPU or HIP runtime. They run in default CI.
 
-use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+mod support;
+use chelis_ir::dag::{
+    Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
+};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::codegen_hip;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,7 +127,7 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    let include = cpu_runtime_include_dir();
+    let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
         "chelis_runtime_dtype.h",
@@ -135,7 +138,8 @@ fn copy_runtime_artifacts(dst: &Path) {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include_dir.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
@@ -152,6 +156,38 @@ fn host_entry_source<'a>(source: &'a str, func_name: &str) -> &'a str {
 fn hip_runtime_header() -> String {
     fs::read_to_string(hip_runtime_src_dir().join("chelis_hip_runtime.h"))
         .expect("read HIP runtime header")
+}
+
+#[test]
+fn hip_runtime_header_owns_its_rank_cap_and_dtype_sizing_dependencies() {
+    let header = hip_runtime_header();
+    assert!(header.contains("#include \"chelis_runtime_dtype.h\""));
+    assert!(header.contains("CHELIS_GPU_MAX_DIM"));
+    for removed in ["CHELIS_MAX_DIM", "chelis_runtime_dtype_size_checked"] {
+        assert!(
+            !header.contains(removed),
+            "HIP runtime header still depends on removed host symbol `{removed}`"
+        );
+    }
+
+    // chelis#1360: this used to assert the header CONTAINED
+    // `case CHELIS_DTYPE_F64:` / `case CHELIS_DTYPE_BOOL:`, which pinned a
+    // second copy of the width table in place. The copy is how the defect
+    // happened - chelis#1308 narrowed bool to one byte here while the
+    // emitter went on dispatching four-byte kernels - so the assertion is
+    // inverted: the header must delegate to the runtime's one authority and
+    // must not restate the per-dtype widths at all.
+    assert!(
+        header.contains("return (size_t)chelis_dtype_size((chelis_dtype)dtype);"),
+        "chelis_gpu_dtype_size must delegate to the runtime width authority"
+    );
+    for restated in ["case CHELIS_DTYPE_F64:", "case CHELIS_DTYPE_BOOL:"] {
+        assert!(
+            !header.contains(restated),
+            "HIP runtime header restates the dtype width table (`{restated}`); \
+             delegate to chelis_dtype_size instead (chelis#1360)"
+        );
+    }
 }
 
 /// Build a simple DAG: const(a) + const(b)
@@ -296,9 +332,10 @@ fn s2_neg_const_only_dag_only_fill_kernel() {
 fn s3_all_elementwise_ops_emit_kernels() {
     let ops_and_names: Vec<(RiscOp, &str)> = vec![
         (RiscOp::Add, "add"),
+        (RiscOp::Sub, "sub"),
         (RiscOp::Mul, "mul"),
         (RiscOp::MaxElem, "max_elem"),
-        (RiscOp::CmpLt, "cmplt"),
+        (RiscOp::MinElem, "min_elem"),
     ];
     for (op, name) in &ops_and_names {
         let mut dag = Dag::new();
@@ -320,6 +357,161 @@ fn s3_all_elementwise_ops_emit_kernels() {
         assert!(
             result.c_source.contains("chelis_launch_kernel"),
             "Binary op '{name}' must emit a kernel launch"
+        );
+    }
+}
+
+#[test]
+fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
+    let sub = dag.add_node(RiscOp::Sub, vec![a, b], vec_f32(4), None);
+    let max = dag.add_node(RiscOp::MaxElem, vec![a, b], vec_f32(4), None);
+    let min = dag.add_node(RiscOp::MinElem, vec![a, b], vec_f32(4), None);
+    let adjoint = dag.add_node(
+        RiscOp::ExtremaAdjoint {
+            kind: ExtremaKind::Max,
+            operand: ExtremaOperand::Left,
+        },
+        vec![a, b, g],
+        vec_f32(4),
+        None,
+    );
+    for root in [sub, max, min, adjoint] {
+        dag.add_root(root);
+    }
+
+    let source = codegen_hip(&dag, "direct_arithmetic_structure")
+        .unwrap()
+        .c_source;
+    for kernel in [
+        "kernel_sub_f32",
+        "kernel_max_elem",
+        "kernel_min_elem",
+        "kernel_max_adjoint_left_f32",
+    ] {
+        assert!(source.contains(kernel), "missing {kernel}: {source}");
+    }
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av >= bv);"));
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av <= bv);"));
+    assert!(!source.contains("fmaxf(av, bv)"), "{source}");
+    assert!(!source.contains("fminf(av, bv)"), "{source}");
+}
+
+#[test]
+fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
+    let relu = dag.add_node(RiscOp::Relu, vec![x], vec_f32(4), None);
+    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], vec_f32(4), None);
+    dag.add_root(relu);
+    dag.add_root(adjoint);
+
+    let source = codegen_hip(&dag, "relu_structure").unwrap().c_source;
+    for kernel in ["kernel_relu", "kernel_relu_adjoint"] {
+        assert!(source.contains(kernel), "missing {kernel}: {source}");
+    }
+    assert!(
+        source.contains("out[i] = value < 0.0f ? 0.0f : value;"),
+        "{source}"
+    );
+    assert!(
+        source.contains("out[i] = 0.0f < a[idx_a] ? g[idx_g] : 0.0f;"),
+        "{source}"
+    );
+    assert!(!source.contains("fmax"), "{source}");
+    assert!(
+        source.contains("int64_t chelis_output_shape_0[1] = { 4 };")
+            && source.contains("int64_t chelis_output_shape_1[1] = { 4 };")
+            && source
+                .contains("outputs[0] = chelis_alloc(1, chelis_output_shape_0, CHELIS_DTYPE_F32);")
+            && source
+                .contains("outputs[1] = chelis_alloc(1, chelis_output_shape_1, CHELIS_DTYPE_F32);"),
+        "host output shapes must match chelis_alloc's int64_t ABI: {source}"
+    );
+    assert!(
+        !source.contains("(int64_t[])"),
+        "host shape ownership must stay in the classified input/output preamble: {source}"
+    );
+    assert!(
+        source.contains("chelis_gpu_alloc(1, (int[]){ 4 }, CHELIS_DTYPE_F32)"),
+        "device shape arrays must retain the GPU runtime's int ABI: {source}"
+    );
+
+    for (precision, suffix, exponent_mask, fraction_mask) in [
+        (Prim::F16, "f16", "0x7c00", "0x03ff"),
+        (Prim::Bf16, "bf16", "0x7f80", "0x007f"),
+    ] {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision,
+        };
+        let mut narrow = Dag::new();
+        let x = narrow.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let g = narrow.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+        let relu = narrow.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
+        let adjoint = narrow.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+        narrow.add_root(relu);
+        narrow.add_root(adjoint);
+        let source = codegen_hip(&narrow, &format!("relu_{suffix}"))
+            .unwrap()
+            .c_source;
+        assert!(
+            source.contains(&format!("kernel_relu_{suffix}")),
+            "{source}"
+        );
+        assert!(source.contains(&format!("{exponent_mask}u")), "{source}");
+        assert!(source.contains(&format!("{fraction_mask}u")), "{source}");
+        assert!(source.contains("is_positive ? g[idx_g] : (unsigned short)0"));
+        assert!(!source.contains("uint16_t"), "HIPRTC source: {source}");
+        assert!(!source.contains("UINT16_C"), "HIPRTC source: {source}");
+    }
+}
+
+#[test]
+fn direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels() {
+    for (precision, suffix) in [
+        (Prim::Int8, "i8"),
+        (Prim::Int16, "i16"),
+        (Prim::Int32, "i32"),
+        (Prim::Int64, "i64"),
+    ] {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        dag.add_root(minimum);
+
+        let fused = fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+            "{precision:?} extrema must not enter the float-only fused HIP family"
+        );
+        let source = codegen_hip(
+            &fused,
+            &format!("direct_integer_extrema_{}", precision.name()),
+        )
+        .unwrap_or_else(|error| panic!("{precision:?} HIP codegen failed: {error}"))
+        .c_source;
+        assert!(
+            source.contains(&format!("kernel_max_elem_{suffix}")),
+            "{precision:?}: missing typed max kernel: {source}"
+        );
+        assert!(
+            source.contains(&format!("kernel_min_elem_{suffix}")),
+            "{precision:?}: missing typed min kernel: {source}"
         );
     }
 }
@@ -459,7 +651,7 @@ fn s5_reshape_no_kernel_launch() {
     );
     let r = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(6)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
         },
         vec![x],
         vec_f32(6),
@@ -509,7 +701,7 @@ fn s5_expand_no_kernel_launch() {
     let e = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![x],
         mat_f32(4, 3),
@@ -524,12 +716,61 @@ fn s5_expand_no_kernel_launch() {
 }
 
 #[test]
+fn s5_input_axis_expand_reads_witness_metadata() {
+    let mut dag = Dag::new();
+    let value = dag.add_node(
+        RiscOp::Load {
+            name: "value".into(),
+        },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let witness_ty = TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let witness = dag.add_node(
+        RiscOp::Load {
+            name: "witness".into(),
+        },
+        vec![],
+        witness_ty.clone(),
+        None,
+    );
+    let expanded = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![value, witness],
+        witness_ty,
+        None,
+    );
+    dag.add_root(expanded);
+
+    let result = codegen_hip(&dag, "test_input_axis_expand").unwrap();
+    assert!(
+        result.c_source.contains("inputs[1]->shape[0]"),
+        "InputAxis extent must be sourced from the witness metadata: {}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("chelis_gpu_alloc_view"),
+        "InputAxis expand remains a metadata-only view"
+    );
+}
+
+#[test]
 fn s5_realize_materializes_with_kernel_not_view() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
+            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
         vec![x],
         vec_f32(3),
@@ -545,7 +786,7 @@ fn s5_realize_materializes_with_kernel_not_view() {
     );
     assert!(
         !result.c_source.contains(
-            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_F32, d_t1->data, d_t1->storage_size)"
+            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size)"
         ),
         "Realize must not lower to a metadata-only view"
     );
@@ -663,11 +904,23 @@ fn s8_duplicate_load_single_slot() {
 }
 
 // ===========================================================================
-// S9: cmplt kernel emits 1.0f/0.0f (not integer bool)
+// S9: cmplt over a bool result is rejected, not emitted at the operand width
 // ===========================================================================
 
+/// chelis#1360. This test used to assert the opposite: that the `cmplt` kernel
+/// "must produce float `1.0f`/`0.0f`, not integer bool". That was correct
+/// while the HIP runtime stored a bool tensor as a four-byte binary32 payload,
+/// and `chelis_gpu_dtype_size(CHELIS_DTYPE_BOOL)` returned 4 to match.
+///
+/// chelis#1308 replaced that payload with the tagged carrier's one-byte
+/// `Repr::Bool8`. The kernel side did not follow, so the assertion above went
+/// on holding - `1.0f` and `0.0f` were still in the emitted source - while the
+/// emitted program wrote `N * 4` bytes into an `N * 1` byte `hipMalloc` and
+/// read back the low bytes of the float stream. Both halves of the assertion
+/// were true and the program was corrupt, which is why the test is now the
+/// rejection rather than the spelling.
 #[test]
-fn s9_cmplt_float_result() {
+fn s9_cmplt_bool_result_is_rejected() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -691,10 +944,16 @@ fn s9_cmplt_float_result() {
         None,
     );
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_cmplt").unwrap();
+    let error = match codegen_hip(&dag, "test_cmplt") {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "a bool result is one byte and the cmplt template writes at the \
+             operand width; emitting it overruns the allocation (chelis#1360)"
+        ),
+    };
     assert!(
-        result.c_source.contains("1.0f") && result.c_source.contains("0.0f"),
-        "cmplt kernel must produce float 1.0f/0.0f, not integer bool"
+        format!("{error:?}").contains("bool"),
+        "the rejection must name the offending dtype; got: {error:?}"
     );
 }
 
@@ -853,7 +1112,7 @@ fn s12_symbolic_peak_memory_reports_formula_without_fake_estimate() {
     assert_eq!(result.peak_device_bytes_formula, "(batch * 4)");
     assert_eq!(
         result
-            .peak_device_bytes_at(&std::collections::HashMap::from([(
+            .peak_device_bytes_at(&chelis_unord::UnordMap::from([(
                 String::from("batch"),
                 64usize,
             )]))
@@ -1080,7 +1339,7 @@ extern "C" void test_compile(chelis_tensor **inputs, int n_in, chelis_tensor **o
 int main(void) {
     chelis_tensor *outputs[1] = {0};
     test_compile(NULL, 0, outputs, 1);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -1240,7 +1499,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -1249,7 +1508,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -1308,7 +1567,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     let result = codegen_hip(&dag, "test_sparse_gather_i64").unwrap();
     assert!(result.c_source.contains("kernel_gather_i64"));
     assert!(result.c_source.contains("const long long *indices"));
-    assert!(result.c_source.contains("CHELIS_I64"));
+    assert!(result.c_source.contains("CHELIS_DTYPE_I64"));
     assert!(
         result
             .c_source
@@ -1545,7 +1804,7 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
     let a = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(3),
+            size: chelis_ir::dag::RtDim::Lit(3),
         },
         vec![base_a],
         tensor3_f32(3, 4, 5),
@@ -1610,7 +1869,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -1619,7 +1878,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -1978,7 +2237,10 @@ fn s8a_pad_emits_kernel_and_launch_not_view() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -2009,7 +2271,7 @@ fn s8a_shrink_emits_kernel_and_launch_not_view() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -2042,7 +2304,10 @@ fn s8a_pad_f64_uses_dtype_suffix() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::zero_pad(Prim::F64, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
+        RiscOp::zero_pad(
+            Prim::F64,
+            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+        ),
         vec![x],
         TensorType {
             dims: vec![DimInfo::Lit(6)],
@@ -2070,7 +2335,7 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
         vec![x],
         vec_i32(4),
@@ -2087,5 +2352,70 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
     assert!(
         src.contains("int32_t"),
         "i32 shrink kernel must use the int32_t C type"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1277 S2b: the same-rank `expand`'s unit-extent claim on the HIP host
+// prologue.
+//
+// GPU-free by construction: the claim is an entry guard in the HOST prologue,
+// so the assertion is on the emitted text. A device run would prove the same
+// thing more expensively and only where a GPU exists.
+// ---------------------------------------------------------------------------
+
+/// The HIP host prologue guards the unit-extent claim, and renders [04-NUM-9].
+///
+/// `spec/05-risc-primitives.md` section 2.4.1 sends a symbolic operand extent
+/// other than 1 to "that claim's runtime extent guard", and
+/// `spec/04-type-system.md` section 4.7 places it at entry and renders it
+/// `numeric trap: domain in load at int64` when the operand is an input
+/// tensor's axis.
+///
+/// The `<op>` is `load`, not `expand`, by section 4.7's operand-class rule.
+/// The `abort()` this lane still emits for its `Name` bindings is the legacy
+/// rendering and is chelis#1112's to move; this guard does not adopt it.
+///
+/// EVIDENTIARY STATUS: regression test. Without the derivation the prologue
+/// emits no comparison against 1 at all, so both assertions fail.
+#[test]
+fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(3),
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "unit_claim").expect("HIP codegen");
+    let host = &result.c_source;
+    assert!(
+        host.contains("chelis_tensor_shape(inputs[0], 0) != 1"),
+        "the prologue compares the operand's axis against the claimed 1:\n{host}"
+    );
+    assert!(
+        host.contains("numeric trap: domain in load at int64"),
+        "and renders [04-NUM-9] rather than this lane's legacy abort:\n{host}"
+    );
+    assert!(
+        host.contains("extent `1`: claimed = 1, x axis 0 = %lld"),
+        "with section 4.7's context on its own line:\n{host}"
     );
 }

@@ -81,13 +81,12 @@ Two levers, both applied:
 
 ### Lever A — swap CI integration runners to `cargo nextest`
 
-The `integration` and `macos-smoke` jobs swap `cargo test --workspace --tests`
-for `cargo nextest run --workspace`. nextest is installed via
-`taiki-e/install-action@nextest`. This ignores zero tests; it is purely a
-scheduler change that overlaps heavyweight binaries. Other CI jobs that use
-narrower invocations (`cargo test --workspace --lib`, `cargo test -p ...`) are
-left on plain `cargo test` since they do not have the many-binary serialization
-problem and `cargo test` must keep working for them.
+The Linux and macOS workspace shard jobs run
+`cargo nextest run --workspace` through the repository gate. Their
+fail-closed `workspace-tests` and `macos-smoke` aggregates retain the stable
+required-check names while the test processes run in parallel. nextest is
+installed via `taiki-e/install-action@nextest`; this scheduler change does not
+alter the selected tests.
 
 ### Lever B — `#[ignore]` the single pathological full-repo-lint test
 
@@ -167,9 +166,10 @@ expensive part.
 > *following* leg a delta, it does not make the first leg cheap. And the wire
 > leg measured 47.4s on the base Linux run against 61.6s on the branch, one
 > sample each and no instrumented explanation. It is not cache carryover: the
-> only job that saves the `linux-workspace` cache is `workspace-tests`, whose
-> `ci` profile excludes both census binaries, so no census rustdoc artifact has
-> ever been in that cache, before or after the rename.
+> only workers that run the `ci` profile are the `workspace-tests-shard`
+> matrix, and only shard 1 saves the `linux-workspace` cache. That profile
+> excludes both census binaries, so no census rustdoc artifact has ever been
+> in that cache, before or after the rename.
 
 The Phase 1 portion of the required dtype oracle already runs both complete
 census binaries. The Linux `ci` nextest profile therefore excludes those two
@@ -178,3 +178,86 @@ in the oracle without paying for them twice. The local `default` profile and
 macOS workspace run remain unchanged. A profile-partition oracle checks that
 the CI-only exclusions are selected by the required dtype oracle, so a future
 rename cannot silently drop them.
+
+## 2026-08-28 typecheck parity-oracle critical path
+
+The level-generalization parity oracle became the per-PR critical path after
+#1207 landed. In CI run `33211316008`, job `98992391323` took 31m38s. Its
+nextest step compiled the feature-enabled workspace in 5m42s, then ran 8,718
+tests in 1,487.053s (24m47s). Setup outside that step was under one minute.
+The same run's Workspace Tests job took 24m48s, so setup or package-install
+trimming could not bring the overall run below 30 minutes while the parity
+corpus remained serial.
+
+The oracle also did not restore the Rust cache it claimed to share with the
+workspace job. `Swatinem/rust-cache` includes `CARGO_TARGET_DIR` in its
+environment hash. The explicit but redundant target override produced cache
+key prefix `72d1170c`; the log reports `No cache found`. The workspace job,
+whose target path was implicit, used prefix `69700c73` and restored a 533 MB
+cache. The faithful-observation job carried the same redundant override and
+the same miss.
+
+The execution repair keeps the corpus intact:
+
+- nextest hash partitions `1/4` through `4/4` run concurrently with matrix
+  fail-fast disabled;
+- a fail-closed aggregate retains the stable **Typecheck Level Generalization
+  Oracle** status and succeeds only when all four shards succeed; the directly
+  required **Integration Tests (Linux)** context transitively gates that
+  aggregate; and
+- the read-only oracle jobs no longer set `CARGO_TARGET_DIR`, so their
+  `linux-workspace` cache identity matches the sole writer.
+
+An exact-head `cargo nextest list` census at `0b446bbc` found 8,710 selected
+non-ignored tests: 2,215, 2,191, 2,146, and 2,158 in shards 1 through 4,
+respectively, with zero overlap, zero missing tests, and zero extras. That
+proves the selection split, not the hosted duration. A hosted exact-head
+sample remains required to establish the actual critical path.
+
+## 2026-09-02 workspace shard critical path
+
+After the 08-29 sharding the Linux workspace shards became the per-PR long
+pole, and two additions to them account for the difference between the
+15-minute unsharded job and the 27-minute shard 2 measured on 2026-09-02.
+The evidence is 1,000 pull-request runs (08-02 to 09-02) and 268 push runs
+(07-15 to 09-02) with per-step timings sampled weekly; pull-request and push
+durations agree within 0.3 minutes, and median queue time is under 0.5
+minutes in every week, so neither branch-scoped caching nor runner
+concurrency is a cause. The repository is private, so `ubuntu-latest` is a
+2-vCPU runner: measured nextest parallelism is exactly 2.0, and every Linux
+build job compiles all 557 test binaries because rust-cache stores only
+dependency artifacts (4m15s to 4m45s per job).
+
+- The chelis#893 Phase 0 oracle joined `gate.py integration` on 09-02, which
+  shard 2 runs as `--support-only`. On push run `33653771041` the support step
+  took 13.0 minutes instead of 2.1 and the shard took 25.9 minutes instead of
+  14.4: 37 controlled mutations re-scanned the seam inventory serially at
+  about 8.5 s each, three release-profile `cargo nextest run --release` legs
+  compiled chelis-ir, chelis-backend-c, chelis-backend-hip, and chelis-runtime
+  for 4.8 minutes (release artifacts are never in the `linux-workspace`
+  cache, whose writer builds only the test profile), and the census tripwire
+  rebuilt chelis-cli for 47 s under `-p` feature unification. The oracle is
+  now the `runtime-representation` gate stage, run by the
+  `runtime-representation-phase0-oracle` job on its own runner, so the shard
+  returns to its partition wall and the oracle keeps its own failure boundary.
+- `ProfilePartitionTests` gained a listing of the explicit generalization
+  lane on 08-29. That listing passes `--features
+  chelis-types/generalize-sweep-oracle`, a different compiled configuration
+  from the shard's default build, so the `Verify nextest profile coverage`
+  step on shard 1 recompiled the workspace a second time: 0.4 minutes before
+  08-29, 4.2 to 4.8 minutes on every run after, for a 17.2-minute shard 1
+  (p90 18.9). The generalization-lane assertions now form
+  `GeneralizationPartitionTests` and run on generalization shard 1, where that
+  feature build is already warm; the default-configuration set math stays on
+  workspace shard 1.
+
+Test growth is the background trend: integration test files under
+`crates/*/tests/` went from 340 on 07-15 to 560 on 09-02, and the unsharded
+Workspace Tests job rose from a week-32 median of 13.0 minutes on push runs
+and 13.4 on pull-request runs to 15 to 16 minutes in weeks 33 to 35. Sharding
+halved test execution to about 7 minutes per shard, but each shard still pays
+about 6.5 minutes of setup and full compile, so before the two additions above
+landed the shards stood at about 13 minutes for shard 1 (its 17.2-minute
+median less the 4.4-minute listing) and 14.2 minutes for shard 2 (the week-36
+median before #1413). Compile time on 2 vCPUs, paid by nine Linux jobs per
+run, is the remaining structural cost.

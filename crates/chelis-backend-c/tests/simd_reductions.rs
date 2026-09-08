@@ -12,6 +12,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 /// Size sweep probing every AVX2 lane-boundary case: below one lane (1),
 /// just under a full lane (7), exactly one lane (8), one past a lane (9),
 /// many full lanes (1024), and a large non-lane-multiple (100003).
@@ -39,8 +41,8 @@ fn gcc_available() -> bool {
 /// Compile and run a standalone C program that includes chelis_simd.h.
 /// Returns stdout on success, or panics on compile/run failure.
 fn compile_and_run(test_name: &str, c_src: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("chelis_simd_{test_name}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("simd_{test_name}"));
+    let dir = probe.path().to_path_buf();
 
     let src_path = dir.join("test.c");
     let bin_path = dir.join("test_bin");
@@ -259,8 +261,8 @@ int main(void) {{
 
 /// Parse `n value` lines from sweep-program stdout into a map from size to
 /// the raw value string.
-fn parse_sweep_output(out: &str) -> std::collections::HashMap<usize, String> {
-    let mut map = std::collections::HashMap::new();
+fn parse_sweep_output(out: &str) -> chelis_unord::UnordMap<usize, String> {
+    let mut map = chelis_unord::UnordMap::new();
     for line in out.lines() {
         let line = line.trim();
         if line.is_empty() {

@@ -11,7 +11,7 @@ def try_read_csv(path: string) -> Option[List[Dict[string, string]]] =
     raw_lines = read_lines(path)
     lines = filter(fn (line: string) -> gt(string_len(line), cast(0, int64)), raw_lines)
     if eq(len(lines), cast(0, int64)) then Some([]) else match parse_line(index(lines, cast(0, int64))) with {
-      | Some(headers) => parse_rows(headers, drop(lines, cast(1, int64)), [])
+      | Some(headers) => parse_rows(headers, drop(lines, cast(1, int64)))
       | None => None
     }
   }
@@ -63,13 +63,51 @@ def first_invalid_row(rows: List[Dict[string, string]]) -> int64 =
       scan.1
     }
   }
-def parse_rows(headers: List[string], lines: List[string], rows: List[Dict[string, string]]) -> Option[List[Dict[string, string]]] =
-  if eq(len(lines), cast(0, int64)) then Some(rows) else {
-    line = index(lines, cast(0, int64))
-    match parse_line(line) with {
-      | Some(fields) => if neq(len(headers), len(fields)) then None else parse_rows(headers, drop(lines, cast(1, int64)), append(rows, dict_of(zip(headers, fields))))
-      | None => None
-    }
+-- Row parsing runs on the linear combinator lane. The pre-#1213 shape
+-- recursed one line at a time through `append(rows, ...)` and
+-- `drop(lines, 1)`; both deep-clone their list argument, so reading r
+-- rows allocated O(r^2) list bytes and every intermediate generation
+-- stayed live until the recursion bottomed out. `map` and `fold` lower
+-- to a capacity-reserved list plus in-place pushes (chelis#943/#949),
+-- so the same read is O(r).
+--
+-- The validity pass carries only a bool, and its body is an `if` on the
+-- accumulator rather than an `and(...)` call: a call evaluates both
+-- arguments, while `if` evaluates one branch, so after the first invalid
+-- row every later line is skipped without being parsed. That preserves
+-- the recursive shape's failure contract: a malformed row means the rest
+-- of the file is never touched -- including a later line whose parse
+-- would exhaust the eval lane's per-character recursion budget
+-- (chelis#1225 tracks the eval lane's long-line stack walls; a long
+-- line in a VALID file still hits them).
+--
+-- On success every line is parsed a second time to build the dicts,
+-- doubling a linear constant. Both single-parse alternatives lose more:
+-- a fold that appends each row's fields to an accumulator list
+-- deep-clones the accumulator per step on the eval lane (the exact
+-- O(r^2) this change removed), and a `map` into an intermediate
+-- `List[List[string]]` parses every line unconditionally, which is the
+-- short-circuit regression this shape exists to prevent.
+def parse_rows(headers: List[string], lines: List[string]) -> Option[List[Dict[string, string]]] = {
+  width = len(headers)
+  ok = fold(fn (acc: bool, line: string) -> if acc then line_ok(width, line) else false, true, lines)
+  if ok then Some(map(fn (line: string) -> dict_of(zip(headers, fields_of(line))), lines)) else None
+}
+-- One test rejects both failure modes: `width` is `len(headers)`, and
+-- `headers` came from a `parse_line` that returned `Some`, so `width` is
+-- at least 1, while an unparsable line takes the `None` arm directly.
+def line_ok(width: int64, line: string) -> bool =
+  match parse_line(line) with {
+    | Some(fields) => eq(len(fields), width)
+    | None => false
+  }
+-- Only reached from the success arm of `parse_rows`, where every line
+-- already passed `line_ok`, so the `None` arm is unreachable there; `[]`
+-- keeps the function total without smuggling a sentinel into results.
+def fields_of(line: string) -> List[string] =
+  match parse_line(line) with {
+    | Some(fields) => fields
+    | None => []
   }
 def parse_line(line: string) -> Option[List[string]] = parse_line_chars(line, cast(0, int64), false, "", [])
 def parse_line_chars(line: string, idx: int64, in_quotes: bool, current: string, fields: List[string]) -> Option[List[string]] =

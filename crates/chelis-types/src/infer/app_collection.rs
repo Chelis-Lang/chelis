@@ -147,16 +147,10 @@ pub(super) fn prepare_constructor_application(
         };
     }
 
-    let ctor_lookup_name = func_name.as_ref().and_then(|fname| {
-        adt_reg
-            .lookup_variant(fname)
-            .map(|_| fname.clone())
-            .or_else(|| {
-                adt_reg
-                    .lookup_variant_terminal_unique(fname)
-                    .map(|(_, variant)| variant.name.clone())
-            })
-    });
+    let constructor = func_name
+        .as_ref()
+        .and_then(|fname| constructor_for_shape(fname, CallShape::Positional, env, adt_reg));
+    let ctor_lookup_name = constructor.map(|_| func_name.as_ref().unwrap().clone());
 
     // The call site uses positional `(app)` syntax here (named-field
     // record construction lowers through a different builder, not
@@ -174,11 +168,7 @@ pub(super) fn prepare_constructor_application(
     // callee `var`'s constructor-reference check is suppressed below
     // so the application does not double-report). Inference continues
     // so the call still yields its true type.
-    if let Some(ref fname) = ctor_lookup_name
-        && let Some((adt_name, _)) = adt_reg
-            .lookup_variant_preferring_shape(fname, CallShape::Positional)
-            .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
-    {
+    if let Some((adt_name, _, _)) = constructor {
         let adt_name = adt_name.to_string();
         crate::opacity::check_opaque_use(
             crate::opacity::OpaqueAction::CtorApplication,
@@ -200,9 +190,7 @@ pub(super) fn prepare_constructor_application(
         .is_some_and(|fname| constructor_out_of_scope(fname, env));
     if !ctor_call_out_of_scope
         && let Some(ref fname) = ctor_lookup_name
-        && let Some((_adt_name, variant)) = adt_reg
-            .lookup_variant_preferring_shape(fname, CallShape::Positional)
-            .or_else(|| adt_reg.lookup_variant_terminal_unique(fname))
+        && let Some((_adt_name, _, variant)) = constructor
         && !variant.fields.is_empty()
         && variant
             .fields

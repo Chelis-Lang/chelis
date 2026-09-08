@@ -49,13 +49,19 @@ host-value surface is still small enough to migrate cleanly.
 
 ## ABI Decision
 
-This phase takes the **ABI cleanup now** path.
+This phase took the **ABI cleanup now** path described below. The tensor half is a
+historical delivery record, not the current target contract: chelis#1286 and
+[`compiled_value_ownership.md`](compiled_value_ownership.md) supersede it with one
+opaque, refcounted heap model and a verified ownership boundary.
 
-### Tensors stay layout-visible
+### Superseded tensor decision
 
 `chelis_tensor` remains a source-visible `#[repr(C)]` struct with the current stable
 field order. Generated numeric C and HIP code dereference tensor fields directly in hot
-loops, so tensor layout stability is required.
+loops, which was why this delivery kept the layout visible. The successor cut removes
+that reachability atomically: generated code uses tagged read/unique-write access and
+the shared reuse proof, while the public handle becomes opaque. No compatibility ABI
+retains the visible layout.
 
 ### Host values become opaque
 
@@ -111,12 +117,18 @@ Implementation rules:
 
 ## Header Contract
 
-`chelis_runtime.h` remains the C ABI contract, but it changes in `3m`:
+`chelis_runtime.h` remains the C ABI contract. The historical `3m` cut made these
+changes:
 
 - `chelis_tensor` stays source-visible
 - host-value structs become opaque forward declarations
 - add accessor APIs for every current generated-code field peek
 - add retain/release APIs for handles and `chelis_value`
+
+The successor chelis#1286 cut replaces the first bullet with an opaque tensor declaration,
+adds tensor/storage lifetime and guarded tagged-data operations, and removes
+`chelis_free`, `chelis_alloc_view`, and ambiguous value-conversion aliases in one
+change set.
 
 The compiler and tests must treat the header shipped by `chelis-runtime` as the only
 source of truth.

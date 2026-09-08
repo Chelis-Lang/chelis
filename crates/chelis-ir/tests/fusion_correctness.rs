@@ -3,10 +3,10 @@
 //! These verify the fusion pass produces correct DAGs and that fused evaluation
 //! matches unfused evaluation via the IR evaluator.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -44,7 +44,7 @@ fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
 }
 
 /// Evaluate a DAG with given inputs and return root outputs.
-fn eval_dag(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+fn eval_dag(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let vals = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
         .expect("evaluation should succeed");
@@ -105,7 +105,7 @@ fn f1_add_neg_fuses() {
 }
 
 // ===========================================================================
-// F2: add→relu→mul 3-way fuses
+// F2: add→max_elem→mul 3-way fuses
 // ===========================================================================
 
 #[test]
@@ -114,7 +114,8 @@ fn f2_three_way_chain_fuses() {
     let a = const_vec(&mut dag, 1.0, 4);
     let b = const_vec(&mut dag, 2.0, 4);
     let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-    // relu = max_elem(x, 0)
+    // A direct max-element chain remains fusible; dedicated ReLU is tested
+    // separately because [05-OP-43] requires its identity to survive.
     let zero = dag.add_node(
         RiscOp::synth_const(vec_f32(4).precision, 0.0),
         vec![],
@@ -152,7 +153,7 @@ fn f3_fused_matches_unfused_evaluator() {
 
     let fused = chelis_ir::fuse::fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -186,8 +187,8 @@ fn f4_multi_consumer_not_fused() {
     // `shared` has 2 consumers → must NOT be fused into either chain
     // Verify by evaluating: if fusion duplicated computation, output would still
     // be correct, but the invariant is violated. Check node count instead.
-    let unfused_out = eval_dag(&dag, &HashMap::new());
-    let fused_out = eval_dag(&fused, &HashMap::new());
+    let unfused_out = eval_dag(&dag, &UnordMap::new());
+    let fused_out = eval_dag(&fused, &UnordMap::new());
     assert_outputs_close(&unfused_out, &fused_out, 1e-6, "F4: multi-consumer");
 
     // The `shared` add node should still exist as a materialized node (not absorbed)
@@ -239,7 +240,7 @@ fn f5_elementwise_into_reduction_fuses() {
     let fused = chelis_ir::fuse::fuse(&dag);
 
     // Verify correctness: fused matches unfused
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -271,7 +272,7 @@ fn f5_neg_reduction_into_elementwise_does_not_fuse() {
 
     // Reduction→elementwise should NOT fuse (iteration space changed)
     // The sum and neg should remain separate
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -293,7 +294,7 @@ fn f6_movement_ops_pass_through() {
     let x = load(&mut dag, "x", vec_f32(6));
     let reshaped = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
         },
         vec![x],
         mat_f32(2, 3),
@@ -312,7 +313,7 @@ fn f6_movement_ops_pass_through() {
     let fused = chelis_ir::fuse::fuse(&dag);
 
     // add→neg should still fuse (reshape is metadata-only, doesn't break chain)
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
     )]
@@ -422,7 +423,7 @@ fn f10_multi_consumer_downstream_chain_fuses() {
     );
 
     // Verify correctness
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -478,7 +479,7 @@ fn f11_double_multi_consumer_no_fusion() {
     );
 
     // Verify correctness
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -534,7 +535,7 @@ fn f12_multi_consumer_at_chain_tail() {
     }
 
     // Verify correctness — both outputs must match
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -584,7 +585,7 @@ fn f13_multi_consumer_as_external_input() {
     );
 
     // Verify correctness
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -616,7 +617,7 @@ fn f9_fan_in_two_inputs() {
 
     let fused = chelis_ir::fuse::fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -680,7 +681,7 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
         );
     }
     // Either way, correctness holds:
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -759,7 +760,7 @@ fn fr3_chain_into_sum_correctness() {
         "FusedElem(add→neg) feeding Sum should be reduction-inlined"
     );
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -790,7 +791,7 @@ fn fr4_realize_is_fusion_barrier() {
         "realize() must block fusion across the materialization boundary"
     );
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),

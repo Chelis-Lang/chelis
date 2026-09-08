@@ -208,6 +208,9 @@ fn type_contains_error(ty: &Type) -> bool {
         Type::Fn(args, ret) => args.iter().any(type_contains_error) || type_contains_error(ret),
         Type::Ref(inner) => type_contains_error(inner),
         Type::Adt(_, args) => args.iter().any(type_contains_error),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(type_contains_error)),
         Type::Tuple(elems) => elems.iter().any(type_contains_error),
         Type::Prim(_) | Type::Tensor(_, _) | Type::Var(_) | Type::Unit => false,
     }

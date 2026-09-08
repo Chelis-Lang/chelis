@@ -31,6 +31,7 @@ enum TokenType {
   WHITESPACE,
   CANONICAL_DECLARATION_END,
   CANONICAL_BLOCK_BINDING_END,
+  CANONICAL_BLOCK_EXPRESSION_END,
 };
 
 bool is_digit(int32_t value) { return value >= '0' && value <= '9'; }
@@ -341,7 +342,8 @@ bool scan_conditional_keyword(TSLexer *lexer, const bool *valid_symbols) {
 
 bool scan_whitespace_or_binding_end(TSLexer *lexer, bool whitespace,
                                     bool declaration_end,
-                                    bool block_binding_end) {
+                                    bool block_binding_end,
+                                    bool block_expression_end) {
   bool saw_whitespace = false;
   bool saw_newline = false;
   while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
@@ -366,16 +368,28 @@ bool scan_whitespace_or_binding_end(TSLexer *lexer, bool whitespace,
     return false;
   }
   lexer->mark_end(lexer);
-  if ((declaration_end || block_binding_end) && saw_newline) {
+  if ((declaration_end || block_binding_end || block_expression_end) &&
+      saw_newline) {
     const bool has_next = skip_trivia_for_lookahead(lexer);
-    const bool continues_pipe = has_next && lexer->lookahead == '|';
+    const bool starts_bar = has_next && lexer->lookahead == '|';
+    bool continues_pipe = false;
+    if (starts_bar) {
+      lexer->advance(lexer, false);
+      continues_pipe = lexer->lookahead == '>';
+    }
+    // Declaration bodies are permissive: a leading variant `|` is not a
+    // declaration start, so it continues just like every other non-start.
+    // The closed block boundary admits only the exact `|>` token.
+    const bool continues_declaration_bar = declaration_end && starts_bar;
     bool continues_property = false;
     if (declaration_end && has_next && lexer->lookahead == 'w') {
       continues_property = consume_identifier(lexer) == "with";
     }
-    if (!continues_pipe && !continues_property) {
-      lexer->result_symbol = block_binding_end ? CANONICAL_BLOCK_BINDING_END
-                                               : CANONICAL_DECLARATION_END;
+    if (!continues_pipe && !continues_declaration_bar && !continues_property) {
+      lexer->result_symbol = block_expression_end
+                                 ? CANONICAL_BLOCK_EXPRESSION_END
+                             : block_binding_end ? CANONICAL_BLOCK_BINDING_END
+                                                 : CANONICAL_DECLARATION_END;
       return true;
     }
   }
@@ -775,11 +789,13 @@ bool tree_sitter_chelis_surf_external_scanner_scan(void *, TSLexer *lexer,
                                                    const bool *valid_symbols) {
   if ((valid_symbols[WHITESPACE] ||
        valid_symbols[CANONICAL_DECLARATION_END] ||
-       valid_symbols[CANONICAL_BLOCK_BINDING_END]) &&
+       valid_symbols[CANONICAL_BLOCK_BINDING_END] ||
+       valid_symbols[CANONICAL_BLOCK_EXPRESSION_END]) &&
       scan_whitespace_or_binding_end(
           lexer, valid_symbols[WHITESPACE],
           valid_symbols[CANONICAL_DECLARATION_END],
-          valid_symbols[CANONICAL_BLOCK_BINDING_END])) {
+          valid_symbols[CANONICAL_BLOCK_BINDING_END],
+          valid_symbols[CANONICAL_BLOCK_EXPRESSION_END])) {
     return true;
   }
   if (valid_symbols[CANONICAL_STRING] && lexer->lookahead == '"') {

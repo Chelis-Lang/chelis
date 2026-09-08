@@ -1,8 +1,8 @@
 use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
-use chelis_deep::Span;
-use std::collections::HashSet;
+use chelis_deep::{DtypeFamily, Span};
+use chelis_unord::UnordSet;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -34,6 +34,20 @@ pub enum ParseError {
          bind the value with `_ = <expr>` or move it to tail position (byte {offset})"
     )]
     BareStatementInBlock { offset: usize },
+    /// A `;` used where a canonical binding block wants a newline.
+    ///
+    /// The generic `Expected` shape used to render this as
+    /// `expected separator (`;` or newline), found Semicolon`, which named the
+    /// token it had just refused as one of the two acceptable spellings
+    /// (chelis#1267). `par`, `do`, and the v0.18 compatibility grammar do take
+    /// `;`, so the wording names canonical Surf v0.19 rather than claiming `;`
+    /// is never a block separator.
+    #[error(
+        "expected a newline separator, found `;`: `;` is not a block separator in canonical \
+         Surf v0.19; replace it with a newline, or run `chelis migrate surf --from 0.18` to \
+         rewrite v0.18 source (byte {offset})"
+    )]
+    SemicolonBlockSeparator { offset: usize },
     #[error("literal `{found}` is not an accepted spelling at byte {offset}; write `{expected}`")]
     NonCanonicalLiteral {
         found: String,
@@ -198,8 +212,8 @@ fn accepted_literal_alias(found: &str, expected: &str, kind: &TokenKind) -> bool
 }
 
 fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
-    let mut value_names = HashSet::new();
-    let mut property_names = HashSet::new();
+    let mut value_names = UnordSet::new();
+    let mut property_names = UnordSet::new();
     for decl in decls {
         match decl {
             Decl::Property { name, span, .. }
@@ -380,6 +394,35 @@ impl Parser {
         consumed
     }
 
+    /// Reject a `;` left standing at a canonical binding-block separator
+    /// boundary (chelis#1267).
+    ///
+    /// `consume_block_separators` takes `;` only in `LegacyV018`, so in
+    /// canonical Surf v0.19 one survives wherever that function is called
+    /// inside a binding block. There are four such positions, three in
+    /// `parse_block_inner` (before the first binding, between bindings, and
+    /// after the tail) and one in `parse_block_let_binding` (between a
+    /// binding's `=` and its value, the legal v0.18 spelling `a = ; 1i64`).
+    /// Each used to surface a different wrong diagnostic, none of which named
+    /// the rule. Call this immediately after every `consume_block_separators`
+    /// so they all report the same thing; adding a fifth call site without a
+    /// matching guard reopens this defect.
+    ///
+    /// The two `consume_block_separators` calls in `parse_property_decl` are
+    /// deliberately unguarded: they sit in a top-level declaration arm whose
+    /// own diagnostic already carries a real offset.
+    ///
+    /// `par` and `do` genuinely require `;` (spec/02-surf-syntax.md §P5) and
+    /// parse through their own functions, so they never reach this.
+    fn reject_canonical_semicolon_separator(&self) -> Result<(), ParseError> {
+        if self.mode == ParseMode::Canonical && matches!(self.raw_peek(), TokenKind::Semicolon) {
+            return Err(ParseError::SemicolonBlockSeparator {
+                offset: self.current_offset(),
+            });
+        }
+        Ok(())
+    }
+
     fn expect(&mut self, kind: &TokenKind) -> Result<Token, ParseError> {
         if self.peek() == kind {
             Ok(self.advance())
@@ -392,6 +435,26 @@ impl Parser {
         }
     }
 
+    /// Exact newline continuations for a block sequencing expression.
+    ///
+    /// chelis#849. A top-level newline inside a sequencing context ends the
+    /// expression being parsed unless the next significant token is one of these:
+    ///
+    /// * `|>` -- an infix pipeline stage has no meaning at the head of a statement.
+    /// * `then` / `else` -- an `if` is not a legal expression without both, so
+    ///   neither can begin one.
+    ///
+    /// Each member is safe because it cannot head an expression, but that is a
+    /// necessary condition rather than the membership rule: other infix tokens
+    /// (`+`, `*`, `==`, `&&`, ...) remain outside this deliberately closed set.
+    /// A token that CAN head an expression (`with`, `match`, an identifier) must
+    /// not be added: after a newline it is genuinely ambiguous between a
+    /// continuation and a new statement, and admitting it would re-open the
+    /// juxtaposition defect chelis#706 closed.
+    fn is_block_expression_continuation(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::Pipe | TokenKind::Then | TokenKind::Else)
+    }
+
     fn block_expr_end(&self) -> usize {
         let mut pos = self.pos;
         let mut paren_depth = 0usize;
@@ -402,13 +465,34 @@ impl Parser {
                 TokenKind::Newline | TokenKind::Semicolon
                     if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
                 {
+                    // A top-level newline does not end the expression when
+                    // the next significant token is in P12's exact closed set
+                    // (chelis#849): `|>` is an infix continuation, and `then` /
+                    // `else` are the mandatory continuations of an `if`. None
+                    // can head a statement, so each selected continuation is
+                    // unambiguous; that safety property does not admit every
+                    // other infix token.
+                    //
+                    // This helper is the only one of the three boundary
+                    // rules that is CLOSED. `decl_expr_end` and
+                    // `property_expr_end` are permissive -- they end only at
+                    // a declaration start (and, for a property predicate, at
+                    // `with`), so a leading `then` or `else` already
+                    // continued there and neither ever showed this defect.
+                    // `block_expr_end` broke instead, which is the 0.17
+                    // regression. spec/02 P12 states all three.
+                    //
+                    // The set is deliberately closed to tokens that can only
+                    // continue. `with {` is NOT admitted: it heads an
+                    // expression, so a leading `with` after a newline is
+                    // genuinely ambiguous and is left to its own decision.
                     if matches!(token.kind, TokenKind::Newline)
                         && self
                             .tokens
                             .iter()
                             .skip(pos + 1)
                             .find(|next| !matches!(next.kind, TokenKind::Newline))
-                            .is_some_and(|next| matches!(next.kind, TokenKind::Pipe))
+                            .is_some_and(|next| Self::is_block_expression_continuation(&next.kind))
                     {
                         pos += 1;
                         continue;
@@ -783,6 +867,59 @@ impl Parser {
             });
         }
         Ok(names)
+    }
+
+    /// Parse a declaration's `[..]` binder list (`spec/02-surf-syntax.md`
+    /// §P4b/§P4c). Shared by `def` and `sig`; a `type` declaration's
+    /// parameter list keeps [`Self::parse_name_bracket_list`], which has no
+    /// bound production.
+    fn parse_type_binder_list(&mut self) -> Result<Vec<TypeBinder>, ParseError> {
+        let start = self.expect(&TokenKind::LBracket)?.span;
+        let mut binders: Vec<TypeBinder> = Vec::new();
+        if *self.peek() != TokenKind::RBracket {
+            loop {
+                binders.push(self.parse_type_binder()?);
+                if *self.peek() != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.comma_terminates_list(&TokenKind::RBracket, binders.len(), false)? {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RBracket)?;
+        if binders.is_empty() && self.mode == ParseMode::Canonical {
+            return Err(ParseError::Expected {
+                expected: "omit empty `[]`".into(),
+                found: "empty parameter list".into(),
+                offset: start.offset,
+            });
+        }
+        Ok(binders)
+    }
+
+    /// One binder: `name`, or `name: Family` for a dtype-family bound.
+    ///
+    /// The bound position admits only the three closed family names, so an
+    /// ADT name written there is a parse error rather than a silently
+    /// accepted bound.
+    fn parse_type_binder(&mut self) -> Result<TypeBinder, ParseError> {
+        let (name, _) = self.expect_ident_or_type_ident()?;
+        if *self.peek() != TokenKind::Colon {
+            return Ok(TypeBinder::unbounded(name));
+        }
+        self.advance();
+        let offset = self.current_offset();
+        let (family, _) = self.expect_ident_or_type_ident()?;
+        match DtypeFamily::from_surf_name(&family) {
+            Some(family) => Ok(TypeBinder::bounded(name, family)),
+            None => Err(ParseError::Expected {
+                expected: "a dtype family `Float`, `Int`, or `Numeric`".into(),
+                found: family,
+                offset,
+            }),
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -1178,9 +1315,9 @@ impl Parser {
         let start = self.advance().span; // consume Def
         let (name, _) = self.expect_ident()?;
 
-        // Optional dimension parameters: def f[a, b](...)
-        let dim_params = if *self.peek() == TokenKind::LBracket {
-            self.parse_name_bracket_list()?
+        // Optional binder list: def f[a, b](...) / def f[p: Float](...)
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
         } else {
             Vec::new()
         };
@@ -1233,7 +1370,7 @@ impl Parser {
 
         Ok(Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -1250,6 +1387,13 @@ impl Parser {
             return Err(err);
         }
         let (name, _) = self.expect_ident()?;
+        // Optional binder list: sig f[p: Float]: ... (§P4c). It sits in the
+        // same position it occupies on a `def`, immediately after the name.
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
+        } else {
+            Vec::new()
+        };
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
         let effects = self.parse_optional_effects()?;
@@ -1261,6 +1405,7 @@ impl Parser {
         let span = start.merge(end);
         Ok(Decl::Sig {
             name,
+            type_binders,
             ty,
             effects,
             span,
@@ -2645,13 +2790,29 @@ impl Parser {
     fn parse_block_inner(&mut self, allow_unbound_tail: bool) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
+        // Separator position 1 of 4: before the first binding.
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         while !self.at_eof() && self.is_short_block_binding_start() {
             bindings.push(self.parse_block_let_binding()?);
+            // Separator position 2 of 4: between bindings. This runs before
+            // the `sep_count` check below, so a `;` here reports the rule
+            // whether or not a newline preceded it.
             let sep_count = self.consume_block_separators();
+            self.reject_canonical_semicolon_separator()?;
             if *self.peek() != TokenKind::RBrace && sep_count == 0 {
                 return Err(ParseError::Expected {
-                    expected: "separator (`;` or newline)".into(),
+                    // A `;` never reaches here: canonical mode rejected it
+                    // just above, and LegacyV018 consumed it as a separator.
+                    // Any other stray token is a plain missing separator, so
+                    // keep the generic shape and list only what this mode's
+                    // grammar actually accepts (spec/02 §P5: canonical
+                    // binding blocks separate on newlines alone).
+                    expected: if self.mode == ParseMode::Canonical {
+                        "separator (newline)".into()
+                    } else {
+                        "separator (`;` or newline)".into()
+                    },
                     found: format!("{:?}", self.raw_peek()),
                     offset: self.current_offset(),
                 });
@@ -2659,8 +2820,9 @@ impl Parser {
         }
         // The tail is Sep-bounded exactly like a binding value
         // (`BlockBody <- (BlockBinding Sep)* Expr`, spec/02 §BlockBody):
-        // a top-level newline/`;` ends it unless the next line begins `|>`
-        // or the break is inside ()/[]/{}. An empty tail keeps today's
+        // a top-level newline/`;` ends it unless the next line begins a
+        // continuation (`|>`, `then`, `else`; spec/02 §P12) or the break is
+        // inside ()/[]/{}. An empty tail keeps today's
         // "expected expression" shape — routing `{ x = 1 }` (RBrace here)
         // through the nested parser would report Eof and disturb the
         // pinned message, so guard it explicitly first.
@@ -2672,7 +2834,14 @@ impl Parser {
             });
         }
         let expr = self.parse_expr_until_block_separator()?;
+        // Separator position 3 of 4: after the tail. spec/02-surf-syntax.md
+        // §P5 rejects a trailing `;` by name, but it used to arrive here and
+        // be reported as a bare statement, which is false twice over for
+        // `{ a = 1i64\n add(a, 1i64); }`: that expression IS the tail, and
+        // there is no unbound statement. Following that advice (`_ = ...;`)
+        // only moved the failure onto the `;` message anyway (chelis#1267).
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         if *self.peek() != TokenKind::RBrace {
             // A second top-level expression after the tail: bare non-tail
             // statements silently juxtaposed into an application before
@@ -2721,7 +2890,13 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Eq)?;
+        // Separator position 4 of 4: between a binding's `=` and its value.
+        // `a = ; 1i64` is a legal v0.18 spelling that the migrator rewrites to
+        // `a = 1i64`, so migrated-era source reaches this. Unguarded it left
+        // the value's token range empty and bottomed out in an offsetless
+        // "unexpected end of input" (chelis#1267).
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         let value = self.parse_expr_until_block_separator()?;
         Ok(LetBinding { pattern, ty, value })
     }
@@ -2846,8 +3021,16 @@ impl Parser {
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
         match self.peek().clone() {
             TokenKind::Int(n) => {
-                let tok = self.advance();
-                Ok(TypeExpr::Named(n.to_string(), tok.span))
+                // spec/02-surf-syntax.md: `IntLit` has exactly one type-position
+                // production, the `DimExpr` inside a tensor shape. Everywhere
+                // else an integer is not a type; accepting one here silently
+                // manufactured `(t-var {} <digits>)` (chelis#1179).
+                Err(ParseError::Expected {
+                    expected: "a type; integer literals are only dimensions inside `tensor[...]`"
+                        .into(),
+                    found: format!("integer literal `{n}`"),
+                    offset: self.current_offset(),
+                })
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
@@ -2882,7 +3065,7 @@ impl Parser {
                     self.advance();
                     let mut args = Vec::new();
                     if *self.peek() != TokenKind::RBracket {
-                        args.push(self.parse_type()?);
+                        args.push(self.parse_type_arg()?);
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
                             if self.comma_terminates_list(
@@ -2892,7 +3075,7 @@ impl Parser {
                             )? {
                                 break;
                             }
-                            args.push(self.parse_type()?);
+                            args.push(self.parse_type_arg()?);
                         }
                     }
                     let end = self.expect(&TokenKind::RBracket)?;
@@ -2930,13 +3113,13 @@ impl Parser {
                 self.expect(&TokenKind::LBracket)?;
                 // Parse dims (all but last are dims, last is precision ident)
                 let mut items = Vec::new();
-                items.push(self.parse_type_atom()?);
+                items.push(self.parse_tensor_item()?);
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
                     if *self.peek() == TokenKind::RBracket {
                         break;
                     }
-                    items.push(self.parse_type_atom()?);
+                    items.push(self.parse_tensor_item()?);
                 }
                 let end = self.expect(&TokenKind::RBracket)?;
                 // Last item should be the precision (a Named ident)
@@ -3024,6 +3207,36 @@ impl Parser {
                 offset: self.current_offset(),
             }),
         }
+    }
+
+    /// One bracketed `tensor[...]` item: a dimension or the trailing
+    /// precision name. Dimension positions have an integer production
+    /// (`DimExpr <- IntLit / Ident / '*' / '..' Ident`,
+    /// spec/02-surf-syntax.md), so the literal-dimension arm lives here
+    /// rather than in `parse_type_atom` (chelis#1179).
+    fn parse_tensor_item(&mut self) -> Result<TypeExpr, ParseError> {
+        if let TokenKind::Int(n) = self.peek().clone() {
+            let tok = self.advance();
+            return Ok(TypeExpr::Named(n.to_string(), tok.span));
+        }
+        self.parse_type_atom()
+    }
+
+    /// One bracketed type-application argument (`Name[...]`). An integer
+    /// literal here is a concrete dimension argument to a
+    /// dimension-parameterized ADT (`Frame[2]`, the chelis#940 shape,
+    /// `TypeArg <- TypeExpr / IntLit`); every other argument is an
+    /// ordinary type expression. Bare-type positions reject integers in
+    /// `parse_type_atom` (chelis#1179).
+    fn parse_type_arg(&mut self) -> Result<TypeExpr, ParseError> {
+        if let TokenKind::Int(n) = self.peek().clone() {
+            let tok = self.advance();
+            return Ok(TypeExpr::DimensionLiteral(
+                crate::ast::DimensionLiteral::new(n),
+                tok.span,
+            ));
+        }
+        self.parse_type()
     }
 
     // ---------------------------------------------------------------------------
@@ -3568,6 +3781,7 @@ fn expr_span(e: &Expr) -> Span {
 fn type_span(t: &TypeExpr) -> Span {
     match t {
         TypeExpr::Named(_, s) => *s,
+        TypeExpr::DimensionLiteral(_, s) => *s,
         TypeExpr::RankSpread(_, s) => *s,
         TypeExpr::Tensor(_, _, s) => *s,
         TypeExpr::Arrow(_, _, s) => *s,
@@ -4175,8 +4389,9 @@ mod tests {
     // ===== chelis#706: bounded block tail + bare-statement diagnostic =====
     //
     // The tail expression, like a binding value, is Sep-bounded: a
-    // top-level newline/`;` ends it unless the next line begins `|>` or
-    // the break is inside ()/[]/{}. A second top-level expression after
+    // top-level newline/`;` ends it unless the next line begins a
+    // continuation (`|>`, `then`, `else`; spec/02 §P12) or the break is
+    // inside ()/[]/{}. A second top-level expression after
     // the tail is rejected (previously it silently cross-newline
     // juxtaposed into an application).
 
@@ -4435,6 +4650,261 @@ mod tests {
                 );
             }
             other => panic!("expected `expression` error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_semicolon_separator_is_rejected_without_offering_semicolon() {
+        // Negative #14 (chelis#1267): canonical Surf v0.19 rejects `;` as a
+        // block separator (spec/02-surf-syntax.md §P5, §P12), so the
+        // diagnostic must not list `;` among the acceptable spellings. The
+        // issue's reproducer spelled the values `cast(1, int64)`; the suffix
+        // form fails identically and keeps the fixture free of type sugar.
+        let src = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }";
+        let err = parse_str(src).unwrap_err();
+        let offset = match err {
+            ParseError::SemicolonBlockSeparator { offset } => offset,
+            ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
+        };
+        // Points at the first `;`, the one just after `1i64`.
+        assert_eq!(offset, src.find(';').unwrap());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expected a newline separator, found `;`"),
+            "message must name the newline as the expectation: {msg}"
+        );
+        assert!(
+            msg.contains("not a block separator in canonical Surf v0.19"),
+            "message must state the v0.19 rule: {msg}"
+        );
+        assert!(
+            msg.contains("chelis migrate surf --from 0.18"),
+            "message must name the migrator: {msg}"
+        );
+        // The contradiction the issue reported: the old wording offered `;`
+        // as one of two acceptable separators while refusing that exact token.
+        assert!(
+            !msg.contains("separator (`;`"),
+            "message must not offer `;` as an acceptable separator: {msg}"
+        );
+    }
+
+    #[test]
+    fn block_missing_separator_non_semicolon_keeps_generic_message() {
+        // Negative #15 (chelis#1267 parity): a stray non-`;` token at a block
+        // separator boundary keeps the generic separator diagnostic rather
+        // than being rewritten into a `;` lecture. In canonical mode the
+        // generic wording names only the newline, because that is the only
+        // separator the grammar accepts here.
+        let src = "def f() -> int64 = { a = 1i64";
+        let err = parse_str(src).unwrap_err();
+        match err {
+            ParseError::Expected {
+                ref expected,
+                ref found,
+                offset,
+            } => {
+                assert_eq!(expected, "separator (newline)", "got {err:?}");
+                assert_eq!(found, "Eof", "got {err:?}");
+                // Deliberate: the synthetic Eof token carries the opening
+                // `{`'s offset, so an unterminated block points at the
+                // construct that was never closed rather than at end of
+                // input. Pinned so a future offset change is a decision.
+                assert_eq!(offset, src.find('{').unwrap(), "got {err:?}");
+            }
+            ref other => panic!("expected generic separator error, got {other:?}"),
+        }
+    }
+
+    /// Every canonical `;`-in-a-block shape must reach the one rule message,
+    /// pointing at the `;` the reader actually typed.
+    fn assert_semicolon_rule_at(src: &str, semicolon_index: usize) {
+        let err = parse_str(src).unwrap_err();
+        let offset = match err {
+            ParseError::SemicolonBlockSeparator { offset } => offset,
+            ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
+        };
+        let expected = src
+            .match_indices(';')
+            .nth(semicolon_index)
+            .expect("fixture has that many semicolons")
+            .0;
+        assert_eq!(offset, expected, "wrong `;` blamed: {err}");
+    }
+
+    #[test]
+    fn block_trailing_semicolon_after_tail_names_the_semicolon_rule() {
+        // Negative #17 (chelis#1267): spec/02-surf-syntax.md §P5 rejects a
+        // trailing `;` by name. It used to report "expression statement must
+        // be bound ... move it to tail position", which is false twice for
+        // this input: `add(a, 1i64)` IS the tail, and nothing is unbound.
+        // Taking that advice (`_ = add(a, 1i64);`) just landed on the `;`.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_on_its_own_line_after_tail_names_the_semicolon_rule() {
+        // Negative #18: same defect with the `;` on its own line, where the
+        // preceding newline is consumed first and the old code still fell
+        // through to the bare-statement message.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n  ;\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn canonical_two_statements_separated_by_semicolon_report_the_semicolon() {
+        // Negative #19: `{ f(x); g(y) }` has two faults at once, a bare
+        // non-tail statement and a `;`. Canonical mode now reports the `;`,
+        // which is the lexically first one and the only one whose remedy is
+        // not itself rejected: `_ = f(x); g(y)` still fails on the `;`.
+        //
+        // What makes this a reclassification rather than a lost diagnostic:
+        // v0.18 reads that `;` as a real separator, so the bare statement is
+        // the genuine fault there and #706's message still fires. That half
+        // is already pinned by `block_bare_second_statement_semicolon_is_rejected`
+        // on byte-identical source, so it is not restated here.
+        assert_semicolon_rule_at("def f(x, y) -> unit = { f(x); g(y) }\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_between_binding_eq_and_value_names_the_semicolon_rule() {
+        // Negative #23 (chelis#1267): the fourth separator position, in
+        // `parse_block_let_binding` between `=` and the value. `a = ; 1i64`
+        // is a legal v0.18 spelling the migrator rewrites to `a = 1i64`, so
+        // migrated-era source reaches it. Unguarded it left the value's token
+        // range empty and reported an offsetless "unexpected end of input".
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_on_its_own_line_before_a_binding_value_names_the_semicolon_rule() {
+        // Negative #24: the same position reached across newlines, where the
+        // separator count is already nonzero.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a =\n  ;\n  1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_after_a_typed_binder_names_the_semicolon_rule() {
+        // Negative #25: the type annotation moves the `=` but not the rule.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a: int64 = ;1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn legacy_v018_still_parses_a_semicolon_before_a_binding_value() {
+        // Positive parity for #23: `a = ; 1i64` is the v0.18 spelling the
+        // migrator accepts and rewrites, so the guard must stay canonical
+        // only or the migration path stops working on real source.
+        let decls = parse_str_legacy_v018("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n")
+            .expect("v0.18 accepts a `;` before a binding value");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn block_semicolon_after_a_newline_between_bindings_names_the_semicolon_rule() {
+        // Negative #20 (chelis#1267): when a newline precedes the `;` the
+        // separator count is already nonzero, so the between-bindings arm was
+        // skipped, `is_short_block_binding_start` was false at `;`, and the
+        // tail parse got an empty range. That surfaced as a bare "unexpected
+        // end of input" with no offset at all, which the LSP then rendered
+        // past the end of the file.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn block_semicolon_leading_a_binding_line_names_the_semicolon_rule() {
+        // Negative #21: the same shape with the next binding on the `;` line.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  ; b = 2i64\n  add(a, b)\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn block_containing_only_a_semicolon_names_the_semicolon_rule() {
+        // Negative #22: `;` at the leading separator position, before any
+        // binding exists. Also previously "unexpected end of input".
+        assert_semicolon_rule_at("def f() -> int64 = { ; }\n", 0);
+    }
+
+    #[test]
+    fn canonical_newline_separated_block_parses() {
+        // Positive control: the whole pre-existing block bank runs through
+        // the v0.18 helpers, so nothing pinned that a canonical block parses
+        // at all. Without this, every negative above could pass on a parser
+        // that rejected every block.
+        let decls = parse_str("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
+            .expect("a newline-separated canonical block parses");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn the_migrator_hint_in_the_semicolon_message_is_true() {
+        // The message tells the reader to run `chelis migrate surf --from
+        // 0.18`. Nothing pinned that the migrator actually resolves the shape
+        // being diagnosed, so a migrator regression would silently turn this
+        // diagnostic into the chelis#1267 defect reborn inside its own fix:
+        // advice that does not work. `migrate_source_v018` is the library
+        // path behind that CLI command (`cmd_migrate` in chelis-cli).
+        let repro = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }\n";
+        parse_str(repro).expect_err("the reproducer must not parse canonically");
+        let migrated = crate::format::migrate_source_v018(repro)
+            .expect("the migrator rewrites the `;` block the diagnostic points at");
+        assert!(
+            !migrated.contains(';'),
+            "migration should remove the block separators: {migrated}"
+        );
+        parse_str(&migrated).expect("migrator output must parse under canonical Surf v0.19");
+    }
+
+    #[test]
+    fn legacy_v018_missing_separator_still_offers_semicolon() {
+        // Parity for #15: the generic wording is mode-dependent because the
+        // two grammars accept different separators. `;` is genuinely one of
+        // v0.18's, so dropping it from the legacy message would be the
+        // chelis#1267 defect pointed the other way.
+        let err = parse_str_legacy_v018("def f() -> int64 = { a = 1i64").unwrap_err();
+        match err {
+            ParseError::Expected {
+                ref expected,
+                ref found,
+                ..
+            } => {
+                assert_eq!(expected, "separator (`;` or newline)", "got {err:?}");
+                assert_eq!(found, "Eof", "got {err:?}");
+            }
+            ref other => panic!("expected generic separator error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_v018_block_still_accepts_semicolon_separators() {
+        // Positive parity for #14: the v0.18 compatibility grammar behind
+        // `chelis migrate surf --from 0.18` still reads `;` as a block
+        // separator, so the new wording is scoped to canonical Surf v0.19
+        // rather than claiming `;` is never a block separator.
+        let decls = parse_str_legacy_v018("def main() -> int64 = { a = 1i64; add(a, 2i64) }")
+            .expect("v0.18 blocks accept `;` separators");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn par_separator_message_still_names_semicolon() {
+        // Negative control for #14: `par` and `do` genuinely require `;`
+        // (spec/02-surf-syntax.md §P5), so their separator diagnostic must
+        // keep offering it. Naming the newline there would be the same
+        // defect in the opposite direction.
+        let src = "def f(x, y) -> unit = par {\n    g(x)\n    h(y)\n}";
+        let err = parse_str(src).unwrap_err();
+        match err {
+            ParseError::Expected { ref expected, .. } => {
+                assert_eq!(expected, "separator (`;`)", "got {err:?}");
+            }
+            ref other => panic!("expected par separator error, got {other:?}"),
         }
     }
 
@@ -5634,6 +6104,196 @@ mod tests {
             },
             other => panic!("expected Apply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn block_if_with_else_on_a_later_line_parses() {
+        // chelis#849: inside a `{ }` block, `block_expr_end` ended the
+        // statement at the newline after the `then` branch, so `parse_if`
+        // reached Eof before its mandatory `else` and reported
+        // `expected Else, found Eof`. The `else` is present -- only its line
+        // placement differs. `|>` already had this continuation carve-out.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n  else lte(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "block + newline before `else` must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    #[test]
+    fn block_if_else_on_one_line_still_parses() {
+        // Positive control for the sibling form, so the fix cannot be a
+        // regression that only moves which layout works.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true else lte(a, b)\n}";
+        assert!(parse_str(src).is_ok(), "same-line form must keep parsing");
+    }
+
+    #[test]
+    fn block_if_with_a_missing_else_is_still_rejected() {
+        // Negative parity: the continuation must not make `else` optional.
+        // Pin the REASON, not merely that something failed -- an unrelated
+        // rejection would otherwise keep this green (review of PR #1369).
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n}";
+        match parse_str(src) {
+            Err(ParseError::Expected {
+                expected, found, ..
+            }) => {
+                assert_eq!(expected, "Else", "the missing `else` is the reason");
+                assert_eq!(found, "Eof", "the block ended before the `else`");
+            }
+            other => panic!("expected a missing-`else` rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_if_with_a_missing_then_is_still_rejected() {
+        // The `then` half of the same parity: admitting `then` as a
+        // continuation must not make it optional either.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n}";
+        match parse_str(src) {
+            Err(ParseError::Expected { expected, .. }) => {
+                assert_eq!(expected, "Then", "the missing `then` is the reason");
+            }
+            other => panic!("expected a missing-`then` rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_if_with_then_on_a_later_line_parses() {
+        // chelis#849 review: the same defect exists one token earlier. A
+        // newline between the condition and `then` failed with
+        // `expected Then, found Eof` for the identical reason.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n  then true\n  else lte(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a newline before `then` must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    #[test]
+    fn a_multiline_else_if_chain_parses() {
+        // The shape that motivated admitting `then`: each arm of a chained
+        // `else if` puts its own `then` and `else` on later lines.
+        let src = "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else if lt(a, b)\n  then b\n  else mul(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a multiline `else if` chain must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    /// chelis#849 review: the corrected spec/02 P12 states that a
+    /// declaration body and a property predicate bound PERMISSIVELY -- they
+    /// end at a declaration start (and, for a predicate, at `with`), so any
+    /// other token continues them across a top-level newline.
+    ///
+    /// The earlier revision of P12 claimed the closed `|>`/`then`/`else` set
+    /// governed declaration bodies too, which is false: a newline-led `with`
+    /// continues one. Asserting it here keeps the numbered spec honest, and
+    /// keeps this PR from silently narrowing a boundary it does not own.
+    #[test]
+    fn the_permissive_boundaries_are_not_governed_by_the_closed_set() {
+        let declaration_body = concat!(
+            "type Point = | Point { x: f32 }\n",
+            "def update(p: Point) -> Point = p\n",
+            "  with { x: 1.0f32 }\n",
+        );
+        assert!(
+            parse_str(declaration_body).is_ok(),
+            "a newline-led `with` must continue a declaration body: {:?}",
+            parse_str(declaration_body).err()
+        );
+
+        // The `where` precondition routes through `property_expr_end`, the
+        // third boundary rule. It is not the property-OPTION path covered
+        // above; confusing the two is what left that consumer untested.
+        let property_predicate =
+            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true";
+        assert!(
+            parse_str(property_predicate).is_ok(),
+            "a split `if` must survive a property predicate: {:?}",
+            parse_str(property_predicate).err()
+        );
+    }
+
+    /// chelis#849 review: `block_expr_end` is shared by seven call sites
+    /// across five constructs -- block bindings, block tails, `do` items,
+    /// `par` items, and property option values. The continuation rule applies
+    /// to all of them, so each is covered rather than assumed.
+    ///
+    /// The property-option case reaches `block_expr_end` through
+    /// `parse_property_option`, which needs a real `with <name> = <expr>`
+    /// option. A `where` precondition looks similar and is NOT this path: it
+    /// routes through `property_expr_end`, a different and permissive rule.
+    /// The `where` form is covered separately below, precisely because
+    /// mistaking one for the other is what left this consumer untested.
+    #[test]
+    fn the_continuation_rule_holds_for_every_block_expr_end_consumer() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "block binding value",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  d = if c\n  then a\n  else b\n  d\n}",
+            ),
+            (
+                "block tail",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else b\n}",
+            ),
+            (
+                "do item",
+                "def f(a: f32, b: f32) -> f32 ! { IO } = {\n  c = neq(a, a)\n  g = do {\n    if c\n    then print(\"y\")\n    else print(\"n\")\n  }\n  a\n}",
+            ),
+            (
+                "property option value",
+                "@property p forall(x: f32): true\n  with tolerance = if lte(x, 1.0f32)\n  then 1e-6f32\n  else 1e-3f32",
+            ),
+            (
+                "par item",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  g = par {\n    if c\n    then a\n    else b\n  }\n  g\n}",
+            ),
+        ];
+        for (label, src) in cases {
+            assert!(
+                parse_str(src).is_ok(),
+                "{label}: the continuation rule must hold here too: {:?}",
+                parse_str(src).err()
+            );
+        }
+    }
+
+    #[test]
+    fn block_expression_continuation_set_is_exact() {
+        // P12 selects exactly three safe continuations. Tokens that can head
+        // an expression stay out, and so do non-selected infix operators: the
+        // inability to begin an expression is necessary but not sufficient.
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Pipe));
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Then));
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Else));
+        for excluded in [
+            TokenKind::With,
+            TokenKind::Match,
+            TokenKind::If,
+            TokenKind::Plus,
+            TokenKind::Star,
+            TokenKind::EqEq,
+            TokenKind::AmpAmp,
+            TokenKind::PipePipe,
+        ] {
+            assert!(!Parser::is_block_expression_continuation(&excluded));
+        }
+    }
+
+    #[test]
+    fn block_statement_after_an_if_else_is_not_swallowed() {
+        // The continuation extends the statement only across the newline that
+        // precedes `else`. A following binding must remain its own statement.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  d = if c then true\n  else lte(a, b)\n  d\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a statement after the if/else must still parse: {:?}",
+            parse_str(src).err()
+        );
     }
 
     #[test]

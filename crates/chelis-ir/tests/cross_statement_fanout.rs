@@ -32,7 +32,7 @@
 //! rejected as `UseAfterConsume`. See
 //! `docs/investigations/var_rhs_aliased_fanout_v2_diagnosis.md`.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::analysis::analyze_function_copy_cost;
 use chelis_ir::dag::{Dag, NodeId, RiscOp};
@@ -93,7 +93,7 @@ fn tv_3(data: [f64; 3]) -> TensorValue {
 /// resulting tensor. `input_name` is the surf-level parameter name (e.g.
 /// `"x"` or `"w"`), which the lowering pass uses as the `Load` op's name.
 fn eval_fanout(dag: &Dag, root: NodeId, input_name: &str, input_value: TensorValue) -> TensorValue {
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(input_name.to_string(), input_value);
     let values =
         eval_tensor_with(dag, |name| inputs.get(name).cloned()).expect("forward eval succeeds");
@@ -222,7 +222,7 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_grad_node = target_grad.grad_nodes[&target_x_load];
     let workaround_grad_node = workaround_grad.grad_nodes[&workaround_x_load];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert("x".to_string(), x);
     let target_vals = eval_tensor_with(&target_grad.dag, |n| inputs.get(n).cloned())
         .expect("target backward eval");
@@ -379,7 +379,7 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_grad_node = target_grad.grad_nodes[&target_x_load];
     let workaround_grad_node = workaround_grad.grad_nodes[&workaround_x_load];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert("x".to_string(), x);
     let target_vals = eval_tensor_with(&target_grad.dag, |n| inputs.get(n).cloned())
         .expect("target backward eval");

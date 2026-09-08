@@ -48,6 +48,24 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self._run_main_with(fake_run), 1)
         self.assertEqual(calls, list(oracle.SUITE_COMMANDS[:2]))
 
+    def test_preflight_reports_missing_tools_without_running_tests(self) -> None:
+        with (
+            mock.patch.object(oracle, "source_violations", return_value=[]),
+            mock.patch.object(oracle, "comparator_violations", return_value=[]),
+            mock.patch.object(
+                oracle, "definition_digest_violations", return_value=[]
+            ),
+            mock.patch.object(
+                oracle.shutil,
+                "which",
+                side_effect=lambda name: None if name == "cc" else "/tool",
+            ),
+        ):
+            self.assertEqual(
+                oracle.preflight_violations(),
+                ["a host C compiler (`cc`) is required"],
+            )
+
 
 class IgnoreInventoryTests(unittest.TestCase):
     def test_shipped_phase3_suites_have_only_the_declared_environment_skip(self) -> None:
@@ -169,6 +187,11 @@ fn hidden_value_row() {}
             "parity_tensor_structural_ops",
             "{}",
         )
+        sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+            sources[oracle.PARITY_SOURCE],
+            "parity_count_bool_axes",
+            "{}",
+        )
         sources[oracle.REJECTED_SOURCE] = oracle.replace_test_body(
             sources[oracle.REJECTED_SOURCE],
             "rejected_cells_fail_the_build_with_their_pinned_diagnostics",
@@ -178,6 +201,7 @@ fn hidden_value_row() {}
         violations = oracle.definition_digest_violations(sources)
 
         self.assertTrue(any("parity_tensor_structural_ops" in item for item in violations))
+        self.assertTrue(any("parity_count_bool_axes" in item for item in violations))
         self.assertTrue(
             any(
                 "rejected_cells_fail_the_build_with_their_pinned_diagnostics" in item
@@ -204,6 +228,14 @@ class ComparatorAdoptionTests(unittest.TestCase):
         ].replace("ArithmeticWidthStatus::Nonconforming { issue: 897 }", "WIDTH_OK")
         violations = oracle.comparator_violations(sources)
         self.assertTrue(any("chelis#897" in item for item in violations), violations)
+
+    def test_restoring_the_retired_formatter_in_the_agreement_harness_is_rejected(self) -> None:
+        sources = oracle.shipped_sources()
+        sources[oracle.EVAL_AGREEMENT_SOURCE] = sources[
+            oracle.EVAL_AGREEMENT_SOURCE
+        ].replace("chelis_string_from_scalar", "chelis_format_shortest")
+        violations = oracle.comparator_violations(sources)
+        self.assertTrue(any("chelis_string_from_scalar" in item for item in violations), violations)
 
 
 if __name__ == "__main__":

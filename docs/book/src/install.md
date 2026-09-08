@@ -260,8 +260,17 @@ the first program loop.
 
 ## Build the Book
 
+The pinned Devenv shell includes mdBook 0.5.2, the same version used by the
+hosted Docs job. From one active `devenv shell` session, run:
+
 ```sh
 mdbook build docs/book
+```
+
+From outside an active session, the equivalent one-shot command is:
+
+```sh
+devenv shell -- mdbook build docs/book
 ```
 
 ## Validate Docs Examples

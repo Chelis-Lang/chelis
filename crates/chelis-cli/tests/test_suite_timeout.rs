@@ -189,6 +189,7 @@ fn timeout_exit_is_bounded_when_stdout_consumer_stops_reading() {
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
         .env("CHELIS_TEST_PROGRESS_ROWS", "6000")
         .env("CHELIS_TEST_HANG_BEFORE_SUITE", "1")
+        .env("CHELIS_TEST_DELAY_BOUNDED_WRITER", "1")
         .args(["test", "tests/", "--json", "--suite-timeout", "1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -238,7 +239,12 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_chelis"))
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["test", "tests/", "--json", "--suite-timeout", "3"])
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_EXPIRE_OUTPUT_FORWARDING_DEADLINE", "1")
+        // Keep the suite deadline well clear of fixture execution. The gated
+        // hook expires only the post-suite forwarding budget, so host load
+        // cannot move this oracle into the distinct timeout-reporting branch.
+        .args(["test", "tests/", "--json", "--suite-timeout", "30"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -252,13 +258,13 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
             break status;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(6),
+            started.elapsed() < Duration::from_secs(15),
             "normal output forwarding escaped the whole-command deadline"
         );
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(status.code(), Some(1));
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(15));
     let mut stderr = Vec::new();
     child
         .stderr
@@ -266,10 +272,54 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
         .expect("stderr pipe")
         .read_to_end(&mut stderr)
         .expect("read stderr");
+    let stderr = String::from_utf8_lossy(&stderr);
     assert!(
-        String::from_utf8_lossy(&stderr).contains("output forwarding exceeded"),
-        "bounded failure must identify incomplete output: {}",
-        String::from_utf8_lossy(&stderr)
+        stderr.contains("output forwarding exceeded"),
+        "bounded failure must identify incomplete output: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_primary_stderr_writer_reports_on_still_writable_stderr() {
+    let (_dir, pkg) = make_reef_package("suite-timeout-failed-stderr-writer");
+    let stderr_file = pkg.join("small-stderr.bin");
+    fs::write(&stderr_file, b"captured suite stderr\n").expect("small stderr probe");
+
+    let ungated = Command::cargo_bin("chelis")
+        .expect("binary")
+        .timeout(Duration::from_secs(5))
+        .current_dir(&pkg)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env_remove("CHELIS_TEST_INTERNAL_TESTING")
+        .env("CHELIS_TEST_BATCH_STDERR_FILE", &stderr_file)
+        .env("CHELIS_TEST_FAIL_BOUNDED_WRITER", "1")
+        .args(["test", "tests/", "--json", "--suite-timeout", "30"])
+        .output()
+        .expect("run ungated control");
+    assert_eq!(
+        ungated.status.code(),
+        Some(0),
+        "production environment activated the forced-writer test hook"
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .timeout(Duration::from_secs(5))
+        .current_dir(&pkg)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_BATCH_STDERR_FILE", &stderr_file)
+        .env("CHELIS_TEST_FAIL_BOUNDED_WRITER", "1")
+        .args(["test", "tests/", "--json", "--suite-timeout", "30"])
+        .output()
+        .expect("run");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("output forwarding exceeded"),
+        "writable stderr lacked an incomplete-output diagnostic: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -519,6 +569,52 @@ fn finalization_hang_retains_rows_but_replaces_false_green_summary() {
     assert_eq!(summary["failed"], 1);
 }
 
+/// A run that abandons its batch AND then misses the suite deadline reports the
+/// deadline, not the fallback: the incomplete-suite renderer keeps only rows,
+/// `--expect` verdicts, and its own `suite` record, so the `batch_fallback`
+/// record and the plain summary marker are both dropped. This is documented in
+/// `spec/design/chelis_native_testing_plan.md`; pin it so the doc stays honest.
+/// The human note still arrives, because leader stderr is forwarded verbatim.
+#[test]
+fn incomplete_suite_reports_the_deadline_not_the_abandoned_batch() {
+    let (_dir, pkg) = make_reef_package("suite-timeout-fallback-then-deadline");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .timeout(Duration::from_secs(10))
+        .current_dir(&pkg)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_FORCE_BATCH_ABORT", "1")
+        .env("CHELIS_TEST_HANG_AFTER_SUITE", "1")
+        .args(["test", "tests/", "--json", "--suite-timeout", "3"])
+        .output()
+        .expect("run");
+    assert_eq!(output.status.code(), Some(1));
+
+    let lines = json_lines(&output);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.get("batch_fallback").is_some()),
+        "incomplete renderer leaked the fallback record: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line["suite"]["incomplete"] == true),
+        "the deadline was not reported: {lines:#?}"
+    );
+    let summary = &lines.last().expect("summary")["summary"];
+    assert_eq!(summary["incomplete"], true);
+    assert!(
+        summary.get("batch_fallback").is_none(),
+        "the incomplete summary is rebuilt and carries no fallback flag: {summary}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("suite batching was abandoned"),
+        "the human note must still reach the operator:\nstderr={stderr}"
+    );
+}
+
 #[test]
 fn plain_timeout_counts_rows_not_fail_text_in_filename() {
     let (_dir, pkg) = make_reef_package("suite-timeout-plain-counts");
@@ -600,7 +696,27 @@ fn batch_stderr_survives_fallback_without_duplication() {
         .output()
         .expect("run");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stderr, b"batch diagnostic before abort\n");
+    // The worker's own bytes survive exactly once and stay at the front of
+    // stderr. chelis#1261 adds the runner's attributed note behind them: the
+    // worker line alone never said which files it belonged to, or that the
+    // batched path had been abandoned at all.
+    let stderr = String::from_utf8(output.stderr.clone()).expect("utf-8 stderr");
+    assert_eq!(
+        stderr.matches("batch diagnostic before abort").count(),
+        1,
+        "worker stderr was duplicated: {stderr:?}"
+    );
+    let Some(rest) = stderr.strip_prefix("batch diagnostic before abort\n") else {
+        panic!("worker stderr was not forwarded first: {stderr:?}");
+    };
+    assert!(
+        rest.starts_with("warning: suite batching was abandoned"),
+        "abandoned batch was not attributed after the worker line: {stderr:?}"
+    );
+    assert!(
+        rest.contains("tests/smoke.ch"),
+        "fallback note did not name the abandoned file: {stderr:?}"
+    );
     let lines = json_lines(&output);
     assert_eq!(
         lines

@@ -1,7 +1,7 @@
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::lower::lower_subexpr_program;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 fn get_tag(list: &List) -> Option<chelis_deep::DeepTag> {
     list.tag()
@@ -54,7 +54,7 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
 
 fn eval_out(src: &str) -> TensorValue {
     let checked = checked_surf(src);
-    let mut defs = HashMap::new();
+    let mut defs = UnordMap::new();
     let mut out_expr = None;
     for expr in checked.exprs() {
         if let Some((name, body)) = def_name_and_body(expr) {
@@ -65,7 +65,12 @@ fn eval_out(src: &str) -> TensorValue {
         }
     }
     let out_expr = out_expr.expect("source must define out");
-    let dag = lower_subexpr_program(&out_expr, HashMap::new(), checked.type_env().clone(), defs);
+    let type_env = checked
+        .type_env()
+        .iter()
+        .map(|(name, ty)| (name.clone(), ty.clone()))
+        .collect();
+    let dag = lower_subexpr_program(&out_expr, UnordMap::new(), type_env, defs);
     let roots = dag.roots().to_vec();
     assert_eq!(roots.len(), 1, "out subexpression should have one root");
     let values = eval_tensor_roots_with_strict(&dag, &roots, |_| None).expect("subexpression eval");

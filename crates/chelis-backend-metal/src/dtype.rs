@@ -129,7 +129,7 @@ pub fn host_sizeof_expr(prec: Prim) -> &'static str {
 /// Shared `chelis_runtime` dtype enum tag for an active Metal dtype.
 /// Used at the host writeback site to match the runtime's `chelis_alloc`
 /// dispatch. Tag spellings match `crates/chelis-runtime/include/chelis_runtime.h`
-/// (`CHELIS_I8`, `CHELIS_I16`, `CHELIS_I32`, `CHELIS_I64` — not `CHELIS_INT*`).
+/// (`CHELIS_DTYPE_I8`, `CHELIS_DTYPE_I16`, `CHELIS_DTYPE_I32`, `CHELIS_DTYPE_I64` — not `CHELIS_INT*`).
 pub fn runtime_dtype_tag(prec: Prim) -> &'static str {
     if prec == Prim::F64 {
         panic!(

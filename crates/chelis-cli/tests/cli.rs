@@ -4,8 +4,6 @@ use predicates::prelude::*;
 use serde_json::Value;
 use std::env;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
@@ -57,6 +55,10 @@ fn transformer_block_example() -> PathBuf {
     example_path("../../examples/transformer_block.ch")
 }
 
+fn hash_order_determinism_example() -> PathBuf {
+    example_path("../../examples/hash_order_determinism.ch")
+}
+
 fn opaque_invariants_example() -> PathBuf {
     example_path("../../examples/opaque_invariants.ch")
 }
@@ -65,7 +67,7 @@ fn opaque_invariants_simplex_example() -> PathBuf {
     example_path("../../examples/opaque_invariants_simplex.ch")
 }
 
-fn executable_examples() -> [PathBuf; 12] {
+fn executable_examples() -> [PathBuf; 13] {
     [
         dict_foundation_example(),
         hello_tensor_example(),
@@ -78,6 +80,7 @@ fn executable_examples() -> [PathBuf; 12] {
         scalar_string_foundation_example(),
         tensor_structural_ops_example(),
         transformer_block_example(),
+        hash_order_determinism_example(),
         vmap_example(),
     ]
 }
@@ -977,7 +980,10 @@ fn eval_json_def_only_emits_empty_roots_json() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     // Execution wire v2 (chelis#729): EvalResult stamps its payload
     // version.
-    assert_eq!(stdout.trim(), r#"{"schema_version":2,"roots":[]}"#);
+    assert_eq!(
+        stdout.trim(),
+        r#"{"schema_version":2,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
+    );
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
 }
@@ -1514,11 +1520,14 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
 
 int main(void) {
     int64_t shape[2] = {2, 3};
-    chelis_tensor *a = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor *a = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    chelis_tensor_write *a_guard = chelis_tensor_begin_write(a);
+    chelis_write_view a_view = chelis_tensor_write_view(a_guard);
     for (int i = 0; i < 6; ++i) {
-        a->data[i] = values[i];
+        ((float *)a_view.data)[i] = values[i];
     }
+    chelis_tensor_end_write(a_guard);
 
     chelis_tensor *out = gram(a);
     float expected[9] = {
@@ -1526,15 +1535,16 @@ int main(void) {
         22.0f, 29.0f, 36.0f,
         27.0f, 36.0f, 45.0f
     };
+    chelis_read_view out_view = chelis_tensor_read_view(out);
     for (int i = 0; i < 9; ++i) {
-        if (fabsf(out->data[i] - expected[i]) > 1e-4f) {
-            fprintf(stderr, "mismatch at %d: got %f expected %f\n", i, out->data[i], expected[i]);
+        if (fabsf(((const float *)out_view.data)[i] - expected[i]) > 1e-4f) {
+            fprintf(stderr, "mismatch at %d: got %f expected %f\n", i, ((const float *)out_view.data)[i], expected[i]);
             return 1;
         }
     }
 
-    chelis_free(out);
-    chelis_free(a);
+    chelis_tensor_release(out);
+    chelis_tensor_release(a);
     return 0;
 }
 "#,
@@ -1555,12 +1565,10 @@ int main(void) {
 }
 
 #[test]
-fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
-    // Regression guard for Nautilus benchmark ask: when `chelis build` produces a
-    // self-contained binary (top-level `result = ...` triggers main emission), any
-    // user-defined `def` in the same TU should be marked `static inline` so -O2
-    // cross-call inlining kicks in without LTO / -Wl,-Bsymbolic on the downstream
-    // shell. Object-mode builds (no main) keep external linkage.
+fn build_c_user_defined_exports_remain_linkable_when_main_is_emitted() {
+    // A root-bearing build is both executable and a published C translation
+    // unit. Its authored definitions must match the external declarations in
+    // the generated header; `main` emission cannot silently hide them.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("inline_helpers.ch");
     let out_dir = dir.path().join("inline-helpers-build-out");
@@ -1587,8 +1595,9 @@ fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
 
     let c_src = fs::read_to_string(out_dir.join("inline_helpers.c")).expect("read generated C");
     assert!(
-        c_src.contains("static inline chelis_tensor* combine("),
-        "expected combine() to be emitted as `static inline` in self-contained binary, got:\n{c_src}"
+        c_src.contains("chelis_tensor* combine(")
+            && !c_src.contains("static inline chelis_tensor* combine("),
+        "expected combine() to retain external linkage in the executable translation unit, got:\n{c_src}"
     );
     assert!(
         c_src.contains("int main("),
@@ -1640,6 +1649,13 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
         header.contains("chelis_tuple* eig_pair("),
         "expected tuple-returning C ABI in generated header, got:\n{header}"
     );
+    let generated = out_dir.join("tuple_abi.c");
+    let source = fs::read_to_string(&generated).expect("generated c");
+    fs::write(
+        &generated,
+        source.replace("int main(void)", "int chelis_manifest_main(void)"),
+    )
+    .expect("rename the generated observation driver for library-link probing");
 
     write_file(
         &out_dir.join("driver.c"),
@@ -1650,24 +1666,28 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
 
 int main(void) {
     chelis_tuple *out = eig_pair();
-    chelis_tensor *lhs = chelis_tuple_get_tensor(out, 0);
-    chelis_tensor *rhs = chelis_tuple_get_tensor(out, 1);
+    chelis_value lhs_value = chelis_tuple_get(out, 0);
+    chelis_value rhs_value = chelis_tuple_get(out, 1);
+    const chelis_tensor *lhs = chelis_tensor_borrow_value(lhs_value);
+    const chelis_tensor *rhs = chelis_tensor_borrow_value(rhs_value);
 
-    if (lhs->size != 2 || rhs->size != 2) {
+    if (chelis_tensor_numel(lhs) != 2 || chelis_tensor_numel(rhs) != 2) {
         fprintf(stderr, "unexpected tuple tensor sizes\n");
         return 1;
     }
-    if (fabsf(lhs->data[0] - 1.0f) > 1e-4f || fabsf(lhs->data[1] - 2.0f) > 1e-4f) {
+    chelis_read_view lhs_view = chelis_tensor_read_view(lhs);
+    chelis_read_view rhs_view = chelis_tensor_read_view(rhs);
+    if (fabsf(((const float *)lhs_view.data)[0] - 1.0f) > 1e-4f || fabsf(((const float *)lhs_view.data)[1] - 2.0f) > 1e-4f) {
         fprintf(stderr, "lhs mismatch\n");
         return 1;
     }
-    if (fabsf(rhs->data[0] - 3.0f) > 1e-4f || fabsf(rhs->data[1] - 4.0f) > 1e-4f) {
+    if (fabsf(((const float *)rhs_view.data)[0] - 3.0f) > 1e-4f || fabsf(((const float *)rhs_view.data)[1] - 4.0f) > 1e-4f) {
         fprintf(stderr, "rhs mismatch\n");
         return 1;
     }
 
-    chelis_free(lhs);
-    chelis_free(rhs);
+    chelis_value_release(lhs_value);
+    chelis_value_release(rhs_value);
     chelis_tuple_release(out);
     return 0;
 }
@@ -1751,8 +1771,8 @@ fn check_rejects_literal_dimension_mismatch() {
     let path = dir.path().join("literal_dim_mismatch.ch");
     write_file(
         &path,
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
     );
 
     let json = run_json_check(&path);
@@ -1763,6 +1783,14 @@ fn check_rejects_literal_dimension_mismatch() {
             .iter()
             .any(|error| error["kind"] == "DimensionMismatch"),
         "expected DimensionMismatch in check output, got {json}"
+    );
+    assert!(
+        !json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| error["kind"] == "TypeMismatch"),
+        "dimension mismatch fixture must not include an unrelated trace return TypeMismatch: {json}"
     );
     assert_eq!(
         json["unresolved_names"]
@@ -1780,8 +1808,8 @@ fn check_rejects_polymorphic_dims_pinned_by_body() {
     let path = dir.path().join("polymorphic_dim_pinned.ch");
     write_file(
         &path,
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
          def main() -> f32 = cast(0.0, f32)\n",
     );
 
@@ -1793,6 +1821,14 @@ fn check_rejects_polymorphic_dims_pinned_by_body() {
             .iter()
             .any(|error| error["kind"] == "DimensionMismatch"),
         "expected DimensionMismatch when polymorphic dims are pinned by the body, got {json}"
+    );
+    assert!(
+        !json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| error["kind"] == "TypeMismatch"),
+        "polymorphic dimension fixture must not include an unrelated trace return TypeMismatch: {json}"
     );
     assert_eq!(
         json["unresolved_names"]
@@ -2015,9 +2051,11 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
     let source = fs::read_to_string(out_dir.join("grad_rows_branching.c")).expect("generated c");
     // WS-4: the `x: f32` scalar param makes the host loss helper return a
     // `float` (the declared width), not the previously-widened `double`.
+    // The generated public header declares authored functions externally, so
+    // adding a manifest observation driver must not make this definition local.
     assert!(
-        source.contains("static inline float loss("),
-        "expected host-side scalar loss helper to be emitted:\n{source}"
+        source.contains("float loss(") && !source.contains("static inline float loss("),
+        "expected an externally linked host-side scalar loss helper:\n{source}"
     );
     assert!(
         source.contains("if (__cond"),
@@ -2035,11 +2073,11 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
     let out_dir = dir.path().join("tensor-grad-lm-canary-out");
     write_file(
         &path,
-        "def residual[n](theta: tensor[n, f32], x: f32, y: f32) -> f32 = {\n\
+        "def lm_residual[n](theta: tensor[n, f32], x: f32, y: f32) -> f32 = {\n\
            y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
            sub(y, y_hat)\n\
          }\n\
-         row = grad(residual, wrt=theta)\n\
+         row = grad(lm_residual, wrt=theta)\n\
          def jac[n, m](theta: tensor[n, f32], xs: tensor[m, f32], ys: tensor[m, f32]) -> List[tensor[n, f32]] = {\n\
            pairs = zip(to_list(xs), to_list(ys))\n\
            map(fn (pair: (f32, f32)) -> row(copy(theta), pair.0, pair.1), pairs)\n\
@@ -2063,11 +2101,13 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
 
     let source = fs::read_to_string(out_dir.join("tensor_grad_lm_canary.c")).expect("generated c");
     assert!(
-        source.contains("static inline chelis_tensor* row("),
-        "expected a host wrapper for the gradient row helper:\n{source}"
+        source.contains("chelis_tensor* row(")
+            && !source.contains("static inline chelis_tensor* row("),
+        "expected an externally linked host wrapper for the gradient row helper:\n{source}"
     );
     assert!(
-        source.contains("__tensor_arg1_") && source.contains("chelis_alloc(0, NULL, CHELIS_F32)"),
+        source.contains("__tensor_arg1_")
+            && source.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F32)"),
         "expected host scalar dependencies to be boxed as rank-0 tensor helper inputs:\n{source}"
     );
     assert!(
@@ -2117,15 +2157,22 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         source.contains("chelis_tensor* __binding_0_value;"),
         "expected tensor-valued local grad result to stay tensor-typed:\n{source}"
     );
-    // RT-4 F1: the runtime call may be either the legacy untyped
-    // entry point or the new dtype-aware variant (CHELIS_F32 here);
-    // both carry the same shape semantics.
+    // [05-OP-33]: list ingress uses the one exact tagged constructor. There
+    // is no untyped or dtype-named compatibility entry point.
     assert!(
-        (source.contains("chelis_tensor_from_value_list(")
-            || source.contains("chelis_tensor_from_value_list_typed("))
+        source.contains("chelis_tensor_from_values(")
+            && source.contains("CHELIS_DTYPE_F32")
             && source.contains("__host_tensor_arg_1")
             && source.contains("tensor_grad_local_wrapper__global__tensor_0"),
         "expected local-wrapper grad to specialize into a tensor helper with a hoisted tensor arg:\n{source}"
+    );
+    assert!(
+        !source.contains("chelis_tensor_from_value_list("),
+        "retired untyped list ingress must not be emitted:\n{source}"
+    );
+    assert!(
+        !source.contains("chelis_tensor_from_value_list_typed("),
+        "retired typed-by-name list ingress must not be emitted:\n{source}"
     );
     assert!(
         !source.contains("`grad` is not representable")
@@ -2980,12 +3027,13 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
 
     let source = fs::read_to_string(out_dir.join("recursive_tensor.c")).expect("generated c");
     assert!(
-        source.contains("static inline chelis_tensor* recur("),
-        "expected recursive tensor helper to stay in the host lane:\n{source}"
+        source.contains("chelis_tensor* recur(")
+            && !source.contains("static inline chelis_tensor* recur("),
+        "expected externally linked recursive tensor helper to stay in the host lane:\n{source}"
     );
     assert!(
-        source.contains("__result = recur("),
-        "expected recursive call to remain a C function call rather than DAG helper expansion:\n{source}"
+        source.contains("__result = recur__chelis_owned_body("),
+        "expected recursive call to target the consuming C body rather than the external borrow adapter or a DAG helper:\n{source}"
     );
 
     let status = gcc_link_generated(&out_dir, "recursive_tensor.c", "recursive_tensor");
@@ -3112,9 +3160,9 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
 
     fs::write(
         &generated,
-        source.replace("float main", "float chelis_entry"),
+        source.replace("int main(void)", "int chelis_manifest_main(void)"),
     )
-    .expect("rename generated entry point");
+    .expect("rename the generated observation driver for library-link probing");
     write_file(
         &out_dir.join("driver.c"),
         r#"#include <stdio.h>
@@ -3476,7 +3524,7 @@ out = einsum("ij,jk->ik", a, b)
 }
 
 #[test]
-fn check_rejects_static_invalid_phase3h_scatter_duplicate_replace() {
+fn check_accepts_static_scatter_duplicate_replace_as_last_write_wins() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("scatter_dup_replace_bad.ch");
     write_file(
@@ -3491,23 +3539,16 @@ out = scatter(base, idx, updates, 0, "replace")
     );
 
     let json = run_json_check(&path);
-    assert!(json["score"].as_f64().unwrap() < 1.0);
+    assert_eq!(json["score"].as_f64(), Some(1.0));
     let errors = json["errors"].as_array().expect("errors array");
     assert!(
-        !errors.is_empty(),
-        "check should report deterministic scatter duplicate-index error"
+        errors.is_empty(),
+        "duplicate replace-scatter indices follow deterministic last-write-wins: {errors:?}"
     );
-    let messages = errors
-        .iter()
-        .filter_map(|error| error["message"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(messages.contains("scatter"));
-    assert!(messages.contains("duplicate target index"));
 }
 
 #[test]
-fn build_c_phase3h_runtime_value_errors_exit_cleanly_instead_of_aborting() {
+fn build_c_scatter_duplicate_replace_is_deterministic_last_write_wins() {
     let dir = tempdir().expect("tempdir");
     let source = dir.path().join("scatter_runtime_bad.ch");
     let out_dir = dir.path().join("scatter-dup-build");
@@ -3541,35 +3582,41 @@ def apply(
         &out_dir.join("runner.c"),
         r#"#include "chelis_runtime.h"
 #include "scatter_runtime_bad.h"
+#include <math.h>
 
 int main(void) {
     int64_t base_shape[2] = {3, 2};
     int64_t idx_shape[1] = {2};
     int64_t updates_shape[2] = {2, 2};
 
-    chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
-    chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
-    chelis_tensor *updates = chelis_alloc(2, updates_shape, CHELIS_F32);
-    /* RT-4 F1 sibling: write through `(int32_t*)` so the slot stores
-     * int32 bytes; the runtime now reads indices at the dtype-correct
-     * width and a float-bit-pattern write would surface as the bit
-     * pattern as an int (e.g. 1065353216 for 1.0f), defeating the
-     * duplicate-index fixture. */
-    ((int32_t*)idx->data)[0] = 1;
-    ((int32_t*)idx->data)[1] = 1;
-    updates->data[0] = 5.0f;
-    updates->data[1] = 5.0f;
-    updates->data[2] = 6.0f;
-    updates->data[3] = 6.0f;
+    chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_DTYPE_I64);
+    chelis_tensor *updates = chelis_alloc(2, updates_shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *idx_guard = chelis_tensor_begin_write(idx);
+    chelis_write_view idx_view = chelis_tensor_write_view(idx_guard);
+    ((int64_t*)idx_view.data)[0] = 1;
+    ((int64_t*)idx_view.data)[1] = 1;
+    chelis_tensor_end_write(idx_guard);
+    chelis_tensor_write *updates_guard = chelis_tensor_begin_write(updates);
+    chelis_write_view updates_view = chelis_tensor_write_view(updates_guard);
+    ((float *)updates_view.data)[0] = 5.0f;
+    ((float *)updates_view.data)[1] = 5.0f;
+    ((float *)updates_view.data)[2] = 6.0f;
+    ((float *)updates_view.data)[3] = 6.0f;
+    chelis_tensor_end_write(updates_guard);
 
     chelis_tensor *output = apply(base, idx, updates);
-
-    if (output != NULL) {
-        chelis_free(output);
+    const float expected[6] = {0.0f, 0.0f, 6.0f, 6.0f, 0.0f, 0.0f};
+    chelis_read_view output_view = chelis_tensor_read_view(output);
+    for (int i = 0; i < 6; i++) {
+        if (fabsf(((const float *)output_view.data)[i] - expected[i]) > 1e-6f) {
+            return 2;
+        }
     }
-    chelis_free(base);
-    chelis_free(idx);
-    chelis_free(updates);
+    chelis_tensor_release(output);
+    chelis_tensor_release(base);
+    chelis_tensor_release(idx);
+    chelis_tensor_release(updates);
     return 0;
 }
 "#,
@@ -3586,27 +3633,10 @@ int main(void) {
         .output()
         .expect("compiled binary should run");
     assert!(
-        !run_output.status.success(),
-        "compiled binary should fail on duplicate scatter replace"
-    );
-    assert!(
+        run_output.status.success(),
+        "compiled duplicate replace-scatter must observe last-write-wins; status {} stderr: {}",
+        run_output.status,
         String::from_utf8_lossy(&run_output.stderr)
-            .contains("scatter replace mode rejects duplicate target index"),
-        "expected duplicate-index stderr, got {}",
-        String::from_utf8_lossy(&run_output.stderr)
-    );
-    assert_eq!(
-        run_output.status.code(),
-        Some(1),
-        "expected clean runtime failure exit code, got {}",
-        run_output.status
-    );
-    #[cfg(unix)]
-    assert_eq!(
-        run_output.status.signal(),
-        None,
-        "expected normal exit instead of signal, got {}",
-        run_output.status
     );
 }
 
@@ -3812,7 +3842,7 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
         "{source}"
     );
     assert!(source.contains("check_loss__tensor_0"));
-    assert!(source.contains("chelis_tensor_to_f64"));
+    assert!(source.contains("chelis_tensor_to_scalar"));
 }
 
 #[test]
@@ -4687,7 +4717,7 @@ def main(
   w: tensor[784, 10, f32],
   b: tensor[10, f32]
 ) -> tensor[32, 10, f32] = {
-  bias = expand(&b, 0, shape(&x, cast(0, int32)))
+  bias = insert(&b, 0, shape(&x, cast(0, int32)))
   wx = matmul(&x, &w)
   add(wx, bias)
 }
@@ -4905,6 +4935,7 @@ def hidden(x: f32) -> f32 = x
         name: "hidden".to_string(),
         kind: SymbolKind::Value,
         type_repr: public.type_repr,
+        type_variable_restrictions: public.type_variable_restrictions,
         effects: public.effects,
         has_body: true,
     });
@@ -5017,8 +5048,8 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int64_t features = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(source.contains("int64_t features = chelis_tensor_shape(inputs[0], 1);"));
 }
 
 #[test]
@@ -5065,15 +5096,26 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let c_source = fs::read_to_string(c_out.join("symbolic_matmul.c")).expect("generated c");
-    assert!(c_source.contains("int64_t batch = inputs[0]->shape[0];"));
-    assert!(c_source.contains("int64_t in_dim = inputs[0]->shape[1];"));
-    assert!(c_source.contains("inputs[1]->shape[0] != in_dim"));
+    assert!(c_source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(c_source.contains("int64_t in_dim = chelis_tensor_shape(inputs[0], 1);"));
+    // chelis#1277: the C guard reads BOTH operands from the class's own
+    // witnesses instead of comparing against the declared variable, so that a
+    // member scoped to one signature is never compared with a variable the
+    // occurrence walk declared for another. The property this row names -
+    // `in_dim`'s second occurrence is guarded against the axis it was
+    // declared from - is unchanged, and the declaration two lines above
+    // pins which axis that is. HIP still compares against the variable and
+    // its assertion below is unchanged, which is the cross-lane difference
+    // this slice records rather than hides.
+    assert!(
+        c_source.contains("chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 1)")
+    );
 
     let hip_source =
         fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");
-    assert!(hip_source.contains("int64_t batch = inputs[0]->shape[0];"));
-    assert!(hip_source.contains("int64_t in_dim = inputs[0]->shape[1];"));
-    assert!(hip_source.contains("inputs[1]->shape[0] != in_dim"));
+    assert!(hip_source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(hip_source.contains("int64_t in_dim = chelis_tensor_shape(inputs[0], 1);"));
+    assert!(hip_source.contains("chelis_tensor_shape(inputs[1], 0) != in_dim"));
 }
 
 #[test]
@@ -5101,8 +5143,8 @@ fn build_hip_accepts_symbolic_softmax() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_softmax_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int64_t seq = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(source.contains("int64_t seq = chelis_tensor_shape(inputs[0], 1);"));
     assert!(source.contains("kernel_maxred_ax1"));
     assert!(source.contains("kernel_sum_ax1"));
 }
@@ -5132,8 +5174,8 @@ fn build_hip_accepts_symbolic_row_sum() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_sum_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int64_t seq = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
+    assert!(source.contains("int64_t seq = chelis_tensor_shape(inputs[0], 1);"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5162,7 +5204,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_layer_norm_hip.cpp")).expect("generated source");
-    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5450,7 +5492,10 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("hip-output");
     let source = dir.path().join("matmul.ch");
-    write_matmul_program(&source);
+    write_file(
+        &source,
+        "def matmul_kernel(a: tensor[2, 3, f32], b: tensor[3, 4, f32]) -> tensor[2, 4, f32] = (matmul(a, b) : tensor[2, 4, f32])\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -5471,6 +5516,39 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
     assert!(
         hip_src.contains("chelis_hipblas_sgemm_row_major"),
         "HIP build should surface hipBLAS specialization for a simple matmul program"
+    );
+}
+
+#[test]
+fn build_hip_unbound_observation_root_fails_before_writing_an_artifact() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("hip-output");
+    let source = dir.path().join("matmul.ch");
+    write_matmul_program(&source);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unsupported:")
+                .and(predicate::str::contains("[05-UNS-1]"))
+                .and(predicate::str::contains("root `a`"))
+                .and(predicate::str::contains("codegen:hip"))
+                .and(predicate::str::contains("required input(s) `a`")),
+        );
+    assert!(
+        !out_dir.exists(),
+        "an unavailable owed root must fail before any partial artifact is written"
     );
 }
 
@@ -6069,9 +6147,13 @@ fn validate_desugar_accepts_dotted_module_paths() {
 
 #[test]
 fn validate_deep_rejects_unknown_tag() {
+    // chelis#1088: the fixture moved inside a declaration. A top-level
+    // `(mystery {} x)` is now a [03-PROG-1] rejection, so leaving it at top
+    // level would make this test pass for a reason unrelated to the unknown
+    // head it is about.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad.dp");
-    write_file(&path, "(mystery {} x)\n");
+    write_file(&path, "(def {} f (mystery {} x))\n");
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -6079,14 +6161,51 @@ fn validate_deep_rejects_unknown_tag() {
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown Deep tag"));
+        .stderr(predicate::str::contains("unknown tag"))
+        .stderr(predicate::str::contains("mystery"));
+}
+
+#[test]
+fn validate_deep_identifies_a_headless_top_level_form_like_check_does() {
+    // chelis#1088: `validate --deep` used to run its Pest grammar first, so a
+    // headless top-level form died as `expected program` and the reader never
+    // learned its [03-PROG-2] class. The stamped ingress now decides first.
+    let dir = tempdir().expect("tempdir");
+    for (name, source, identification) in [
+        ("bare_int.dp", "42\n", "a bare integer literal"),
+        (
+            "untagged.dp",
+            "((var {} f) (var {} x))\n",
+            "a list without a tag symbol",
+        ),
+        ("empty.dp", "", "empty program"),
+        ("comments.dp", "; only a comment\n", "empty program"),
+    ] {
+        let path = dir.path().join(name);
+        write_file(&path, source);
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["validate", "--deep", path.to_str().unwrap()])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(identification));
+    }
 }
 
 #[test]
 fn validate_deep_rejects_invalid_effects_children() {
+    // chelis#1088: `(effects ...)` is a metadata value in real Deep, never a
+    // top-level form, so the fixture now sits where it actually occurs. That
+    // position is invisible to the Pest leg, which walks node children; the
+    // AST-side sweep `check` has always used is what reaches it, and
+    // `validate --deep` now runs that sweep too.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad_effects.dp");
-    write_file(&path, "(effects {} 1)\n");
+    write_file(
+        &path,
+        "(defsig {} f (t-fn {eff: (effects {} 1)} (t-prim {} f32)))\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -6094,16 +6213,20 @@ fn validate_deep_rejects_invalid_effects_children() {
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "`effects` must contain bare names or `(resource {} ...)` entries",
-        ));
+        .stderr(predicate::str::contains("`effects` must contain"));
 }
 
 #[test]
 fn validate_deep_rejects_invalid_resource_arity() {
+    // chelis#1088: likewise nested where a `resource` entry really appears.
+    // The stamped ingress reaches the arity first and names the tag; the Pest
+    // arity arm remains the second line of defence.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad_resource.dp");
-    write_file(&path, "(resource {} x y)\n");
+    write_file(
+        &path,
+        "(defsig {} f (t-fn {eff: (effects {} (resource {} x y))} (t-prim {} f32)))\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -6111,7 +6234,8 @@ fn validate_deep_rejects_invalid_resource_arity() {
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("expected exactly 1 child"));
+        .stderr(predicate::str::contains("resource"))
+        .stderr(predicate::str::contains("wrong child count"));
 }
 
 #[test]
@@ -8444,24 +8568,26 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
 ///
 /// The typer is canonical and accepts `[count, 1]` (INSERT semantics) for
 /// the linreg-style bias broadcast. The IR evaluator agrees (it consults
-/// the IR node's output type). Previously the host runtime
-/// (`tensor_expand_host` in `chelis-compiler-api`) silently picked the
-/// same-rank "replicate-singleton" branch when `in_shape[axis] == 1`,
-/// producing rank-1 `[count]` instead of the rank-2 `[count, 1]` the
-/// typer accepted — the divergence reproduced from the
-/// `examples/linreg.ch` shape (`expand(b, 0, 64i64)` over a rank-1 bias).
+/// the IR node's output type). Previously one host function served both
+/// spellings and silently picked the same-rank "replicate-singleton"
+/// branch when `in_shape[axis] == 1`, producing rank-1 `[count]` instead
+/// of the rank-2 `[count, 1]` the typer accepted, the divergence
+/// reproduced from the `examples/linreg.ch` shape
+/// (`insert(b, 0, 64i64)` over a rank-1 bias). With one result shape per
+/// operation the two names route to two host functions and neither
+/// guesses (spec/04-type-system.md section 4.7.2).
 #[test]
-fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
+fn build_c_linreg_insert_singleton_bias_keeps_rank2_shape() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("linreg_expand_bias.ch");
     let out_dir = dir.path().join("linreg-expand-bias-out");
-    // Rank-1 [1] bias expanded along axis 0 with count 4 must produce
+    // A rank-1 [1] bias with an axis added at 0 and count 4 must produce
     // rank-2 [4, 1] output. This is the exact shape pattern the
     // `examples/linreg.ch` predict/loss helpers rely on
-    // (`expand(b, 0, 64i64)` where `b: tensor[1, f32]`).
+    // (`insert(b, 0, 64i64)` where `b: tensor[1, f32]`).
     write_file(
         &path,
-        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = expand(b, 0, 4i64)\n\
+        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = insert(b, 0, 4i64)\n\
          result = broadcast_bias(to_tensor([cast(7.0, f32)]))\n",
     );
 
@@ -8509,7 +8635,7 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     // `chelis test`/`chelis eval` must produce the same shape as the
     // typer (rank-2 [4, 1] with all entries equal to the singleton
     // value). The host-runtime evaluator path is exercised by the
-    // companion test `host_runtime_expand_singleton_input_inserts_not_replicates`
+    // companion test `host_runtime_insert_singleton_input_adds_an_axis`
     // in `chelis-compiler-api`; this CLI test pins the typer + C emit
     // legs of the agreement.
     let status = gcc_compile_generated(&out_dir, "linreg_expand_bias.c");
@@ -8559,9 +8685,9 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
 
     let source = fs::read_to_string(out_dir.join("poly_top_dim.c")).expect("generated c");
     // Every dim that appears in a `(int64_t[]){ <name>` literal must also
-    // appear as an `int64_t <name> = inputs[...]->shape[<axis>];`
+    // appear as an `int64_t <name> = chelis_tensor_shape(inputs[...], <axis>);`
     // declaration. Walk both sets and assert containment.
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut used: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     for line in source.lines() {
         if let Some(after) = line.split("(int64_t[]){ ").nth(1) {
             let name: String = after
@@ -8573,11 +8699,11 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
             }
         }
     }
-    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut declared: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     for line in source.lines() {
         if let Some(idx) = line.find("int64_t ")
             && let Some(rest) = line.get(idx + 8..)
-            && rest.contains(" = inputs[")
+            && rest.contains(" = chelis_tensor_shape(inputs[")
         {
             let name: String = rest
                 .chars()
@@ -8588,11 +8714,11 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
             }
         }
     }
-    for name in &used {
+    for name in used.to_sorted() {
         assert!(
             declared.contains(name),
             "dim `{name}` used in `(int64_t[]){{ {name} }}` but never declared as \
-             `int64_t {name} = inputs[...]->shape[...];` -- Bucket 4c symbolic-dim \
+             `int64_t {name} = chelis_tensor_shape(inputs[...], ...);` -- Bucket 4c symbolic-dim \
              leakage. Generated source:\n{source}",
         );
     }
@@ -8648,9 +8774,10 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
     // 4-byte `float` type. Before the precision fix the host lane collapsed
     // these to `double`, silently widening the declared `f32` signature.
     assert!(
-        source.contains("static inline float apply(float (*model)(float), float x) {"),
-        "expected `apply` wrapper definition in the C source; only a forward \
-         declaration would leave gcc with `implicit declaration`. Source:\n{source}",
+        source.contains("float apply(float (*model)(float), float x) {")
+            && !source.contains("static inline float apply("),
+        "expected externally linked `apply` wrapper definition in the C source; only a \
+         forward declaration would leave gcc with `implicit declaration`. Source:\n{source}",
     );
     // Parity with the tensor case: the same shape with `tensor[n, f32]`
     // already emits the wrapper. Make sure both shapes succeed in this
@@ -8787,7 +8914,7 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
     // A pure-DAG module emits no `main`, so drive the kernel directly.
     write_file(
         &out_dir.join("driver.c"),
-        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int64_t shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
+        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int64_t shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   chelis_tensor_write* x_guard = chelis_tensor_begin_write(x);\n         \x20   chelis_write_view x_view = chelis_tensor_write_view(x_guard);\n         \x20   memcpy(x_view.data, xd, sizeof(xd));\n         \x20   chelis_tensor_end_write(x_guard);\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   chelis_read_view out_view = chelis_tensor_read_view(outs[0]);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", ((const float *)out_view.data)[i]);\n         \x20   chelis_tensor_release(outs[0]);\n         \x20   chelis_tensor_release(x);\n         \x20   return 0;\n         }\n",
     );
 
     let status = gcc_link_sources(&out_dir, &["driver.c", "only_ho.c"], "only_ho_driver");
@@ -9299,7 +9426,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
 
     let json_text = fs::read_to_string(&json_path).expect("out.json written");
     assert_eq!(
-        json_text, "{\"cap_price\":0.15110743269565682,\"name\":\"a\\\"b\\\\c\",\"n\":3}",
+        json_text, "{\"cap_price\":0.15110743269565682,\"n\":3,\"name\":\"a\\\"b\\\\c\"}",
         "compiled write_json output must be byte-exact"
     );
     let csv_text = fs::read_to_string(&csv_path).expect("out.csv written");

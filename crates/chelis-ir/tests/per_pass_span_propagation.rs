@@ -737,8 +737,8 @@ fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
     // No parent span — sub-nodes should get __synthesized_tier2__.
     let _ = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
 
-    // The relu decomposes into Const(0) + MaxElem. Both should carry the
-    // marker. The original Const(1) input does NOT.
+    // The dedicated ReLU identity carries the synthesized marker. The
+    // original Const(1) input does not.
     let mut marker_count = 0usize;
     for node in dag.nodes() {
         match node.span_id.as_deref() {
@@ -756,15 +756,15 @@ fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
         }
     }
     assert!(
-        marker_count >= 2,
-        "expected at least 2 sub-nodes carrying __synthesized_tier2__, got {marker_count}"
+        marker_count == 1,
+        "expected exactly one ReLU identity carrying __synthesized_tier2__, got {marker_count}"
     );
 }
 
-/// Larger decomposition (sub) — every emitted sub-node carries the
-/// parent's span. Locks the rule across multiple Tier 2 helpers.
+/// Direct subtraction retains its own identity and the parent's span; it
+/// must not reconstruct subtraction through synthetic Add/Neg nodes.
 #[test]
-fn tier2_lower_sub_inherits_parent_span() {
+fn tier2_lower_sub_preserves_direct_identity_and_parent_span() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 5.0),
@@ -778,12 +778,23 @@ fn tier2_lower_sub_inherits_parent_span() {
         scalar_f32(),
         None,
     );
-    // sub(a,b) = neg(b) + add(a, neg_b). Two synthesized nodes.
-    let _ = tier2::lower_sub(&mut dag, a, b, &scalar_f32(), Some("sub.expr"));
+    let result = tier2::lower_sub(&mut dag, a, b, &scalar_f32(), Some("sub.expr"));
+    assert_eq!(dag.len(), 3, "direct sub should add exactly one node");
+    let sub = dag.get(result).expect("lowered Sub node");
+    assert_eq!(sub.op, RiscOp::Sub);
+    assert_eq!(sub.inputs, vec![a, b]);
+    assert_eq!(sub.span_id.as_deref(), Some("sub.expr"));
+    assert!(
+        dag.nodes()
+            .iter()
+            .all(|node| !matches!(node.op, RiscOp::Add | RiscOp::Neg)),
+        "direct Sub lowering must not synthesize Add/Neg nodes"
+    );
+
     for node in dag.nodes() {
         match (&node.op, node.span_id.as_deref()) {
             (RiscOp::Const { .. }, None) => {} // operand consts
-            (RiscOp::Neg, Some("sub.expr")) | (RiscOp::Add, Some("sub.expr")) => {}
+            (RiscOp::Sub, Some("sub.expr")) => {}
             (op, span) => panic!(
                 "unexpected (op={op:?}, span={span:?}) on node {:?}",
                 node.id
@@ -1005,7 +1016,7 @@ fn s3_oracle_lowering_then_optimization_passes() {
     use chelis_types::{check_ir_program, check_linearity};
     use std::collections::BTreeSet;
 
-    // A small but rich program: tier-2 sub (decomposes), constants
+    // A small but rich program: direct Tier-1 sub identity, constants
     // (fold-eligible if operands match), repeated subexpression
     // (CSE-eligible). Every node carries its own span.
     let source = r#"

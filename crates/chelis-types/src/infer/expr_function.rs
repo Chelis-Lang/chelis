@@ -29,7 +29,7 @@ pub(super) fn infer_fn(
     for (pname, ty_ann) in &params {
         let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
         product.note_shape_lambda_param(&ty);
-        fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
+        fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a parameter is a fresh runtime binding with no
         // size provenance. Clear any entry inherited (through the derived
         // `Clone` of `env`) from an outer name it shadows, so a sourceless
@@ -64,7 +64,14 @@ pub(super) fn infer_fn(
     };
     let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
-    check_declared_dvars_rigid(&declared_dvars, subst, errors);
+    // chelis#260: no recorded names on this path. A dim binder has to be
+    // declared as `def f[n, m]`, which routes through the `Defsig` arm and
+    // then the annotated-def site; an `fn` whose annotation mentions `n`
+    // without such a declaration is rejected earlier as an undeclared
+    // dimension variable. So this call cannot currently reach a named
+    // collapse, and passing an empty map renders the internal id rather
+    // than inventing a name.
+    check_declared_dvars_rigid(&declared_dvars, &UnordMap::new(), subst, errors);
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
@@ -130,7 +137,7 @@ pub(super) fn infer_def_body_with_sig(
         // path in the standard way.
         let ty = ty_ann.clone().unwrap_or_else(|| decl_arg.clone());
         product.note_shape_lambda_param(&ty);
-        fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
+        fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
         fn_env.clear_size_provenance(pname);
@@ -205,7 +212,7 @@ pub(super) fn extract_params(
                         .iter()
                         .find(|(key, _)| key == "type")
                         .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Ok(ty) => ty.into_type(),
                             Err(witness) => propagate(&witness),
                         });
                 params.push((name.to_string(), annotation));
@@ -222,7 +229,7 @@ pub(super) fn extract_params(
                         .iter()
                         .find(|(key, _)| key == "type")
                         .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Ok(ty) => ty.into_type(),
                             Err(witness) => propagate(&witness),
                         }),
                     _ => None,
@@ -239,7 +246,7 @@ pub(super) fn extract_params(
                         .iter()
                         .find(|(key, _)| key == "type")
                         .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Ok(ty) => ty.into_type(),
                             Err(witness) => propagate(&witness),
                         }),
                     _ => None,
@@ -247,6 +254,13 @@ pub(super) fn extract_params(
                 params.push((name.to_string(), annotation));
             }
             _ => {}
+        }
+    }
+    drop(resolver);
+    let mut aliases = AliasExpansionSession::new(adt_reg, vg);
+    for (_, annotation) in &mut params {
+        if let Some(ty) = annotation {
+            *ty = aliases.resolve(ty);
         }
     }
     params
@@ -277,6 +291,7 @@ pub(super) fn infer_let(
         while i + 1 < bind_children.len() {
             if let Some(name) = symbol_name(&bind_children[i]) {
                 let rhs_expr = &bind_children[i + 1];
+                let rhs_level = subst.enter_level(vg);
                 let shape_checkpoint = product.deferred_shape_checkpoint();
                 let mut rhs_type_metadata_resolution = None;
                 let expr_ty = infer_expr_with_type_metadata_ownership(
@@ -359,10 +374,13 @@ pub(super) fn infer_let(
                     expr_ty
                 };
 
+                subst.leave_level(rhs_level, vg);
+
                 let scheme = if product.has_pending_shape_check_since(shape_checkpoint) {
                     // Bind-on-first-use (PP1): semantic shape obligations
                     // retain the exact inference variables captured by this
                     // lambda until its first application supplies types.
+                    subst.lower_type_to_current(&final_ty);
                     Scheme::mono(subst.apply(&final_ty))
                 } else {
                     let_env.generalize(&final_ty, subst)
@@ -380,7 +398,13 @@ pub(super) fn infer_let(
                 // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
                 match classify_expand_size(rhs_expr, &let_env) {
                     SizeClass::Static => {
-                        let_env.mark_size_provenance(name, crate::env::SizeProvenance::Static);
+                        if let Some(value) =
+                            fold_static_int_expr(rhs_expr, |bound| let_env.static_size_value(bound))
+                        {
+                            let_env.mark_static_size_value(name, value);
+                        } else {
+                            let_env.mark_size_provenance(name, crate::env::SizeProvenance::Static);
+                        }
                     }
                     SizeClass::ShapeSourced => {
                         let_env
@@ -392,7 +416,7 @@ pub(super) fn infer_let(
                 }
                 // chelis#631: same discipline for list-literal lengths.
                 note_list_literal_binding(&mut let_env, name, rhs_expr);
-                let_env.bind(name.to_string(), scheme);
+                let_env.bind_lexical(name.to_string(), scheme);
             }
             i += 2;
         }

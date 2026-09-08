@@ -33,7 +33,7 @@ use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::tier2;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 fn f32_dims(dims: Vec<DimInfo>) -> TensorType {
     TensorType {
@@ -132,7 +132,7 @@ fn issue_320_grad_through_symbolic_mean_is_exact() {
     let mean = tier2::lower_mean(&mut dag, x, 0, &sym_vec("n"), None);
 
     // Forward value: mean([10,20,30,40]) = 25.
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
@@ -177,7 +177,7 @@ fn issue_320_lower_mean_over_literal_extent_still_exact() {
     );
     let result = grad_dag_checked(&dag, mean, &[x]).expect("literal mean grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -209,7 +209,7 @@ fn issue_320_grad_max_reduce_over_literal_shape_still_exact() {
     let out = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], scalar_f32(), None);
     let result = grad_dag_checked(&dag, out, &[x]).expect("literal max_reduce grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 9.0, 3.0, 2.0]),
@@ -251,7 +251,7 @@ fn issue_320_grad_gather_over_literal_shape_still_exact() {
     );
     let result = grad_dag_checked(&dag, out, &[x]).expect("literal gather grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),

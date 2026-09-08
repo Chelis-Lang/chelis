@@ -1,0 +1,26 @@
+[package]
+name = "chelis-image-id"
+description = "Identify the object image the running chelis code is loaded from, and derive a build-identity discriminator for it"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc.workspace = true
+sha2 = "0.10"
+# `read_core`/`elf`/`macho` only: this crate reads two header fields and never
+# needs the write, archive, PE, XCOFF, wasm, or compression halves of `object`.
+object = { version = "0.37", default-features = false, features = [
+    "read_core",
+    "elf",
+    "macho",
+    "std",
+    "unaligned",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

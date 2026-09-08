@@ -239,7 +239,7 @@ fn named_axis_expand_int64_size_typechecks() {
     assert_clean(
         r#"
 sig add_axis: &tensor[..rest, f32] -> tensor[..rest, one, f32]
-def add_axis(x) = expand(x, one, 1i64)
+def add_axis(x) = insert(x, one, 1i64)
 "#,
         "named-axis expand with an int64 literal size",
     );
@@ -250,7 +250,7 @@ fn named_axis_expand_int32_size_rejected() {
     assert_rejected_with(
         r#"
 sig add_axis: &tensor[..rest, f32] -> tensor[..rest, one, f32]
-def add_axis(x) = expand(x, one, 1)
+def add_axis(x) = insert(x, one, 1)
 "#,
         "int64",
         "named-axis expand with a bare int32 size",

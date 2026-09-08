@@ -39,7 +39,7 @@
 //! no value; an accepted decode returns a [`RuntimeValue`] that is
 //! value-identical to the structurally-valid input.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::ast::Expr;
 use chelis_types::types::Prim;
@@ -180,7 +180,8 @@ pub fn try_decode_adt_value(
 ) -> Result<RuntimeValue, DecodeError> {
     let field_types = collect_ctor_field_types(program_exprs);
     let adt_fields = field_types
-        .iter()
+        .to_sorted()
+        .into_iter()
         .map(|(ctor, fields)| {
             (
                 ctor.clone(),
@@ -209,10 +210,10 @@ pub fn try_decode_adt_value(
 /// real codec lands they are promoted to the public surface alongside it.
 pub(crate) fn decode_with_tables(
     payload: &ExecutionValue,
-    field_types: &HashMap<String, Vec<DecodeField>>,
-    adt_fields: &HashMap<String, Vec<String>>,
-    invariants: &HashMap<String, InvariantEntry>,
-    module_constants: &HashMap<String, Expr>,
+    field_types: &UnordMap<String, Vec<DecodeField>>,
+    adt_fields: &UnordMap<String, Vec<String>>,
+    invariants: &UnordMap<String, InvariantEntry>,
+    module_constants: &UnordMap<String, Expr>,
 ) -> Result<RuntimeValue, DecodeError> {
     // Pass 1: structural conversion (constructor + field arity/order/type).
     let value = structural_decode(payload, field_types)?;
@@ -230,7 +231,7 @@ pub(crate) fn decode_with_tables(
 /// non-ADT payload converts but carries no opaque invariant.
 fn structural_decode(
     payload: &ExecutionValue,
-    field_types: &HashMap<String, Vec<DecodeField>>,
+    field_types: &UnordMap<String, Vec<DecodeField>>,
 ) -> Result<RuntimeValue, DecodeError> {
     match payload {
         ExecutionValue::Adt { ctor, fields } => decode_adt(ctor, fields, field_types),
@@ -299,7 +300,7 @@ fn structural_decode(
 fn decode_adt(
     ctor: &str,
     payload_fields: &[ExecutionValue],
-    field_types: &HashMap<String, Vec<DecodeField>>,
+    field_types: &UnordMap<String, Vec<DecodeField>>,
 ) -> Result<RuntimeValue, DecodeError> {
     let declared = field_types.get(ctor).ok_or_else(|| {
         DecodeError::Structural(format!(
@@ -334,7 +335,7 @@ fn decode_field(
     ctor: &str,
     spec: &DecodeField,
     payload: &ExecutionValue,
-    field_types: &HashMap<String, Vec<DecodeField>>,
+    field_types: &UnordMap<String, Vec<DecodeField>>,
 ) -> Result<RuntimeValue, DecodeError> {
     match &spec.ty {
         DecodeFieldType::Prim(prim) => decode_scalar_field(ctor, &spec.name, *prim, payload),
@@ -567,7 +568,7 @@ type Probability = | Probability { value: f32 }
             },
             ExecutionValue::Tuple { value: scalars },
         ] {
-            let decoded = structural_decode(&payload, &HashMap::new()).expect("structural decode");
+            let decoded = structural_decode(&payload, &UnordMap::new()).expect("structural decode");
             let reencoded = decoded.to_execution_value().expect("wire re-encode");
             assert_eq!(
                 serde_json::to_value(reencoded).expect("serialize re-encoded value"),
@@ -583,7 +584,7 @@ type Probability = | Probability { value: f32 }
             ExecutionValue::Float16 { value: 2049.0 },
             ExecutionValue::Bfloat16 { value: 257.0 },
         ] {
-            let err = structural_decode(&payload, &HashMap::new())
+            let err = structural_decode(&payload, &UnordMap::new())
                 .expect_err("a reduced-float carrier may not silently round its claimed image");
             assert!(
                 matches!(err, DecodeError::Structural(_)),

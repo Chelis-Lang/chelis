@@ -6,7 +6,8 @@
 //! `kernels::matmul_tiled_kernel` (16x16 tiled MSL kernel) and dispatches
 //! via `chelis_metal_launch2d`.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp};
+use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp};
+use chelis_ir::ownership::VerifiedDagView;
 use chelis_types::types::Prim;
 
 /// Information about a detected matmul pattern.
@@ -40,7 +41,7 @@ pub struct MatmulInfo {
 /// precision. Integer matmul is rejected at type-check per
 /// spec/04-type-system.md §5.7.2 (Wave-2-Fixups B6) so it should never
 /// reach this detector with matching operand precision.
-pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
+pub fn detect_matmul_pattern(dag: VerifiedDagView<'_>, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
     // Read the Sum node's accumulator field per the destructure-`..`
     // memory rule (do not silently ignore the accumulator). This is
@@ -131,7 +132,7 @@ fn extract_matmul_dims(
 ///
 /// Returns `(sum_node_id, info)` for each detected pattern, ordered by
 /// the Sum node's position in the DAG.
-pub fn find_all_matmuls(dag: &Dag) -> Vec<(NodeId, MatmulInfo)> {
+pub fn find_all_matmuls(dag: VerifiedDagView<'_>) -> Vec<(NodeId, MatmulInfo)> {
     let mut found = Vec::new();
     for node in dag.nodes() {
         if let Some(info) = detect_matmul_pattern(dag, node.id) {
@@ -146,6 +147,12 @@ mod tests {
     use super::*;
     use chelis_ir::dag::{Dag, DimInfo, TensorType};
     use chelis_types::types::Prim;
+
+    fn detect(dag: &Dag, sum: NodeId) -> Option<MatmulInfo> {
+        let verified = crate::testing::verified_dag(dag)
+            .expect("BLAS detector unit-test DAG must verify ownership");
+        super::detect_matmul_pattern(verified.emission(), sum)
+    }
 
     fn mat_f32(r: usize, c: usize) -> TensorType {
         TensorType {
@@ -179,7 +186,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -188,7 +195,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 3, 4),
@@ -205,7 +212,7 @@ mod tests {
             None,
         );
 
-        let info = detect_matmul_pattern(&dag, sum).expect("matmul should be detected");
+        let info = detect(&dag, sum).expect("matmul should be detected");
         assert_eq!(info.a, a);
         assert_eq!(info.b, b);
         assert_eq!(info.m, 2);
@@ -232,7 +239,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -241,7 +248,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 3, 4),
@@ -259,7 +266,7 @@ mod tests {
             None,
         );
 
-        assert!(detect_matmul_pattern(&dag, sum).is_none());
+        assert!(detect(&dag, sum).is_none());
     }
 
     #[test]
@@ -280,7 +287,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -289,7 +296,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 5, 4),
@@ -306,7 +313,10 @@ mod tests {
             None,
         );
 
-        assert!(detect_matmul_pattern(&dag, sum).is_none());
+        let error = chelis_ir::ownership::lower_dag_ownership(dag)
+            .expect_err("dimension-mismatched matmul must not cross the verified boundary");
+        assert!(error.to_string().contains("mismatched dimension"));
+        let _ = sum;
     }
 
     fn mat_prec(r: usize, c: usize, prec: Prim) -> TensorType {
@@ -340,7 +350,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_prec(2, 3, 4, prec),
@@ -349,7 +359,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_prec(2, 3, 4, prec),
@@ -369,7 +379,7 @@ mod tests {
                 accumulator: acc,
             },
             vec![mul],
-            mat_prec(2, 4, prec),
+            mat_prec(2, 4, acc),
             None,
         );
         (dag, sum)
@@ -378,14 +388,14 @@ mod tests {
     #[test]
     fn detects_f16_matmul_with_precision_threaded_through() {
         let (dag, sum) = build_matmul(Prim::F16);
-        let info = detect_matmul_pattern(&dag, sum).expect("f16 matmul should be detected");
+        let info = detect(&dag, sum).expect("f16 matmul should be detected");
         assert_eq!(info.precision, Prim::F16);
     }
 
     #[test]
     fn detects_bf16_matmul_with_precision_threaded_through() {
         let (dag, sum) = build_matmul(Prim::Bf16);
-        let info = detect_matmul_pattern(&dag, sum).expect("bf16 matmul should be detected");
+        let info = detect(&dag, sum).expect("bf16 matmul should be detected");
         assert_eq!(info.precision, Prim::Bf16);
     }
 
@@ -395,7 +405,7 @@ mod tests {
         // type-check per §5.7.2); the detector still bails so the F1
         // codegen guard is never asked to handle this case in practice.
         let (dag, sum) = build_matmul(Prim::Int32);
-        assert!(detect_matmul_pattern(&dag, sum).is_none());
+        assert!(detect(&dag, sum).is_none());
     }
 
     #[test]
@@ -419,7 +429,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_prec(2, 3, 4, Prim::F32),
@@ -428,7 +438,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_prec(2, 3, 4, Prim::F16),
@@ -449,6 +459,9 @@ mod tests {
             mat_prec(2, 4, Prim::F32),
             None,
         );
-        assert!(detect_matmul_pattern(&dag, sum).is_none());
+        let error = chelis_ir::ownership::lower_dag_ownership(dag)
+            .expect_err("mixed-precision matmul must not cross the verified boundary");
+        assert!(error.to_string().contains("mismatched precisions"));
+        let _ = sum;
     }
 }

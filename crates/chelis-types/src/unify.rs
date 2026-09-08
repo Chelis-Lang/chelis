@@ -8,7 +8,7 @@
 //! caller resolves a variable via [`Subst::apply`] or [`Subst::apply_dim`],
 //! the resolver iteratively follows the chain to its terminal value AND
 //! writes the resolved value back into the substitution so future lookups
-//! land in O(1). The HashMaps live behind a `RefCell` so this in-place
+//! land in O(1). The maps live behind a `Mutex` so this in-place
 //! compression remains available to callers that hold an immutable
 //! borrow of `Subst` (annotation passes, `Env::generalize`, occurs checks).
 //!
@@ -21,12 +21,45 @@
 //! `nn/embedding.ch`. See the gdb backtrace recorded in this commit's
 //! body for the canonical reproducer.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
+
+/// A level change and the variable-generator state at which it took effect.
+/// Transitions are append-only between persisted-context resumptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum LevelTransitionKind {
+    Enter,
+    Leave,
+    Resume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct LevelTransition {
+    kind: LevelTransitionKind,
+    level: u32,
+    watermarks: VarWatermarks,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VarClass {
+    Type,
+    Dim,
+    Rank,
+}
+
+/// Linear token proving which child level must be left next.
+///
+/// The token is deliberately neither `Copy` nor `Clone`: every successful
+/// enter must have exactly one matching leave, and leaves must be LIFO.
+#[derive(Debug)]
+pub(crate) struct LevelToken {
+    parent_level: u32,
+    child_level: u32,
+}
 
 /// Type error produced during unification.
 #[derive(Debug, Clone)]
@@ -47,7 +80,7 @@ pub enum TypeErrorKind {
 
 /// Substitution: maps type variables to types and dim variables to dims.
 ///
-/// The HashMaps are wrapped in `Mutex` so [`Subst::apply`] and
+/// The maps are wrapped in `Mutex` so [`Subst::apply`] and
 /// [`Subst::apply_dim`] can perform in-place path compression while
 /// keeping the public method receiver `&self`. The Mutex is uncontended
 /// in normal use (each `compile_new_source_in_context` call clones the
@@ -56,12 +89,17 @@ pub enum TypeErrorKind {
 /// [`Subst::insert_dim`] to record new bindings during unification.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Subst {
-    types: Mutex<HashMap<TypeVar, Type>>,
-    dims: Mutex<HashMap<DimVar, Dim>>,
+    types: Mutex<UnordMap<TypeVar, Type>>,
+    /// Semantic domains attached to unresolved type variables. This is
+    /// serialized with reusable checking contexts: a constrained function
+    /// value must not become unconstrained after a cache round trip.
+    #[serde(default)]
+    tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
+    dims: Mutex<UnordMap<DimVar, Dim>>,
     /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
     /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
     /// is a rank-to-rank alias resolved transitively by `resolve_rvar`.
-    ranks: Mutex<HashMap<RankVar, Vec<Dim>>>,
+    ranks: Mutex<UnordMap<RankVar, Vec<Dim>>>,
     /// Issue #256 soundness ledger. The `borrow` inference arm accepts a
     /// borrow whose inner type is still an unresolved `Type::Var`,
     /// deferring the tensor-or-carrier classification to subsequent
@@ -88,43 +126,24 @@ pub struct Subst {
     /// serialized: transient per-pass bookkeeping.
     #[serde(skip)]
     deferred_opaque_uses: Mutex<Vec<(TypeVar, DeferredOpaqueUse)>>,
-    /// chelis#942: positional `expand` has two legal output shapes until a
-    /// consumer fixes the result rank. The constraint stays attached to the
-    /// unresolved result variable so ordinary unification can select either
-    /// the same-rank replacement or rank-increasing insertion shape without
-    /// letting an unrelated tensor shape slip through. Reusable library
-    /// contexts serialize this obligation so a downstream checking unit can
-    /// make the first shape-bearing choice after a cache round trip.
-    deferred_expand_constraints: Mutex<HashMap<TypeVar, Vec<DeferredExpandConstraint>>>,
-    /// A `reshape` of an unresolved positional-expand result can itself have
-    /// candidate-dependent output dimensions. Keep the legal input/output
-    /// pairs attached to the reshape result variable until either side
-    /// selects one pair. This prevents a wildcard summary from forgetting
-    /// which reshape output belongs to the eventual expand shape.
-    deferred_reshape_constraints: Mutex<HashMap<TypeVar, Vec<DeferredReshapeConstraint>>>,
-}
-
-/// The two-shape obligation carried by an unresolved positional `expand`
-/// result (spec/04-type-system.md §4.7.2).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeferredExpandConstraint {
-    pub input_dims: Vec<Dim>,
-    pub input_prec: TensorPrec,
-    pub axis: usize,
-    pub size: Dim,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeferredReshapeConstraint {
-    input_var: TypeVar,
-    candidates: Vec<DeferredReshapeCandidate>,
-    output_requirements: Vec<Type>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeferredReshapeCandidate {
-    input: Type,
-    output: Type,
+    /// Current lexical generalization level. Serialized because a cloned
+    /// checking context must preserve in-flight transactional state.
+    #[serde(default)]
+    current_level: u32,
+    /// Ordered enter/leave/resume watermarks used to recover mint levels.
+    #[serde(default)]
+    level_transitions: Vec<LevelTransition>,
+    /// Sparse overrides for variables unified into an older scope.
+    #[serde(default)]
+    lowered_tvar_levels: UnordMap<TypeVar, u32>,
+    #[serde(default)]
+    lowered_dvar_levels: UnordMap<DimVar, u32>,
+    #[serde(default)]
+    lowered_rvar_levels: UnordMap<RankVar, u32>,
+    /// IDs below these floors came from an earlier persisted check and are
+    /// always level zero in the resumed check.
+    #[serde(default)]
+    resume_floors: VarWatermarks,
 }
 
 /// Which deferred use shape registered a ledger entry (determines the
@@ -141,6 +160,12 @@ impl Clone for Subst {
     fn clone(&self) -> Self {
         Subst {
             types: Mutex::new(self.types.lock().expect("subst.types poisoned").clone()),
+            tvar_restrictions: Mutex::new(
+                self.tvar_restrictions
+                    .lock()
+                    .expect("subst.tvar_restrictions poisoned")
+                    .clone(),
+            ),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
             ranks: Mutex::new(self.ranks.lock().expect("subst.ranks poisoned").clone()),
             deferred_borrow_vars: Mutex::new(
@@ -155,18 +180,12 @@ impl Clone for Subst {
                     .expect("subst.deferred_opaque_uses poisoned")
                     .clone(),
             ),
-            deferred_expand_constraints: Mutex::new(
-                self.deferred_expand_constraints
-                    .lock()
-                    .expect("subst.deferred_expand_constraints poisoned")
-                    .clone(),
-            ),
-            deferred_reshape_constraints: Mutex::new(
-                self.deferred_reshape_constraints
-                    .lock()
-                    .expect("subst.deferred_reshape_constraints poisoned")
-                    .clone(),
-            ),
+            current_level: self.current_level,
+            level_transitions: self.level_transitions.clone(),
+            lowered_tvar_levels: self.lowered_tvar_levels.clone(),
+            lowered_dvar_levels: self.lowered_dvar_levels.clone(),
+            lowered_rvar_levels: self.lowered_rvar_levels.clone(),
+            resume_floors: self.resume_floors,
         }
     }
 }
@@ -176,14 +195,198 @@ impl Subst {
         Self::default()
     }
 
+    pub(crate) fn current_level(&self) -> u32 {
+        self.current_level
+    }
+
+    /// Enter a lexical inference scope and record the first IDs minted there.
+    pub(crate) fn enter_level(&mut self, var_gen: &VarGen) -> LevelToken {
+        let parent_level = self.current_level;
+        let child_level = parent_level
+            .checked_add(1)
+            .expect("type-checker generalization level overflow");
+        self.current_level = child_level;
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Enter,
+            level: child_level,
+            watermarks: var_gen.watermarks(),
+        });
+        LevelToken {
+            parent_level,
+            child_level,
+        }
+    }
+
+    /// Leave the most recently entered lexical inference scope.
+    pub(crate) fn leave_level(&mut self, token: LevelToken, var_gen: &VarGen) {
+        assert_eq!(
+            self.current_level, token.child_level,
+            "generalization levels must be left in LIFO order"
+        );
+        self.current_level = token.parent_level;
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Leave,
+            level: token.parent_level,
+            watermarks: var_gen.watermarks(),
+        });
+    }
+
+    /// Normalize a persisted solver before it is reused for a new check.
+    /// Existing IDs become level-zero imports; only work performed after this
+    /// point contributes level metadata to the serialized context.
+    pub(crate) fn resume_for_new_check(&mut self, var_gen: &VarGen) {
+        assert_eq!(
+            self.current_level, 0,
+            "a persisted type environment cannot resume inside an inference scope"
+        );
+        let floors = var_gen.watermarks();
+        self.resume_floors = floors;
+        self.level_transitions.clear();
+        let stale_tvars = self
+            .lowered_tvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_tvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_tvars {
+            self.lowered_tvar_levels.remove(&var);
+        }
+        let stale_dvars = self
+            .lowered_dvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_dvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_dvars {
+            self.lowered_dvar_levels.remove(&var);
+        }
+        let stale_rvars = self
+            .lowered_rvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_rvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_rvars {
+            self.lowered_rvar_levels.remove(&var);
+        }
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Resume,
+            level: 0,
+            watermarks: floors,
+        });
+    }
+
+    fn mint_level(&self, id: u32, class: VarClass) -> u32 {
+        let floor = match class {
+            VarClass::Type => self.resume_floors.next_tvar,
+            VarClass::Dim => self.resume_floors.next_dvar,
+            VarClass::Rank => self.resume_floors.next_rvar,
+        };
+        if id < floor {
+            return 0;
+        }
+        let transition_index = self.level_transitions.partition_point(|transition| {
+            let watermark = match class {
+                VarClass::Type => transition.watermarks.next_tvar,
+                VarClass::Dim => transition.watermarks.next_dvar,
+                VarClass::Rank => transition.watermarks.next_rvar,
+            };
+            watermark <= id
+        });
+        transition_index
+            .checked_sub(1)
+            .map_or(0, |index| self.level_transitions[index].level)
+    }
+
+    pub(crate) fn level_of_tvar(&self, var: TypeVar) -> u32 {
+        self.lowered_tvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Type))
+    }
+
+    pub(crate) fn level_of_dvar(&self, var: DimVar) -> u32 {
+        self.lowered_dvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Dim))
+    }
+
+    pub(crate) fn level_of_rvar(&self, var: RankVar) -> u32 {
+        self.lowered_rvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Rank))
+    }
+
+    fn lower_tvar_to(&mut self, var: TypeVar, level: u32) {
+        if level < self.level_of_tvar(var) {
+            self.lowered_tvar_levels.insert(var, level);
+        }
+    }
+
+    fn lower_dvar_to(&mut self, var: DimVar, level: u32) {
+        if level < self.level_of_dvar(var) {
+            self.lowered_dvar_levels.insert(var, level);
+        }
+    }
+
+    fn lower_rvar_to(&mut self, var: RankVar, level: u32) {
+        if level < self.level_of_rvar(var) {
+            self.lowered_rvar_levels.insert(var, level);
+        }
+    }
+
+    /// Lower every variable reachable through the post-substitution type.
+    fn lower_type_to(&mut self, ty: &Type, level: u32) {
+        let ty = self.apply(ty);
+        for var in crate::env::free_tvars(&ty) {
+            self.lower_tvar_to(var, level);
+        }
+        for var in crate::env::free_dvars(&ty) {
+            self.lower_dvar_to(var, level);
+        }
+        for var in crate::env::free_rvars(&ty) {
+            self.lower_rvar_to(var, level);
+        }
+    }
+
+    fn lower_dim_to(&mut self, dim: &Dim, level: u32) {
+        match self.apply_dim(dim) {
+            Dim::Var(var) => self.lower_dvar_to(var, level),
+            Dim::Rank(var) => self.lower_rvar_to(var, level),
+            Dim::Lit(_) | Dim::Name(_) | Dim::Wildcard => {}
+        }
+    }
+
+    fn lower_ground_rank_to(&mut self, dims: &[Dim], level: u32) {
+        for dim in dims {
+            self.lower_dim_to(dim, level);
+        }
+    }
+
+    pub(crate) fn lower_type_to_current(&mut self, ty: &Type) {
+        self.lower_type_to(ty, self.current_level);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn level_metadata_counts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.level_transitions.len(),
+            self.lowered_tvar_levels.len(),
+            self.lowered_dvar_levels.len(),
+            self.lowered_rvar_levels.len(),
+        )
+    }
+
     /// Snapshot of the type-variable bindings (cloned out of the lock).
     /// Useful for serialization, tests, and read-only inspection.
-    pub fn types_snapshot(&self) -> HashMap<TypeVar, Type> {
+    pub fn types_snapshot(&self) -> UnordMap<TypeVar, Type> {
         self.types.lock().expect("subst.types poisoned").clone()
     }
 
     /// Snapshot of the dim-variable bindings.
-    pub fn dims_snapshot(&self) -> HashMap<DimVar, Dim> {
+    pub fn dims_snapshot(&self) -> UnordMap<DimVar, Dim> {
         self.dims.lock().expect("subst.dims poisoned").clone()
     }
 
@@ -197,12 +400,71 @@ impl Subst {
         self.dims.lock().expect("subst.dims poisoned").len()
     }
 
-    /// Record a new type-variable binding.
-    pub fn insert_type(&mut self, v: TypeVar, ty: Type) {
+    /// Record a type-variable binding through ordinary unification.
+    ///
+    /// This public mutation seam enforces occurs checks, semantic domains,
+    /// deferred constraints, and restriction transfer exactly like every
+    /// checker-created binding. It must never write the map directly.
+    pub fn insert_type(&mut self, v: TypeVar, ty: Type) -> Result<(), TypeError> {
+        unify(&Type::Var(v), &ty, self)
+    }
+
+    /// Publish a type binding after [`bind_tvar`] has validated the complete
+    /// transaction. Keeping the raw map write private prevents callers from
+    /// bypassing semantic domains through the public API.
+    fn record_validated_type_binding(&mut self, v: TypeVar, ty: Type) {
         self.types
             .lock()
             .expect("subst.types poisoned")
             .insert(v, ty);
+    }
+
+    /// Attach a semantic domain to an unresolved inference variable,
+    /// narrowing to the intersection with any domain it already carries.
+    ///
+    /// `spec/04-type-system.md` [04-DTYPE-2]: identifying two bounded
+    /// variables yields the intersection of their families, and an empty
+    /// intersection is a `PrecisionMismatch`. Narrowing here rather than
+    /// overwriting is what keeps a `Numeric` alias from widening a `Float`
+    /// variable back out to every numeric dtype.
+    pub(crate) fn narrow_tvar_restriction(
+        &self,
+        v: TypeVar,
+        restriction: TypeVarRestriction,
+    ) -> Result<(), TypeError> {
+        let mut restrictions = self
+            .tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned");
+        let narrowed = match restrictions.get(&v).copied() {
+            Some(existing) => merge_tvar_restrictions(existing, restriction)?,
+            None => restriction,
+        };
+        restrictions.insert(v, narrowed);
+        Ok(())
+    }
+
+    /// Restriction currently attached to an unresolved variable, if any.
+    pub fn tvar_restriction(&self, v: TypeVar) -> Option<TypeVarRestriction> {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .get(&v)
+            .copied()
+    }
+
+    fn tvar_restrictions_snapshot(&self) -> UnordMap<TypeVar, TypeVarRestriction> {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .clone()
+    }
+
+    fn remove_tvar_restriction(&self, v: TypeVar) {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .remove(&v);
     }
 
     /// Record a new dim-variable binding.
@@ -219,303 +481,6 @@ impl Subst {
             .lock()
             .expect("subst.ranks poisoned")
             .insert(r, dims);
-    }
-
-    /// Attach a positional-expand obligation to its unresolved result.
-    pub fn record_deferred_expand_constraint(
-        &self,
-        v: TypeVar,
-        constraint: DeferredExpandConstraint,
-    ) {
-        self.deferred_expand_constraints
-            .lock()
-            .expect("subst.deferred_expand_constraints poisoned")
-            .entry(v)
-            .or_default()
-            .push(constraint);
-    }
-
-    /// Whether `v` is an unresolved output carrying a positional-expand
-    /// obligation. Generalization uses this to keep one produced value
-    /// monomorphic: two consumers may not independently choose two shapes for
-    /// the same binding.
-    pub fn has_deferred_expand_constraint(&self, v: TypeVar) -> bool {
-        self.deferred_expand_constraints
-            .lock()
-            .expect("subst.deferred_expand_constraints poisoned")
-            .contains_key(&v)
-    }
-
-    /// Whether `v` carries any deferred shape relation and must therefore
-    /// remain monomorphic until that relation is selected.
-    pub fn has_deferred_shape_constraint(&self, v: TypeVar) -> bool {
-        self.has_deferred_expand_constraint(v)
-            || self
-                .deferred_reshape_constraints
-                .lock()
-                .expect("subst.deferred_reshape_constraints poisoned")
-                .contains_key(&v)
-    }
-
-    /// Materialize the context-free positional-expand default for `v`.
-    /// Existing-axis calls choose same-rank replacement; `axis == rank` has
-    /// no replacement form and therefore chooses trailing insertion. Every
-    /// obligation attached through alias unification must agree.
-    pub fn materialize_deferred_expand_default(
-        &mut self,
-        v: TypeVar,
-    ) -> Result<Option<Type>, TypeError> {
-        let constraints = self
-            .deferred_expand_constraints
-            .lock()
-            .expect("subst.deferred_expand_constraints poisoned")
-            .get(&v)
-            .cloned();
-        let Some(constraints) = constraints else {
-            return Ok(None);
-        };
-
-        // Aliasing through an ordinary consumer can attach more than one
-        // expand obligation to the same result variable. In that case the
-        // consumer has imposed equality between the results, so choose the
-        // first legal shape of the first producer that satisfies every
-        // obligation. Candidate order preserves the context-free rule:
-        // same-rank replacement precedes insertion when both are legal.
-        // Probe on a clone because a failed tensor unification may have
-        // already bound dimension variables before discovering a later
-        // mismatch; rejected candidates must not mutate the real state.
-        let mut first_rejection = None;
-        for candidate in constraints[0].candidate_types()? {
-            let mut trial = self.clone();
-            let compatible = constraints.iter().try_for_each(|constraint| {
-                let canonical = constraint.canonical_for_output(&candidate)?;
-                unify(&canonical, &candidate, &mut trial)
-            });
-            match compatible {
-                Ok(()) => {
-                    unify(&Type::Var(v), &candidate, self)?;
-                    return Ok(Some(self.apply(&candidate)));
-                }
-                Err(error) => {
-                    first_rejection.get_or_insert(error);
-                }
-            }
-        }
-        Err(first_rejection.expect("deferred expand constraint set has at least one candidate"))
-    }
-
-    /// Resolve a positional-expand result consumed by `reshape`.
-    /// Reshape does not preserve rank or individual dimensions, but it does
-    /// preserve element count. Derive the target separately for every legal
-    /// expand candidate because `shape(expanded, axis)` may itself distinguish
-    /// replacement from insertion or reject an out-of-bounds candidate. If
-    /// more than one candidate survives, retain their input/output relation
-    /// on a fresh reshape result variable so either side can select the same
-    /// candidate later.
-    pub fn resolve_deferred_expand_for_reshape<F>(
-        &mut self,
-        input_var: TypeVar,
-        output_var: TypeVar,
-        mut target_dims_for_candidate: F,
-    ) -> Result<Option<Type>, TypeError>
-    where
-        F: FnMut(&[Dim]) -> Result<Vec<Dim>, TypeError>,
-    {
-        let constraints = self
-            .deferred_expand_constraints
-            .lock()
-            .expect("subst.deferred_expand_constraints poisoned")
-            .get(&input_var)
-            .cloned();
-        let Some(constraints) = constraints else {
-            return Ok(None);
-        };
-
-        let mut first_rejection = None;
-        let mut compatible_candidates = Vec::new();
-        for candidate in constraints[0].candidate_types()? {
-            let Type::Tensor(candidate_dims, _) = &candidate else {
-                unreachable!("deferred expand candidates are tensors");
-            };
-            let target_dims = match target_dims_for_candidate(candidate_dims) {
-                Ok(target_dims) => target_dims,
-                Err(error) => {
-                    first_rejection.get_or_insert(error);
-                    continue;
-                }
-            };
-            if self.static_dim_products_match(candidate_dims, &target_dims) == Some(false) {
-                let candidate_numel = self.static_dim_product(candidate_dims);
-                let target_numel = self.static_dim_product(&target_dims);
-                first_rejection.get_or_insert_with(|| TypeError {
-                    kind: TypeErrorKind::DimensionMismatch,
-                    message: match (target_numel, candidate_numel) {
-                        (Some(target), Some(candidate)) => format!(
-                            "reshape target has {target} elements, which matches no legal expand \
-                             output shape (candidate has {candidate} elements)"
-                        ),
-                        _ => "reshape target element count matches no legal expand output shape"
-                            .to_string(),
-                    },
-                });
-                continue;
-            }
-
-            let mut trial = self.clone();
-            let compatible = constraints.iter().try_for_each(|constraint| {
-                let canonical = constraint.canonical_for_output(&candidate)?;
-                unify(&canonical, &candidate, &mut trial)
-            });
-            if let Err(error) = compatible {
-                first_rejection.get_or_insert(error);
-                continue;
-            }
-            compatible_candidates.push((candidate, target_dims));
-        }
-        match compatible_candidates.as_slice() {
-            [(candidate, target_dims)] => {
-                let Type::Tensor(_, precision) = candidate else {
-                    unreachable!("deferred expand candidates are tensors");
-                };
-                unify(&Type::Var(input_var), candidate, self)?;
-                Ok(Some(self.apply(&Type::Tensor(
-                    target_dims.clone(),
-                    precision.clone(),
-                ))))
-            }
-            [] => Err(first_rejection.expect("every deferred expand candidate was rejected")),
-            candidates => {
-                let candidates = candidates
-                    .iter()
-                    .map(|(input, target_dims)| {
-                        let Type::Tensor(_, precision) = input else {
-                            unreachable!("deferred expand candidates are tensors");
-                        };
-                        DeferredReshapeCandidate {
-                            input: input.clone(),
-                            output: Type::Tensor(target_dims.clone(), precision.clone()),
-                        }
-                    })
-                    .collect();
-                self.deferred_reshape_constraints
-                    .lock()
-                    .expect("subst.deferred_reshape_constraints poisoned")
-                    .entry(output_var)
-                    .or_default()
-                    .push(DeferredReshapeConstraint {
-                        input_var,
-                        candidates,
-                        output_requirements: Vec::new(),
-                    });
-                Ok(Some(Type::Var(output_var)))
-            }
-        }
-    }
-
-    /// Compose a `reshape` over the output of an earlier unresolved
-    /// `reshape`, retaining the original expand candidate that owns each
-    /// intermediate shape.
-    pub fn resolve_deferred_reshape_for_reshape<F>(
-        &mut self,
-        input_output_var: TypeVar,
-        output_var: TypeVar,
-        mut target_dims_for_candidate: F,
-    ) -> Result<Option<Type>, TypeError>
-    where
-        F: FnMut(&[Dim]) -> Result<Vec<Dim>, TypeError>,
-    {
-        let constraints = self
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned")
-            .get(&input_output_var)
-            .cloned();
-        let Some(constraints) = constraints else {
-            return Ok(None);
-        };
-
-        let mut pending = Vec::new();
-        let mut selected = Vec::new();
-        for constraint in constraints {
-            let (compatible, mut first_rejection) =
-                self.deferred_reshape_candidates(&constraint, None);
-            let mut derived = Vec::new();
-            for candidate in compatible {
-                let Type::Tensor(input_dims, precision) = &candidate.output else {
-                    unreachable!("deferred reshape candidates are tensors");
-                };
-                let precision = precision.clone();
-                let target_dims = match target_dims_for_candidate(input_dims) {
-                    Ok(target_dims) => target_dims,
-                    Err(error) => {
-                        first_rejection.get_or_insert(error);
-                        continue;
-                    }
-                };
-                if self.static_dim_products_match(input_dims, &target_dims) == Some(false) {
-                    first_rejection.get_or_insert_with(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "reshape target element count matches no legal deferred reshape \
-                                  input shape"
-                            .to_string(),
-                    });
-                    continue;
-                }
-                derived.push((candidate, Type::Tensor(target_dims, precision)));
-            }
-
-            match derived.as_slice() {
-                [] => {
-                    return Err(first_rejection.unwrap_or_else(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "reshape target matches no legal deferred input shape".to_string(),
-                    }));
-                }
-                [(candidate, output)] => {
-                    selected.push((
-                        constraint.input_var,
-                        candidate.input.clone(),
-                        candidate.output.clone(),
-                        output.clone(),
-                    ));
-                }
-                _ => {
-                    pending.push(DeferredReshapeConstraint {
-                        input_var: constraint.input_var,
-                        candidates: derived
-                            .into_iter()
-                            .map(|(candidate, output)| DeferredReshapeCandidate {
-                                input: candidate.input,
-                                output,
-                            })
-                            .collect(),
-                        output_requirements: Vec::new(),
-                    });
-                }
-            }
-        }
-
-        // Install pending relations before singleton selection so a concrete
-        // result also constrains every relation attached to the new output.
-        // Work on a clone so any rejected candidate leaves the original
-        // substitution and its serialized obligations unchanged.
-        let mut trial = self.clone();
-        if !pending.is_empty() {
-            trial
-                .deferred_reshape_constraints
-                .lock()
-                .expect("subst.deferred_reshape_constraints poisoned")
-                .entry(output_var)
-                .or_default()
-                .extend(pending);
-        }
-        for (root_var, root_input, intermediate, output) in selected {
-            unify(&Type::Var(input_output_var), &intermediate, &mut trial)?;
-            unify(&Type::Var(root_var), &root_input, &mut trial)?;
-            unify(&Type::Var(output_var), &output, &mut trial)?;
-        }
-        *self = trial;
-        Ok(Some(self.apply(&Type::Var(output_var))))
     }
 
     pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i128> {
@@ -580,217 +545,8 @@ impl Subst {
                 && rhs_factors.iter().all(|factor| *factor == 1),
         )
     }
-
-    fn has_deferred_reshape_output(&self, output_var: TypeVar) -> bool {
-        self.deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned")
-            .contains_key(&output_var)
-    }
-
-    fn transfer_deferred_reshape_alias(&self, from: TypeVar, to: TypeVar) {
-        let mut constraints = self
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned");
-        if let Some(output_constraints) = constraints.remove(&from) {
-            constraints
-                .entry(to)
-                .or_default()
-                .extend(output_constraints);
-        }
-        for output_constraints in constraints.values_mut() {
-            for constraint in output_constraints {
-                if constraint.input_var == from {
-                    constraint.input_var = to;
-                }
-            }
-        }
-    }
-
-    fn deferred_reshape_candidates(
-        &self,
-        constraint: &DeferredReshapeConstraint,
-        input_requirement: Option<&Type>,
-    ) -> (Vec<DeferredReshapeCandidate>, Option<TypeError>) {
-        let current_input = self.apply(&Type::Var(constraint.input_var));
-        let current_input = (!matches!(current_input, Type::Var(_))).then_some(current_input);
-        let mut first_rejection = None;
-        let mut compatible = Vec::new();
-        for candidate in &constraint.candidates {
-            let mut trial = self.clone();
-            let result = (|| {
-                if let Some(input) = current_input.as_ref() {
-                    unify(&candidate.input, input, &mut trial)?;
-                }
-                if let Some(input) = input_requirement {
-                    unify(&candidate.input, input, &mut trial)?;
-                }
-                for output in &constraint.output_requirements {
-                    unify(&candidate.output, output, &mut trial)?;
-                }
-                Ok(())
-            })();
-            match result {
-                Ok(()) => compatible.push(candidate.clone()),
-                Err(error) => {
-                    first_rejection.get_or_insert(error);
-                }
-            }
-        }
-        (compatible, first_rejection)
-    }
-
-    /// Add an observed type requirement to a deferred reshape output. If it
-    /// selects one legal pair, bind both sides. If more than one pair still
-    /// fits, retain the requirement without binding the result to a wildcard
-    /// summary that could erase the dependency.
-    fn constrain_deferred_reshape_output(
-        &mut self,
-        output_var: TypeVar,
-        requirement: &Type,
-    ) -> Result<bool, TypeError> {
-        let mut trial = self.clone();
-        let constrained =
-            trial.constrain_deferred_reshape_output_in_place(output_var, requirement)?;
-        if constrained {
-            *self = trial;
-        }
-        Ok(constrained)
-    }
-
-    fn constrain_deferred_reshape_output_in_place(
-        &mut self,
-        output_var: TypeVar,
-        requirement: &Type,
-    ) -> Result<bool, TypeError> {
-        let constraints = self
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned")
-            .remove(&output_var);
-        let Some(constraints) = constraints else {
-            return Ok(false);
-        };
-
-        let mut pending = Vec::new();
-        for mut constraint in constraints {
-            constraint.output_requirements.push(requirement.clone());
-            let (compatible, rejection) = self.deferred_reshape_candidates(&constraint, None);
-            match compatible.as_slice() {
-                [] => {
-                    return Err(rejection.unwrap_or_else(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "reshape output matches no legal deferred expand shape"
-                            .to_string(),
-                    }));
-                }
-                [candidate] => {
-                    for output in &constraint.output_requirements {
-                        unify(&candidate.output, output, self)?;
-                    }
-                    unify(&Type::Var(output_var), &candidate.output, self)?;
-                    unify(&Type::Var(constraint.input_var), &candidate.input, self)?;
-                }
-                _ => pending.push(constraint),
-            }
-        }
-        if !pending.is_empty() {
-            self.deferred_reshape_constraints
-                .lock()
-                .expect("subst.deferred_reshape_constraints poisoned")
-                .entry(output_var)
-                .or_default()
-                .extend(pending);
-        }
-        Ok(true)
-    }
-
-    fn take_deferred_reshapes_for_input(
-        &self,
-        input_var: TypeVar,
-    ) -> Vec<(TypeVar, DeferredReshapeConstraint)> {
-        let mut constraints = self
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned");
-        let mut dependent = Vec::new();
-        for (output_var, output_constraints) in constraints.iter_mut() {
-            let all = std::mem::take(output_constraints);
-            for constraint in all {
-                if constraint.input_var == input_var {
-                    dependent.push((*output_var, constraint));
-                } else {
-                    output_constraints.push(constraint);
-                }
-            }
-        }
-        constraints.retain(|_, output_constraints| !output_constraints.is_empty());
-        dependent
-    }
-
-    /// Refine every reshape result that depends on a newly selected expand
-    /// input. A concrete insertion/replacement shape normally leaves exactly
-    /// one legal pair; an intentionally wildcard input keeps the relation.
-    fn resolve_deferred_reshapes_for_input(
-        &mut self,
-        input_var: TypeVar,
-        input: &Type,
-    ) -> Result<(), TypeError> {
-        let constraints = self.take_deferred_reshapes_for_input(input_var);
-        for (output_var, constraint) in constraints {
-            let (compatible, rejection) =
-                self.deferred_reshape_candidates(&constraint, Some(input));
-            match compatible.as_slice() {
-                [] => {
-                    return Err(rejection.unwrap_or_else(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "selected expand shape has no legal reshape output".to_string(),
-                    }));
-                }
-                [candidate] => {
-                    unify(&candidate.input, input, self)?;
-                    for output in &constraint.output_requirements {
-                        unify(&candidate.output, output, self)?;
-                    }
-                    unify(&Type::Var(output_var), &candidate.output, self)?;
-                }
-                _ => {
-                    self.deferred_reshape_constraints
-                        .lock()
-                        .expect("subst.deferred_reshape_constraints poisoned")
-                        .entry(output_var)
-                        .or_default()
-                        .push(constraint);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Resolve every positional-expand result whose shape remained
-    /// unconstrained through the complete inference schedule. Consumers must
-    /// get the first opportunity to select either legal shape; only the
-    /// program freeze point invokes this fallback so no unresolved result can
-    /// escape into checked annotations.
-    pub fn materialize_deferred_expand_defaults(&mut self) -> Result<(), TypeError> {
-        let vars = self
-            .deferred_expand_constraints
-            .lock()
-            .expect("subst.deferred_expand_constraints poisoned")
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        for var in vars {
-            if self.has_deferred_expand_constraint(var) {
-                self.materialize_deferred_expand_default(var)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Snapshot of the rank-variable bindings.
-    pub fn ranks_snapshot(&self) -> HashMap<RankVar, Vec<Dim>> {
+    pub fn ranks_snapshot(&self) -> UnordMap<RankVar, Vec<Dim>> {
         self.ranks.lock().expect("subst.ranks poisoned").clone()
     }
 
@@ -961,6 +717,15 @@ impl Subst {
                 let args = args.iter().map(|a| self.apply(a)).collect();
                 Type::Adt(name.clone(), args)
             }
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name.clone(),
+                args.iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.apply(ty)),
+                        NominalArg::Dimension(dim) => NominalArg::Dimension(self.apply_dim(dim)),
+                    })
+                    .collect(),
+            ),
             Type::Tuple(ts) => {
                 let ts = ts.iter().map(|t| self.apply(t)).collect();
                 Type::Tuple(ts)
@@ -993,9 +758,9 @@ impl Subst {
     fn apply_excluding(
         &self,
         ty: &Type,
-        quantified_tvars: &std::collections::HashSet<TypeVar>,
-        quantified_dvars: &std::collections::HashSet<DimVar>,
-        quantified_rvars: &std::collections::HashSet<RankVar>,
+        quantified_tvars: &chelis_unord::UnordSet<TypeVar>,
+        quantified_dvars: &chelis_unord::UnordSet<DimVar>,
+        quantified_rvars: &chelis_unord::UnordSet<RankVar>,
     ) -> Type {
         match ty {
             Type::Var(v) if quantified_tvars.contains(v) => ty.clone(),
@@ -1081,6 +846,28 @@ impl Subst {
                     })
                     .collect(),
             ),
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name.clone(),
+                args.iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.apply_excluding(
+                            ty,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )),
+                        NominalArg::Dimension(Dim::Var(var)) if quantified_dvars.contains(var) => {
+                            argument.clone()
+                        }
+                        NominalArg::Dimension(Dim::Rank(var)) if quantified_rvars.contains(var) => {
+                            argument.clone()
+                        }
+                        NominalArg::Dimension(dim) => {
+                            NominalArg::Dimension(self.apply_dim_excluding(dim, quantified_dvars))
+                        }
+                    })
+                    .collect(),
+            ),
             Type::Tuple(items) => Type::Tuple(
                 items
                     .iter()
@@ -1101,7 +888,7 @@ impl Subst {
     fn resolve_tvar_excluding(
         &self,
         start: TypeVar,
-        quantified: &std::collections::HashSet<TypeVar>,
+        quantified: &chelis_unord::UnordSet<TypeVar>,
     ) -> Type {
         let map = self.types.lock().expect("subst.types poisoned");
         let mut current = start;
@@ -1120,11 +907,7 @@ impl Subst {
         Type::Var(current)
     }
 
-    fn apply_dim_excluding(
-        &self,
-        dim: &Dim,
-        quantified: &std::collections::HashSet<DimVar>,
-    ) -> Dim {
+    fn apply_dim_excluding(&self, dim: &Dim, quantified: &chelis_unord::UnordSet<DimVar>) -> Dim {
         let Dim::Var(start) = dim else {
             return dim.clone();
         };
@@ -1148,7 +931,7 @@ impl Subst {
     fn resolve_rvar_excluding(
         &self,
         start: RankVar,
-        quantified: &std::collections::HashSet<RankVar>,
+        quantified: &chelis_unord::UnordSet<RankVar>,
     ) -> Vec<Dim> {
         let map = self.ranks.lock().expect("subst.ranks poisoned");
         let mut current = start;
@@ -1202,19 +985,167 @@ impl Subst {
     }
 
     /// Compose: apply `other` to all bindings in self, then merge.
-    pub fn compose(&mut self, other: &Subst) {
+    ///
+    /// Composition is transactional because independent substitutions can
+    /// carry a binding and a semantic restriction for the same variable.
+    /// Restrictions from both operands are canonicalized through the merged
+    /// binding graph; a forbidden concrete resolution rejects the complete
+    /// compose and leaves `self` unchanged.
+    pub fn compose(&mut self, other: &Subst) -> Result<(), TypeError> {
+        let mut trial = self.clone();
+        trial.compose_bindings(other);
+
+        let mut restrictions = self.tvar_restrictions_snapshot();
+        for (var, incoming) in other.tvar_restrictions_snapshot().into_sorted() {
+            let narrowed = match restrictions.get(&var).copied() {
+                Some(existing) => merge_tvar_restrictions(existing, incoming)?,
+                None => incoming,
+            };
+            restrictions.insert(var, narrowed);
+        }
+
+        trial
+            .tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .clear();
+        for (source, restriction) in restrictions.into_sorted() {
+            let resolved = trial.resolve_tvar(source);
+            ensure_tvar_restriction(restriction, &resolved)?;
+            if let Type::Var(target) = resolved {
+                trial.narrow_tvar_restriction(target, restriction)?;
+            }
+        }
+
+        *self = trial;
+        Ok(())
+    }
+
+    /// Project semantic domains from an inferred implementation type onto a
+    /// structurally corresponding declared type.
+    ///
+    /// Most declared definitions use ordinary unification, which transfers
+    /// restrictions while binding matching variables. A small set of exact
+    /// stdlib contracts deliberately retains its declared type when unrelated
+    /// shape relations are not yet procedurally inferable. This projection
+    /// preserves the semantic domains learned while checking those bodies
+    /// without weakening them into an unconstrained exported function value.
+    /// The operation is transactional so a later conflicting slot cannot
+    /// publish an earlier partial transfer.
+    pub(crate) fn project_tvar_restrictions(
+        &mut self,
+        inferred: &Type,
+        declared: &Type,
+    ) -> Result<(), TypeError> {
+        let mut trial = self.clone();
+        trial.project_tvar_restrictions_inner(inferred, declared)?;
+        *self = trial;
+        Ok(())
+    }
+
+    fn project_tvar_restrictions_inner(
+        &mut self,
+        inferred: &Type,
+        declared: &Type,
+    ) -> Result<(), TypeError> {
+        let inferred = self.apply(inferred);
+        let declared = self.apply(declared);
+        match (&inferred, &declared) {
+            (Type::Var(source), target) => {
+                let Some(restriction) = self.tvar_restriction(*source) else {
+                    return Ok(());
+                };
+                ensure_tvar_restriction(restriction, target)?;
+                if let Type::Var(target) = target {
+                    self.narrow_tvar_restriction(*target, restriction)?;
+                }
+                Ok(())
+            }
+            (Type::Fn(inferred_args, inferred_ret), Type::Fn(declared_args, declared_ret))
+                if inferred_args.len() == declared_args.len() =>
+            {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                self.project_tvar_restrictions_inner(inferred_ret, declared_ret)
+            }
+            (Type::Ref(inferred), Type::Ref(declared)) => {
+                self.project_tvar_restrictions_inner(inferred, declared)
+            }
+            (
+                Type::Tensor(inferred_dims, inferred_prec),
+                Type::Tensor(declared_dims, declared_prec),
+            ) if inferred_dims.len() == declared_dims.len() => {
+                let inferred = match inferred_prec {
+                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                    TensorPrec::Var(var) => Type::Var(*var),
+                };
+                let declared = match declared_prec {
+                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                    TensorPrec::Var(var) => Type::Var(*var),
+                };
+                self.project_tvar_restrictions_inner(&inferred, &declared)
+            }
+            (Type::Adt(inferred_name, inferred_args), Type::Adt(declared_name, declared_args))
+                if inferred_name == declared_name && inferred_args.len() == declared_args.len() =>
+            {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                Ok(())
+            }
+            (
+                Type::KindedAdt(inferred_name, inferred_args),
+                Type::KindedAdt(declared_name, declared_args),
+            ) if inferred_name == declared_name && inferred_args.len() == declared_args.len() => {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    if let (NominalArg::Type(inferred), NominalArg::Type(declared)) =
+                        (inferred, declared)
+                    {
+                        self.project_tvar_restrictions_inner(inferred, declared)?;
+                    }
+                }
+                Ok(())
+            }
+            (Type::Tuple(inferred), Type::Tuple(declared)) if inferred.len() == declared.len() => {
+                for (inferred, declared) in inferred.iter().zip(declared) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn compose_bindings(&mut self, other: &Subst) {
         // Note: `other.apply` / `other.apply_dim` lock `other`'s maps;
-        // we must not be holding a lock on `other` simultaneously
-        // (which we never do — `self` and `other` are distinct).
+        // we must not be holding a lock on `other` simultaneously. This
+        // helper runs on a clone, so it is distinct even for `s.compose(&s)`.
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
-            for val in self_types.values_mut() {
+            let vars = self_types
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_types
+                    .get_mut(&var)
+                    .expect("collected type variable remains present");
                 *val = other.apply(val);
             }
         }
         {
             let mut self_dims = self.dims.lock().expect("subst.dims poisoned");
-            for val in self_dims.values_mut() {
+            let vars = self_dims
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_dims
+                    .get_mut(&var)
+                    .expect("collected dimension variable remains present");
                 *val = other.apply_dim(val);
             }
         }
@@ -1224,7 +1155,15 @@ impl Subst {
             // silently drop rank substitutions through a compose — a Tier-3
             // footgun since ranks are now load-bearing.
             let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
-            for val in self_ranks.values_mut() {
+            let vars = self_ranks
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_ranks
+                    .get_mut(&var)
+                    .expect("collected rank variable remains present");
                 *val = val.iter().map(|d| other.apply_dim(d)).collect();
             }
         }
@@ -1233,19 +1172,19 @@ impl Subst {
         let other_ranks = other.ranks_snapshot();
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
-            for (k, v) in other_types {
+            for (k, v) in other_types.into_sorted() {
                 self_types.entry(k).or_insert(v);
             }
         }
         {
             let mut self_dims = self.dims.lock().expect("subst.dims poisoned");
-            for (k, v) in other_dims {
+            for (k, v) in other_dims.into_sorted() {
                 self_dims.entry(k).or_insert(v);
             }
         }
         {
             let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
-            for (k, v) in other_ranks {
+            for (k, v) in other_ranks.into_sorted() {
                 self_ranks.entry(k).or_insert(v);
             }
         }
@@ -1255,79 +1194,26 @@ impl Subst {
     }
 }
 
-impl DeferredExpandConstraint {
-    fn canonical_for_output(&self, output: &Type) -> Result<Type, TypeError> {
-        let Type::Tensor(out_dims, _) = output else {
-            return Err(TypeError {
-                kind: TypeErrorKind::TypeMismatch,
-                message: format!("expand expects tensor output, got {output}"),
-            });
-        };
-
-        let mut expected = self.input_dims.clone();
-        if out_dims.len() == self.input_dims.len() + 1 {
-            expected.insert(self.axis, self.size.clone());
-        } else if out_dims.len() == self.input_dims.len() {
-            if self.axis >= self.input_dims.len() {
-                return Err(TypeError {
-                    kind: TypeErrorKind::DimensionMismatch,
-                    message: format!(
-                        "expand axis {} is out of bounds for rank {} tensor",
-                        self.axis,
-                        self.input_dims.len(),
-                    ),
-                });
-            }
-            expected[self.axis] = self.size.clone();
-        } else {
-            return Err(TypeError {
-                kind: TypeErrorKind::DimensionMismatch,
-                message: format!(
-                    "expand output rank {} must equal input rank {} or {}",
-                    out_dims.len(),
-                    self.input_dims.len(),
-                    self.input_dims.len() + 1,
-                ),
-            });
-        }
-        Ok(Type::Tensor(expected, self.input_prec.clone()))
-    }
-
-    fn default_type(&self) -> Result<Type, TypeError> {
-        let mut dims = self.input_dims.clone();
-        if self.axis == dims.len() {
-            dims.insert(self.axis, self.size.clone());
-        } else if self.axis < dims.len() {
-            dims[self.axis] = self.size.clone();
-        } else {
-            return Err(TypeError {
-                kind: TypeErrorKind::DimensionMismatch,
-                message: format!(
-                    "expand insert axis {} is out of bounds for rank {} tensor",
-                    self.axis,
-                    dims.len(),
-                ),
-            });
-        }
-        Ok(Type::Tensor(dims, self.input_prec.clone()))
-    }
-
-    /// Legal output candidates in context-free preference order. An existing
-    /// positional axis defaults to replacement but may be selected as an
-    /// insertion by an equal-shape consumer; a trailing axis has only the
-    /// insertion form.
-    fn candidate_types(&self) -> Result<Vec<Type>, TypeError> {
-        let default = self.default_type()?;
-        let mut candidates = vec![default];
-        if self.axis < self.input_dims.len() {
-            let mut inserted = self.input_dims.clone();
-            inserted.insert(self.axis, self.size.clone());
-            candidates.push(Type::Tensor(inserted, self.input_prec.clone()));
-        }
-        Ok(candidates)
-    }
+/// Combine the bounds of two variables being identified.
+///
+/// [04-DTYPE-2] makes this the family intersection rather than equality: a
+/// `Numeric`-bounded variable may legitimately be identified with a `Float`
+/// one, and the result admits only floats. Only `Float` against `Int` is
+/// empty, and an empty intersection is a `PrecisionMismatch` naming both
+/// families.
+fn merge_tvar_restrictions(
+    existing: TypeVarRestriction,
+    incoming: TypeVarRestriction,
+) -> Result<TypeVarRestriction, TypeError> {
+    existing.intersect(incoming).ok_or_else(|| TypeError {
+        kind: TypeErrorKind::PrecisionMismatch,
+        message: format!(
+            "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
+            existing.family_name(),
+            incoming.family_name()
+        ),
+    })
 }
-
 /// Unify two types, producing a substitution or a type error.
 pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     let t1 = subst.apply(t1);
@@ -1439,6 +1325,39 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             }
             for (a1, a2) in args1.iter().zip(args2.iter()) {
                 unify(a1, a2, subst)?;
+            }
+            Ok(())
+        }
+        (Type::KindedAdt(n1, args1), Type::KindedAdt(n2, args2)) => {
+            if n1 != n2 {
+                return Err(TypeError {
+                    kind: TypeErrorKind::TypeMismatch,
+                    message: format!("type mismatch: {n1} vs {n2}"),
+                });
+            }
+            if args1.len() != args2.len() {
+                return Err(TypeError {
+                    kind: TypeErrorKind::ArityMismatch,
+                    message: format!(
+                        "ADT type argument count mismatch for {n1}: {} vs {}",
+                        args1.len(),
+                        args2.len()
+                    ),
+                });
+            }
+            for (a1, a2) in args1.iter().zip(args2) {
+                match (a1, a2) {
+                    (NominalArg::Type(t1), NominalArg::Type(t2)) => unify(t1, t2, subst)?,
+                    (NominalArg::Dimension(d1), NominalArg::Dimension(d2)) => {
+                        unify_dim(d1, d2, subst)?
+                    }
+                    _ => {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::TypeMismatch,
+                            message: format!("nominal argument kind mismatch for {n1}"),
+                        });
+                    }
+                }
             }
             Ok(())
         }
@@ -1572,41 +1491,59 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
         });
     }
 
-    if !matches!(ty, Type::Var(_) | Type::Error(_))
-        && subst.has_deferred_reshape_output(v)
-        && subst.constrain_deferred_reshape_output(v, ty)?
-    {
-        return Ok(());
+    let source_restriction = subst.tvar_restriction(v);
+    let target_restriction = match ty {
+        Type::Var(target) => subst.tvar_restriction(*target),
+        _ => None,
+    };
+    // Both endpoints keep their bound: the identified variable admits only
+    // the dtypes both families admit ([04-DTYPE-2]). `.or()` would silently
+    // discard the narrower of the two.
+    let merged_restriction = match (source_restriction, target_restriction) {
+        (Some(source), Some(target)) => Some(merge_tvar_restrictions(source, target)?),
+        (found, None) | (None, found) => found,
+    };
+    if let Some(restriction) = source_restriction {
+        ensure_tvar_restriction(restriction, ty)?;
     }
 
-    let constraints = subst
-        .deferred_expand_constraints
-        .lock()
-        .expect("subst.deferred_expand_constraints poisoned")
-        .remove(&v);
-    if let Some(constraints) = constraints {
-        if let Type::Var(target) = ty {
-            subst
-                .deferred_expand_constraints
-                .lock()
-                .expect("subst.deferred_expand_constraints poisoned")
-                .entry(*target)
-                .or_default()
-                .extend(constraints);
-        } else {
-            for constraint in constraints {
-                let canonical = constraint.canonical_for_output(ty)?;
-                unify(&canonical, ty, subst)?;
-            }
-        }
-    }
-    subst.insert_type(v, ty.clone());
-    if let Type::Var(target) = ty {
-        subst.transfer_deferred_reshape_alias(v, *target);
-    } else {
-        subst.resolve_deferred_reshapes_for_input(v, ty)?;
+    // An older variable that becomes bound to a younger composite makes all
+    // reachable variables part of the older scope.
+    let target_level = subst.level_of_tvar(v);
+    subst.lower_type_to(ty, target_level);
+    subst.record_validated_type_binding(v, ty.clone());
+    subst.remove_tvar_restriction(v);
+    if let (Some(restriction), Type::Var(target)) = (merged_restriction, ty) {
+        subst.narrow_tvar_restriction(*target, restriction)?;
     }
     Ok(())
+}
+
+/// Check one instantiation of a bounded type variable ([04-DTYPE-2]).
+///
+/// An unresolved variable and a witnessed error both pass: the first is
+/// narrowed instead by [`Subst::narrow_tvar_restriction`], and the second
+/// already owns a diagnostic.
+fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result<(), TypeError> {
+    let family = restriction.family_name();
+    let gloss = restriction.membership_gloss();
+    match ty {
+        Type::Var(_) | Type::Error(_) => Ok(()),
+        Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
+        Type::Prim(prim) => Err(TypeError {
+            kind: TypeErrorKind::PrecisionMismatch,
+            message: format!(
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
+                prim.name()
+            ),
+        }),
+        other => Err(TypeError {
+            kind: TypeErrorKind::PrecisionMismatch,
+            message: format!(
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
+            ),
+        }),
+    }
 }
 
 fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
@@ -1621,6 +1558,8 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
             message: format!("infinite dimension: d{} occurs in {dim:?}", v.0),
         });
     }
+    let target_level = subst.level_of_dvar(v);
+    subst.lower_dim_to(dim, target_level);
     subst.insert_dim(v, dim.clone());
     Ok(())
 }
@@ -1873,6 +1812,8 @@ fn unify_row_against_row(d1: &[Dim], d2: &[Dim], subst: &mut Subst) -> Result<()
         match (a, b) {
             (Dim::Rank(r1), Dim::Rank(r2)) => {
                 if r1 != r2 {
+                    let target_level = subst.level_of_rvar(*r1);
+                    subst.lower_rvar_to(*r2, target_level);
                     subst.insert_rank(*r1, vec![Dim::Rank(*r2)]);
                 }
             }
@@ -1906,6 +1847,8 @@ fn bind_rvar(r: RankVar, dims: &[Dim], subst: &mut Subst) -> Result<(), TypeErro
             ),
         });
     }
+    let target_level = subst.level_of_rvar(r);
+    subst.lower_ground_rank_to(dims, target_level);
     subst.insert_rank(r, dims.to_vec());
     Ok(())
 }
@@ -1927,6 +1870,9 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
             TensorPrec::Var(v2) => *v2 == v,
         },
         Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(|ty| occurs_in(v, ty, subst))),
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),
         Type::Prim(_) | Type::Unit | Type::Error(_) => false,
     }
@@ -1943,6 +1889,579 @@ mod tests {
 
     fn var_gen() -> VarGen {
         VarGen::default()
+    }
+
+    #[test]
+    fn level_transitions_restore_parent_mint_levels_for_every_id_class() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+
+        let child = subst.enter_level(&vg);
+        let child_t = vg.fresh_tvar();
+        let child_d = vg.fresh_dvar();
+        let child_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(child_t), 1);
+        assert_eq!(subst.level_of_dvar(child_d), 1);
+        assert_eq!(subst.level_of_rvar(child_r), 1);
+
+        subst.leave_level(child, &vg);
+        let parent_t = vg.fresh_tvar();
+        let parent_d = vg.fresh_dvar();
+        let parent_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(parent_t), 0);
+        assert_eq!(subst.level_of_dvar(parent_d), 0);
+        assert_eq!(subst.level_of_rvar(parent_r), 0);
+
+        let sibling = subst.enter_level(&vg);
+        let sibling_t = vg.fresh_tvar();
+        let sibling_d = vg.fresh_dvar();
+        let sibling_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(sibling_t), 1);
+        assert_eq!(subst.level_of_dvar(sibling_d), 1);
+        assert_eq!(subst.level_of_rvar(sibling_r), 1);
+        subst.leave_level(sibling, &vg);
+        assert_eq!(subst.current_level(), 0);
+        assert_eq!(subst.level_of_tvar(child_t), 1);
+        assert_eq!(subst.level_of_dvar(child_d), 1);
+        assert_eq!(subst.level_of_rvar(child_r), 1);
+        assert_eq!(subst.level_of_tvar(parent_t), 0);
+        assert_eq!(subst.level_of_dvar(parent_d), 0);
+        assert_eq!(subst.level_of_rvar(parent_r), 0);
+    }
+
+    #[test]
+    fn binding_older_type_to_younger_composite_lowers_every_reachable_class() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older = vg.fresh_tvar();
+        let mut env = crate::env::Env::new();
+        env.bind("outer".to_string(), Scheme::mono(Type::Var(older)));
+        let inner = subst.enter_level(&vg);
+        let younger_t = vg.fresh_tvar();
+        let younger_d = vg.fresh_dvar();
+        let younger_r = vg.fresh_rvar();
+
+        let composite = Type::Tuple(vec![
+            Type::Var(younger_t),
+            Type::Tensor(
+                vec![Dim::Var(younger_d), Dim::Rank(younger_r)],
+                TensorPrec::Var(younger_t),
+            ),
+        ]);
+        unify(&Type::Var(older), &composite, &mut subst).expect("composite bind");
+
+        assert_eq!(subst.level_of_tvar(younger_t), 0);
+        assert_eq!(subst.level_of_dvar(younger_d), 0);
+        assert_eq!(subst.level_of_rvar(younger_r), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(&composite, &subst);
+        assert!(escaped.tvars.is_empty());
+        assert!(escaped.dvars.is_empty());
+        assert!(escaped.rvars.is_empty());
+    }
+
+    #[test]
+    fn dimension_rank_and_rank_alias_bindings_lower_younger_variables() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older_d = vg.fresh_dvar();
+        let older_ground_r = vg.fresh_rvar();
+        let older_alias_r = vg.fresh_rvar();
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "outer".to_string(),
+            Scheme::mono(Type::Tuple(vec![
+                Type::Tensor(vec![Dim::Var(older_d)], TensorPrec::Concrete(Prim::F32)),
+                Type::Tensor(
+                    vec![Dim::Rank(older_ground_r)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(
+                    vec![Dim::Rank(older_alias_r)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+            ])),
+        );
+        let inner = subst.enter_level(&vg);
+        let younger_d_alias = vg.fresh_dvar();
+        let younger_d_in_rank = vg.fresh_dvar();
+        let younger_r = vg.fresh_rvar();
+
+        unify_dim(&Dim::Var(older_d), &Dim::Var(younger_d_alias), &mut subst)
+            .expect("dimension alias");
+        bind_rvar(older_ground_r, &[Dim::Var(younger_d_in_rank)], &mut subst)
+            .expect("ground rank bind");
+        unify_row_against_row(
+            &[Dim::Rank(older_alias_r)],
+            &[Dim::Rank(younger_r)],
+            &mut subst,
+        )
+        .expect("rank alias");
+
+        assert_eq!(subst.level_of_dvar(younger_d_alias), 0);
+        assert_eq!(subst.level_of_dvar(younger_d_in_rank), 0);
+        assert_eq!(subst.level_of_rvar(younger_r), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(
+            &Type::Tuple(vec![
+                Type::Tensor(
+                    vec![Dim::Var(younger_d_alias)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(
+                    vec![Dim::Var(younger_d_in_rank)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(vec![Dim::Rank(younger_r)], TensorPrec::Concrete(Prim::F32)),
+            ]),
+            &subst,
+        );
+        assert!(escaped.dvars.is_empty());
+        assert!(escaped.rvars.is_empty());
+    }
+
+    #[test]
+    fn expanded_rank_dimensions_and_precision_aliases_are_lowered() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older_type = vg.fresh_tvar();
+        let older_precision = vg.fresh_tvar();
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "outer".to_string(),
+            Scheme::mono(Type::Tuple(vec![
+                Type::Var(older_type),
+                Type::Tensor(vec![], TensorPrec::Var(older_precision)),
+            ])),
+        );
+        let inner = subst.enter_level(&vg);
+        let younger_rank = vg.fresh_rvar();
+        let younger_dim = vg.fresh_dvar();
+        let younger_precision = vg.fresh_tvar();
+
+        bind_rvar(younger_rank, &[Dim::Var(younger_dim)], &mut subst)
+            .expect("inner ground rank bind");
+        unify(
+            &Type::Var(older_type),
+            &Type::Tensor(
+                vec![Dim::Rank(younger_rank)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+            &mut subst,
+        )
+        .expect("expanded rank reaches the older type");
+        unify_tensor_prec(
+            &TensorPrec::Var(older_precision),
+            &TensorPrec::Var(younger_precision),
+            &mut subst,
+        )
+        .expect("precision alias");
+
+        assert_eq!(subst.level_of_dvar(younger_dim), 0);
+        assert_eq!(subst.level_of_tvar(younger_precision), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(
+            &Type::Tuple(vec![
+                Type::Tensor(vec![Dim::Var(younger_dim)], TensorPrec::Concrete(Prim::F32)),
+                Type::Tensor(vec![], TensorPrec::Var(younger_precision)),
+            ]),
+            &subst,
+        );
+        assert!(escaped.tvars.is_empty());
+        assert!(escaped.dvars.is_empty());
+    }
+
+    #[test]
+    fn tensor_precision_variables_generalize_at_an_ordinary_boundary() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let boundary = subst.enter_level(&vg);
+        let precision = vg.fresh_tvar();
+        let linked = vg.fresh_tvar();
+        unify_tensor_prec(
+            &TensorPrec::Var(precision),
+            &TensorPrec::Var(linked),
+            &mut subst,
+        )
+        .expect("precision variables link");
+        subst.leave_level(boundary, &vg);
+
+        let scheme = crate::env::Env::new()
+            .generalize(&Type::Tensor(vec![], TensorPrec::Var(precision)), &subst);
+        assert_eq!(scheme.tvars, vec![linked]);
+
+        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &subst);
+        let Type::Tensor(_, TensorPrec::Var(fresh_precision)) = instantiated else {
+            panic!("precision instantiation must remain a tensor precision variable");
+        };
+        unify_tensor_prec(
+            &TensorPrec::Var(fresh_precision),
+            &TensorPrec::Concrete(Prim::F32),
+            &mut subst,
+        )
+        .expect("precision variable binds to a concrete precision");
+        assert_eq!(
+            subst.apply_tensor_prec(&TensorPrec::Var(fresh_precision)),
+            TensorPrec::Concrete(Prim::F32)
+        );
+    }
+
+    /// chelis#1417: identifying a `Numeric`-bounded variable with a
+    /// `Float`-bounded one keeps the INTERSECTION, in both orders.
+    ///
+    /// This is the direction test, not the conflict test. The two acceptance
+    /// tests that exercise narrowing through a program detect
+    /// `merge_tvar_restrictions` returning `Err`, so a reversion that merely
+    /// widens survives them; this one asserts the surviving family IS `Float`
+    /// and that `int32` is consequently rejected.
+    ///
+    /// It does not isolate either mechanism, and measurement rather than
+    /// reasoning says so. `bind_tvar`'s `merged_restriction` and
+    /// `narrow_tvar_restriction` each independently suffice to produce the
+    /// narrowing, so reverting either ALONE leaves this green (and leaves all
+    /// 1460 crate tests green); only reverting BOTH reds it. Neither is dead
+    /// code — both sit on live paths — but neither is individually necessary
+    /// for this behavior, so no single test can discriminate them. Five
+    /// program shapes, including the reversed order, were tried and none
+    /// discriminates either.
+    #[test]
+    fn identifying_a_numeric_variable_with_a_float_one_keeps_float() {
+        for numeric_first in [true, false] {
+            let mut vg = var_gen();
+            let mut subst = Subst::new();
+            let numeric = vg.fresh_tvar();
+            let float = vg.fresh_tvar();
+            subst
+                .narrow_tvar_restriction(numeric, TypeVarRestriction::ActiveNumeric)
+                .expect("fresh variable takes a bound");
+            subst
+                .narrow_tvar_restriction(float, TypeVarRestriction::ActiveFloat)
+                .expect("fresh variable takes a bound");
+
+            let (left, right) = if numeric_first {
+                (numeric, float)
+            } else {
+                (float, numeric)
+            };
+            unify(&Type::Var(left), &Type::Var(right), &mut subst)
+                .expect("Float is a subset of Numeric, so the two are compatible");
+
+            // Whichever variable survives the binding must admit floats only.
+            let surviving = match subst.resolve_tvar(left) {
+                Type::Var(v) => v,
+                other => panic!("expected a variable, got {other}"),
+            };
+            assert_eq!(
+                subst.tvar_restriction(surviving),
+                Some(TypeVarRestriction::ActiveFloat),
+                "identifying Numeric with Float must narrow to Float, not keep \
+                 Numeric (numeric_first = {numeric_first})"
+            );
+
+            // And the narrowing is observable: int32 is in Numeric but not in
+            // Float, so it must now be rejected.
+            let error = unify(&Type::Var(surviving), &Type::Prim(Prim::Int32), &mut subst)
+                .expect_err("a narrowed variable must reject a non-float dtype");
+            assert!(
+                matches!(error.kind, TypeErrorKind::PrecisionMismatch)
+                    && error.message.contains("Float"),
+                "expected a Float PrecisionMismatch, got: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn active_float_restrictions_propagate_through_aliases_and_generalization() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let boundary = subst.enter_level(&vg);
+        let restricted = vg.fresh_tvar();
+        let alias = vg.fresh_tvar();
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        unify(&Type::Var(restricted), &Type::Var(alias), &mut subst)
+            .expect("restriction must flow through an ordinary type-variable alias");
+        subst.leave_level(boundary, &vg);
+
+        let scheme = crate::env::Env::new().generalize(&Type::Var(alias), &subst);
+        assert_eq!(scheme.tvars.len(), 1);
+        assert_eq!(
+            scheme.tvar_restrictions,
+            vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
+        );
+
+        let mut call_subst = Subst::new();
+        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &call_subst);
+        let Type::Var(call_var) = instantiated else {
+            panic!("generalized alias must instantiate to a fresh variable");
+        };
+        let error = unify(
+            &Type::Var(call_var),
+            &Type::Prim(Prim::Bool),
+            &mut call_subst,
+        )
+        .expect_err("instantiated alias must retain its active-float domain");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+    }
+
+    #[test]
+    fn compose_preserves_active_float_restrictions_from_both_operands() {
+        let receiver_var = TypeVar(80_001);
+        let other_var = TypeVar(80_002);
+        let shared_var = TypeVar(80_003);
+        let mut receiver = Subst::new();
+        receiver
+            .narrow_tvar_restriction(receiver_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        receiver
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let other = Subst::new();
+        other
+            .narrow_tvar_restriction(other_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        other
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        receiver
+            .compose(&other)
+            .expect("identical and independent restrictions compose");
+
+        assert_eq!(
+            receiver.tvar_restriction(receiver_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "compose must retain the receiver's restriction"
+        );
+        assert_eq!(
+            receiver.tvar_restriction(other_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "compose must merge the right operand's restriction"
+        );
+        assert_eq!(
+            receiver.tvar_restriction(shared_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "the same restriction on a shared key must compose idempotently"
+        );
+    }
+
+    #[test]
+    fn compose_canonicalizes_active_float_restrictions_through_alias_chains() {
+        let source = TypeVar(80_004);
+        let middle = TypeVar(80_005);
+        let terminal = TypeVar(80_006);
+        let mut receiver = Subst::new();
+        receiver
+            .narrow_tvar_restriction(source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        receiver
+            .insert_type(source, Type::Var(middle))
+            .expect("restricted source aliases an unresolved variable");
+        let mut other = Subst::new();
+        other
+            .insert_type(middle, Type::Var(terminal))
+            .expect("unrestricted alias chain is valid");
+
+        receiver
+            .compose(&other)
+            .expect("a restriction follows the composed alias chain");
+        assert_eq!(receiver.apply(&Type::Var(source)), Type::Var(terminal));
+        assert_eq!(
+            receiver.tvar_restriction(terminal),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        receiver
+            .insert_type(terminal, Type::Prim(Prim::F64))
+            .expect("the composed restriction accepts an active float");
+        assert_eq!(receiver.apply(&Type::Var(source)), Type::Prim(Prim::F64));
+        assert_eq!(receiver.tvar_restriction(terminal), None);
+    }
+
+    #[test]
+    fn compose_rejects_forbidden_bindings_transactionally_in_either_operand() {
+        let restricted_in_receiver = TypeVar(80_007);
+        let mut receiver = Subst::new();
+        receiver
+            .narrow_tvar_restriction(restricted_in_receiver, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let mut other = Subst::new();
+        other
+            .insert_type(restricted_in_receiver, Type::Prim(Prim::Int64))
+            .expect("the independent substitution does not know the restriction");
+        let receiver_types_before = receiver.types_snapshot();
+        let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
+
+        let error = receiver
+            .compose(&other)
+            .expect_err("the merged substitution must enforce the receiver restriction");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert_eq!(receiver.types_snapshot(), receiver_types_before);
+        assert_eq!(
+            receiver.tvar_restrictions_snapshot(),
+            receiver_restrictions_before
+        );
+
+        let restricted_in_other = TypeVar(80_008);
+        let mut receiver = Subst::new();
+        receiver
+            .insert_type(restricted_in_other, Type::Prim(Prim::Int16))
+            .expect("the receiver does not yet know the restriction");
+        let other = Subst::new();
+        other
+            .narrow_tvar_restriction(restricted_in_other, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let receiver_types_before = receiver.types_snapshot();
+        let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
+
+        let error = receiver
+            .compose(&other)
+            .expect_err("the merged substitution must enforce the right restriction");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert_eq!(receiver.types_snapshot(), receiver_types_before);
+        assert_eq!(
+            receiver.tvar_restrictions_snapshot(),
+            receiver_restrictions_before
+        );
+    }
+
+    #[test]
+    fn direct_type_insertion_cannot_bypass_active_float_restrictions() {
+        let restricted = TypeVar(80_009);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        let error = subst
+            .insert_type(restricted, Type::Prim(Prim::Int32))
+            .expect_err("a forbidden direct insertion must fail explicitly");
+
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert!(error.message.contains("int32"));
+        assert_eq!(subst.apply(&Type::Var(restricted)), Type::Var(restricted));
+        assert_eq!(
+            subst.tvar_restriction(restricted),
+            Some(TypeVarRestriction::ActiveFloat),
+            "a rejected direct binding must preserve the restriction ledger"
+        );
+    }
+
+    #[test]
+    fn direct_type_insertion_transfers_and_resolves_active_float_restrictions() {
+        let restricted = TypeVar(80_010);
+        let alias = TypeVar(80_011);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        subst
+            .insert_type(restricted, Type::Var(alias))
+            .expect("an unresolved alias preserves the semantic domain");
+        assert_eq!(subst.tvar_restriction(restricted), None);
+        assert_eq!(
+            subst.tvar_restriction(alias),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        subst
+            .insert_type(alias, Type::Prim(Prim::F16))
+            .expect("an active float satisfies the transferred restriction");
+        assert_eq!(subst.apply(&Type::Var(restricted)), Type::Prim(Prim::F16));
+        assert_eq!(subst.tvar_restriction(alias), None);
+    }
+
+    #[test]
+    fn structural_projection_preserves_domains_across_an_exact_signature_boundary() {
+        let inferred_precision = TypeVar(80_012);
+        let declared_precision = TypeVar(80_013);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(inferred_precision, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let inferred_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(inferred_precision));
+        let declared_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(declared_precision));
+        let inferred = Type::Fn(
+            vec![
+                Type::Ref(Box::new(inferred_tensor)),
+                Type::Var(inferred_precision),
+            ],
+            Box::new(Type::Unit),
+        );
+        let declared = Type::Fn(
+            vec![
+                Type::Ref(Box::new(declared_tensor)),
+                Type::Var(declared_precision),
+            ],
+            Box::new(Type::Unit),
+        );
+
+        subst
+            .project_tvar_restrictions(&inferred, &declared)
+            .expect("matching signature positions carry the inferred domain");
+        assert_eq!(
+            subst.tvar_restriction(declared_precision),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+        let error = subst
+            .insert_type(declared_precision, Type::Prim(Prim::Bool))
+            .expect_err("the projected declaration must reject a non-float");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+    }
+
+    #[test]
+    fn structural_projection_is_transactional_when_a_later_slot_conflicts() {
+        let first_source = TypeVar(80_014);
+        let second_source = TypeVar(80_015);
+        let first_target = TypeVar(80_016);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(first_source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        subst
+            .narrow_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let inferred = Type::Tuple(vec![Type::Var(first_source), Type::Var(second_source)]);
+        let declared = Type::Tuple(vec![Type::Var(first_target), Type::Prim(Prim::Int32)]);
+        let restrictions_before = subst.tvar_restrictions_snapshot();
+
+        let error = subst
+            .project_tvar_restrictions(&inferred, &declared)
+            .expect_err("a forbidden declared slot rejects the whole projection");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert_eq!(subst.tvar_restrictions_snapshot(), restrictions_before);
+        assert_eq!(subst.tvar_restriction(first_target), None);
+    }
+
+    #[test]
+    fn pp1_monomorphic_binding_is_lowered_before_a_sibling_boundary() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let pp1_level = subst.enter_level(&vg);
+        let pp1_var = vg.fresh_tvar();
+        subst.leave_level(pp1_level, &vg);
+        subst.lower_type_to_current(&Type::Var(pp1_var));
+
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "pending_shape".to_string(),
+            Scheme::mono(Type::Var(pp1_var)),
+        );
+        let sibling_level = subst.enter_level(&vg);
+        let sibling_var = vg.fresh_tvar();
+        subst.leave_level(sibling_level, &vg);
+        let scheme = env.generalize(
+            &Type::Tuple(vec![Type::Var(pp1_var), Type::Var(sibling_var)]),
+            &subst,
+        );
+        assert_eq!(scheme.tvars, vec![sibling_var]);
     }
 
     #[test]
@@ -2469,212 +2988,6 @@ mod tests {
     }
 
     // === WS-A5 precision polymorphism unification ===
-
-    #[test]
-    fn deferred_expand_binds_unresolved_consumer_precision() {
-        let mut g = var_gen();
-        let result = g.fresh_tvar();
-        let consumer_prec = g.fresh_tvar();
-        let mut s = Subst::new();
-        s.record_deferred_expand_constraint(
-            result,
-            DeferredExpandConstraint {
-                input_dims: vec![Dim::Lit(2)],
-                input_prec: tprec(Prim::F32),
-                axis: 0,
-                size: Dim::Lit(3),
-            },
-        );
-
-        let consumer = Type::Tensor(
-            vec![Dim::Lit(3), Dim::Lit(2)],
-            TensorPrec::Var(consumer_prec),
-        );
-        unify(&Type::Var(result), &consumer, &mut s)
-            .expect("the expand input precision must bind the consumer precision variable");
-
-        assert_eq!(s.apply(&Type::Var(consumer_prec)), Type::Prim(Prim::F32));
-    }
-
-    #[test]
-    fn deferred_expand_rejects_concrete_consumer_precision_mismatch() {
-        let mut g = var_gen();
-        let result = g.fresh_tvar();
-        let mut s = Subst::new();
-        s.record_deferred_expand_constraint(
-            result,
-            DeferredExpandConstraint {
-                input_dims: vec![Dim::Lit(2)],
-                input_prec: tprec(Prim::F32),
-                axis: 0,
-                size: Dim::Lit(3),
-            },
-        );
-
-        let consumer = Type::Tensor(
-            vec![Dim::Lit(3), Dim::Lit(2)],
-            TensorPrec::Concrete(Prim::F64),
-        );
-        let error = unify(&Type::Var(result), &consumer, &mut s)
-            .expect_err("a concrete f64 consumer must not accept an f32 expand result");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
-    }
-
-    #[test]
-    fn reshape_numel_selects_rank_increasing_deferred_expand() {
-        let mut g = var_gen();
-        let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
-        let mut s = Subst::new();
-        s.record_deferred_expand_constraint(
-            result,
-            DeferredExpandConstraint {
-                input_dims: vec![Dim::Lit(2)],
-                input_prec: tprec(Prim::F32),
-                axis: 0,
-                size: Dim::Lit(3),
-            },
-        );
-
-        let output = s
-            .resolve_deferred_expand_for_reshape(result, output, |_| Ok(vec![Dim::Lit(6)]))
-            .expect("a six-element reshape target must select insertion")
-            .expect("the result carries a deferred expand constraint");
-        assert_eq!(
-            output,
-            Type::Tensor(vec![Dim::Lit(6)], TensorPrec::Concrete(Prim::F32))
-        );
-        assert_eq!(
-            s.apply(&Type::Var(result)),
-            Type::Tensor(
-                vec![Dim::Lit(3), Dim::Lit(2)],
-                TensorPrec::Concrete(Prim::F32)
-            )
-        );
-    }
-
-    #[test]
-    fn reshape_numel_rejects_every_incompatible_deferred_expand_shape() {
-        let mut g = var_gen();
-        let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
-        let mut s = Subst::new();
-        s.record_deferred_expand_constraint(
-            result,
-            DeferredExpandConstraint {
-                input_dims: vec![Dim::Lit(2)],
-                input_prec: tprec(Prim::F32),
-                axis: 0,
-                size: Dim::Lit(3),
-            },
-        );
-
-        let error = s
-            .resolve_deferred_expand_for_reshape(result, output, |_| Ok(vec![Dim::Lit(5)]))
-            .expect_err("five elements match neither tensor[3] nor tensor[3, 2]");
-        assert!(matches!(error.kind, TypeErrorKind::DimensionMismatch));
-        assert!(
-            error
-                .message
-                .contains("matches no legal expand output shape")
-        );
-    }
-
-    #[test]
-    fn reshape_unknown_numel_leaves_deferred_expand_unresolved() {
-        let mut g = var_gen();
-        let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
-        let mut s = Subst::new();
-        s.record_deferred_expand_constraint(
-            result,
-            DeferredExpandConstraint {
-                input_dims: vec![Dim::Lit(2)],
-                input_prec: tprec(Prim::F32),
-                axis: 0,
-                size: Dim::Lit(3),
-            },
-        );
-
-        let output = s
-            .resolve_deferred_expand_for_reshape(result, output, |_| Ok(vec![Dim::Wildcard]))
-            .expect("an unknown reshape target is compatible with either expand shape")
-            .expect("the reshape still has its own output type");
-        assert!(matches!(output, Type::Var(_)));
-        assert!(s.has_deferred_expand_constraint(result));
-        let Type::Var(output_var) = output else {
-            unreachable!();
-        };
-        assert!(s.has_deferred_shape_constraint(output_var));
-    }
-
-    #[test]
-    fn reshape_ambiguous_candidates_preserve_common_target_dims() {
-        let mut g = var_gen();
-        let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
-        let mut s = Subst::new();
-        s.record_deferred_expand_constraint(
-            result,
-            DeferredExpandConstraint {
-                input_dims: vec![Dim::Lit(2), Dim::Lit(4)],
-                input_prec: tprec(Prim::F32),
-                axis: 0,
-                size: Dim::Lit(3),
-            },
-        );
-
-        let output = s
-            .resolve_deferred_expand_for_reshape(result, output, |candidate_dims| {
-                Ok(vec![candidate_dims[0].clone(), Dim::Wildcard])
-            })
-            .expect("both expand candidates remain possible")
-            .expect("the reshape still has its own output type");
-        assert!(matches!(output, Type::Var(_)));
-        assert!(s.has_deferred_expand_constraint(result));
-        let Type::Var(output_var) = output else {
-            unreachable!();
-        };
-        assert!(s.has_deferred_shape_constraint(output_var));
-    }
-
-    #[test]
-    fn rejected_deferred_reshape_requirement_preserves_relation() {
-        let mut g = var_gen();
-        let input = g.fresh_tvar();
-        let output = g.fresh_tvar();
-        let mut s = Subst::new();
-        s.record_deferred_expand_constraint(
-            input,
-            DeferredExpandConstraint {
-                input_dims: vec![Dim::Lit(1), Dim::Lit(2), Dim::Lit(1)],
-                input_prec: tprec(Prim::F32),
-                axis: 0,
-                size: Dim::Lit(3),
-            },
-        );
-        let output = s
-            .resolve_deferred_expand_for_reshape(input, output, |candidate_dims| {
-                Ok(vec![
-                    candidate_dims[1].clone(),
-                    candidate_dims[2].clone(),
-                    Dim::Lit(3),
-                ])
-            })
-            .expect("both expand candidates have legal reshape outputs")
-            .expect("the input carries a deferred expand relation");
-        let Type::Var(output_var) = output else {
-            panic!("ambiguous reshape output must remain deferred");
-        };
-
-        let incompatible = Type::Tensor(vec![Dim::Lit(5)], TensorPrec::Concrete(Prim::F32));
-        unify(&Type::Var(output_var), &incompatible, &mut s)
-            .expect_err("five elements match neither deferred reshape candidate");
-        assert!(
-            s.has_deferred_shape_constraint(output_var),
-            "a rejected consumer must not erase the deferred relation"
-        );
-    }
 
     #[test]
     fn static_dim_product_comparison_is_exact_beyond_i128() {

@@ -2,12 +2,12 @@ use std::process::Command;
 use std::ptr;
 
 use chelis_runtime::{
-    chelis_alloc, chelis_alloc_view, chelis_dtype_size, chelis_tensor,
-    chelis_tensor_from_value_list_typed, chelis_tensor_to_f64,
+    chelis_alloc, chelis_dtype, chelis_dtype_size, chelis_tensor_entry_borrow,
+    chelis_tensor_from_values,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_RUNTIME_DTYPE_INVALID_CHILD_CASE";
-const INVALID_DTYPE: i32 = 9;
+const INVALID_DTYPE: chelis_dtype = 9;
 
 #[test]
 fn invalid_dtype_child() {
@@ -18,26 +18,14 @@ fn invalid_dtype_child() {
         "alloc" => unsafe {
             chelis_alloc(0, ptr::null(), INVALID_DTYPE);
         },
-        "alloc_view" => unsafe {
-            chelis_alloc_view(0, ptr::null(), INVALID_DTYPE, ptr::null_mut());
+        "entry_borrow" => unsafe {
+            chelis_tensor_entry_borrow(0, ptr::null(), INVALID_DTYPE, ptr::null_mut(), 0);
         },
         "dtype_size" => {
             chelis_dtype_size(INVALID_DTYPE);
         }
-        "value_list_typed" => unsafe {
-            chelis_tensor_from_value_list_typed(ptr::null(), INVALID_DTYPE);
-        },
-        "tensor_field_read" => unsafe {
-            let tensor = chelis_tensor {
-                data: ptr::null_mut(),
-                shape: [0; 8],
-                strides: [0; 8],
-                ndim: 0,
-                dtype: INVALID_DTYPE,
-                size: 1,
-                owns_data: 0,
-            };
-            chelis_tensor_to_f64(&tensor);
+        "tensor_from_values" => unsafe {
+            chelis_tensor_from_values(ptr::null(), INVALID_DTYPE);
         },
         other => panic!("unknown child case {other}"),
     }
@@ -47,13 +35,7 @@ fn invalid_dtype_child() {
 #[test]
 fn every_raw_dtype_ffi_boundary_rejects_before_returning_a_value() {
     let test_binary = std::env::current_exe().expect("current test binary");
-    for case in [
-        "alloc",
-        "alloc_view",
-        "dtype_size",
-        "value_list_typed",
-        "tensor_field_read",
-    ] {
+    for case in ["alloc", "entry_borrow", "dtype_size", "tensor_from_values"] {
         let output = Command::new(&test_binary)
             .args(["--exact", "invalid_dtype_child", "--nocapture"])
             .env(CHILD_CASE_ENV, case)

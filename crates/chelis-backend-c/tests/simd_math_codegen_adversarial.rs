@@ -2,10 +2,12 @@
 //!
 //! Items 4–9 from the red-team checklist.
 
-use chelis_backend_c::{CodegenOptions, MathLib, codegen_with_options};
+use chelis_backend_c::{CodegenOptions, MathLib};
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
+use support::codegen_with_options;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {

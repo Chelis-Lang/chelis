@@ -445,7 +445,7 @@ fn checked_cast_product_program() -> String {
 }
 
 fn assert_checked_cast_product_observations(stdout: &str, lane: &str) {
-    let lines = stdout.lines().collect::<std::collections::HashSet<_>>();
+    let lines = stdout.lines().collect::<chelis_unord::UnordSet<_>>();
     for source in ACTIVE_CAST_PRIMS {
         for target in ACTIVE_CAST_PRIMS {
             let scalar_value = match target {
@@ -468,6 +468,11 @@ fn assert_checked_cast_product_observations(stdout: &str, lane: &str) {
                         .contains(&format!("out_checked_{surface}_{source}_to_{target}")))
                 );
             }
+            let automatic = format!("checked_tensor_host_{source}_to_{target} = {tensor_value}");
+            assert!(
+                lines.contains(automatic.as_str()),
+                "{lane} product is missing the automatic pure-nullary observation `{automatic}`"
+            );
         }
     }
 }
@@ -492,7 +497,7 @@ fn generated_checked_cast_product_is_positive_on_every_active_pair_and_surface()
     let eval_stdout = String::from_utf8_lossy(&eval.stdout);
     assert_eq!(
         eval_stdout.lines().count(),
-        ACTIVE_CAST_PRIMS.len() * ACTIVE_CAST_PRIMS.len() * 3,
+        ACTIVE_CAST_PRIMS.len() * ACTIVE_CAST_PRIMS.len() * 4,
         "every generated eval cell must reach root observation"
     );
     assert_checked_cast_product_observations(&eval_stdout, "eval");
@@ -501,7 +506,7 @@ fn generated_checked_cast_product_is_positive_on_every_active_pair_and_surface()
     assert!(ok, "the generated C product must succeed; stderr={stderr}");
     assert_eq!(
         stdout.lines().count(),
-        ACTIVE_CAST_PRIMS.len() * ACTIVE_CAST_PRIMS.len() * 3,
+        ACTIVE_CAST_PRIMS.len() * ACTIVE_CAST_PRIMS.len() * 4,
         "every generated C DAG/host cell must reach root observation"
     );
     assert_checked_cast_product_observations(&stdout, "compiled C");
@@ -555,7 +560,7 @@ fn compiled_checked_casts_round_directly_at_reduced_float_width() {
         ok,
         "direct target-width rounding probe must compile and run; stderr={stderr}"
     );
-    let observed = stdout.lines().collect::<std::collections::HashSet<_>>();
+    let observed = stdout.lines().collect::<chelis_unord::UnordSet<_>>();
     for line in expected {
         assert!(
             observed.contains(line.as_str()),

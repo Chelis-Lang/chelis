@@ -8,7 +8,7 @@ with their AD adjoints, the Tier-2 derived built-ins, division and reduction sem
 windowed reductions, movement and memory ops, effectful primitives with seed determinism,
 scatter determinism and AD policy, host-only builtins, the standard ML-op lowerings, AD
 completeness and the reference oracle, and the decided unsupported-case and observation
-contracts. This is the current and decided truth of how tensor computation lowers and runs.
+contracts.
 
 **Source:** captured from [`spec/05-risc-primitives.md`](../../../spec/05-risc-primitives.md).
 
@@ -51,19 +51,38 @@ remain owned tensors and the borrow distinction SHALL be erased before IR loweri
 ### Requirement: Two tiers
 
 Tier-1 RISC primitives SHALL be the irreducible set the IR operates on, each with a defined AD
-adjoint rule. Tier-2 derived built-ins SHALL be convenience functions the desugarer emits and
-the IR lowers to Tier-1 compositions during IR construction; they SHALL exist in Deep AST only,
-not in the RISC DAG.
+adjoint or rejection rule. Tier-2 derived built-ins SHALL be convenience functions the desugarer
+emits and the IR lowers to semantics-preserving Tier-1 compositions during IR construction; they
+SHALL exist in Deep AST only, not in the RISC DAG. `sub`, `max_elem`, and `min_elem` are Tier-1
+identities because an arithmetic surrogate can introduce a trap or alter selected stored bits.
 
-#### Scenario: Derived builtin lowers to primitives
+#### Scenario: Subtraction stays direct
 
-- **WHEN** `sub(a, b)` is lowered
-- **THEN** it becomes `add(a, neg(b))` during IR construction
+- **WHEN** `sub(a, b)` reaches RISC IR
+- **THEN** it remains direct checked subtraction rather than becoming `add(a, neg(b))`
 
-#### Scenario: Derived builtin is not in the RISC DAG
+#### Scenario: Minimum stays a selection
 
-- **WHEN** the IR DAG is inspected after lowering
-- **THEN** it contains only Tier-1 primitives, with `sub` decomposed rather than present as a node
+- **WHEN** `min_elem(a, b)` reaches RISC IR
+- **THEN** it remains direct selection rather than becoming `neg(max_elem(neg(a), neg(b)))`
+
+### Requirement: Direct subtraction and extrema semantics
+
+Checked signed-integer subtraction SHALL trap only when its exact mathematical result is
+unrepresentable at the operand width. Float subtraction SHALL execute at the declared arithmetic
+width. Float extrema SHALL select the first NaN in operand order with exact stored bits and SHALL
+otherwise preserve the first operand on every equality, including signed-zero equality. Integer
+extrema SHALL compare exactly at the stored width and use the same first-operand tie rule.
+
+#### Scenario: Representable subtraction cannot trap at an invented negation
+
+- **WHEN** `sub(-1i64, INT64_MIN)` executes
+- **THEN** it returns `INT64_MAX` without evaluating `neg(INT64_MIN)`
+
+#### Scenario: Extrema preserve the selected stored value
+
+- **WHEN** two float extrema operands include a NaN or compare equal
+- **THEN** the first selected operand is returned bit-for-bit and receives the whole cotangent
 
 ### Requirement: Division semantics
 
@@ -106,11 +125,13 @@ SHALL be valid on float types only, and each SHALL carry its defined AD adjoint.
 
 ### Requirement: Reduction axis and accumulator
 
-A reduction axis SHALL be a compile-time constant (literal or `cast(N, int32)`); a runtime axis
-SHALL be rejected at the call site. Negative axes SHALL index from the end uniformly across
-axis-taking primitives. `sum` SHALL carry a populated accumulator-precision field resolved to
-the documented default when omitted; an explicitly narrower-than-default accumulator SHALL be a
-type error.
+A reduction SHALL take one or more unique compile-time positional int32 axes
+or one or more unique named axes, never a mixture. Negative positional axes
+SHALL normalize once against original rank. Value reductions execute the
+highest-original-position-first single-axis composition; `count` executes one
+dedicated multi-axis bool reduction. `sum` SHALL carry a populated
+accumulator-precision field resolved to the documented default when omitted;
+an explicitly narrower-than-default accumulator SHALL be a type error.
 
 #### Scenario: Constant axis reduction
 
@@ -124,29 +145,32 @@ type error.
 
 ### Requirement: Windowed reductions
 
-`reduce_window_max/min/sum/mean` SHALL implement `Valid`-padding-only strided windowed
-reductions over the trailing axes, with output extent
-`floor((input_dim - window) / stride) + 1`; a non-positive output extent SHALL be a type error.
-They SHALL be differentiable via `ReduceWindowGrad`; HIP codegen SHALL be deferred and rejected
-before codegen with an `unsupported_feature` diagnostic.
+`reduce_window_max/min/sum/mean` SHALL accept runtime `List[int64]`
+`window_shape` and `strides`, validate lengths/positive values before access,
+and implement the exact target-independent output-shape, arithmetic,
+tie/NaN, accumulation, adjoint, and second-derivative graph of
+[05-RWIN-1..2]/[05-OP-39]. Statically proven invalid inputs are type errors;
+runtime invalid inputs trap `Domain` before allocation or reads.
 
 #### Scenario: Valid-padding output extent
 
 - **WHEN** `reduce_window_max` runs with input 8, window 2, stride 2 on an axis
 - **THEN** the output extent is 4 (`floor((8-2)/2)+1`)
 
-#### Scenario: HIP target rejects windowed reduction
+#### Scenario: Device targets execute windowed reduction
 
 - **WHEN** `chelis build --target hip` compiles a program using `reduce_window_*`
-- **THEN** it is rejected at compile time with a clean `unsupported_feature` error
+- **THEN** it executes the same runtime window values, results, traps, and adjoints as eval and C
 
 ### Requirement: Movement ops and runtime bounds
 
-`reshape`, `permute`, `expand`, `pad`, `shrink`, and `stride` SHALL each carry their defined AD
-adjoint. Runtime (node-valued) movement bounds and reshape targets SHALL be validated at run
-time in both the eval and C lanes with matching abort/error paths for negative bounds, range
-overshoot, non-positive stride, and reshape numel disagreement; the HIP and Metal targets SHALL
-reject them naming `--target c`.
+`reshape`, `permute`, `expand`, `pad`, `shrink`, and `stride` SHALL each carry
+their exact AD adjoint. Runtime movement bounds and reshape targets SHALL be
+validated in every execution mode with matching language traps for negative
+bounds, range overshoot, non-positive stride, and reshape numel disagreement.
+Stride reverse mode SHALL zero-fill the original shape and route each output
+cotangent to its unique forward-selected source index; runtime steps carry
+zero cotangent.
 
 #### Scenario: Movement adjoint is defined
 
@@ -156,41 +180,44 @@ reject them naming `--target c`.
 #### Scenario: Runtime reshape numel mismatch aborts
 
 - **WHEN** a runtime reshape target's element product disagrees with the input
-- **THEN** both the eval lane and the C backend's emitted guard abort loudly rather than allocate a wrong view
+- **THEN** every execution mode traps before allocating a wrong view
 
 ### Requirement: Memory and shape-query primitives
 
-`const` and `load` SHALL be the pure tensor constructors and SHALL be non-differentiable
-(`const` gradient zero, `load` non-differentiable). `shape(x, axis)` SHALL read the runtime
-extent along a compile-time-constant axis as a rank-0 integer scalar contributing a zero
-cotangent; a non-constant axis forced into DAG construction (e.g. via `grad`) SHALL fail loudly.
+`const` and `load` SHALL be the pure tensor constructors and contribute zero
+cotangent. `shape(x, axis)` SHALL read the runtime extent along any literal or
+computed int32 axis as a rank-0 int64 scalar contributing a zero
+cotangent. Literal and computed axes SHALL remain ordinary checked runtime
+values when `shape` participates in a graph constructed by `grad`.
 
 #### Scenario: const is non-differentiable
 
 - **WHEN** `grad` reaches a `const` node
 - **THEN** its gradient contribution is zero and it does not block AD
 
-#### Scenario: Non-constant shape axis under grad fails loudly
+#### Scenario: Computed shape axis under grad remains a runtime value
 
-- **WHEN** `grad` forces DAG construction of `shape(x, axis)` with a runtime axis
-- **THEN** it fails with a clean source-located diagnostic requiring a compile-time-constant axis, not a fabricated gradient
+- **WHEN** `grad` constructs `shape(x, axis)` with a computed runtime axis
+- **THEN** it preserves that axis, executes one-step normalization, and contributes exact zero cotangent
 
 ### Requirement: Effectful primitives
 
 `dropout` and `uniform_like` SHALL introduce the `Random` effect drawing from the active
 `with seed(...)` handler. `process_run` SHALL introduce `IO`, pass its argv straight to the OS
-with no shell or interpolation, report a signal-killed process as exit code `-1`, and be
-eval/test-only — rejected by the C/HIP/Metal build backends with a clean diagnostic.
+with no shell or interpolation, and report a signal-killed process as exit code `-1`.
+Every legal host execution mode SHALL provide the same typed result/trap; a
+device-only kernel cannot perform IO but that boundary SHALL NOT become a
+whole-module or language-wide rejection.
 
 #### Scenario: dropout introduces Random under a seed
 
 - **WHEN** `dropout(x, rate)` runs inside `with seed(42i64)`
 - **THEN** it draws its mask from the handled seed and reuses it on the backward pass
 
-#### Scenario: process_run rejected by a build backend
+#### Scenario: process_run compiles as a host effect
 
 - **WHEN** a program applying `process_run` is compiled with `--target c`
-- **THEN** it is rejected with a clean build error rather than a silent zero, because a compiled artifact has no host interpreter
+- **THEN** the host execution performs the exact argv call and returns `(int64,string,string)!{IO}`
 
 ### Requirement: Seed determinism
 
@@ -214,7 +241,10 @@ mixing.
 `Scatter` (last-write-wins) and `ScatterAdd` (commutative accumulation) SHALL be distinct
 primitives. `Scatter` SHALL resolve duplicate indices by updates-tensor row-major flat order on
 every backend (single-threaded on C, `<<<1,1>>>` on HIP) and SHALL structurally reject reverse-mode
-AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
+AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint. `Gather`,
+`ScatterAdd`, `Scatter`, and `ScatterElements`, including [05-OP-33]'s public C gather and scatter
+callables, SHALL admit an index tensor at every active signed-integer dtype, interpreted at its
+exact stored width without conversion.
 
 #### Scenario: ScatterAdd is differentiable
 
@@ -226,29 +256,39 @@ AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
 - **WHEN** `grad` is applied through `Scatter`
 - **THEN** it is rejected with `AdError::NotSupported` because the forward result depends on iteration order at duplicate indices
 
-### Requirement: Host-only builtins
+#### Scenario: Narrow signed indices remain exact
 
-`tensor_scan` and the `test_*` assertion family SHALL be host-only, running inside the
-`chelis test`/`chelis eval` interpreter with no compiled-lane emission. `tensor_scan` SHALL be
-rejected whole-program at `chelis build --target c`/`hip`, and `grad`/`vmap` over a function
-reaching it SHALL be rejected at the transform boundary (reachability-scoped).
+- **WHEN** gather or scatter consumes an int8 or int16 index tensor
+- **THEN** it interprets each stored index exactly rather than rejecting or widening the tensor
+
+### Requirement: Host-executed builtins
+
+`tensor_scan` and the `test_*` assertion family SHALL execute on the host in
+evaluation and compiled artifacts with [05-HOST-1..3]/[05-OP-38]'s exact
+signatures, effects, recurrence, equality/closeness, and AD/vmap rules. An
+unreachable call SHALL neither emit a stub nor cause whole-module rejection.
 
 #### Scenario: tensor_scan runs under eval
 
 - **WHEN** `tensor_scan` builds a rank-1 tensor under `chelis eval`
 - **THEN** it iterates on the host with constant worker-stack usage
 
-#### Scenario: tensor_scan build is rejected
+#### Scenario: tensor_scan builds as a host operation
 
 - **WHEN** a program calling `tensor_scan` (even in an entry-unreachable helper) is built with `--target c`
-- **THEN** it is rejected at compile time with a `tensor_scan`-tagged `unsupported_feature` diagnostic
+- **THEN** the reachable host call executes its exact recurrence; an unreachable helper has no effect on the artifact
 
 ### Requirement: Standard lowerings
 
 `matmul`, `softmax`, `cross_entropy`, `layer_norm`, `conv2d`, `embedding`, and
 `multi_head_attention` SHALL lower to defined Tier-1 compositions; `matmul` SHALL carry an
 accumulator parameter with the documented defaults and SHALL NOT admit integer operand
-precisions. The compiler MAY recognize these patterns and emit optimized library calls.
+precisions. `matmul`'s inner sum SHALL follow the canonical balanced tree, so its result
+bits are target-independent; a library kernel or fusion is permissible only where it
+reproduces those exact bits and traps, and a vendor-kernel accumulation order is available
+only through a future named explicit opt-in, never a backend default. `relu` SHALL carry
+[05-OP-43]'s dedicated adjoint (gradient exactly zero at zero, both signed zeros, and NaN)
+while its forward value remains the exact `max_elem` lowering.
 
 #### Scenario: softmax lowers to a stable composition
 
@@ -262,20 +302,25 @@ precisions. The compiler MAY recognize these patterns and emit optimized library
 
 ### Requirement: AD completeness and reference oracle
 
-Every RISC primitive SHALL have a defined adjoint so `grad` can differentiate any composition;
-`cmplt`, `const`, and `load` SHALL have zero gradient. The naive C reference implementations
-SHALL be the correctness oracle, and GPU backends SHALL produce numerically identical results
-within floating-point tolerance (1e-6 for f32, 1e-12 for f64).
+Every numeric callable SHALL state exactly one of an adjoint, a zero cotangent, or a
+structural `grad` rejection; `cmplt`, `const`, and `load` contribute zero. [05-OP-42]
+`stop_gradient` SHALL be the differentiation barrier whose argument subgraph is outside
+adjoint construction and structural rejection analysis. The pseudocode reference
+implementations are illustrative, not a semantic oracle; cross-lane agreement is exact by
+default, with only [05-OBS-3]'s per-operation tolerance table excepted, and blanket
+per-dtype bounds are not a conforming oracle.
 
 #### Scenario: Composition is differentiable
 
 - **WHEN** `grad` is applied to a composition of primitives with defined adjoints
 - **THEN** it produces a gradient through the whole composition
 
-#### Scenario: GPU matches the reference within tolerance
+#### Scenario: Cross-lane agreement is exact outside the tolerance table
 
-- **WHEN** a GPU backend evaluates a primitive against the C reference
-- **THEN** the results agree within 1e-6 (f32) / 1e-12 (f64)
+- **WHEN** two lanes evaluate an operation absent from [05-OBS-3]'s table at the same
+  arithmetic width
+- **THEN** their stored result bits agree exactly; a blanket 1e-6/1e-12 bound is not a
+  conforming comparison
 
 ### Requirement: Unsupported-case response contract
 

@@ -6,7 +6,7 @@
 //! compiler-api crate does NOT depend on chelis-prove). The public decode
 //! chokepoint lives in `crate::decode`; it calls into this machinery.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::Atom;
@@ -190,12 +190,24 @@ impl std::fmt::Display for InvariantViolation {
 ///   well-formedness (RFC D-WF) rejects malformed metadata before it can
 ///   reach a chelis-compiled module, but the decode chokepoint is the
 ///   contract for the next external/hand-built codec and must fail closed.
+/// - When the type-name child is NOT a readable symbol (chelis#1305), the
+///   entry is [`InvariantEntry::Malformed`] under the
+///   [`UNREADABLE_DEFTYPE_NAME`] placeholder. Dropping the whole deftype
+///   was the same fail-open reached through a different door: the absent
+///   entry was indistinguishable from "no declared invariant".
 ///
 /// A deftype with NO `invariant` entry is simply absent from the table:
 /// there is no invariant to check for its constructors, which is
 /// legitimate, not a failure.
-pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, InvariantEntry> {
-    let mut out = HashMap::new();
+/// The placeholder type name recorded when an invariant-declaring `deftype`'s
+/// type-name child is not a readable symbol (chelis#1305). It is diagnostic
+/// wire data on a fail-closed path, not a [03-PROG-2] rejection
+/// identification, so the angle-bracket spelling follows the
+/// `UNKNOWN_FORM_NON_SYMBOL_HEAD` convention.
+pub(crate) const UNREADABLE_DEFTYPE_NAME: &str = "<unreadable deftype name>";
+
+pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> UnordMap<String, InvariantEntry> {
+    let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
         let Some((DeepTag::Deftype, meta, kids)) = expr_parts(expr) else {
             continue;
@@ -204,21 +216,40 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
             // No declared invariant: this type contributes no table entry.
             continue;
         };
-        let Some(type_name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
+        // chelis#1305 (fail-closed): a deftype that DECLARES an invariant
+        // but whose type-name child is not a readable symbol must not
+        // contribute zero entries. `revalidate_adt_value` treats an absent
+        // entry as "no declared invariant; nothing to check", so a
+        // `continue` here was the same fail-open the malformed-metadata arm
+        // below already closed, reached through a different door. The
+        // unreadable-name declaration is malformed as a whole, so every
+        // extractable constructor records `Malformed` under the placeholder
+        // name, whatever the invariant metadata itself parses to.
+        let readable_type_name = kids.first().and_then(symbol_name);
         // The deftype DECLARES an invariant, so it always contributes an
         // entry. Parse the metadata once; a malformed metadata becomes a
         // `Malformed` entry rather than being skipped (fail-closed).
-        let parsed = parse_invariant_fn(inv_value);
+        let parsed = match readable_type_name {
+            Some(_) => parse_invariant_fn(inv_value),
+            None => None,
+        };
+        let type_name = readable_type_name.unwrap_or(UNREADABLE_DEFTYPE_NAME);
         // Key by every record-variant constructor of the type. The RFC's
         // single-record-variant representation means there is exactly one
         // in V1, but iterating keeps the table honest if that widens.
         for variant in kids.iter().skip(2) {
             let Some((DeepTag::Variant, _, variant_kids)) = expr_parts(variant) else {
+                // Not a fail-open: a non-`variant` child declares no
+                // constructor, so there is no key this table could record
+                // (chelis#1305).
                 continue;
             };
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
+                // Not a fail-open, but only because of the backstop: with no
+                // readable ctor name there is no key to insert under, and
+                // the same unreadable name is also absent from the
+                // field-type table, so `decode_adt`'s unknown-constructor
+                // guard rejects every payload claiming it (chelis#1305).
                 continue;
             };
             let entry = match &parsed {
@@ -274,11 +305,11 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
 /// non-foldable expression) is NOT a constant and must not pollute the
 /// table -- registering it would map the name to an unresolved or wrong
 /// value at predicate evaluation time.
-pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr> {
+pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> UnordMap<String, Expr> {
     // Phase 1: collect candidate constant bodies keyed by name. A candidate
     // is the unwrapped value body of either the fn-wrapped zero-arg form or
     // the bare value-binding form. Parameterized fn defs are not candidates.
-    let mut candidates: HashMap<String, Expr> = HashMap::new();
+    let mut candidates: UnordMap<String, Expr> = UnordMap::new();
     for expr in top_level_items(exprs) {
         let Some((DeepTag::Def, _, kids)) = expr_parts(expr) else {
             continue;
@@ -319,9 +350,10 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
     // constant aliases and chains while excluding references to
     // non-constant or unbound names.
     candidates
-        .iter()
+        .to_sorted()
+        .into_iter()
         .filter(|(_, body)| {
-            let mut visiting = HashSet::new();
+            let mut visiting = UnordSet::new();
             is_constant_foldable(body, &candidates, &mut visiting)
         })
         .map(|(name, body)| (name.clone(), body.clone()))
@@ -336,8 +368,8 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
 /// which are not foldable.
 fn is_constant_foldable(
     expr: &Expr,
-    candidates: &HashMap<String, Expr>,
-    visiting: &mut HashSet<String>,
+    candidates: &UnordMap<String, Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
     let Some((node_tag, _, kids)) = expr_parts(expr) else {
         // A bare atom (not wrapped in a Deep node) is not a value form.
@@ -396,7 +428,7 @@ fn is_constant_foldable(
 /// stable D-WF set and any drift is locked by the constant-folding tests.
 fn is_constant_grammar_op(op: &str) -> bool {
     const ARITH: &[&str] = &["add", "sub", "mul", "div", "neg"];
-    const COMPARISON: &[&str] = &["eq", "neq", "cmplt", "lte", "gte"];
+    const COMPARISON: &[&str] = &["eq", "neq", "cmplt", "gt", "lte", "gte"];
     const BOOL: &[&str] = &["and", "or", "not"];
     const INTRINSICS: &[&str] = &["abs", "min", "max", "sqrt", "exp", "log", "sin", "cos"];
     ARITH.contains(&op)
@@ -433,8 +465,8 @@ pub(crate) struct DecodeField {
 /// [`collect_type_invariants`]). The decode chokepoint uses this for the
 /// structural check (arity, names, scalar-vs-tensor-vs-adt field types)
 /// before invariant revalidation.
-pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<DecodeField>> {
-    let mut out = HashMap::new();
+pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> UnordMap<String, Vec<DecodeField>> {
+    let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
         let Some((DeepTag::Deftype, _, kids)) = expr_parts(expr) else {
             continue;
@@ -567,7 +599,22 @@ fn strip_span_meta(expr: &mut Expr) {
                 _ => unreachable!(),
             }
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
+        // chelis#1087: span metadata inside either transitional variant
+        // would otherwise leak into the rendered invariant text.
+        Expr::BareList(elements, _) => {
+            for element in elements {
+                strip_span_meta(element);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            data.meta.entries.retain(|(key, _)| key != "span");
+            for (_, value) in &mut data.meta.entries {
+                strip_span_meta(value);
+            }
+            for child in &mut data.children {
+                strip_span_meta(child);
+            }
+        }
     }
 }
 
@@ -583,8 +630,8 @@ fn check_representation_finite(
     value: &RuntimeValue,
     type_name: &str,
     ctor: &str,
-    invariants: &HashMap<String, InvariantEntry>,
-    adt_fields: &HashMap<String, Vec<String>>,
+    invariants: &UnordMap<String, InvariantEntry>,
+    adt_fields: &UnordMap<String, Vec<String>>,
     path: &str,
 ) -> Result<(), InvariantViolation> {
     match value {
@@ -695,9 +742,9 @@ fn describe_non_finite(v: f64) -> String {
 /// See [`collect_zero_arg_constants`].
 pub(crate) fn revalidate_adt_value(
     value: &RuntimeValue,
-    invariants: &HashMap<String, InvariantEntry>,
-    adt_fields: &HashMap<String, Vec<String>>,
-    module_constants: &HashMap<String, Expr>,
+    invariants: &UnordMap<String, InvariantEntry>,
+    adt_fields: &UnordMap<String, Vec<String>>,
+    module_constants: &UnordMap<String, Expr>,
 ) -> Result<(), InvariantViolation> {
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
         // Non-ADT values carry no opaque invariant; structural decode has
@@ -754,7 +801,7 @@ pub(crate) fn revalidate_adt_value(
     // In-module zero-argument constants (CR-3) are registered as
     // top_level_defs so a predicate referencing e.g. a tolerance `eps`
     // resolves it to its value instead of dying on "unknown runtime name".
-    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     // OpenSpec `add-eval-system-boundary`: invariant predicate evaluation
     // MUST receive a deny-all system boundary, enforcing the effect
     // prohibition in `spec/04-type-system.md` §2.5.1. This is a fresh
@@ -762,17 +809,19 @@ pub(crate) fn revalidate_adt_value(
     // `decode_with_tables` or another decode API (design D5).
     let mut system_boundary = super::system::EvalSystemBoundary::deny_all();
     let mut ctx = EvalContext {
-        bindings: HashMap::new(),
-        binding_types: HashMap::new(),
-        named_axis_route_cache: HashMap::new(),
-        named_axis_route_visiting: HashSet::new(),
+        bindings: UnordMap::new(),
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
         top_level_defs: module_constants.clone(),
-        type_env: HashMap::new(),
+        declared_signatures: UnordMap::new(),
+        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        type_env: UnordMap::new(),
         adt_fields: adt_fields.clone(),
-        // Invariant predicates never route through grad marshalling, so
-        // the rejection map is not needed here.
-        adt_grad_rejections: HashMap::new(),
         tensor_bindings: &empty_tensors,
+        program: None,
+        def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),
         random_seed: None,
@@ -808,5 +857,106 @@ pub(crate) fn revalidate_adt_value(
             invariant: invariant_text,
             reason,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_deep::ast::{MetaMap, UnknownFormData};
+
+    fn sp() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn span_entry() -> (String, Expr) {
+        (
+            "span".to_string(),
+            Expr::Atom(Atom::Str("surf:0..1".to_string()), sp()),
+        )
+    }
+
+    /// True when any metadata map anywhere in `expr` still carries a `span`
+    /// entry.
+    fn mentions_span_key(expr: &Expr) -> bool {
+        match expr {
+            Expr::Atom(_, _) => false,
+            Expr::Map(map, _) => {
+                map.entries.iter().any(|(key, _)| key == "span")
+                    || map
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+            }
+            Expr::MetaExpr(meta, _) => {
+                meta.entries.iter().any(|(key, _)| key == "span")
+                    || meta
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || mentions_span_key(&meta.expr)
+            }
+            Expr::List(list, _) => list.elements.iter().any(mentions_span_key),
+            Expr::Node(node, _) => {
+                node.meta().entries.iter().any(|(key, _)| key == "span")
+                    || node
+                        .meta()
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || node.children_slice().iter().any(mentions_span_key)
+            }
+            Expr::BareList(elements, _) => elements.iter().any(mentions_span_key),
+            Expr::UnknownForm(data) => {
+                data.meta.entries.iter().any(|(key, _)| key == "span")
+                    || data
+                        .meta
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || data.children.iter().any(mentions_span_key)
+            }
+        }
+    }
+
+    /// chelis#1087: `strip_span_meta` must reach span metadata inside both
+    /// transitional variants, or the rendered invariant text leaks
+    /// span-annotated desugar output.
+    #[test]
+    fn strip_span_meta_reaches_bare_list_and_unknown_form() {
+        let mut expr = Expr::BareList(
+            vec![
+                Expr::Map(
+                    MetaMap {
+                        entries: vec![span_entry()],
+                    },
+                    sp(),
+                ),
+                Expr::UnknownForm(Box::new(UnknownFormData {
+                    head: "mystery".to_string(),
+                    meta: MetaMap {
+                        entries: vec![span_entry()],
+                    },
+                    children: vec![Expr::BareList(
+                        vec![Expr::Map(
+                            MetaMap {
+                                entries: vec![span_entry()],
+                            },
+                            sp(),
+                        )],
+                        sp(),
+                    )],
+                    span: sp(),
+                })),
+            ],
+            sp(),
+        );
+        assert!(mentions_span_key(&expr), "fixture carries span metadata");
+        strip_span_meta(&mut expr);
+        assert!(
+            !mentions_span_key(&expr),
+            "span metadata inside transitional variants must be stripped \
+             (a span key survived under a BareList or UnknownForm child)"
+        );
     }
 }

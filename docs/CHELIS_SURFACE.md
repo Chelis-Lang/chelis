@@ -80,11 +80,13 @@ inputs are borrow-typed (`&tensor`, auto-borrowed at call sites).
 | Name | Signature | AD adjoint (given upstream `g`) |
 |---|---|---|
 | `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, g)` |
+| `sub` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, -g)` on floats; signed-integer forms are forward-only |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*y, g*x)` |
 | `div` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | `(g/b, -g*y/b)`; IEEE-754, **float operands only** (chelis#178) |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | **non-differentiable** — `grad` rejects; round quotient toward −∞ (Python `//`); ints and floats |
 | `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | **non-differentiable** — `grad` rejects; round toward zero (C `/`); **integer operands only** |
-| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*(x>=y), g*(x<y))` |
+| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | complete `g` to the exact operand selected by [05-OP-40]; signed-integer forms are forward-only |
+| `min_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | complete `g` to the exact operand selected by [05-OP-40]; signed-integer forms are forward-only |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | zero gradient (by design) |
 
 `div`/`recip` are native Tier-1 (IEEE-754, correct on the full real line) — **not** an
@@ -116,7 +118,8 @@ float upcast (their default `divide`); use a `cast` first for that.
 
 | Name | Signature | AD adjoint |
 |---|---|---|
-| `sum` | `(&tensor[..,p], axis: int32, accumulator: prec = default(p)) -> tensor[..,acc]` | `expand(g, axis)` |
+| `sum` | `(&tensor[..,p], axis: int32, accumulator: prec = default(p)) -> tensor[..,acc]` | `insert(g, axis)` |
+| `count` | `(&tensor[..,bool], axes: int32...) -> tensor[..,int64]` | **non-differentiable** (`IntegerReductionOutput`) |
 | `max_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmax)` |
 | `min_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmin)` |
 | `prod_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | per-slice product/quotient |
@@ -126,6 +129,10 @@ float upcast (their default `divide`); use a `cast` first for that.
 - **Axis must be a compile-time constant** (literal, or `cast(N,int32)` of a literal).
   A runtime-axis reduction is a check-time error (chelis#259). Negative axes index
   from the end (`-1` = last).
+- `count` requires one or more unique axes. Concrete-rank calls may use several
+  positional axes in any order; rank-polymorphic calls use named axes only. It lowers
+  to one dedicated `Count` node whose normalized original positions are stored in
+  descending order. Eval and C implement it; HIP/Metal reject pending chelis#1291.
 - **`accumulator` (sum only)** controls running-sum precision and result dtype.
   Defaults (no implicit promotion): bf16/f16→f32, f32→f32, f64→f64, int8/int16→int32,
   int32→int32, int64→int64. Full table: `spec/04` §5.7.1.
@@ -150,13 +157,16 @@ explicitly first. Windowed extents must be statically known on the build path.
 |---|---|---|
 | `reshape` | `(&tensor[D_old,p], shape) -> tensor[D_new,p]` | `reshape(g, old_shape)` |
 | `permute` | `(&tensor[..,p], axes: int32...) -> tensor[..,p]` | `permute(g, inverse_axes)` |
-| `expand` | `(&tensor[D_small,p], axis: int32, size: int64) -> tensor[D_large,p]` | `sum(g, expanded_axes)` |
+| `expand` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D',p]` | `insert(sum(g, axis), axis, 1i64)` |
+| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | `sum(g, axis)` |
 | `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | `shrink(g, inverse_padding)` |
 | `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | `pad(g, inverse_bounds)` |
-| `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | expand/scatter |
+| `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | [05-MOV-1]'s zero-filled inverse sampling map at the original shape |
 
-`expand` does not copy data (stride-0 on the expanded axis) and addresses its insert
-point by name; its insert axis must be a compile-time constant.
+`expand` sets an existing size-1 axis to `size` and leaves the rank alone; `insert`
+adds an axis and raises the rank by one. Neither copies data (stride-0 on the
+broadcast axis). The named-axis and four-argument anchored forms belong to `insert`;
+`expand` takes a positional int32 axis, which must be a compile-time constant.
 
 ### 1.6 Memory & effectful — `spec/05` §2.5–2.6
 
@@ -192,23 +202,22 @@ host-lane `scatter` (§3).
 
 ## 2. Tier-2 derived built-ins (DAG)
 
-Convenience functions the desugarer emits and the IR pass decomposes into Tier-1
-during construction (`crates/chelis-ir/src/tier2.rs`). They are **not** separate DAG
-nodes — they exist in Deep AST only and end up as Tier-1 compositions, so they reach
-all backends and differentiate via their decomposition. `spec/05` §3–4.
+Convenience functions emitted by the desugarer (`crates/chelis-ir/src/tier2.rs`).
+Most decompose into Tier-1 operations during construction. `relu` is the
+[05-OP-43] exception: its dedicated DAG identity survives semantic transforms
+and AD so its zero-boundary rule cannot be confused with `max_elem`'s tie rule.
+`spec/05` §3–4.
 
 | Name | Lowering | AD |
 |---|---|---|
-| `sub` | `add(a, neg(b))` | differentiable |
 | `eq`,`neq`,`gt`,`gte`,`lte`,`lt` | `cmplt` compositions (`spec/05` §3.2) | zero-grad (bool out) |
-| `and`,`or`,`not` | `mul` / `max_elem` / `neg` on bools | zero-grad (bool) |
-| `relu` | `max_elem(x, 0)` | differentiable (subgradient) |
+| `and`,`or`,`not` | Spec: bool-only truth tables ([05-OP-26..28]); the pre-v0.19 IR still uses numeric aliases, tracked by #1284 | `grad` rejects |
+| `relu` | dedicated `RiscOp::Relu`; forward equals stored-bit `max_elem(x, 0)` | `g` only where `0 < x`; exact +0 at both zeros and NaN |
 | `sigmoid` | `recip(add(1, exp(neg(x))))` | differentiable |
 | `tanh`,`silu`,`gelu` | `tier2.rs` decompositions | differentiable |
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
-| `mean` | `div(sum(x,axis), count)` | differentiable |
+| `mean` | `div(sum(x,axis), axis extent)` | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
-| `min_elem` | `neg(max_elem(neg(a), neg(b)))` | differentiable |
 | `layer_norm` | mean/var normalize + affine (`spec/05` §4.4) | differentiable |
 | `conv2d` | `im2col` → `matmul` → `reshape` (`spec/05` §4.5) | differentiable |
 
@@ -244,7 +253,7 @@ capability.
 | `einsum` | `(equation: string, &lhs, &rhs) -> tensor` | 2-operand only today; no ellipsis; static-extent errors rejected at check |
 | `diagonal` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | diagonal extraction |
 | `trace` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | matrix trace |
-| `where` | `(&cond, &a, &b) -> tensor` | `DAG+Host`: also has the `add(mul(cond,a),mul(neg(cond),b))` DAG form (`spec/05` §3.5) |
+| `where` | `(&cond, &a, &b) -> tensor` | Spec: element-wise selection without converting the boolean condition to a numeric dtype; the pre-v0.19 numeric-mask DAG form is tracked by #1284 (`spec/05` §3.5) |
 | `clamp` | `(&tensor, lo, hi) -> tensor` | elementwise clip |
 | `concat` | `(tensors: List[tensor], axis: int32) -> tensor` | join tensors along axis; ordinary two-list concatenation has no axis slot |
 | `split` | `(&tensor, axis: int32, sizes: List[int]) -> list` | partition along axis |
@@ -280,20 +289,20 @@ The host lane is eager (no lazy list fusion).
   selected runtime extent as `int64`; reductions/expands still need
   compile-time-constant axes regardless.
 
-### 3.5 I/O and process — introduces `Io`
+### 3.5 I/O and process — introduces `IO`
 
 `read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`,
 `mmap_file`, `mmap_read`, `mmap_len`, `process_run`.
 
 | Name | Signature | Notes |
 |---|---|---|
+| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by the entry name's byte sequence, per [05-HOST-4]. |
 | `process_run` | `(cmd: string, args: List[string]) -> (int64, string, string)` | argv, no shell. **Eval/test-only** — C/HIP/Metal build reject it (chelis#267). |
 
 ### 3.6 Diagnostics & test — `Test` effect on asserts
 
 `print`, `fail`, `debug`, and the `test_assert*` family: `test_assert`,
-`test_assert_eq_f32`, `test_assert_eq_int`, `test_assert_eq_bool`,
-`test_assert_eq_string`, `test_assert_close_tensor`, `test_assert_eq_tensor_int64`.
+`test_assert_eq`, `test_assert_close_tensor`, `test_assert_eq_tensor`.
 
 ### 3.7 Integer / bitwise elementwise
 
@@ -302,91 +311,46 @@ no AD. Shifts use declared-width two's-complement semantics; counts at or
 above the width fully shift out the value, while negative counts trap
 ([04-NUM-13]).
 
-### 3.8 JSON I/O + decimal rounding — **eval-only** (chelis#890)
+### 3.8 Decimal rounding — **eval-only**
 
-Native JSON over the prelude `Json` ADT
-(`Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string |
-JList List[Json] | JDict Dict[string, Json]`). **Eval/test-only**:
-`chelis build` and the public `compile()` API reject every name below when the retained compile target reaches it
-(`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`), like `process_run`. Build
-checks the complete selected program before it removes well-typed
-unreachable definitions. The compiled-lane counterpart is `Std.Io.{Json,Csv}` (§11):
-ordinary package defs that `chelis build` accepts, over std's own distinct
-`Json` ADT — reef package name-rewriting keeps its same-named
-`parse_json`/`to_json` from colliding with these builtins in either lane.
-All failures (malformed JSON, missing path, type mismatch,
-non-finite number) are loud eval errors — no silent defaults. Numeric
-semantics are normative in `spec/05-risc-primitives.md` §3.7
-([05-OP-1]..[05-OP-5]).
+`round_to(x: f64|f32, places: int) -> f64|f32` performs ties-to-even decimal
+rounding on the operand's exact binary value ([05-OP-1], [04-NUM-8]). It
+preserves the operand dtype, accepts `places` in 0..=100 at any integer width,
+passes non-finite values through, and rejects f16/bf16 operands loudly. An
+unannotated operand pins to f64. `chelis build` and the public `compile()` API
+reject `round_to` when the retained compile target reaches it.
 
-| Name | Signature | Notes |
-|---|---|---|
-| `parse_json` | `(s: string) -> Json` | strict RFC 8259; a leading UTF-8 BOM is ignored (§8.1, matching `parse_csv`); **int-vs-float is decided at parse time** ([05-OP-2]) — a token with `.`/`e`/`E` becomes `JNum f64`, anything else becomes `JInt int64` (the `Std.Io.Json` and Python `json` rule), so integers stay exact; an integer literal too wide for int64 falls back to `JNum` and is the one documented lossy case; duplicate keys: first position, last value; depth cap 512 |
-| `to_json` | `(v: Json) -> string` | compact, **insertion-order keys**, `JInt` emitted exactly (no decimal point, no f64 round-trip), **shortest-round-trip f64** for `JNum` through the [05-OBS-1] `format_element` channel ([05-OP-5]; deliberately NOT the print helpers, chelis#748/#723/#734); NaN/inf fail; non-ASCII emitted as raw UTF-8; byte-stable |
-| `json_f64` | `(j: Json, path: string) -> f64` | dot-path: segment = dict key, or strictly all-digits list index (no sign, no leading zeros); failures name the missing key and list available keys; **widens `JInt` via the named lossy widening** ([05-OP-3]; lossy above 2^53 — use `json_int` for exactness) |
-| `json_int` | `(j: Json, path: string) -> int64` | exact integer read ([05-OP-3]). Refuses a `JNum` rather than truncating it, naming `json_f64` as the remedy (§C1.1: no silent narrowing) |
-| `json_str` | `(j: Json, path: string) -> string` | |
-| `json_list` | `(j: Json, path: string) -> List[Json]` | elements re-enter the accessors (element-relative paths) |
-| `json_f64s` | `(j: Json, path: string) -> List[f64]` | list of numbers at path; `JInt` elements widen as in `json_f64`; any non-number element fails with its index |
-| `json_ints` | `(j: Json, path: string) -> List[int64]` | exact integer list ([05-OP-3]); any `JNum` element fails with its index, naming `json_f64s` as the remedy |
-| `jnum` | `(x: f64) -> Json` | **exactly f64** ([05-OP-4]; bare literals are f32 per §5.3 and are rejected loudly — suffix them `0.1f64` or use `cast(n, f64)`; an f32 would quantize through the byte-exact serializer) |
-| `jint` | `(n: int64) -> Json` | **exactly int64** ([05-OP-4]; narrower integers rejected loudly — suffix `1i64` or `cast(n, int64)`), mirroring `jnum`'s width guard |
-| `jstr` | `(s: string) -> Json` | |
-| `jlist` | `(items: List[Json]) -> Json` | |
-| `jdict` | `(entries: List[(string, Json)]) -> Json` | insertion order; duplicate keys upsert |
-| `json_set` | `(j: Json, path: string, v: Json) -> Json` | returns updated value; missing intermediate dict keys auto-create nested dicts (output assembly); list segments replace existing elements only; path segments and the built result respect the 512 depth cap |
-| `round_to` | `(x: f64\|f32, places: int) -> f64\|f32` | decimal rounding, **ties-to-even on the exact binary value** (= Python `round`): `round_to(2.5f64, 0) = 2.0`, `round_to(2.675f64, 2) = 2.67`; `places` in 0..=100, any integer precision; non-finite passes through. Per-dtype at declared widths ([05-OP-1], [04-NUM-8]): the operand's exact binary value decimal-rounds and finalizes ONCE to the operand's own width — the result preserves the operand dtype; f16/bf16 operands are rejected loudly at check and eval |
-
-Composes with §3.5: `read_file |> parse_json`, accessors + tensor builtins
-for compute, `jdict`/`json_set`/`to_json` + `write_file` for nested output.
-Matching on the `Json` constructors is available for power users; the
-accessors are the primary agent surface.
-
-Two contract notes: (1) an UN-annotated `round_to` operand (e.g. a bare
-lambda parameter) pins to **f64** — annotate the parameter (`fn (x: f32)
--> round_to(x, 3)`) to select the f32 lane; (2) accessor paths take at
-least one segment — the root value itself is not path-addressable, so a
-top-level array reads element-wise (`json_int(doc, "0")`) or via ADT
-matching, never as `json_list(doc, "")`.
+JSON is not a builtin or prelude ADT. The sole public JSON surface is the
+source-defined `Std.Io.Json` module described in §11, including its distinct
+`JsonInt`, `JsonBigInt`, and `JsonFloat` numeric variants.
 
 ### 3.9 CSV I/O — **eval-only** (chelis#903)
 
-Native CSV, first row = header, riding the `Json` ADT: a **Csv document**
-is the fixed-shape Json value
-`JDict {"columns": JList[JStr], "rows": JList[JDict]}` (cells from
-`parse_csv` are `JStr` — no silent numeric coercion at parse time), so
-every §3.8 accessor works on it (`json_list(c, "rows")`, `json_str(c,
-"rows.0.px")`, `to_json(c)` for debugging) and there is deliberately no
-`Csv` prelude type. **Eval/test-only** like §3.8
-(`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`); build-lane CSV reading and
-writing live in `Std.Io.Csv` (§11). All failures are loud eval
-errors — no silent NaN/defaults. Numeric cell semantics are normative in
-`spec/05-risc-primitives.md` §3.7 ([05-OP-2], [05-OP-3]).
+The builtin CSV carrier is exactly `List[Dict[string,string]]`: the input's
+first record supplies the column names, the carrier contains only data rows,
+and parsing keeps every cell as text. Numeric meaning enters only through an
+explicit `csv_int*` or `csv_f64*` accessor ([05-OP-2..3]).
+Every operation validates the carrier and fails loudly; no cell is silently
+coerced or defaulted. The compiled-lane source module is `Std.Io.Csv` (§11).
 
 | Name | Signature | Notes |
 |---|---|---|
-| `parse_csv` | `(s: string) -> Json` | RFC-4180-ish: quoted fields, doubled embedded quotes, commas/newlines literal inside quotes; LF or CRLF (mixed ok); leading UTF-8 BOM stripped; blank rows only at EOF. Errors name the 1-based row, plus the 1-based column where one applies (quote/separator errors): unclosed quote, content after closing quote, bare `"` in an unquoted field, bare CR, ragged row (row-level), interior blank row (row-level), **duplicate header names** |
-| `to_csv` | `(c: Json) -> string` | serializes the exact document shape `parse_csv` returns; the round-trip is **values-as-text**: every cell re-reads as the `JStr` of its serialized field text (all-`JStr` documents round-trip identically; `JNum` re-reads bit-exactly via `csv_f64`, `JInt` exactly via `csv_int`; cell *types* other than `JStr` do not survive — CSV is untyped). Cells may be `JStr`/`JInt` (exact digits)/`JNum` (**shortest-round-trip f64**, the same [05-OP-5] channel as `to_json`)/`JBool`/`JNull` (empty cell); minimal quoting (incl. a BOM-leading first header field), LF rows, trailing newline, byte-stable; loud on non-finite numbers, container cells, unexpected top-level keys, a row missing a declared column or carrying an undeclared/duplicate key |
-| `csv_f64s` | `(c: Json, col: string) -> List[f64]` | whole column as numbers; strict JSON number grammar per cell — literally `parse_json`'s scanner (surrounding ASCII spaces/tabs tolerated, matching Python `float()`); empty or non-numeric cells fail naming the column, 0-based data row, and offending text; finite `JNum` cells (assembled docs) read directly and `JInt` cells widen per [05-OP-3], non-finite fail; `JBool`/`JNull` cells fail per-type |
-| `csv_ints` | `(c: Json, col: string) -> List[int64]` | whole column as **exact int64** ([05-OP-3]): strict integer grammar on `JStr` cells (optional `-`, digits, no leading zeros beyond `0` itself; ASCII space/tab trim; out-of-range int64 is a loud Overflow-class error, never an f64 fallback); `JInt` cells read exactly; `JNum` cells fail naming `csv_f64s` as the remedy |
-| `csv_strs` | `(c: Json, col: string) -> List[string]` | whole column verbatim (`JStr` cells only; other cell types fail per-type — no cross-type coercion) |
-| `csv_nrows` | `(c: Json) -> int64` | data rows (header excluded), exact count ([05-OP-3]) |
-| `csv_cols` | `(c: Json) -> List[string]` | header names in file order (preserved even for zero-row files) |
-| `csv_f64` | `(c: Json, row: int, col: string) -> f64` | one cell as a number; `row` is a 0-based data-row index, any integer precision (bare literals work) |
-| `csv_int` | `(c: Json, row: int, col: string) -> int64` | one cell as exact int64, same grammar and refusal contract as `csv_ints` |
-| `csv_str` | `(c: Json, row: int, col: string) -> string` | one cell verbatim |
+| `parse_csv` | `(s: string) -> List[Dict[string,string]]` | RFC-4180-style quoted fields, doubled quotes, embedded commas/newlines, LF or CRLF, leading UTF-8 BOM; rejects malformed, ragged, blank-interior, or duplicate-header input |
+| `to_csv` | `(rows: List[Dict[string,string]]) -> string` | requires every row to have the first row's unique string-keyed columns; quotes fields as needed and emits LF rows with a trailing newline |
+| `csv_f64s` | `(rows, col: string) -> List[f64]` | strict finite JSON-number grammar after ASCII space/tab trim; overflow and non-numbers fail |
+| `csv_ints` | `(rows, col: string) -> List[int64]` | exact integer grammar and int64 range; float syntax fails naming `csv_f64s` |
+| `csv_strs` | `(rows, col: string) -> List[string]` | whole column verbatim |
+| `csv_nrows` | `(rows) -> int64` | exact data-row count |
+| `csv_cols` | `(rows) -> List[string]` | first row's columns in insertion order |
+| `csv_f64` | `(rows, row: int, col: string) -> f64` | one cell; row is a nonnegative 0-based data-row index |
+| `csv_int` | `(rows, row: int, col: string) -> int64` | one exact integer cell |
+| `csv_str` | `(rows, row: int, col: string) -> string` | one cell verbatim |
 
-Missing columns fail naming the column **and listing the available
-columns**. Document-shape validation is eager and uniform: every accessor
-(including `csv_nrows`/`csv_cols`) checks that `columns` is a list of
-unique strings and every row a JDict; cell types are checked at read.
-**Integer columns are first-class**: an int64 ID column above 2^53 reads
-exactly through `csv_ints`/`csv_int` — reaching for `csv_f64s` on such a
-column is the [04-NUM-11] collapse the integer accessors exist to prevent
-(`csv_f64` widens with the named 2^53 boundary, same as `json_f64`).
-Composes end-to-end with §3.5/§3.8:
-`read_file |> parse_csv` → `csv_f64s`/`csv_ints` + tensor builtins →
-`round_to` → `jdict`/`json_set`/`to_json` (or `to_csv`) + `write_file`.
+Missing columns name the requested column and list the available columns.
+`chelis build` and the public `compile()` API reject every builtin in this
+section when the retained compile target reaches it. Build checks the
+complete selected program before it removes well-typed unreachable
+definitions.
 
 ---
 
@@ -406,13 +370,13 @@ is not in the block, it is not a builtin (it's `chelis-std`, a shell library, or
 undefined).
 
 ```
-Tier-1 DAG:   add mul div floor_div trunc_div max_elem cmplt neg recip exp log sin cos tan atan sqrt
-              abs floor ceil round sum max_reduce min_reduce prod_reduce argmax_reduce
+Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan sqrt
+              abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
-              reduce_window_mean reshape permute expand pad shrink stride
+              reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
-Tier-2 DAG:   sub eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
-              softmax normalize mean matmul min_elem layer_norm conv2d
+Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
+              softmax normalize mean matmul layer_norm conv2d
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk
@@ -425,13 +389,11 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               to_list
               read_file write_file read_lines read_bytes file_exists list_dir
               mmap_file mmap_read mmap_len process_run
-              parse_json to_json json_f64 json_int json_str json_list json_f64s
-              json_ints jnum jint jstr jlist jdict json_set round_to
+              round_to
               parse_csv to_csv csv_f64s csv_ints csv_strs csv_nrows csv_cols
               csv_f64 csv_int csv_str
-              print fail debug test_assert test_assert_eq_f32 test_assert_eq_int
-              test_assert_eq_bool test_assert_eq_string test_assert_close_tensor
-              test_assert_eq_tensor_int64
+              print fail debug test_assert test_assert_eq test_assert_close_tensor
+              test_assert_eq_tensor
               mod bitand bitor bitxor shl shr
 ```
 
@@ -439,8 +401,7 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
 lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see §2).
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
-`List`/`Cons`/`Nil`, `MappedFile`, and
-`Json`/`JNull`/`JBool`/`JInt`/`JNum`/`JStr`/`JList`/`JDict` (§3.8).
+`List`/`Cons`/`Nil`, and `MappedFile`.
 
 ---
 
@@ -455,7 +416,8 @@ primitives (Tier-2 inherit via decomposition).
 - **Non-differentiable — `grad` rejects with a structured `AdError`:** `floor`, `ceil`,
   `round`, `cast_trunc` ([05-OP-6], `PiecewiseConstant`); `argmax_reduce`,
   `argmin_reduce` (index output); `scatter_replace`, `scatter_elements`
-  (`NonDeterministicAtDuplicateIndices`).
+  (`NonDeterministicAtDuplicateIndices`); signed-integer `sub`, `max_elem`, and
+  `min_elem` (`IntegerArithmeticOutput`).
 - **No AD (host lane):** every op in §3 — `cumsum`, `sort`, `einsum`, `fold`, `scan`,
   `tensor_scan`, etc. A differentiable path must stay in the DAG lane.
 - `if/then/else` differentiates (chosen branch); loops/recursion do not differentiate
@@ -525,6 +487,17 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
   sites). `realize` and explicit `drop` consume owned params.
 - **Rank polymorphism** (`..r`): Tier-2 shape-identity bodies and Tier-3 named-axis
   reductions (`sum`/`mean`) — see [`spec/design/rank_polymorphism.md`](../spec/design/rank_polymorphism.md); owning issue chelis#258. Body discipline limits which builtins are admissible (`shape_class` in `builtins.rs`).
+- **Dtype-family bounds** ([04-DTYPE-2], §5.9): a binder in a `def` or `sig`
+  `[...]` clause may declare `Float`, `Int`, or `Numeric`, restricting the dtypes
+  it instantiates at. Every stdlib signature whose [05-OP-35] domain is one
+  family now declares it, so `Std.Tensor.Construct`, `Std.Scalar`, `Std.Sort`,
+  `Std.Test`, `Std.Contracts`, and the `Std.Init.*` modules all narrow: each
+  rejects the families its domain excludes, and a `Numeric` bound additionally
+  rejects `bool`, which the previously unbounded binders accepted.
+  The bound lives on the scheme, so it survives aliases, wrappers,
+  higher-order values, and imports; two bounded variables that unify keep the
+  intersection of their families. An unbounded binder is still a general
+  type variable, not a dtype variable.
 
 ---
 
@@ -533,7 +506,7 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
 | Effect | Introduced by | Handled by |
 |---|---|---|
 | `Random` | `dropout`, `uniform_like` | `with seed(Ni64) { ... }` |
-| `Io` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
+| `IO` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
 | `Test` | `test_assert*` | pinned at root, no handler |
 | `Accum` | accumulation contexts | — |
 | `Resource(String)` | device/resource pinning | `with device("gpu:0"|"cpu") { ... }` |
@@ -592,13 +565,13 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 
 | Module | Key exports |
 |---|---|
-| `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze` |
+| `Std.Tensor.Construct` | `linspace`, `arange` (evaluator; their `Float`/`Int` dtype families are declared bounds and are enforced, while compiled-host generic casts remain [chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)); `stack`, `squeeze`, and `unsqueeze` are exported but concrete-call typing is not fully implemented ([chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416)) |
 | `Std.Tensor.Mask` | `where_indices` |
-| `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller) |
-| `Std.Sort` | `sort_1d`, `sort_2d` |
+| `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller; handlers advance only for draws on the executed runtime path, including computed/nested conditionals inside `grad`) |
+| `Std.Sort` | `sort` (rank-polymorphic numeric tensor; returns sorted values and `int64` indices) |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
-| `Std.Index` | `list_index`, `take_list`, `drop_list` |
-| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors, `try_*` twins). Ordinary package defs, so they run under **`chelis build`** — which rejects the §3.8/§3.9 builtins — making this the compiled lane's structured-I/O path; std's `Json` ADT (`JsonInt`/`JsonFloat`/…) is a distinct type from the prelude `Json` (`JInt`/`JNum`/…), and package name-rewriting keeps the shared callable names apart. Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
+| `Std.Index` | `list_index`, `take_list`, `drop_list` (scalar/tensor/nested/multi-target List adjoints preserve runtime length/positions through composed calls in eval and generated C) |
+| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(int64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`; object serialization recursively orders keys by Unicode scalar-value sequence, independent of insertion history. Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
 | `Std.Text` | `join(parts, sep)` |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | dates, fixed-point, tokenization, `run`/`run_chelis`, contract predicates |

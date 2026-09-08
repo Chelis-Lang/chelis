@@ -233,7 +233,7 @@ values: List[int32] = [1, 2, 3, 4]
 doubled = map(fn (v: int32) -> mul(v, 2), values)
 kept = filter(fn (v: int32) -> gt(v, 2), values)
 total = fold(fn (acc: int32, v: int32) -> add(acc, v), 0, values)
-count = len(values)
+item_total = len(values)
 first_two = take(values, cast(2, int64))
 paired = zip(values, values)
 "#,

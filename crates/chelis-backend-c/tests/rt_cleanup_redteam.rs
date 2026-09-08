@@ -22,13 +22,16 @@
 //! gate stays green for orchestrator merging and WS-Cleanup-Fixups can
 //! re-enable them when fixed.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
+
+mod common;
 
 const BF16_TOL: f64 = 1e-2;
 #[allow(dead_code)]
@@ -126,18 +129,18 @@ fn gcc_available() -> bool {
 
 #[allow(dead_code)]
 fn cblas_available() -> bool {
-    let dir = std::env::temp_dir().join("chelis_rtcleanup_cblas_probe");
-    let _ = fs::create_dir_all(&dir);
-    let probe = dir.join("probe.c");
+    let probe = common::probe_dir("rtcleanup_cblas_probe");
+    let dir = probe.path().to_path_buf();
+    let probe_source = dir.join("probe.c");
     fs::write(
-        &probe,
+        &probe_source,
         "extern void cblas_sgemm(); int main(void){(void)cblas_sgemm; return 0;}",
     )
     .unwrap();
     let out = dir.join("probe_bin");
     Command::new("gcc")
         .args([
-            probe.to_str().unwrap(),
+            probe_source.to_str().unwrap(),
             "-lcblas",
             "-o",
             out.to_str().unwrap(),
@@ -153,8 +156,8 @@ fn compile_and_run_kernel(
     main_c: &str,
     needs_cblas: bool,
 ) -> String {
-    let dir = std::env::temp_dir().join(format!("chelis_rtcleanup_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("rtcleanup_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
@@ -217,32 +220,48 @@ const HARNESS: &str = r#"
 
 static chelis_tensor *bf16_tensor_from_bits(const uint16_t *bits, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
-    memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    memcpy(chelis_tensor_write_view(guard).data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_bits(const uint16_t *bits, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
-    memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    memcpy(chelis_tensor_write_view(guard).data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
-    uint16_t *p = (uint16_t*)t->data;
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_bf16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
-    uint16_t *p = (uint16_t*)t->data;
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_f16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
+}
+
+static const uint16_t *tensor_u16_data(const chelis_tensor *t) {
+    return (const uint16_t*)chelis_tensor_read_view(t).data;
+}
+
+static const float *tensor_f32_data(const chelis_tensor *t) {
+    return (const float*)chelis_tensor_read_view(t).data;
 }
 "#;
 
@@ -301,10 +320,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_abs_edge(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -342,10 +361,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     f16_abs_edge(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -562,7 +581,7 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_sum_4096(inputs, 1, outputs, 1);
-    float backend = ((float*)outputs[0]->data)[0];
+    float backend = tensor_f32_data(outputs[0])[0];
     /* Naive bf16-direct: every add rounds back to bf16. */
     uint16_t acc = 0x0000;
     uint16_t step = chelis_f32_to_bf16(0.001f);
@@ -572,8 +591,8 @@ int main(void) {{
     }}
     float naive = chelis_bf16_to_f32(acc);
     printf("%.8f\n%.8f\n", backend, naive);
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -609,7 +628,7 @@ int main(void) {{
 /// so a bf16-input/f32-output matmul still routes through the
 /// convert-then-sgemm wrapper. Lock this behavior: building a
 /// BlasMatmul with bf16 operands and an f32-typed output node must
-/// still emit `chelis_bf16_buffer_to_f32` in the generated C.
+/// still emit element-wise `chelis_bf16_to_f32` conversion in the generated C.
 #[test]
 fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     use chelis_ir::dag::DimExpr;
@@ -641,9 +660,9 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "bf16_mm_f32_out").unwrap();
     assert!(
-        result.c_source.contains("chelis_bf16_buffer_to_f32"),
+        result.c_source.contains("chelis_bf16_to_f32"),
         "bf16-operand matmul with f32 output must convert operands through \
-         chelis_bf16_buffer_to_f32, not read them as raw f32:\n{}",
+         chelis_bf16_to_f32, not read them as raw f32:\n{}",
         result.c_source
     );
     assert!(
@@ -651,10 +670,10 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         "must dispatch cblas_sgemm:\n{}",
         result.c_source
     );
-    // When output is f32, no chelis_f32_buffer_to_bf16 downcast is
+    // When output is f32, no chelis_f32_to_bf16 downcast is
     // emitted (cblas_sgemm writes directly into t{id}->data).
     assert!(
-        !result.c_source.contains("chelis_f32_buffer_to_bf16"),
+        !result.c_source.contains("chelis_f32_to_bf16"),
         "bf16-operand matmul with f32 output must NOT downcast back to bf16:\n{}",
         result.c_source
     );
@@ -686,12 +705,12 @@ fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "f16_mm_f32_out").unwrap();
     assert!(
-        result.c_source.contains("chelis_f16_buffer_to_f32"),
+        result.c_source.contains("chelis_f16_to_f32"),
         "f16-operand matmul with f32 output must convert operands:\n{}",
         result.c_source
     );
     assert!(
-        !result.c_source.contains("chelis_f32_buffer_to_f16"),
+        !result.c_source.contains("chelis_f32_to_f16"),
         "must not downcast back to f16 when output is f32:\n{}",
         result.c_source
     );
@@ -737,9 +756,9 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
         "bf16 matmul wrapper must allocate exactly 3 scratch buffers (af, bf, cf):\n{src}"
     );
     // free(t{id}_af), free(t{id}_bf), free(t{id}_cf) plus the contiguity
-    // chelis_free's (`if (t{id}_a != t{a}) chelis_free(t{id}_a);` and
-    // similar for _b). Match the bare `free(t` and the wrapper-internal
-    // pattern.
+    // descriptor releases (`if (t{id}_a != t{a})
+    // chelis_tensor_release(t{id}_a);` and similar for _b). Match the bare
+    // `free(t` calls used only for the wrapper's scratch buffers.
     let af_free = src.contains("free(t") && src.contains("_af);");
     let bf_free = src.contains("free(t") && src.contains("_bf);");
     let cf_free = src.contains("free(t") && src.contains("_cf);");
@@ -829,9 +848,9 @@ extern void bf16_const_extra(chelis_tensor **inputs, int n_in, chelis_tensor **o
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     bf16_const_extra(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -879,9 +898,9 @@ extern void f16_const_extra(chelis_tensor **inputs, int n_in, chelis_tensor **ou
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     f16_const_extra(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -943,9 +962,9 @@ extern void cast_f32_bf16(chelis_tensor **inputs, int n_in, chelis_tensor **outp
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     cast_f32_bf16(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -992,9 +1011,9 @@ extern void cast_bf16_f32(chelis_tensor **inputs, int n_in, chelis_tensor **outp
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     cast_bf16_f32(NULL, 0, outputs, 1);
-    float v = ((float*)outputs[0]->data)[0];
+    float v = tensor_f32_data(outputs[0])[0];
     printf("%.8f\n", v);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1040,9 +1059,9 @@ extern void cast_f32_f16(chelis_tensor **inputs, int n_in, chelis_tensor **outpu
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     cast_f32_f16(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1092,7 +1111,7 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
     dag.add_node(RiscOp::Mul, vec![add, c], vec_ty(n, Prim::Bf16), None);
 
     // Evaluator
-    let mut inputs = std::collections::HashMap::new();
+    let mut inputs = chelis_unord::UnordMap::new();
     let a_eval = chelis_ir::eval::TensorValue::from_vec(
         vec![n],
         vec![0.5, 1.5, 2.5, -0.25, 1.0, 2.0, -1.0, 0.125],
@@ -1127,16 +1146,16 @@ int main(void) {{
     chelis_tensor *inputs[3] = {{a, b, c}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_chain(inputs, 3, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < {n}; i++) {{
         if (i) printf(" ");
         printf("%.8f", chelis_bf16_to_f32(p[i]));
     }}
     printf("\n");
-    chelis_free(a);
-    chelis_free(b);
-    chelis_free(c);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    chelis_tensor_release(c);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1236,6 +1255,27 @@ fn sibling_sweep_no_bf16_f16_panic_in_production_emit() {
             }
         }
     }
+}
+
+/// chelis#1484 REGRESSION TEST (source contract): red before, green after.
+/// The issue and `spec/design/checker_totality.md` PP5 both cite
+/// `grep -c 'rank mismatch' crates/chelis-backend-c/src/host_emit.rs`
+/// returning 0 as the shape of the gap. This locks the grep, so a later
+/// refactor cannot delete the host-lane guard and leave the doc's claim
+/// standing. The behavioral proof is `exec_compile`'s `host_lane_*` tests
+/// and `chelis-cli`'s `issue_1484_host_lane_rank_guard`; this assertion
+/// only pins that the string the doc cites is present.
+#[test]
+fn sibling_sweep_host_emit_carries_the_elementwise_rank_guard() {
+    let host = read_host_emit_src();
+    assert!(
+        host.contains("elementwise operand rank mismatch"),
+        "host_emit.rs must emit the chelis#1484 positive-rank operand guard; a regression has removed it"
+    );
+    assert!(
+        host.contains("elementwise operand shape mismatch"),
+        "host_emit.rs must emit the chelis#1484 equal-rank operand shape guard; a regression has removed it"
+    );
 }
 
 /// Em-dash sibling sweep. Per CLAUDE.md §8.6 and the lint-rule history

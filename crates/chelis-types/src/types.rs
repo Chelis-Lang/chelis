@@ -12,16 +12,91 @@ use serde::{Deserialize, Serialize};
 use crate::errors::ErrorWitness;
 
 /// A unique identifier for a type variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypeVar(pub u32);
 
-/// A unique identifier for a dimension variable.
+/// A semantic domain attached to a quantified type variable.
+///
+/// Unlike a callee-name check, a restriction is part of the polymorphic
+/// scheme itself. Instantiation installs it on the fresh inference variable,
+/// ordinary unification propagates it through aliases, and generalization
+/// re-quantifies it on wrappers and higher-order values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TypeVarRestriction {
+    /// `spec/04-type-system.md` §5.9 `Float`: the variable may instantiate
+    /// only at an active float primitive (`f16`, `bf16`, `f32`, `f64`).
+    ActiveFloat,
+    /// §5.9 `Int`: only at an active signed integer primitive (`int8`,
+    /// `int16`, `int32`, `int64`).
+    ActiveInt,
+    /// §5.9 `Numeric`: the union of [`TypeVarRestriction::ActiveFloat`] and
+    /// [`TypeVarRestriction::ActiveInt`]. `bool` and `string` are excluded,
+    /// as are the §1.1.1 reserved spellings.
+    ActiveNumeric,
+}
+
+impl TypeVarRestriction {
+    /// The `spec/04-type-system.md` §5.9 family name, as diagnostics and the
+    /// Surf surface spell it.
+    pub fn family_name(self) -> &'static str {
+        match self {
+            TypeVarRestriction::ActiveFloat => "Float",
+            TypeVarRestriction::ActiveInt => "Int",
+            TypeVarRestriction::ActiveNumeric => "Numeric",
+        }
+    }
+
+    /// The family's membership, spelled for a diagnostic reader who has not
+    /// read §5.9.
+    pub fn membership_gloss(self) -> &'static str {
+        match self {
+            TypeVarRestriction::ActiveFloat => "the active float dtypes",
+            TypeVarRestriction::ActiveInt => "the active signed integer dtypes",
+            TypeVarRestriction::ActiveNumeric => "the active numeric dtypes",
+        }
+    }
+
+    /// Whether `prim` is a member of this family.
+    ///
+    /// Membership follows §1.1's active set through [`Prim::is_float`] and
+    /// [`Prim::is_integer`], both of which already exclude the §1.1.1
+    /// deferred `f8e4m3`. `Prim::is_numeric` is deliberately NOT used for
+    /// `ActiveNumeric`: it admits `f8e4m3` so that rejection sites can
+    /// describe it, and a bound must not admit a dtype §1.1 does not.
+    pub fn admits(self, prim: Prim) -> bool {
+        match self {
+            TypeVarRestriction::ActiveFloat => prim.is_float(),
+            TypeVarRestriction::ActiveInt => prim.is_integer(),
+            TypeVarRestriction::ActiveNumeric => prim.is_float() || prim.is_integer(),
+        }
+    }
+
+    /// The family both bounds admit, or `None` when they share no dtype.
+    ///
+    /// [04-DTYPE-2]: unifying two bounded variables yields the intersection
+    /// of their families. `Numeric` is the join of the other two, so every
+    /// non-empty intersection is itself one of the three families and the
+    /// only empty case is `Float` against `Int`.
+    pub fn intersect(self, other: TypeVarRestriction) -> Option<TypeVarRestriction> {
+        use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
+        match (self, other) {
+            (ActiveFloat, ActiveFloat) => Some(ActiveFloat),
+            (ActiveInt, ActiveInt) => Some(ActiveInt),
+            (ActiveNumeric, ActiveNumeric) => Some(ActiveNumeric),
+            (ActiveNumeric, ActiveFloat) | (ActiveFloat, ActiveNumeric) => Some(ActiveFloat),
+            (ActiveNumeric, ActiveInt) | (ActiveInt, ActiveNumeric) => Some(ActiveInt),
+            (ActiveFloat, ActiveInt) | (ActiveInt, ActiveFloat) => None,
+        }
+    }
+}
+
+/// A unique identifier for a dimension variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DimVar(pub u32);
 
 /// A unique identifier for a *rank* variable — a `Dim::Rank` stands for an
 /// entire shape vector (Tier-2 rank polymorphism, `spec/design/rank_polymorphism.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RankVar(pub u32);
 
 /// Numeric precision types.
@@ -47,6 +122,20 @@ pub enum Prim {
     Int64,
     Bool,
     String,
+}
+
+// Canonical identity order for order-free collection indices. This is byte
+// order over the public dtype spelling, not a semantic numeric ordinal.
+impl PartialOrd for Prim {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Prim {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name().cmp(other.name())
+    }
 }
 
 impl Prim {
@@ -393,6 +482,54 @@ impl From<Prim> for TensorPrec {
     }
 }
 
+/// One argument of a nominal type application.
+///
+/// Keeping dimensions out of [`Type`] makes an extent impossible to consume
+/// as an ordinary type while preserving the declared argument order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NominalArg {
+    Type(Type),
+    Dimension(Dim),
+}
+
+/// Checker-owned kind of a nominal declaration parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NominalParamKind {
+    Type,
+    Dimension,
+}
+
+impl NominalArg {
+    pub fn as_type(&self) -> Option<&Type> {
+        match self {
+            Self::Type(ty) => Some(ty),
+            Self::Dimension(_) => None,
+        }
+    }
+
+    pub fn as_dimension(&self) -> Option<&Dim> {
+        match self {
+            Self::Type(_) => None,
+            Self::Dimension(dim) => Some(dim),
+        }
+    }
+}
+
+impl From<Type> for NominalArg {
+    fn from(value: Type) -> Self {
+        Self::Type(value)
+    }
+}
+
+impl fmt::Display for NominalArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Type(ty) => ty.fmt(f),
+            Self::Dimension(dim) => dim.fmt(f),
+        }
+    }
+}
+
 /// Chelis type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
@@ -407,8 +544,12 @@ pub enum Type {
     /// `TensorPrec::Var(_)` for sig-quantified precision polymorphism
     /// per `spec/04-type-system.md` §5.8 (WS-A5).
     Tensor(Vec<Dim>, TensorPrec),
-    /// Algebraic data type: name + type arguments.
+    /// Algebraic data type whose arguments are all ordinary types.
     Adt(String, Vec<Type>),
+    /// Algebraic data type with at least one dimension-kinded argument.
+    /// Keeping this representation distinct makes a dimension impossible to
+    /// consume through an ordinary `Type::Adt` argument path.
+    KindedAdt(String, Vec<NominalArg>),
     /// Type variable (for inference).
     Var(TypeVar),
     /// Tuple type.
@@ -505,6 +646,10 @@ impl fmt::Display for EffectSet {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scheme {
     pub tvars: Vec<TypeVar>,
+    /// Domain restrictions for quantified type variables. Entries are kept
+    /// in quantifier order for deterministic serialization.
+    #[serde(default)]
+    pub tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
     pub dvars: Vec<DimVar>,
     /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
     #[serde(default)]
@@ -517,6 +662,7 @@ impl Scheme {
     pub fn mono(ty: Type) -> Scheme {
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: ty,
@@ -540,6 +686,11 @@ impl fmt::Display for Type {
             Type::Adt(name, args) if args.is_empty() => write!(f, "{name}"),
             Type::Adt(name, args) => {
                 let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{name} {}", arg_strs.join(" "))
+            }
+            Type::KindedAdt(name, args) if args.is_empty() => write!(f, "{name}"),
+            Type::KindedAdt(name, args) => {
+                let arg_strs: Vec<String> = args.iter().map(ToString::to_string).collect();
                 write!(f, "{name} {}", arg_strs.join(" "))
             }
             Type::Var(v) => write!(f, "?{}", v.0),
@@ -747,7 +898,27 @@ pub struct VarGen {
     next_rvar: u32,
 }
 
+/// The next fresh identifier in each solver-variable class.
+///
+/// Level transitions record these watermarks instead of attaching a level to
+/// every variable. A variable's mint level is therefore the final transition
+/// whose corresponding watermark is no greater than its identifier.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VarWatermarks {
+    pub(crate) next_tvar: u32,
+    pub(crate) next_dvar: u32,
+    pub(crate) next_rvar: u32,
+}
+
 impl VarGen {
+    pub(crate) fn watermarks(&self) -> VarWatermarks {
+        VarWatermarks {
+            next_tvar: self.next_tvar,
+            next_dvar: self.next_dvar,
+            next_rvar: self.next_rvar,
+        }
+    }
+
     pub fn fresh_tvar(&mut self) -> TypeVar {
         let v = TypeVar(self.next_tvar);
         self.next_tvar += 1;
@@ -801,4 +972,138 @@ pub enum Lane {
     Tensor,
     /// Realized through the host runtime path (interpreter or host C emission).
     Host,
+}
+
+#[cfg(test)]
+mod dtype_family_bound_tests {
+    //! Lock `spec/04-type-system.md` §5.9's family membership and
+    //! [04-DTYPE-2]'s intersection rule against the active dtype set.
+
+    use super::*;
+
+    const EVERY_PRIM: [Prim; 11] = [
+        Prim::F32,
+        Prim::F64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F8e4m3,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+        Prim::String,
+    ];
+
+    fn admitted(restriction: TypeVarRestriction) -> Vec<Prim> {
+        EVERY_PRIM
+            .into_iter()
+            .filter(|prim| restriction.admits(*prim))
+            .collect()
+    }
+
+    #[test]
+    fn float_family_is_exactly_the_four_active_floats() {
+        assert_eq!(
+            admitted(TypeVarRestriction::ActiveFloat),
+            vec![Prim::F32, Prim::F64, Prim::F16, Prim::Bf16]
+        );
+    }
+
+    #[test]
+    fn int_family_is_exactly_the_four_active_signed_integers() {
+        assert_eq!(
+            admitted(TypeVarRestriction::ActiveInt),
+            vec![Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64]
+        );
+    }
+
+    #[test]
+    fn numeric_family_is_the_union_of_float_and_int() {
+        let mut union = admitted(TypeVarRestriction::ActiveFloat);
+        union.extend(admitted(TypeVarRestriction::ActiveInt));
+        let mut numeric = admitted(TypeVarRestriction::ActiveNumeric);
+        numeric.sort_by_key(|prim| format!("{prim:?}"));
+        union.sort_by_key(|prim| format!("{prim:?}"));
+        assert_eq!(numeric, union);
+    }
+
+    #[test]
+    fn no_family_admits_bool_string_or_a_reserved_dtype() {
+        // §1.1.1's deferred `f8e4m3` is numeric for diagnostic purposes but
+        // is not an active dtype, so no bound may admit it.
+        for restriction in [
+            TypeVarRestriction::ActiveFloat,
+            TypeVarRestriction::ActiveInt,
+            TypeVarRestriction::ActiveNumeric,
+        ] {
+            for prim in [Prim::Bool, Prim::String, Prim::F8e4m3] {
+                assert!(
+                    !restriction.admits(prim),
+                    "{} must not admit {prim:?}",
+                    restriction.family_name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn intersection_narrows_to_the_common_family() {
+        use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
+        assert_eq!(ActiveFloat.intersect(ActiveFloat), Some(ActiveFloat));
+        assert_eq!(ActiveInt.intersect(ActiveInt), Some(ActiveInt));
+        assert_eq!(ActiveNumeric.intersect(ActiveNumeric), Some(ActiveNumeric));
+        assert_eq!(ActiveNumeric.intersect(ActiveFloat), Some(ActiveFloat));
+        assert_eq!(ActiveFloat.intersect(ActiveNumeric), Some(ActiveFloat));
+        assert_eq!(ActiveNumeric.intersect(ActiveInt), Some(ActiveInt));
+        assert_eq!(ActiveInt.intersect(ActiveNumeric), Some(ActiveInt));
+    }
+
+    #[test]
+    fn float_and_int_have_an_empty_intersection() {
+        assert_eq!(
+            TypeVarRestriction::ActiveFloat.intersect(TypeVarRestriction::ActiveInt),
+            None
+        );
+        assert_eq!(
+            TypeVarRestriction::ActiveInt.intersect(TypeVarRestriction::ActiveFloat),
+            None
+        );
+    }
+
+    #[test]
+    fn an_intersection_admits_exactly_the_shared_dtypes() {
+        for left in [
+            TypeVarRestriction::ActiveFloat,
+            TypeVarRestriction::ActiveInt,
+            TypeVarRestriction::ActiveNumeric,
+        ] {
+            for right in [
+                TypeVarRestriction::ActiveFloat,
+                TypeVarRestriction::ActiveInt,
+                TypeVarRestriction::ActiveNumeric,
+            ] {
+                let shared: Vec<Prim> = EVERY_PRIM
+                    .into_iter()
+                    .filter(|prim| left.admits(*prim) && right.admits(*prim))
+                    .collect();
+                match left.intersect(right) {
+                    Some(merged) => assert_eq!(admitted(merged), shared),
+                    None => assert!(
+                        shared.is_empty(),
+                        "{}/{} share {shared:?} but intersect to nothing",
+                        left.family_name(),
+                        right.family_name()
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn family_names_match_the_surf_spelling() {
+        assert_eq!(TypeVarRestriction::ActiveFloat.family_name(), "Float");
+        assert_eq!(TypeVarRestriction::ActiveInt.family_name(), "Int");
+        assert_eq!(TypeVarRestriction::ActiveNumeric.family_name(), "Numeric");
+    }
 }

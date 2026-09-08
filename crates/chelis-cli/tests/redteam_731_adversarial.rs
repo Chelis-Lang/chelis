@@ -271,11 +271,16 @@ fn redteam_boundary_seed_cross_function_parity() {
 
 /// A `.dp`-only reachable negative int64 seed: the checker's suffix rule used to
 /// accept `(lit {type: int64} -1)` (score 1) while the DAG lowering's
-/// `extract_usize_value` rejects negatives and silently falls back, so both
+/// `extract_usize_value` rejected negatives and silently fell back, so both
 /// lanes ran the DEFAULT stream: seed -1 and seed 0 produced identical output
-/// ("distinct seeds yield distinct streams" [05-RNG-1] fails). Phase 1 F2
-/// rejects a negative seed at check, so this returns early. If a future change
-/// accepts it again, the fallback assertions below fire.
+/// ("distinct seeds yield distinct streams" [05-RNG-1] fails). chelis#794
+/// replaced that fold with `extract_u64_value`, which honors [05-RNG-1]'s
+/// two's-complement reinterpretation. The checker still narrows the front-end
+/// surface (Phase 1 F2, pending chelis#735), so this oracle still returns early
+/// and gives that lowering fix NO end-to-end cross-lane coverage: only the
+/// in-memory `RiscOp::UniformLike { seed }` unit assertions in
+/// `chelis-ir` cover it. If a future change accepts a negative seed at check,
+/// the assertions below become live.
 #[test]
 fn redteam_negative_dp_seed_not_silently_dropped() {
     let score = check_score(NEGATIVE_SEED_DP, ".dp");

@@ -45,12 +45,12 @@ clarabel = [
 # independent auditability of the linear-arithmetic / EUF fragment (the
 # SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
 # slice of Alethe is not reachable here). It audits cvc5's output, so it
-# implies `smt`. `gmp-mpfr-sys/use-system-libs` forces the
-# transitive `rug -> gmp-mpfr-sys` build to LINK system GMP (needs the
-# `gmp-devel` headers) instead of compiling GMP from C source, keeping the
-# build off the slow from-source path. Carcara's `rug` enables only
-# `integer`+`rational`, so neither MPFR nor MPC belongs in this feature.
-carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
+# implies `smt`. Carcara's `rug` enables only `integer`+`rational`; its
+# transitive `gmp-mpfr-sys` therefore builds the locked GMP source without
+# activating MPFR or MPC. Do not force `use-system-libs`: when Cargo unifies
+# this feature with `arb`'s default MPFR/MPC set, supported distributions can
+# provide older libraries than the locked bindings accept.
+carcara = ["smt", "dep:carcara"]
 # WI-14 Arb/FLINT rigorous-enclosure oracle. `arb-sys` vendors FLINT + Arb C
 # source and compiles them (and pulls `gmp-mpfr-sys`, which compiles GMP/MPFR),
 # so a clean build compiles the C stack from source (~1 min cold). The oracle is
@@ -64,6 +64,7 @@ carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
 arb = ["dep:arb-sys"]
 
 [dependencies]
+chelis-unord.workspace = true
 cvc5-rs = { version = "0.3", optional = true }
 # WI-14 oracle: FFI to FLINT/Arb. 0.3.6 vendors FLINT 2.8.5 + Arb c2b7e36 (it
 # does NOT link a system FLINT) and exposes `arb_hypgeom_erf` plus the interval
@@ -86,11 +87,6 @@ z3 = { version = "0.20", default-features = false, optional = true }
 # note), so it is a pinned git dependency. Pin a specific rev for build
 # reproducibility and CI-cache stability.
 carcara = { git = "https://github.com/ufmg-smite/carcara", rev = "45bfaedce92b31970cc2f8b07966813652aed8b0", optional = true }
-# Pulled in only so the `carcara` feature can force `use-system-libs` on the
-# transitive `rug -> gmp-mpfr-sys` build (cargo unifies the feature across the
-# graph). `default-features = false` retains the GMP base required by Rug
-# without activating the default MPFR and MPC features.
-gmp-mpfr-sys = { version = "1", default-features = false, optional = true }
 # WI-15 SoS certificate engine (behind `clarabel`). clarabel is the float SDP
 # core that PROPOSES a Gram matrix; num-bigint/num-traits back the exact-rational
 # repair + verification that turns the proposal into a checked certificate
@@ -121,7 +117,7 @@ bincode = "1"
 thiserror = { workspace = true }
 # Beacon subprocess shim (chelis#439): transport-only deps for the in-tree
 # DischargeEngine that shells to the out-of-tree chelis-beacon binary. base64
-# encodes the EXACT WireDag v1 bytes inline in the request JSON; wait-timeout
+# encodes the EXACT WireDag v6 bytes inline in the request JSON; wait-timeout
 # gives the hard subprocess kill the discharge timeout maps to; tempfile backs
 # the optional temp-file request transport. None link a solver, so the default
 # build stays solver-free. (tempfile is already used elsewhere in the workspace.)
@@ -168,3 +164,6 @@ required-features = ["arb"]
 name = "certify_special_fn_envelope"
 path = "src/bin/certify_special_fn_envelope.rs"
 required-features = ["arb"]
+
+[lints]
+workspace = true

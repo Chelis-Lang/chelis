@@ -6,7 +6,7 @@
 //!
 //! - [`Goal`]: a canonical, engine-independent statement to discharge. It
 //!   carries an OPTIONAL IR back-reference ([`Goal::ir`]) which addresses the
-//!   serialized `WireDag` v1 artifact a consumer (Beacon) deserializes. In
+//!   serialized exact-version `WireDag` v6 artifact a consumer (Beacon) deserializes. In
 //!   Phase 1 the cvc5 path leaves this unpopulated; the graph-extraction seam
 //!   (WI-3) populates it with the artifact's content hash + a root index.
 //! - [`Soundness`] and [`Qualifier`] / [`QualifierSet`]: the guarantee an
@@ -28,17 +28,16 @@
 
 use crate::tier_b::{SmtProperty, TierBResult};
 
-/// A content-addressed back-reference to a serialized `WireDag` v1 artifact.
+/// A content-addressed back-reference to a serialized exact-version `WireDag` artifact.
 ///
 /// This is the artifact an out-of-tree consumer resolves: it parses the
-/// serialized `WireDag` JSON bytes, validates a negotiated schema version,
+/// serialized `WireDag` JSON bytes, requires the exact current schema version,
 /// computes a sha256 over those bytes, and selects the output of interest by
-/// `root_index`. Chelis currently stamps v5; Beacon still advertises v1-v3,
-/// so chelis#708 requires negotiation to reject that mismatch before
-/// dispatch until the consumer adopts v5. The handle addresses that artifact by:
+/// `root_index`. Older and future versions are rejected before op decoding;
+/// there is no compatibility reader. The handle addresses that artifact by:
 ///
 /// - [`dag_hash`](Self::dag_hash): the lowercase-hex sha256 of the serialized
-///   `WireDag` v1 bytes. A consumer recomputes the same digest over the bytes
+///   exact-version `WireDag` bytes. A consumer recomputes the same digest over the bytes
 ///   it received and compares for byte-identity; lowercase hex round-trips
 ///   cleanly through JSON and is cheap to compare.
 /// - [`root_index`](Self::root_index): which `WireDag.roots` entry this goal's
@@ -52,7 +51,7 @@ use crate::tier_b::{SmtProperty, TierBResult};
 /// computes the hash and hands it here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IrHandle {
-    /// Lowercase-hex sha256 of the serialized `WireDag` v1 artifact this goal
+    /// Lowercase-hex sha256 of the serialized exact-version `WireDag` v6 artifact this goal
     /// was extracted from, once a producer populates it. `None` on the Phase 1
     /// cvc5 path.
     dag_hash: Option<String>,
@@ -70,7 +69,7 @@ impl IrHandle {
         }
     }
 
-    /// Construct a handle addressing a serialized `WireDag` v1 artifact by its
+    /// Construct a handle addressing a serialized exact-version `WireDag` v6 artifact by its
     /// content hash and the root index this goal's output selects. Reserved for
     /// the WI-3 graph-extraction producer; unused on the cvc5 path. `dag_hash`
     /// is the lowercase-hex sha256 of the serialized artifact bytes.
@@ -86,7 +85,7 @@ impl IrHandle {
         self.dag_hash.is_some()
     }
 
-    /// The content hash of the addressed `WireDag` v1 artifact, if populated.
+    /// The content hash of the addressed exact-version `WireDag` v6 artifact, if populated.
     pub fn dag_hash(&self) -> Option<&str> {
         self.dag_hash.as_deref()
     }
@@ -137,7 +136,7 @@ pub enum GoalShape {
 pub struct Goal {
     /// What is being asserted.
     pub shape: GoalShape,
-    /// Optional back-reference to the serialized `WireDag` v1 artifact this
+    /// Optional back-reference to the serialized exact-version `WireDag` v6 artifact this
     /// goal was extracted from (content hash + root index). Unpopulated on the
     /// Phase 1 cvc5 path; populated by the WI-3 graph-extraction seam.
     pub ir: IrHandle,
@@ -691,7 +690,7 @@ mod tests {
     #[test]
     fn ir_handle_from_wire_dag_carries_hash_and_root_index() {
         // The WI-3 producer surface: a content hash (lowercase-hex sha256 of
-        // the serialized WireDag v1 bytes) plus the root index the goal's
+        // the serialized exact-version WireDag bytes) plus the root index the goal's
         // output selects. The handle holds only the hash + index -- never a
         // Dag or WireDag value.
         let hash = "a".repeat(64);

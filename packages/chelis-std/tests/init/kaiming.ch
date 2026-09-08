@@ -47,11 +47,11 @@ def test_kaiming_normal_distinct_seeds_produce_distinct_samples() -> unit ! { Te
 }
 def test_kaiming_uniform_preserves_template_shape() -> unit ! { Test } = {
   out = with seed(11i64) { kaiming_uniform(template8(), cast(4.0, f32)) }
-  assert_shape(out, cast(8, int64), "kaiming_uniform output rank-1 length matches template (8)")
+  assert_shape(out, [cast(8, int64)], "kaiming_uniform output rank-1 length matches template (8)")
 }
 def test_kaiming_normal_preserves_template_shape() -> unit ! { Test } = {
   out = with seed(12i64) { kaiming_normal(template8(), cast(4.0, f32)) }
-  assert_shape(out, cast(8, int64), "kaiming_normal output rank-1 length matches template (8)")
+  assert_shape(out, [cast(8, int64)], "kaiming_normal output rank-1 length matches template (8)")
 }
 def test_kaiming_uniform_respects_bound() -> unit ! { Test } = {
   out = with seed(13i64) { kaiming_uniform(template1024(), cast(4.0, f32)) }

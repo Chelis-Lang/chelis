@@ -1,0 +1,4 @@
+[cache]
+ignore_env = true
+cache_executables = true
+heartbeat_secs = 30

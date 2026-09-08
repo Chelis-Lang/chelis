@@ -16,9 +16,12 @@
 //! these tests because its format strings discard information; these
 //! fixtures are written before the fix lands to lock the contract.
 
-use chelis_backend_c::emit::CEmitter;
+mod support;
 use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::emit_dag;
+
+mod common;
 
 fn scalar(p: Prim) -> TensorType {
     TensorType {
@@ -42,20 +45,20 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
         scalar(Prim::F32),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     let want_bits = (0.000000123456789_f64 as f32).to_bits();
     let needle = format!("0x{want_bits:08x}");
     assert!(
         src.contains(&needle),
         "F32 const must round-trip via exact bit pattern `{needle}`; emitted source:\n{src}"
     );
-    // Pre-fix emission used a lossy decimal format and the
-    // `chelis_fill_f32` symbol. Post-fix uses a dedicated bit-pattern
-    // helper so the lossy format string can never re-emerge through a
-    // future refactor that hand-edits the `%.8` literal back in.
+    // The exact tagged scalar keeps the bit pattern and dtype coupled
+    // through the single public fill entry point.
     assert!(
-        src.contains("chelis_fill_f32_bits"),
-        "F32 const must dispatch through `chelis_fill_f32_bits`; emitted source:\n{src}"
+        src.contains(
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"
+        ),
+        "F32 const must dispatch through the exact tagged fill; emitted source:\n{src}"
     );
 }
 
@@ -73,7 +76,7 @@ fn issue_189_f64_const_emits_exact_bit_pattern() {
         scalar(Prim::F64),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     let want_bits = v.to_bits();
     let needle = format!("0x{want_bits:016x}");
     assert!(
@@ -81,8 +84,10 @@ fn issue_189_f64_const_emits_exact_bit_pattern() {
         "F64 const must round-trip via exact bit pattern `{needle}`; emitted source:\n{src}"
     );
     assert!(
-        src.contains("chelis_fill_f64_bits"),
-        "F64 const must dispatch through `chelis_fill_f64_bits`; emitted source:\n{src}"
+        src.contains(
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"
+        ),
+        "F64 const must dispatch through the exact tagged fill; emitted source:\n{src}"
     );
 }
 
@@ -108,7 +113,7 @@ fn issue_189_f32_const_does_not_use_lossy_format() {
             scalar(Prim::F32),
             None,
         );
-        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let src = emit_dag(&dag, "test_fn").unwrap();
         let v32 = v as f32;
         let want_bits = v32.to_bits();
         // The bit pattern must be present.
@@ -134,7 +139,7 @@ fn issue_189_f32_const_smallest_denormal_round_trips() {
         scalar(Prim::F32),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("0x00000001"),
         "f32 denormal must round-trip via bit pattern `0x00000001`; emitted source:\n{src}"
@@ -157,7 +162,7 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
             scalar(Prim::F64),
             None,
         );
-        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let src = emit_dag(&dag, "test_fn").unwrap();
         let bits = v.to_bits();
         assert!(
             src.contains(&format!("0x{bits:016x}")),
@@ -176,11 +181,11 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
 // bit pattern exactly.
 // ---------------------------------------------------------------
 
-use chelis_backend_c::codegen;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
 
 fn runtime_include_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
@@ -274,8 +279,8 @@ fn runtime_lib_path() -> PathBuf {
 }
 
 fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join(format!("chelis_issue189_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("issue189_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
     let include_dir = runtime_include_dir();
@@ -361,11 +366,13 @@ extern void test_const_f32(chelis_tensor** inputs, int n_in, chelis_tensor** out
 int main(void) {
     chelis_tensor* outputs[1] = { NULL };
     test_const_f32(NULL, 0, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
     float v;
-    memcpy(&v, outputs[0]->data, sizeof(float));
+    memcpy(&v, view.data, sizeof(float));
     uint32_t bits;
     memcpy(&bits, &v, sizeof(uint32_t));
     printf("0x%08x\n", bits);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -420,11 +427,13 @@ extern void test_const_f64(chelis_tensor** inputs, int n_in, chelis_tensor** out
 int main(void) {
     chelis_tensor* outputs[1] = { NULL };
     test_const_f64(NULL, 0, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
     double v;
-    memcpy(&v, outputs[0]->data, sizeof(double));
+    memcpy(&v, view.data, sizeof(double));
     uint64_t bits;
     memcpy(&bits, &v, sizeof(uint64_t));
     printf("0x%016lx\n", (unsigned long)bits);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;

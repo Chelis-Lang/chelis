@@ -1,5 +1,5 @@
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
@@ -179,8 +179,8 @@ impl<'a> EvalContext<'a> {
             },
             span,
         );
-        let scoped = HashMap::from([(placeholder.to_string(), operand_type)]);
-        let staged = HashMap::from([(placeholder.to_string(), operand.value.clone())]);
+        let scoped = UnordMap::from([(placeholder.to_string(), operand_type)]);
+        let staged = UnordMap::from([(placeholder.to_string(), operand.value.clone())]);
         self.route_named_axis_expr(&app_expr, scoped, staged, reduce_name)
             .map_err(NamedAxisRouteError::into_message)
     }
@@ -205,8 +205,8 @@ impl<'a> EvalContext<'a> {
         args: &[RuntimeValue],
     ) -> Result<Option<RuntimeValue>, String> {
         let span = Span::new(0, 0);
-        let mut scoped: HashMap<String, TensorType> = HashMap::with_capacity(args.len());
-        let mut staged: HashMap<String, IrTensorValue> = HashMap::with_capacity(args.len());
+        let mut scoped: UnordMap<String, TensorType> = UnordMap::new();
+        let mut staged: UnordMap<String, IrTensorValue> = UnordMap::new();
         let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + args.len());
         app_elements.push(Expr::Atom(Atom::Tag(DeepTag::App), span));
         app_elements.push(Expr::Map(MetaMap::default(), span));
@@ -262,11 +262,13 @@ impl<'a> EvalContext<'a> {
             Ok(value) => Ok(Some(
                 self.unwrap_declared_scalar_return(resolved_name, value)?,
             )),
-            // Not lowerable (host-shaped body): deterministic ladder,
-            // fall back to interpretation; site A handles the body's
-            // reduction or fails loudly.
-            Err(NamedAxisRouteError::NotLowerable(_)) => Ok(None),
-            Err(NamedAxisRouteError::Fatal(message)) => Err(message),
+            // chelis#1277 B2h: a lowering failure after the routing decision
+            // is the evaluation's error, not a silent fall-through to the
+            // interpreter; the decision itself stays by classification (the
+            // `eval_app` gate and the `Ok(None)` returns above for arguments
+            // this boundary cannot type). This retires the eval-lane sibling
+            // of the C lane's chelis#1515 fall-through.
+            Err(error) => Err(error.into_message()),
         }
     }
 
@@ -277,8 +279,8 @@ impl<'a> EvalContext<'a> {
     fn route_named_axis_expr(
         &mut self,
         routed_expr: &Expr,
-        scoped_types: HashMap<String, TensorType>,
-        staged_inputs: HashMap<String, IrTensorValue>,
+        scoped_types: UnordMap<String, TensorType>,
+        staged_inputs: UnordMap<String, IrTensorValue>,
         context_label: &str,
     ) -> Result<RuntimeValue, NamedAxisRouteError> {
         self.pre_resolve_top_level_value_refs(routed_expr)
@@ -385,7 +387,7 @@ impl<'a> EvalContext<'a> {
     /// them from `bindings` (the lowerer emits `Load(name)` for such
     /// free names).
     fn pre_resolve_top_level_value_refs(&mut self, root: &Expr) -> Result<(), String> {
-        let mut visited: HashSet<String> = HashSet::new();
+        let mut visited: UnordSet<String> = UnordSet::new();
         let mut vars: Vec<String> = Vec::new();
         collect_var_names(root, &mut vars);
         while let Some(name) = vars.pop() {
@@ -420,7 +422,7 @@ impl<'a> EvalContext<'a> {
 pub(super) fn pack_dag_roots(
     dag: &Dag,
     roots: &[NodeId],
-    values: &HashMap<NodeId, IrTensorValue>,
+    values: &UnordMap<NodeId, IrTensorValue>,
     context_label: &str,
 ) -> Result<RuntimeValue, String> {
     let mut packed: Vec<RuntimeValue> = Vec::with_capacity(roots.len());
@@ -468,6 +470,7 @@ pub(super) fn pack_dag_roots(
 /// always a named axis, never a runtime value reference.
 pub(super) const REDUCTION_BUILTIN_NAMES: &[&str] = &[
     "sum",
+    "count",
     "mean",
     "max_reduce",
     "min_reduce",
@@ -529,7 +532,9 @@ fn app_expands_named_axis(list: &List) -> bool {
     let Some(callee) = kids.first().and_then(var_name) else {
         return false;
     };
-    callee == "expand" && kids.len() >= 4 && kids.get(2).and_then(var_name).is_some()
+    (callee == "expand" || callee == "insert")
+        && kids.len() >= 4
+        && kids.get(2).and_then(var_name).is_some()
 }
 
 /// Walk a Deep expr looking for a named-axis reduction or expand app,

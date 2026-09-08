@@ -102,6 +102,11 @@ fn build_to_c(source: &str, name: &str) -> String {
 /// header up to the matching closing `}`. Panics if the function
 /// definition is not present in `c`.
 fn function_body(c: &str, function: &str) -> String {
+    // Phase 2 gives every externally callable owned-formal function a
+    // borrowing artifact adapter plus a consuming implementation body. Sparse
+    // lowering belongs to the latter; inspecting the adapter would only test
+    // its required retain-and-forward boundary.
+    let function = format!("{function}__chelis_owned_body");
     let needle = format!("chelis_tensor* {function}(");
     // Find the definition: the prototype ends with `;`, the
     // definition with `{`. Scan candidate positions.
@@ -162,7 +167,12 @@ fn count_gather_out_index_lines(body: &str) -> usize {
 }
 
 fn count_gather_dtype_dispatch(body: &str) -> usize {
-    body.matches("->dtype == CHELIS_I64) ? (int64_t)((const int64_t*)")
+    body.lines()
+        .filter(|line| {
+            line.contains("chelis_host_tensor_dtype(")
+                && line.contains("== CHELIS_DTYPE_I64")
+                && line.contains("chelis_host_tensor_data(")
+        })
         .count()
 }
 
@@ -223,7 +233,7 @@ fn body_contains_tensor_helper_call(body: &str) -> bool {
 /// via `__result = <callee>(...);` — the C call-site fallback used
 /// when no function-level summary is registered.
 fn body_contains_host_function_call(body: &str, callee: &str) -> bool {
-    body.contains(&format!("= {callee}("))
+    body.contains(&format!("= {callee}__chelis_owned_body("))
 }
 
 // =========================================================================
@@ -289,8 +299,8 @@ fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
     // This test asserts the surface invariant: there is no Surf
     // construct today whose tensor-lane lowering goes to
     // `RiscOp::ScatterAdd`. The host-lane `scatter(base, indices,
-    // updates, axis, "add")` pentaop emits a `chelis_tensor_scatter()`
-    // runtime call (the generic dispatch path; see
+    // updates, axis, "add")` pentaop emits a `chelis_tensor_scatter_add()`
+    // runtime call (the exact tagged dispatch path; see
     // `specialization_dispatch.rs::scatter`), not `RiscOp::ScatterAdd`.
     // We confirm that pentaop path remains generic and that no false
     // summary is registered.

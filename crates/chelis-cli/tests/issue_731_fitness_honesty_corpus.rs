@@ -46,6 +46,27 @@
 //! chelis#850's unbacked `defsig`, chelis#1131's contradictory literal atom,
 //! and chelis#1147's four `scatter_elements` admission holes. Each class also
 //! has a well-typed score-1 control below.
+//!
+//! Membership (chelis#874 / chelis#887 / chelis#1525, PP8): a role-slot child
+//! the checker read through a partial extraction that silently defaulted on
+//! failure. §C4.1's coverage invariant quantifies over the nodes inference
+//! VISITS, so a `vmap` axis it discarded, a `pat-ctor` or `pat-record` head it
+//! skipped, a `grad` operand it typed fresh, a `kv` key it stepped past, and a
+//! `pat-lit` value it declined to read all satisfied [04-TOT-2] vacuously and
+//! scored a perfect 1.0. `spec/04-type-system.md` [04-TOT-4] settles the rule
+//! the fix implements: an omitted optional child and a present unreadable one
+//! are distinct inputs, and only the omission may take the form's declared
+//! default. The paired positive controls below are the readable form of every
+//! one of those slots, including bare `vmap(f)` with no axis child at all,
+//! which must keep scoring 1.0.
+//!
+//! Membership (chelis#1494): a `match` arm whose literal pattern cannot denote
+//! the scrutinee's primitive. `pattern_bindings` did nothing at `pat-lit`, so
+//! `spec/04-type-system.md` [04-PAT-1]'s constraint went unchecked and an
+//! `f32` pattern against an `int32` scrutinee scored 1.0 with an empty error
+//! list while the arm could never match. The paired positive control is the
+//! same program with a matching literal family, which must stay at 1.0 so the
+//! rejection cannot creep into a well-formed match.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -99,6 +120,19 @@ fn assert_below_one(members: &[(&str, String, &str)]) {
 #[test]
 fn surf_known_bad_programs_score_below_one() {
     let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "issue_668_rank_divergent_elementwise",
+            "module Repro.RankDivergent\n\
+             sig f: tensor[n, f32] -> tensor[u, f32]\n\
+             def f(x) = {\n\
+               s = stride(x, 2i64)\n\
+               e = insert(x, 0i32, 2i64)\n\
+               add(s, e)\n\
+             }\n\
+             out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n"
+                .to_string(),
+            ".ch",
+        ),
         ("bare", format!("def f() -> f32 = {MASKED_ERROR}\n"), ".ch"),
         (
             "let_body",
@@ -213,6 +247,18 @@ fn surf_known_bad_programs_score_below_one() {
         (
             "scatter_elements_string_data",
             "def f(indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) = scatter_elements(\"bad\", indices, updates, 0)\n".to_string(),
+            ".ch",
+        ),
+        (
+            "literal_pattern_float_vs_int_scrutinee",
+            "module ScrutineeSigned\n\ndef g(n: int32) -> int32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1.5 => 1.5\n  | _ => 2.5\n}\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "literal_pattern_out_of_range_vs_int8_scrutinee",
+            "def g(n: int8) -> int8 = add(0i8, n)\n\n             r: int32 = match g(1i8) with {\n  | 300 => 10\n  | _ => 20\n}\n"
+                .to_string(),
             ".ch",
         ),
     ];
@@ -370,6 +416,98 @@ fn bare_atom_expression_position_scores_below_one() {
     assert_below_one(&cases);
 }
 
+/// chelis#885: the seven bare-atom corpus members now hold the TOP rung.
+///
+/// `bare_atom_expression_position_scores_below_one` above is the check-rung
+/// guard (score < 1.0). The #885 domain split moved the defect class up the
+/// `docs/agent_quality_architecture.md` ladder: a bare atom in expression
+/// position is an INGRESS rejection (`spec/03-deep-syntax.md` [03-ROLE-2]
+/// for a bare identifier; the §8.1 metadata-key rule for a bare `:keyword`),
+/// identified per [03-PROG-2] discipline. Every member must exit 2 with the
+/// identification its class fixes: `keyword` for the four keyword members,
+/// `bare name` for the three symbol members. The score-rung test above stays
+/// as regression evidence; this one is the rung the class now holds.
+#[test]
+fn bare_atom_expression_position_rejects_at_parse() {
+    let wrap_body = |body: &str| {
+        format!(
+            "(module {{}} m.main (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+        )
+    };
+    let wrap_unit_sig = |body: &str| {
+        format!(
+            "(module {{}} m.main \
+             (defsig {{}} f (t-fn {{}} (t-prim {{}} int32) (t-unit {{}}))) \
+             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+        )
+    };
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "dp_bare_keyword_body_no_defsig",
+            wrap_body(":oops"),
+            "keyword",
+        ),
+        (
+            "dp_bare_symbol_body_no_defsig",
+            wrap_body("oops"),
+            "bare name",
+        ),
+        (
+            "dp_bare_keyword_body_unit_defsig",
+            wrap_unit_sig(":oops"),
+            "keyword",
+        ),
+        (
+            "dp_bare_symbol_body_unit_defsig",
+            wrap_unit_sig("oops"),
+            "bare name",
+        ),
+        (
+            "dp_bare_keyword_toplevel_def",
+            "(module {} m.main (def {} out :oops))\n".to_string(),
+            "keyword",
+        ),
+        (
+            "dp_bare_symbol_toplevel_def",
+            "(module {} m.main (def {} out oops))\n".to_string(),
+            "bare name",
+        ),
+        (
+            "dp_bare_keyword_unused_let_binding",
+            wrap_body("(let {} (bind {} unused :oops) (var {} x))"),
+            "keyword",
+        ),
+    ];
+    for (name, program, identification) in &cases {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("p.dp");
+        write_file(&path, program);
+        let out = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["check", path.to_str().unwrap()])
+            .output()
+            .expect("chelis check should run");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "[{name}] a bare atom in expression position is an ingress rejection (exit 2)"
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("[{name}] check must emit JSON: {e}"));
+        let errors = parsed["errors"].to_string();
+        assert!(
+            !errors.is_empty() && errors != "[]",
+            "[{name}] the rejection must carry a diagnostic"
+        );
+        assert!(
+            errors.contains(identification),
+            "[{name}] the diagnostic must identify the rejected form as \
+             {identification}: {errors}"
+        );
+    }
+}
+
 /// Negative parity for [`bare_atom_expression_position_scores_below_one`]:
 /// the chelis#873 rejection must not over-apply.
 ///
@@ -469,6 +607,11 @@ fn post_phase_checker_controls_still_score_one() {
             "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 1)\n",
             ".ch",
         ),
+        (
+            "matching_literal_pattern_family",
+            "module ScrutineeSigned\n\ndef g(n: int32) -> int32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1 => 1.5\n  | _ => 2.5\n}\n",
+            ".ch",
+        ),
     ];
     for (name, program, extension) in cases {
         let score = check_score(program, extension);
@@ -516,4 +659,240 @@ fn well_formed_control_still_scores_one_after_858() {
         (score - 1.0).abs() < f64::EPSILON,
         "the well-formed control must still score 1.0, got {score}"
     );
+}
+
+/// chelis#874 / chelis#887 / chelis#1525 (PP8): the source-coverage slots.
+///
+/// Each program below submits a child the form's semantics reads and the
+/// checker could not read. Before the fix, R1 through R4, the record-pattern
+/// `kv` key, and the three `pat-lit` rows all scored exactly 1.0 with an empty
+/// error vector; the record-construction, record-update, `pat-var` and `pat-as`
+/// rows were rejected, but by §C4.1's owner-stamp tripwire blaming a collateral
+/// node rather than by the slot that was wrong. The unit-level assertions on
+/// the diagnostics live in
+/// `crates/chelis-types/tests/issue_874_source_coverage_totality.rs`; these
+/// rows are the corpus-level property that the SCORE cannot read "perfect".
+#[test]
+fn pp8_source_coverage_slots_score_below_one() {
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "pp8_vmap_axis_var",
+            pp8_vmap("(var {} nonexistent_name_zzz)"),
+            ".dp",
+        ),
+        (
+            "pp8_vmap_axis_float_literal",
+            pp8_vmap("(lit {type: (t-prim {} f32)} 1.5)"),
+            ".dp",
+        ),
+        (
+            "pp8_vmap_axis_type_node",
+            pp8_vmap("(t-prim {} f32)"),
+            ".dp",
+        ),
+        ("pp8_vmap_axis_application", pp8_vmap(PP8_APP), ".dp"),
+        (
+            "pp8_pat_ctor_head_application",
+            pp8_pat_ctor(PP8_APP),
+            ".dp",
+        ),
+        (
+            "pp8_pat_record_head_var",
+            pp8_pat_record("(var {} nonexistent_name_zzz)"),
+            ".dp",
+        ),
+        (
+            "pp8_grad_non_function_operand",
+            pp8_wrap(
+                "(def {} d2 (fn {} (params {} (x {type: (t-prim {} f32)})) (grad {} (var {} x))))",
+            ),
+            ".dp",
+        ),
+        (
+            "pp8_record_kv_key_var",
+            pp8_record_kv("(var {} nonexistent_name_zzz)"),
+            ".dp",
+        ),
+        (
+            "pp8_record_update_kv_key_var",
+            pp8_record_update_kv("(var {} nonexistent_name_zzz)"),
+            ".dp",
+        ),
+        (
+            "pp8_pat_record_kv_key_var",
+            pp8_pat_record_kv("(var {} nonexistent_name_zzz)"),
+            ".dp",
+        ),
+        (
+            "pp8_pat_var_name_node",
+            pp8_wrap(
+                "(defsig {} pv (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n\
+                 (def {} pv (fn {} (params {} (q {type: (t-prim {} f32)}))\n\
+                 (match {} (var {} q) (arm {} (pat-var {} (var {} zz)) () \
+                 (lit {type: (t-prim {} f32)} 1.0)))))",
+            ),
+            ".dp",
+        ),
+        (
+            "pp8_pat_as_name_node",
+            pp8_wrap(
+                "(defsig {} pa (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n\
+                 (def {} pa (fn {} (params {} (q {type: (t-prim {} f32)}))\n\
+                 (match {} (var {} q) (arm {} (pat-as {} (var {} zz) (pat-wild {})) () \
+                 (lit {type: (t-prim {} f32)} 1.0)))))",
+            ),
+            ".dp",
+        ),
+        // chelis#1525: spec/03-deep-syntax.md section 6.3 fixes a `pat-lit`
+        // value as a literal, not an expression node, so a `lit` wrapper is
+        // malformed Deep. The float row is the one that shows the vacuity
+        // biting: the same atom unwrapped is an [04-PAT-1] rejection.
+        ("pp8_pat_lit_lit_node_int", pp8_pat_lit("(lit {} 1)"), ".dp"),
+        (
+            "pp8_pat_lit_lit_node_float",
+            pp8_pat_lit("(lit {type: (t-prim {} f32)} 1.5)"),
+            ".dp",
+        ),
+        ("pp8_pat_lit_var_node", pp8_pat_lit("(var {} zz)"), ".dp"),
+    ];
+    assert_below_one(&cases);
+}
+
+/// chelis#874 positive controls: the readable form of every slot above stays at
+/// a perfect 1.0. Their job is to prove the seam rejects UNREADABILITY rather
+/// than non-tagged-ness -- without them, the cheapest wrong fix (rejecting
+/// every structural bare list) passes every negative row.
+#[test]
+fn pp8_readable_slots_still_score_one() {
+    let cases: Vec<(&str, String)> = vec![
+        // spec/02 section 0.1 spells the zero axis as bare `vmap(f)`, so the
+        // OMITTED child must still take the form's declared default.
+        ("pp8_vmap_axis_absent", pp8_vmap("")),
+        (
+            "pp8_vmap_axis_zero",
+            pp8_vmap("(lit {type: (t-prim {} int32)} 0)"),
+        ),
+        (
+            "pp8_vmap_axis_cast_wrapped",
+            pp8_vmap("(cast {} (lit {type: (t-prim {} int64)} 0) (t-prim {} int32))"),
+        ),
+        ("pp8_pat_ctor_real_head", pp8_pat_ctor("Non")),
+        ("pp8_pat_record_real_head", pp8_pat_record("Circle")),
+        (
+            "pp8_grad_of_a_function",
+            pp8_wrap("(def {} d4 (grad {} (var {} double)))"),
+        ),
+        ("pp8_record_kv_declared_field", pp8_record_kv("r")),
+        (
+            "pp8_record_update_declared_field",
+            pp8_record_update_kv("r"),
+        ),
+        ("pp8_pat_record_kv_declared_field", pp8_pat_record_kv("r")),
+        ("pp8_pat_lit_bare_atom", pp8_pat_lit("1")),
+    ];
+    for (name, program) in cases {
+        let score = check_score(&program, ".dp");
+        assert!(
+            (score - 1.0).abs() < f64::EPSILON,
+            "{name} must remain a score-1 control, got {score}"
+        );
+    }
+}
+
+/// An unreadable child the PP8 probe table drives through several slots.
+const PP8_APP: &str = "(app {} (var {} missing_fn_qqq) (var {} missing_arg_www))";
+
+/// Declarations the PP8 fixtures share: a scalar function, a rank-1 tensor
+/// function to `vmap`, and three ADTs.
+const PP8_PRELUDE: &str = concat!(
+    "(deftype {} Shape () (variant {} Circle (field {} r (t-prim {} f32)))\n",
+    "  (variant {} Square (field {} a (t-prim {} f32))))\n",
+    "(deftype {} Box () (variant {} Box (field {} r (t-prim {} f32))))\n",
+    "(deftype {} Opt () (variant {} Non) (variant {} Som (field {} value (t-prim {} f32))))\n",
+    "(defsig {} double (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n",
+    "(def {} double (fn {} (params {} (x {type: (t-prim {} f32)}))\n",
+    "  (app {} (var {} mul) (var {} x) (lit {type: (t-prim {} f32)} 2.0))))\n",
+    "(defsig {} process (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))\n",
+    "  (t-tensor {} (d-name {} features) (t-prim {} f32))))\n",
+    "(def {} process (fn {} (params {} (x {type: (t-tensor {} (d-name {} features) \
+     (t-prim {} f32))}))\n",
+    "  (app {} (var {} relu) (var {} x))))\n",
+);
+
+fn pp8_wrap(body: &str) -> String {
+    format!("(module {{}} m.main\n{PP8_PRELUDE}{body})\n")
+}
+
+fn pp8_vmap(axis: &str) -> String {
+    let child = if axis.is_empty() {
+        String::new()
+    } else {
+        format!(" {axis}")
+    };
+    pp8_wrap(&format!(
+        "(defsig {{}} batched (t-fn {{}} (t-tensor {{}} (d-name {{}} batch) \
+         (d-name {{}} features) (t-prim {{}} f32))\n\
+         (t-tensor {{}} (d-name {{}} batch) (d-name {{}} features) (t-prim {{}} f32))))\n\
+         (def {{}} batched (fn {{}} (params {{}} (xs {{type: (t-tensor {{}} (d-name {{}} batch) \
+         (d-name {{}} features) (t-prim {{}} f32))}}))\n\
+         (app {{}} (vmap {{}} (var {{}} process){child}) (var {{}} xs))))"
+    ))
+}
+
+fn pp8_pat_ctor(head: &str) -> String {
+    pp8_wrap(&format!(
+        "(defsig {{}} gg (t-fn {{}} (t-adt {{}} Opt) (t-prim {{}} f32)))\n\
+         (def {{}} gg (fn {{}} (params {{}} (s {{type: (t-adt {{}} Opt)}}))\n\
+         (match {{}} (var {{}} s)\n\
+         (arm {{}} (pat-ctor {{}} {head}) () (lit {{type: (t-prim {{}} f32)}} 1.0))\n\
+         (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} f32)}} 2.0)))))"
+    ))
+}
+
+fn pp8_pat_record(head: &str) -> String {
+    pp8_wrap(&format!(
+        "(defsig {{}} hh (t-fn {{}} (t-adt {{}} Shape) (t-prim {{}} f32)))\n\
+         (def {{}} hh (fn {{}} (params {{}} (s {{type: (t-adt {{}} Shape)}}))\n\
+         (match {{}} (var {{}} s)\n\
+         (arm {{}} (pat-record {{}} {head}) () (lit {{type: (t-prim {{}} f32)}} 1.0))\n\
+         (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} f32)}} 2.0)))))"
+    ))
+}
+
+fn pp8_pat_record_kv(key: &str) -> String {
+    pp8_wrap(&format!(
+        "(defsig {{}} pr (t-fn {{}} (t-adt {{}} Shape) (t-prim {{}} f32)))\n\
+         (def {{}} pr (fn {{}} (params {{}} (s {{type: (t-adt {{}} Shape)}}))\n\
+         (match {{}} (var {{}} s)\n\
+         (arm {{}} (pat-record {{}} Circle (kv {{}} {key} (pat-wild {{}}))) () \
+         (lit {{type: (t-prim {{}} f32)}} 1.0))\n\
+         (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} f32)}} 2.0)))))"
+    ))
+}
+
+fn pp8_record_kv(key: &str) -> String {
+    pp8_wrap(&format!(
+        "(defsig {{}} mk (t-fn {{}} (t-adt {{}} Shape)))\n\
+         (def {{}} mk (fn {{}} (params {{}})\n\
+         (record {{}} Circle (kv {{}} {key} (lit {{type: (t-prim {{}} f32)}} 1.0)))))"
+    ))
+}
+
+fn pp8_record_update_kv(key: &str) -> String {
+    pp8_wrap(&format!(
+        "(defsig {{}} ru (t-fn {{}} (t-adt {{}} Box) (t-adt {{}} Box)))\n\
+         (def {{}} ru (fn {{}} (params {{}} (s {{type: (t-adt {{}} Box)}}))\n\
+         (record-update {{}} (var {{}} s) (kv {{}} {key} \
+         (lit {{type: (t-prim {{}} f32)}} 3.0)))))"
+    ))
+}
+
+fn pp8_pat_lit(value: &str) -> String {
+    pp8_wrap(&format!(
+        "(defsig {{}} pl (t-fn {{}} (t-prim {{}} int32) (t-prim {{}} f32)))\n\
+         (def {{}} pl (fn {{}} (params {{}} (n {{type: (t-prim {{}} int32)}}))\n\
+         (match {{}} (var {{}} n)\n\
+         (arm {{}} (pat-lit {{}} {value}) () (lit {{type: (t-prim {{}} f32)}} 1.0))\n\
+         (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} f32)}} 2.0)))))"
+    ))
 }

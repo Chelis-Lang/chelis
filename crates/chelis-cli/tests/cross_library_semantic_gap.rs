@@ -52,7 +52,7 @@ struct Counts {
     fused: usize,
     user_helper_defs: usize,
     /// Total bytes summed across every `chelis_alloc(N, (int64_t[]){...},
-    /// CHELIS_F32)` call. This approximates peak working set under the C
+    /// CHELIS_DTYPE_F32)` call. This approximates peak working set under the C
     /// backend's Phase-0 free-all-at-end strategy.
     total_alloc_bytes: usize,
 }
@@ -84,7 +84,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     let fused = c.matches("parallel for simd").count();
     let user_helper_defs = c.matches("static void my_mm__tensor_").count();
 
-    // Sum bytes across every chelis_alloc(N, (int64_t[]){...}, CHELIS_F32) call.
+    // Sum bytes across every chelis_alloc(N, (int64_t[]){...}, CHELIS_DTYPE_F32) call.
     let mut total_alloc_bytes = 0usize;
     let mut idx = 0;
     while let Some(start) = c[idx..].find("chelis_alloc(") {
@@ -111,7 +111,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
                     }
                 }
                 if ok {
-                    total_alloc_bytes += const_factor * 4; // CHELIS_F32 only in this test
+                    total_alloc_bytes += const_factor * 4; // CHELIS_DTYPE_F32 only in this test
                 }
             }
         } else if window.starts_with("chelis_alloc(0, NULL,") {
@@ -134,8 +134,8 @@ fn semantic_gap_sources() -> (&'static str, &'static str, &'static str, &'static
                   -> tensor[8, 4, f32] = matmul(a, b)\n";
     let inline_manual = "def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                          -> tensor[8, 4, f32] = {\n  \
-                           ae = expand(a, 2, 4i64)\n  \
-                           be = expand(b, 0, 8i64)\n  \
+                           ae = insert(a, 2, 4i64)\n  \
+                           be = insert(b, 0, 8i64)\n  \
                            sum(mul(ae, be), 1)\n\
                          }\n";
     let user_def_builtin = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
@@ -144,8 +144,8 @@ fn semantic_gap_sources() -> (&'static str, &'static str, &'static str, &'static
                             -> tensor[8, 4, f32] = my_mm(a, b)\n";
     let user_def_manual = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                            -> tensor[8, 4, f32] = {\n  \
-                             ae = expand(a, 2, 4i64)\n  \
-                             be = expand(b, 0, 8i64)\n  \
+                             ae = insert(a, 2, 4i64)\n  \
+                             be = insert(b, 0, 8i64)\n  \
                              sum(mul(ae, be), 1)\n\
                            }\n\
                            def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \

@@ -157,13 +157,14 @@ fn in_vocabulary_tags_without_expression_disposition_are_rejected_loudly() {
 /// list above or has a real `infer_expr` case; nothing is counted twice.
 #[test]
 fn no_disposition_list_is_disjoint_and_in_vocabulary() {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = Vec::new();
     for tag in NO_EXPRESSION_DISPOSITION {
         assert!(
-            seen.insert(tag),
+            !seen.contains(&tag),
             "duplicate entry in NO_EXPRESSION_DISPOSITION: {}",
             tag.as_str()
         );
+        seen.push(tag);
     }
     assert_eq!(
         DeepTag::ALL.len() - NO_EXPRESSION_DISPOSITION.len(),

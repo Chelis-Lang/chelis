@@ -4,7 +4,7 @@ path, driven against a shipped release toolchain layout.
 
 Drives a fixed-shape matmul through the C backend, links the generated C
 against system OpenBLAS with `gcc`, and runs the resulting binary. The
-Linux analog of smoke_macos_accelerate.py: it proves the exact unpacked
+Linux consumption smoke: it proves the exact unpacked
 release tarball works on a machine without Nix -- `bin/chelis` resolves
 `../lib/libchelis_runtime.a` from its own layout and stages it into the
 build output directory.

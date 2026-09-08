@@ -35,6 +35,7 @@ module.exports = grammar({
     $._whitespace,
     $._canonical_declaration_end,
     $._canonical_block_binding_end,
+    $._canonical_block_expression_end,
   ],
 
   extras: ($) => [$._whitespace, $.line_comment, $.block_comment],
@@ -146,6 +147,7 @@ module.exports = grammar({
       seq(
         "sig",
         field("name", $.identifier),
+        optional(field("quantifiers", $.type_binders)),
         ":",
         field("type", $.type_expression),
         optional($.effect_clause),
@@ -186,7 +188,7 @@ module.exports = grammar({
       seq(
         "def",
         field("name", $.identifier),
-        optional(field("quantifiers", $.dimension_parameters)),
+        optional(field("quantifiers", $.type_binders)),
         "(",
         commaSep($.parameter),
         ")",
@@ -195,7 +197,15 @@ module.exports = grammar({
         "=",
         field("body", $.expression),
       ),
-    dimension_parameters: ($) => seq("[", commaSep1($.identifier), "]"),
+    // spec/02-surf-syntax.md §P4b/§P4c: an unkinded binder list, each entry
+    // optionally bounded by one of the three closed dtype families.
+    type_binders: ($) => seq("[", commaSep1($.type_binder), "]"),
+    type_binder: ($) =>
+      seq(
+        field("name", $.identifier),
+        optional(seq(":", field("bound", $.dtype_family))),
+      ),
+    dtype_family: ($) => choice("Float", "Int", "Numeric"),
     parameter: ($) =>
       seq(
         field("name", $.value_identifier),
@@ -299,14 +309,27 @@ module.exports = grammar({
       seq(
         "{",
         choice(
-          prec.dynamic(1, $.expression),
-          seq(repeat1($.let_binding), field("result", prec.dynamic(1, $.expression))),
+          seq(
+            prec.dynamic(1, $.expression),
+            optional($._canonical_block_expression_end),
+          ),
+          seq(
+            repeat1($.let_binding),
+            field("result", prec.dynamic(1, $.expression)),
+            optional($._canonical_block_expression_end),
+          ),
         ),
         "}",
       ),
 
     block_expression: ($) =>
-      seq("{", repeat1($.let_binding), field("result", prec.dynamic(1, $.expression)), "}"),
+      seq(
+        "{",
+        repeat1($.let_binding),
+        field("result", prec.dynamic(1, $.expression)),
+        optional($._canonical_block_expression_end),
+        "}",
+      ),
     let_binding: ($) =>
       seq(
         field("pattern", $.let_pattern),
@@ -323,8 +346,8 @@ module.exports = grammar({
         seq("(", $.let_pattern, ",", optional(commaSep1($.let_pattern)), ")"),
       ),
 
-    par_expression: ($) => seq("par", "{", semicolonSep1($.expression), "}"),
-    do_expression: ($) => seq("do", "{", semicolonSep1($.expression), "}"),
+    par_expression: ($) => seq("par", "{", blockExpressionSep1($, $.expression), "}"),
+    do_expression: ($) => seq("do", "{", blockExpressionSep1($, $.expression), "}"),
 
     record_update_expression: ($) =>
       prec.right(
@@ -639,8 +662,19 @@ module.exports = grammar({
     tensor_type: ($) =>
       seq("tensor", "[", commaSep1(choice($.dimension_expression, $.identifier)), "]"),
     dimension_expression: ($) => choice($.axis_integer, "*", seq("..", $.identifier)),
+    // A type-application argument admits an integer literal: the concrete
+    // dimension instantiation of a dimension-parameterized ADT
+    // (`Frame[2]`, chelis#940). Bare type positions do not (chelis#1179).
     applied_type: ($) =>
-      prec(1, seq(field("name", $.qualified_type_name), "[", commaSep1($.type_expression), "]")),
+      prec(
+        1,
+        seq(
+          field("name", $.qualified_type_name),
+          "[",
+          commaSep1(choice($.type_expression, $.axis_integer)),
+          "]",
+        ),
+      ),
     unit_type: () => "unit",
     tuple_type: ($) =>
       seq("(", $.type_expression, ",", optional(commaSep1($.type_expression)), ")"),
@@ -718,6 +752,11 @@ function commaSep1(rule) {
 
 function semicolonSep1(rule) {
   return seq(rule, repeat(seq(";", rule)), optional(";"));
+}
+
+function blockExpressionSep1($, rule) {
+  const bounded = seq(rule, optional($._canonical_block_expression_end));
+  return seq(bounded, repeat(seq(";", bounded)), optional(";"));
 }
 
 function commaSepNoTrail1(rule) {

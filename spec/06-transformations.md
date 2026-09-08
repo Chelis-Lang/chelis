@@ -1,17 +1,12 @@
 # Chelis Language Specification: DAG-to-DAG Transformations
 
-**Version:** 0.1.0-draft
-**Status:** Authoritative specification draft
-
----
-
 ## 1. Overview
 
 Transformations are functions from DAGs to DAGs. They take a function (represented as a RISC DAG, see spec/05-risc-primitives.md) and produce a new function (a new RISC DAG). The three core transformations are:
 
-1. **`grad`** -- Reverse-mode automatic differentiation (Phase 0)
-2. **`vmap`** -- Vectorized map over a named dimension (Phase 2, semantics specified now)
-3. **`jit`** -- Just-in-time compilation with caching (Phase 2, semantics specified now)
+1. **`grad`** -- Reverse-mode automatic differentiation
+2. **`vmap`** -- Vectorized map over a named dimension
+3. **`jit`** -- Just-in-time compilation with caching
 
 This document also covers the optimization passes that operate on RISC DAGs (Section 5) and the rules governing how transformations compose (Section 6).
 
@@ -30,19 +25,22 @@ Then grad(f) : A -> dA
 ```
 
 where `dA` is the gradient type:
-- If `A` is a single tensor type `tensor[D, P]`, then `dA = tensor[D, P]` (same type).
+- If `A` is a float scalar or tensor type `tensor[D, P]`, then `dA = A`.
 - If `A` is a tuple `(T1, T2, ..., Tn)`, then `dA = (dT1, dT2, ..., dTn)`.
-- If `A` is an ADT/record whose fields (across every variant) are all float tensors
-  or float scalars, and at least one variant carries a field, then `dA` is the same
-  constructor shape with a gradient per field (the field-wise extension of
-  `spec/design/differentiable_language.md` Decision 6; shipped as the chelis#520 D2
-  slice documented in §2.10.1, with the limits listed there).
-- If a component of `A` is otherwise non-differentiable (e.g., `bool`, `i32`, an ADT
-  with a non-tensor field in any variant, or a pure enum with no fields at all),
-  then its gradient component is `unit`; the shipped D2 slice rejects such
-  arguments loudly rather than emitting a partial gradient struct.
+- If `A = List[T]` and `dT` is defined, then `dA = List[dT]`; the cotangent
+  list has exactly the primal list's runtime length and positional order.
+- If `A` is an ADT/record, then `dA` has the same executed constructor shape
+  with `dT` for every differentiable field. A non-differentiable field has
+  gradient component `unit`; a pure enum therefore has no differentiable
+  payload.
+- Any other non-differentiable component (`bool`, signed integer, string,
+  deferred value, function, or resource) has gradient type `unit`.
 
-Chelis's shipped source-level `grad` returns gradients only, not `(value, grad)`.
+The recursive definition is shape-preserving. It never drops a tuple field,
+list element, or ADT field merely because its cotangent is unit, and it never
+uses a backend carrier limitation to reject a language-defined cotangent.
+
+Source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
 
 ```
@@ -74,7 +72,11 @@ gradient value directly; multiple listed parameters return a flat tuple.
 
 ### 2.3 Algorithm: Reverse-Mode AD
 
-**Input:** A forward DAG `G` with nodes `[n_1, n_2, ..., n_k]` in topological order, where `n_k` is the output node.
+**Input:** A forward DAG `G` with its canonical node sequence
+`[n_1, n_2, ..., n_k]`, where every input precedes its consumer and `n_k` is
+the output node. A node's canonical forward ordinal is its position in this
+sequence. The ordinal belongs to the input DAG; a transform never derives it
+from an arbitrary topological-sort tie.
 
 **Output:** A backward DAG `G'` that computes both the forward output and gradients.
 
@@ -82,11 +84,13 @@ gradient value directly; multiple listed parameters return a flat tuple.
 
 **Step 1 -- Initialize adjoints.**
 
-Create an adjoint accumulator for every node in the forward DAG, initialized to zero:
+Create one cotangent accumulator for every forward value. Its type is §2.1's
+recursive `dT`, not necessarily one RISC tensor node. Initialize it with the
+shape-preserving zero cotangent for the executed primal value:
 
 ```
-for each node n_i in G:
-    adjoint[n_i] = Const(0, shape_of(n_i), precision_of(n_i))
+for each value v_i in G:
+    adjoint[v_i] = zero_cotangent(type_of(v_i), primal_value(v_i))
 ```
 
 Set the output node's adjoint to the seed gradient:
@@ -95,18 +99,29 @@ Set the output node's adjoint to the seed gradient:
 adjoint[n_k] = Const(1.0, shape_of(n_k), precision_of(n_k))
 ```
 
-If the output is a scalar tensor (0-dimensional), the seed is `Const(1.0, {}, P)`. If the output is a non-scalar tensor, the seed must be provided externally (this corresponds to a vector-Jacobian product).
+If the output is a float scalar or rank-zero float tensor, the seed is exact
+one at its dtype. A vector-Jacobian product supplies a seed with exactly the
+output's recursive cotangent type.
 
 **Step 2 -- Backward traversal.**
 
 Process nodes in **reverse topological order** (from output toward inputs). For each node `n_i`:
 
-1. Look up the adjoint rule for `n_i`'s operation in spec/05-risc-primitives.md Section 8.
-2. For each input `n_j` of `n_i`, compute the adjoint contribution using the rule, passing `adjoint[n_i]` as the upstream gradient.
-3. **Accumulate:** Add the contribution to `n_j`'s adjoint:
+1. Except for the seeded output node, materialize `adjoint[n_i]` from its
+   queued contributions using §2.4's canonical key order and balanced tree.
+2. Look up the operation's exact adjoint, zero-cotangent, or structural
+   rejection contract in its controlling numbered-spec atom.
+3. For an adjoint contract, compute each input's recursive contribution from
+   `adjoint[n_i]`. For a zero-cotangent contract, contribute the exact
+   shape-preserving zero. For a rejection contract, stop with its named
+   `AdRejectionReason`.
+4. **Queue:** store the contribution for `n_j` under the consumer's canonical
+   forward ordinal and the exact input-slot index. Do not incrementally build
+   an addition tree during traversal.
 
 ```
-adjoint[n_j] = Add(adjoint[n_j], contribution_from_n_i)
+contributions[n_j][(canonical_forward_ordinal(n_i), input_slot)] =
+    contribution_from_n_i
 ```
 
 **Step 3 -- Emit output.**
@@ -117,23 +132,32 @@ The backward DAG returns the requested gradient payload:
 adjoint[p_1], ..., adjoint[p_m]
 ```
 
-where `p_1, ..., p_m` are the parameters specified by `wrt` (or all tensor-typed Load nodes if `wrt` is not specified).
+where `p_1, ..., p_m` are the parameters specified by `wrt`, or every
+parameter containing at least one differentiable float leaf when `wrt` is
+omitted.
 
 ### 2.4 Gradient Accumulation (Multi-Use Nodes)
 
-When a node `x` is consumed by multiple downstream nodes `y_1, y_2, ..., y_m`, the adjoint of `x` is the **sum** of all contributions from its consumers:
+When a value `x` is consumed by multiple downstream edges, order those edges
+lexicographically by canonical forward node ordinal, then by input-slot index.
+Repeated use by one consumer therefore remains distinct and is ordered by the
+slot in that consumer's exact input list. This consumer-edge order is
+independent of the work-list or topological-sort tie order used to construct
+the backward graph. At every float scalar or tensor leaf, combine their contributions with the
+canonical adjacent-pair balanced addition tree at that leaf's declared dtype,
+beginning with an exact positive-zero base leaf. Tuple, List, and ADT
+cotangents combine corresponding fields/elements recursively; List lengths and
+the executed ADT constructor must match the primal, and `unit` fields remain
+`unit`.
 
 ```
-adjoint[x] = Add(
-    adjoint_from_y_1,
-    Add(adjoint_from_y_2,
-        ...
-        Add(adjoint_from_y_{m-1}, adjoint_from_y_m) ...))
+adjoint[x] = balanced_add(+0, contribution(edge_1), ..., contribution(edge_m))
 ```
 
 This implements the multivariate chain rule: if `L = L(y_1(x), y_2(x), ..., y_m(x))`, then `dL/dx = sum_i (dL/dy_i * dy_i/dx)`.
 
-In the DAG, this is represented by `Add` nodes that sum the contributions. The `Add` nodes are emitted during the backward traversal.
+The backward DAG represents this exact recursive tree. A backend may reassociate
+only where another numbered rule explicitly permits it.
 
 ### 2.5 Worked Example
 
@@ -196,92 +220,58 @@ Process n2 (Mul(n1, n1)):
 
 For `x = [1.0, 1.0]`: forward = exp(2) ~ 7.389, gradient = [14.778, 14.778].
 
-### 2.7 Non-Differentiable Operations
+### 2.7 Adjoint, Zero-Cotangent, and Rejected Operations
 
-The following operations produce zero gradients when encountered in a `grad` scope:
+Every numeric callable has exactly one of spec/05 §5's contracts: an exact
+adjoint, an exact zero cotangent, or a structural `grad` rejection. The
+operation's controlling `[05-OP-N]` atom decides which; an implementation may
+not replace one class with another.
 
-- **`CmpLt`**: Zero gradient to both inputs. The compiler emits a warning: "grad: CmpLt encountered; gradient is zero at this point."
-- **Integer operations**: Not differentiable. If `grad` is applied to a function with integer-typed parameters, a `non_differentiable` type error is raised.
-- **`Max(a, b)`**: Differentiable almost everywhere. The gradient routes to whichever input is larger (subgradient convention). Zero gradient at ties. See spec/05 Section 4.4.
-- **`Cast` to integer**: `Cast(x, i32)` produces zero gradient because the floor/truncation function has zero derivative almost everywhere.
+Comparisons, predicates, and `shape` use their specified zero-cotangent rules
+and therefore do not block a surrounding differentiable graph. Extrema use
+their exact tie/NaN subgradient rules, not a generic zero-at-ties convention.
+Piecewise-constant numeric conversions and roundings whose atoms specify
+`AdRejectionReason::PiecewiseConstant` reject the transformed graph even
+though their forward execution is legal; they never silently return zero.
+The one boundary that structural analysis does not cross is [05-OP-42]'s
+`stop_gradient` barrier: its argument's subgraph is outside adjoint
+construction and rejection analysis, its forward value passes through
+unchanged, and its argument receives the shape-preserving exact zero
+cotangent.
 
-The compiler does **not** error on non-differentiable operations in the forward pass of a `grad`-ed function. It only errors if the function's **parameter types** are non-differentiable. This follows JAX's convention: `grad(relu)` is valid (ReLU uses Max internally, which has zero gradient at one point), but `grad(fn (x: bool) -> ...)` is a type error.
+An explicit `wrt` target must contain at least one differentiable float leaf.
+A bool, signed-integer, string, function, resource, or recursively all-unit
+parameter is a `non_differentiable` type error. A List, tuple, or ADT with a
+differentiable leaf is legal and returns §2.1's shape-preserving cotangent;
+its discrete fields remain present as `unit`.
 
 ### 2.7.1 Symbolic Input Dimensions in Adjoint Construction
 
-Adjoint construction runs before symbolic dimensions are bound, so an input
-axis may be a `Named` dim with no concrete size. The rules split into two
-classes (chelis#513, gap 3 structural slice):
+Adjoint construction preserves symbolic identities where ordinary type
+reasoning proves them and otherwise carries exact runtime int64 extent nodes.
+`Sum`/`Expand` carry their selected extents, `Reshape`/`Permute` restore the
+recorded source shape, and `Pad`/`Shrink`/`Stride` use [05-MOV-1]'s runtime
+bounds and exact inverse graphs. Bound and axis scalars have zero cotangent.
 
-- **Structural (supported).** Where the adjoint can carry the symbolic dim
-  through without reading its value, it must. `Sum`/`Expand` adjoints carry
-  the extent as a `DimExpr`; `Reshape`/`Permute` adjoints reuse the source
-  dims; and a symbolic **bystander** axis (one the op does not touch) in the
-  `Pad`, `Stride`, and `ProdReduce` adjoints uses the `SHRINK_TO_END`
-  full-axis identity sentinel in its `Shrink` bounds, which
-  `bind_symbolic_dims` (evaluation) and the C backend's `emit_shrink`
-  resolve to the runtime extent. The `Shrink` adjoint of a full-axis
-  `(0, SHRINK_TO_END)` bound is exactly zero padding on that axis. A
-  `reshape` target dim written as static integer arithmetic over `shape()`
-  reads of statically-sized axes folds to a literal at lowering; the
-  `floor_div` / `trunc_div` / `mod` arms fold only on a non-negative
-  dividend with a positive divisor, the domain where floor, truncating,
-  and euclidean division agree, so the fold can never disagree with the
-  runtime operator.
-- **Runtime (node-valued; chelis#616).** Where the construction needs an
-  extent that is only known at run time -- the strided axis of a `Stride`
-  adjoint (the trim bound and the `m_a * step` merge extent), a symbolic
-  axis under a concrete or runtime `Shrink` sub-range (the trailing pad
-  amount `shape(x, axis) - end`), a runtime `Pad` bound (`end = before +
-  shape(x, axis)`), or a `reshape` target restoring a runtime axis -- the
-  adjoint builds the extent as a rank-0 integer scalar node (`Shape` reads
-  plus `add`/`mul`/`neg` arithmetic, with explicit casts between integer
-  precisions) referenced as a node-valued `RtDim` (see
-  `spec/05-risc-primitives.md` §2.4.1). It never guesses a size. Bound
-  scalars are a stop-gradient boundary: index math carries no cotangent and
-  does not pull its producers (a window-count `floor_div`) into the
-  differentiability check.
-- **Value-dependent (fail-closed).** The residual constructions that need a
-  runtime LOOP or value-dependent structure, not just an extent: the reduced
-  axis of a `ProdReduce` adjoint (one slice per element of the runtime
-  axis) and a runtime (node-valued) stride STEP (a runtime-extent axis
-  insertion). These fail loudly at construction, naming the op, the axis,
-  and the symbolic dim.
+Value-dependent traversal is equally part of the transform. [05-OP-14]
+reverses the executed balanced `ProdReduce` tree for every runtime slice;
+[05-MOV-1] maps every stride cotangent to its unique selected source index;
+and [05-RWIN-2]/[05-OP-39] reverse the exact executed runtime-window graph,
+including overlap accumulation and second derivatives. No symbolic or
+runtime dimension, loop extent, step, window, or target shape is a structural
+`grad` rejection merely because it is unavailable at transform time. Every
+execution mode evaluates the same generated runtime graph and guards.
 
-Likewise at lowering, a shape()-derived arithmetic `reshape` target now
-lowers to a rank-0 scalar node referenced as a node-valued target extent
-(chelis#616), with the numel invariant enforced at run time in both lanes
-(clean eval error, C runtime abort); only a target the fold PROVES negative
-is refused at lowering (a proven-invalid program).
-
-**Scalar `shape()` value reads (chelis#558 / chelis#513).** A `shape(x, axis)`
-read used as a scalar VALUE now lowers to a `RiscOp::Shape { axis }` node (a
-rank-0 integer extent; see `spec/05-risc-primitives.md` §2.5.1), replacing the
-prior bogus `Load { name: "shape" }` fallthrough. It is AD-transparent: the
-node reads only shape metadata, so its adjoint routes a zero cotangent to the
-input, and a loss whose value depends on a runtime dim (for example
-`loss = sum(x) * shape(x, 0)`, whose gradient is `shape(x, 0)` at every
-element) differentiates correctly in the eval and C lanes. The node carries a
-compile-time-constant `axis`; a `shape()` read whose axis is itself a runtime
-(data- or metadata-derived) value is not representable, so the forward host
-lane resolves it while any DAG-forcing path (notably `grad`) fails **loud** with
-a source-located "requires a compile-time-constant `axis`" diagnostic
-(chelis#616) instead of the same bogus `Load { name: "shape" }` fallthrough.
-The runtime movement-op bound and reshape-target representation built on this
-node (chelis#616) closed the former gap-2 / gap-3-value remainder: the
-runtime-symbolic-window `avgpool1d` grad
-(`issue_368_grad_concat_windows.rs::issue_368_runtime_symbolic_window_grad_is_half_everywhere`)
-is a passing analytic + finite-difference + forward-parity oracle.
-
-Executable oracles: `crates/chelis-cli/tests/issue_513_symbolic_axis_adjoints.rs`
-(finite-difference + eval-vs-C agreement per enabled path, plus the
-fail-closed negative pins), `crates/chelis-cli/tests/issue_558_shape_value_read.rs`
-(the scalar `shape()` value-read node: FD + eval-vs-C runtime-dim agreement,
-plus the runtime-axis pins — a loud grad rejection and the preserved forward
-host lane), `crates/chelis-cli/tests/issue_616_runtime_movement_c_parity.rs` /
-`issue_616_runtime_reshape_c_parity.rs` (runtime bound/target eval-vs-C value
-AND error parity, one C binary across input lengths, gradient parity for the
-runtime window), and the `chelis-ir` unit tests alongside the adjoint rules.
+**Scalar `shape()` value reads.** A `shape(x, axis)` read used as a scalar
+value is the rank-zero int64 extent operation in
+`spec/05-risc-primitives.md` [05-OP-7]/[05-SHAPE-1]. It is AD-transparent:
+the operation reads only shape metadata, so its adjoint routes zero cotangent
+to the input and discrete int32 axis. A loss whose value depends on a runtime
+dimension (for example `loss = sum(x) * shape(x, axis)`) therefore
+differentiates with the actual selected runtime extent. Literal and computed
+axes have one semantic operation and remain representable through every DAG
+transform; a transform never guesses, freezes, or rejects the axis merely
+because a backend representation once stored it as a compile-time field.
 
 ### 2.8 Higher-Order Derivatives (Composition)
 
@@ -297,7 +287,7 @@ first `grad`.
 
 **Implementation note:** The backward DAG may share nodes with the forward DAG (e.g., `Exp(x)` reused in its own adjoint). These shared references must be preserved as-is -- the DAG is a graph, not a tree. The second `grad` application must correctly handle these shared nodes.
 
-### 2.9 Checkpointing (Phase 2)
+### 2.9 Checkpointing
 
 For memory efficiency, `grad(f, checkpoint=true)` opts into gradient checkpointing. Instead of storing all intermediate forward values for use in the backward pass, the checkpointed version recomputes them during the backward pass.
 
@@ -305,129 +295,56 @@ For memory efficiency, `grad(f, checkpoint=true)` opts into gradient checkpointi
 
 **Implementation approach:** During the backward traversal, when an adjoint rule needs a forward value (e.g., `Mul(g, Exp(x))` needs `Exp(x)`), instead of referencing the cached forward node, emit a new computation of that value from the forward inputs. The optimizer can then schedule these recomputations to minimize peak memory.
 
-This is not implemented in Phase 0 but is specified here so the DAG representation can accommodate it from the start.
+### 2.10 Recursive host values and execution modes
 
-### 2.10 Backend support: tensor lane vs host lane
-
-`grad` is fully supported on the **tensor lane** of `chelis build --target c`
-— the lane that lowers pure tensor expressions to a RISC DAG. Functions that
-live in the tensor lane have at least one tensor input and a scalar or tensor
-output; their bodies use only pure tensor ops (`add`, `mul`, `einsum`, `sum`,
-etc.). The supported pattern is encoded by the regression test
-`build_c_tensor_grad_local_wrapper_over_function_param_builds` in
-`crates/chelis-cli/tests/cli.rs`:
-
-```chelis
-def jac_row[n](
-  model: tensor[n, f32] -> f32 -> f32 -> f32,
-  theta: tensor[n, f32], x: f32, y: f32
-) -> tensor[n, f32] = {
-  target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)
-  grad(target, wrt=theta_local)(theta)
-}
-```
-
-`chelis eval` and the Tide host runtime apply `grad`/`vmap` by lowering the
-runtime transform application back into the RISC DAG evaluator. That path is
-not a separate host-lane AD engine: it uses the same reverse-mode rules as the
-tensor lane after rewriting a narrow set of host-list boundary idioms into
-ordinary tensor DAG structure.
-
-The supported eval/Tide AD boundary idioms are:
+Every execution mode applies `grad`/`vmap` through the same semantic transform
+rules. Host lists are ordinary differentiable carriers under §2.1, not a
+target-specific boundary subset. In particular:
 
 - `to_tensor(to_list(x))`, which is the identity boundary and whose adjoint is
   the identity cotangent
-- `to_tensor(map(f, to_list(x)))` and equivalent let-bound aliases, for
-  concrete rank-1 `x`; the runtime lowering recurses into `f` element-by-element
-  and stacks the scalar results
-- `to_tensor(filter(p, to_list(x)))`, for concrete rank-1 `x`, in scalar-loss
-  AD contexts; the primal predicate mask is treated as constant, selected
-  positions receive cotangents, and rejected positions receive zero
-- `fold(step, init, to_list(x))`, for concrete rank-1 `x`; lowering unrolls the
-  recurrence so the reverse pass scans the recorded scalar trajectory through
+- `map(f, xs)` differentiates each executed application of `f` in list order
+  and returns the same-length positional cotangent list
+- `filter(p, xs)` treats the exact forward predicate mask as constant,
+  routes selected output cotangents to their source positions, and gives
+  rejected positions zero cotangent
+- `fold(step, init, xs)` reverses the recorded recurrence trajectory through
   the ordinary structural adjoints
 
-These rewrites deliberately use differentiable structural primitives
-(`shrink`/`reshape`/`pad`/`add`) rather than `gather`/`scatter_add` for
-`map`, so `grad(grad(...))` through boundary+map is supported by composition
-of first-order rules. Dynamic-length list materialization remains a host value
-operation outside this AD boundary subset. In particular, differentiating a
-body that observes the selected cardinality of `filter(...)` through
-`shape`/`len`/`numel` is unsupported; the supported `filter` rule is the
-constant-mask cotangent path for scalar losses over the selected values.
+These rules compose through higher-order AD. A list length or selected
+cardinality is discrete metadata and contributes zero cotangent, while the
+values selected by the fixed forward mask retain the cotangents above.
+Scalar-only and list-carrying host graphs have the same language legality as
+tensor graphs; a target representation gap does not change their signatures
+or adjoints.
 
-`chelis build --target c` still rejects scalar-only host-lane AD patterns that
-do not enter the tensor DAG transform path. Adding a general scalar host AD
-engine remains tracked under Phase 5
-(`spec/design/phase5_host_scalar_ad.md`).
+### 2.10.1 Control flow and ADT-typed arguments
 
-### 2.10.1 `match` bodies and ADT-typed arguments (chelis#520 D1/D2 slices)
+`match` differentiates the arm executed by the forward program. Constructor
+tags, pattern tests, and guards are discrete and contribute zero cotangent;
+the untaken arms contribute nothing and are not evaluated. This rule is
+identical whether the scrutinee is known statically or only at runtime. Nested
+destructuring preserves the field paths used by §2.1's recursive cotangent
+type.
 
-Two slices of the differentiable-language roadmap
-(`spec/design/differentiable_language.md` Phases 1 and 2) are shipped for
-`grad`:
+Scalar `if` likewise differentiates the executed branch and gives its boolean
+condition zero cotangent. Tensor conditions use the exact `where` adjoint.
+Branch values may be scalar, tensor, List, tuple, or ADT; their cotangent keeps
+the same recursive shape.
 
-**D1 slice — static arm selection.** A `match` inside a differentiated body is
-resolved at lowering time when its scrutinee is a compile-time-known
-constructor value: a nullary constructor literal (`ModeA`), a positional
-constructor application, a record construction (`Box { t: e }`), or an
-ADT-typed parameter of the differentiated function (whose constructor shape is
-fixed at the `grad` call boundary). Only the taken arm is lowered and
-differentiated. This is the exact gradient, not an approximation: the
-constructor tag is discrete, so perturbing tensor inputs cannot change the
-taken arm. The slice covers both the host-eval lane (`chelis eval`) and the
-compiled tensor lane (`chelis build --target c`), which share the same DAG
-lowering. Still rejected, loudly and by name: a runtime scrutinee (anything
-that lowers to a tensor node), an arm guard on the selected pattern, and
-nested destructuring beyond `pat-var`/`pat-wild` field bindings.
+Recursive calls differentiate the finite recurrence actually executed by the
+forward program and reverse that recorded call trajectory. The language
+defines no fixed differentiation-depth cap. A nonterminating recursion remains
+nonterminating rather than becoming a target-specific gradient rejection.
 
-**Static condition pruning for `if` (chelis#620).** The `if` analogue of
-static arm selection: when an `if` condition const-folds at lowering time
-(its lowered subgraph is scalar, closed over literals — no `Load`, no
-`shape()` read, no random op — and every op is in the pure scalar
-vocabulary, with `cast` target-finalization matching the evaluator exactly
-and a trapping cast refusing the fold, a
-zero-divisor `floor_div`/`trunc_div` refusing the fold rather than folding
-a trap away, and any non-finite intermediate refusing the fold, because
-the lowered comparison composition disagrees with the forward lanes' IEEE
-semantics on NaN — chelis#666), ONLY the taken branch is lowered, and its
-value passes
-through verbatim — a tensor, a tuple, an ADT constructor, or a list. The
-untaken branch is never lowered, so a `fail(...)` guard arm, an empty-list
-base case, or a recursive call in the other branch cannot poison the DAG.
-This is the exact gradient for the same reason as static arm selection: a
-condition the fold can resolve cannot vary under input perturbation. Both
-lanes share the path. Two consequences ship with it:
-
-- **Bounded recursion unrolling.** A recursive function in a
-  differentiated body lowers by unrolling, terminated by the static
-  pruning of its base case (`if k >= n then [] else ...recurse...` with
-  literal-rooted bounds). Two caps backstop chains the pruning cannot
-  bound — 512 active levels per callee, 1024 total — and exceeding either
-  is a loud diagnostic naming the callee and the limit, never a hang. A
-  recursion whose base-case condition is only known at runtime cannot
-  unroll and hits the cap.
-- **Static list values through `concat`.** The `Cons`/`Nil` spine an
-  unrolled builder returns is consumed by list append
-  (`concat(list, list)`) and by tensor `concat(list, axis)`, which emits
-  the same Pad+Add cascade as the expression-level path.
-
-Compiler-inserted linearity `copy`/`drop` over tuple and ADT values lower
-structurally (one `Copy`/`Drop` per tensor leaf), closing the issue's
-"copy input expected a single tensor value" residue on the
-single-argument-closure path. Runtime-condition `if` keeps its previous
-contract: single-tensor float branches lower via the mask blend; an ADT-
-or tuple-valued branch under a runtime condition is rejected loudly,
-citing chelis#620 (the static alternative) and chelis#618 (the
-`RiscOp::Select` blend successor).
-
-**D2 slice — field-wise ADT gradients (eval lane).** `grad(f)(Ctor { .. })`
-over an ADT argument whose fields are all float tensors or float scalars
-returns a gradient with the same constructor shape, one gradient per field
-(the pytree contract). A field that does not influence the output receives an
-explicit zero tensor of its shape, so the gradient struct always matches the
-argument's structure. For a multi-constructor sum type, the gradient
-corresponds to whichever variant was constructed.
+Compiler-inserted linearity `copy`/`drop` operates structurally over List,
+tuple, and ADT values. `grad(f)(Ctor { .. })` returns §2.1's shape-preserving
+cotangent for the executed constructor: differentiable fields receive their
+exact field cotangents, uninfluential differentiable fields receive explicit
+zero, and discrete fields receive unit in their original positions. A pure
+enum has the same constructor with no continuous cotangent payload. For a
+multi-constructor sum type, the gradient uses the constructor selected by the
+primal argument.
 
 The ADT argument may appear ALONGSIDE plain tensor/scalar arguments — the
 chelis#520 closing bar `grad(model_forward, wrt=params)(x, params)`. The
@@ -443,49 +360,31 @@ slot would shift and mislabel every later gradient. Two pytree leaves whose
 gradient is the same DAG node (e.g. `sum(add(t, y))` has adjoint `1` for both)
 each keep their own root, so no tuple slot collapses.
 
-Limits, each a loud diagnostic naming the construct: mixed types (a
-non-float-tensor field in ANY variant of the argument's type) are rejected
-naming the field, even when the constructed variant itself is float-clean,
-because the checker types such a gradient as `unit` and the runtime must not
-produce a value the static type does not admit; pure enums (no fields in any
-variant) are rejected because there is no continuous payload to differentiate;
-and the compiled lane rejects `out = grad(f)` exports over ADT-typed
-parameters (the C ABI has no ADT value representation). Runtime-scrutinee
-`match` differentiation stays
-rejected and is tracked separately (chelis#618); it awaits a `RiscOp::Select`
-blend primitive per `spec/design/differentiable_language.md` Phase 1.
+Mixed differentiable and discrete fields therefore remain legal and
+well-typed. Runtime scrutinees, guarded arms, nested patterns, and compiled ADT
+parameters follow the same rule in every execution mode. A missing host-ABI
+carrier is a backend capability gap, not a language restriction.
 
-The acceptance oracle for both slices is
-`crates/chelis-cli/tests/issue_520_adt_match_grad.rs` (analytic +
-finite-difference gradients, eval-vs-C-backend agreement for D1, the
-multi-argument issue-shaped reproducer, and the negative-parity pins for
-every listed rejection). The static-condition-pruning slice's oracle is
-`crates/chelis-cli/tests/issue_620_static_if_adt_grad.rs` (guard and
-constructor pruning, the recursive-builder finite-difference witness, the
-params-loss and curried-closure shapes, eval-vs-C agreement, and the
-runtime-condition / unroll-cap negative pins).
-
-### 2.11 Interaction With Phase 2a Effects
+### 2.11 Interaction With Effects
 
 `grad` remains a compiler transform, not a user-visible effect handler.
 
 - `Diff` is treated as a capability of the AD pipeline rather than a boundary effect
-- `Accum` remains an internal design hook for backward-pass accumulation and is not yet
-  a user-facing checked effect
-- `with seed(...)` is handled before or during lowering so seeded `dropout` enters the
-  DAG as a deterministic `Dropout { rate, seed }` node
-- in the shipped evaluator/AD path, the backward pass reuses the same seeded dropout
-  mask rather than differentiating with respect to the seed
+- `Accum` is an internal backward-pass accumulation effect and is not a
+  user-handled boundary effect
+- `with seed(...)` fixes [05-RNG-1]'s stream for the complete forward and
+  reverse execution; random source words and the seed have zero cotangent,
+  while [05-OP-8]/[05-OP-37] and the stdlib graphs use their exact pathwise
+  parameter adjoints
 
-`with device(...)` is not a DAG-to-DAG transform. In the shipped Phase 2a subset it is
-validated on the checked Deep/build boundary: `chelis build --target c` rejects GPU
-resource regions, and `chelis build --target hip` rejects CPU-only regions.
+`with device(...)` is not a DAG-to-DAG transform. It selects the declared
+`Resource(Device)` region at the checked execution boundary; a target
+capability gap is reported through its typed capability cell and never changes
+the region's language semantics.
 
 ---
 
 ## 3. vmap -- Vectorized Map
-
-**Status:** Phase 2 shipped subset.
 
 ### 3.1 Signature
 
@@ -522,11 +421,12 @@ For each node in the original DAG, the vmap transformation adds the batch dimens
 | `ReduceSum(x, axis=d)` | `ReduceSum(x', axis=d)` -- reduce original axis, not batch |
 | `ReduceMax(x, axis=d)` | `ReduceMax(x', axis=d)` -- same |
 | `Reshape(x, D2)` | `Reshape(x', {batch} + D2)` -- preserve batch dim |
-| `Expand(x, dim, size)` | `Expand(x', dim, size)` -- expand within each batch element |
+| `Expand(x, dim, size)` | `Expand(x', dim, size)` -- broadcast within each batch element |
+| `Insert(x, dim, size)` | `Insert(x', dim, size)` -- insert within each batch element |
 | `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
 | `Load(buf)` | Load with batch dimension added to buffer type |
 
-The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension.
+The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: in the rewritten DAG's numbering a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
 
 ### 3.4 Type Rule
 
@@ -548,10 +448,9 @@ If `f` takes multiple arguments, each tensor argument gains the batch dimension:
 
 ### 3.5 Composition
 
-**vmap of vmap:** repeated application adds multiple batch axes. The shipped IR rewrite
-supports nested vectorization. The executable source subset currently targets direct
-`vmap(f)(args...)` applications rather than arbitrary stored higher-order transform
-values.
+**vmap of vmap:** repeated application adds multiple batch axes. Nested
+vectorization and stored higher-order transform values follow the same rule as
+direct `vmap(f)(args...)` applications.
 
 **vmap of grad:**
 
@@ -560,20 +459,20 @@ otherwise available.
 
 Computes **per-example gradients**: each example in the batch gets its own independent gradient. This is useful for per-example gradient clipping or differential privacy.
 
-In the shipped executable subset, the direct lowering path supports both the
-single-gradient case and flat tuple-valued gradient payloads from multi-parameter
-`grad(..., wrt=(...))`. Tuple construction and projection are resolved before the DAG
-surface, so the executable DAG still carries only ordinary tensor roots.
+The result may contain a single gradient or §2.1's recursive tuple/List/ADT
+gradient payload from multi-parameter `grad(..., wrt=(...))`; vectorization
+preserves that complete structure.
 
 **grad of vmap:**
 
-Direct source-level `grad(vmap(f))` remains rejected in the shipped subset unless the
-caller explicitly reduces the vmapped result back to a scalar first.
+`grad(vmap(f))` follows the ordinary scalar-output rule for `grad`. A bare
+vmapped tensor result is rejected by §8.3; composing an exact scalar reduction
+over that result is legal and differentiates the complete vectorized graph.
 
 These two are distinct concepts:
 - `vmap(grad(f))` returns a batch of gradient vectors (one per example).
 - `grad(fn(xs) = sum(vmap(f)(xs)))` is the batched gradient pattern once source-level
-  `grad` lowering reaches that path.
+  `grad` receives the required scalar result.
 
 ### 3.6 Error Conditions
 
@@ -581,11 +480,33 @@ These two are distinct concepts:
   arguments or results.
 - If `f` has non-tensor arguments, those arguments are broadcast (shared across the batch). They are not vmapped.
 
+### 3.7 Runtime Extents
+
+A rank-0 extent value that feeds a movement bound, an `expand` or `insert`
+size, or a `reshape` target (a `shape()` read, an integer parameter, a cast, checked
+integer arithmetic, or a user-function result over these) is not batched. It
+is a non-tensor argument in the sense of §3.6: one value is shared by every
+batch element, it is evaluated exactly once, and its traps and effects occur
+exactly once in the order of the unbatched function. A folded tensor-axis read
+(`InputAxis`, spec/05-risc-primitives.md §2.4.1) observes the axis it named in
+the unbatched function: after the batch axis is inserted a literal axis shifts
+by one, and a computed axis is normalized against the unbatched rank and then
+shifted, so the read never selects the batch axis. A materialized `shape()`
+value node (the `Node` form) shifts its axis the same way. A `shape()` read
+used both as an extent and as an ordinary value is still evaluated once and
+the ordinary use sees the shared rank-0 value. The movement operation itself
+follows §3.3: the batch axis passes through untouched and every bound applies
+within each batch element.
+
+An extent whose value depends on the elements of a vmapped tensor argument
+would vary per batch element and cannot describe one stacked result shape.
+Such a program is a type error, `batch_varying_extent` (§8.6): vectorization
+neither shares one element's value across the batch nor produces a ragged
+result.
+
 ---
 
 ## 4. jit -- Just-In-Time Compilation
-
-**Status:** Phase 2 implementation. Semantics specified here for forward compatibility.
 
 ### 4.1 Signature
 
@@ -648,10 +569,14 @@ After:  Const(0.0, shape_of(x), precision_of(x))    -- by algebraic simplificati
 
 ### 5.2 Dead Code Elimination (DCE)
 
-**Rule:** Remove any node whose output is not consumed by any other live node.
+**Rule:** Remove a node only when its result is not consumed by another live
+node and removing its execution preserves every effect and trap occurrence.
+Potentially effectful or trapping nodes are observable roots; purity alone does
+not make a possible trap dead.
 
 **Algorithm:**
-1. Mark all `Store` nodes and the designated output nodes as **live**.
+1. Mark every effectful node, every potentially trapping node, every `Store`,
+   and every designated output as **live**.
 2. Walk backward through the DAG: for each live node, mark all its input nodes as live.
 3. Remove all nodes not marked as live.
 
@@ -673,7 +598,12 @@ DCE is particularly important after `grad`, which may produce gradient nodes for
 
 ### 5.3 Common Subexpression Elimination (CSE)
 
-**Rule:** If two nodes perform the same operation on the same inputs (identical node references), merge them into one node.
+**Rule:** If two total, deterministic, pure nodes perform the same operation on
+the same typed inputs and semantic parameters, they may merge only when one
+execution has the same stored result and observation order as both original
+executions. Effectful, Random, resource, IO, Test, and potentially trapping
+nodes never merge. The key includes the complete dtype, shape, accumulator,
+and operation identity; an implementation name is not a semantic key.
 
 **Algorithm:**
 1. For each node, compute a hash: `hash(op, input_node_id_1, input_node_id_2, ..., params)`.
@@ -698,33 +628,37 @@ CSE is particularly valuable after `grad`, which often introduces duplicate sube
 
 ### 5.4 Algebraic Simplification
 
-**Rules (applied as pattern rewrites):**
+An algebraic rewrite is legal only when the owning numbered operation atoms
+prove equality of stored result bits, dtype, shape, effects, trap kind,
+operation attribution, and [04-NUM-12] trap occurrence for the complete input
+domain. IEEE-looking algebra is not such a proof. In particular, none of these
+patterns is unconditional:
 
-| Pattern | Replacement | Justification |
-|---------|-------------|---------------|
-| `Add(x, Const(0))` | `x` | Additive identity |
-| `Add(Const(0), x)` | `x` | Additive identity (commutative) |
-| `Mul(x, Const(1))` | `x` | Multiplicative identity |
-| `Mul(Const(1), x)` | `x` | Multiplicative identity (commutative) |
-| `Mul(x, Const(0))` | `Const(0)` | Zero annihilation |
-| `Mul(Const(0), x)` | `Const(0)` | Zero annihilation (commutative) |
-| `Neg(Neg(x))` | `x` | Double negation |
-| `Reciprocal(Reciprocal(x))` | `x` | Double reciprocal |
-| `Exp(Log(x))` | `x` | Inverse functions |
-| `Log(Exp(x))` | `x` | Inverse functions |
-| `Reshape(Reshape(x, D1), D2)` | `Reshape(x, D2)` | Collapse reshapes |
-| `Permute(Permute(x, P1), P2)` | `Permute(x, compose(P1, P2))` | Compose permutations |
-| `Add(x, x)` | `Mul(Const(2), x)` | Strength reduction |
-| `Cast(Cast(x, P1), P2)` | `Cast(x, P2)` | Collapse casts |
-| `Expand(ReduceSum(x, d), d, s)` | `x` (if s matches) | Expand-reduce cancellation (only when safe) |
+| Pattern | Why it requires a proof |
+|---------|-------------------------|
+| `Add(x, 0)` / `Mul(x, 1)` | signed zero and NaN finalization can make the arithmetic observation differ from `x` |
+| `Mul(x, 0)` | NaN, infinity, signed zero, and integer trap behavior defeat zero annihilation |
+| `Neg(Neg(x))` | signed-min overflow and NaN finalization can be observable |
+| `Reciprocal(Reciprocal(x))`, `Exp(Log(x))`, `Log(Exp(x))` | rounding, domain, zero, infinity, and NaN behavior are not inverse identities |
+| nested `Cast` | the first conversion can round or trap and may not be erased |
+| nested runtime `Reshape` | the inner shape guard can trap even when the outer target is valid |
+| `Expand(Sum(x, ...), ...)` | reduction arithmetic and multiplicity are observable |
 
-**Application strategy:** Iterate rules until a fixpoint (no more rules apply). Limit to 100 iterations to prevent pathological cases. In practice, convergence occurs within 3-5 iterations.
+A dtype-specific rule may discharge those obligations for a narrower proven
+domain. `Permute(Permute(x, P1), P2)` may compose only when both permutations
+are already statically validated and the composed node preserves the exact
+metadata transformation. Rewrites iterate to a fixpoint, but termination and
+the semantic proof are both required; an iteration limit is not correctness.
 
 ### 5.5 Operator Fusion
 
-**Status:** Phase 1 implementation (not Phase 0).
-
 **Rule:** Merge chains of elementwise operations into a single fused kernel. Instead of writing intermediate results to memory between each operation, compute the entire chain in registers.
+
+Fusion preserves every primitive's declared arithmetic width and stored-value
+finalization boundary. It may remove an intermediate allocation, but may not
+contract operations, retain an intermediate at wider precision, reorder a
+trap/effect, or change NaN and signed-zero observations unless the governing
+atom explicitly permits that transformation.
 
 **Fusible pattern:** A sequence of unary and binary elementwise nodes where:
 1. Every intermediate result has the same dimension set.
@@ -753,8 +687,6 @@ Fusion is the primary optimization for GPU backends, where memory bandwidth is t
 
 ### 5.6 Memory Planning
 
-**Status:** Phase 1 implementation.
-
 **Purpose:** Analyze the lifetimes of intermediate tensors and schedule buffer reuse to minimize peak memory usage.
 
 **Algorithm:**
@@ -771,18 +703,18 @@ Fusion is the primary optimization for GPU backends, where memory bandwidth is t
 
 ### 6.1 Valid Compositions
 
-| Expression | Meaning | Phase | Notes |
-|-----------|---------|-------|-------|
-| `grad(f)` | Reverse-mode AD | 0 | Core operation |
-| `grad(grad(f))` | Second derivatives | 0 | Nested AD |
-| `grad(f, wrt=w)` | Gradient w.r.t. specific param | 0 | Selective differentiation |
-| `vmap(f, axis=a)` | Vectorize over integer axis `a` | 2 | Batch dimension inserted at `a` |
-| `jit(f)` | Compile and cache | 2 | Shape-specialized |
-| `jit(grad(f))` | Compile gradient function | 2 | Most common pattern |
-| `grad(jit(f))` | Differentiate through jit | 2 | Equivalent to `jit(grad(f))` |
-| `vmap(grad(f))` | Per-example gradients | 2 | Direct executable path supports flat tuple-valued gradient payloads |
-| `grad(vmap(f))` | Rejected in shipped source subset | 2 | Reduce the vmapped result to a scalar first |
-| `jit(vmap(grad(f)))` | Future compiled per-example gradients | 2 | `jit` remains non-executable today |
+| Expression | Meaning | Notes |
+|-----------|---------|-------|
+| `grad(f)` | Reverse-mode AD | Exact adjoints from the owning op atoms |
+| `grad(grad(f))` | Second derivatives | Nested AD |
+| `grad(f, wrt=w)` | Gradient w.r.t. specific param | Selective differentiation |
+| `vmap(f, axis=a)` | Vectorize over integer axis `a` | Batch dimension inserted at `a` |
+| `jit(f)` | Compile and cache | Shape-specialized |
+| `jit(grad(f))` | Compile gradient function | Same transformed graph as `grad(jit(f))` |
+| `grad(jit(f))` | Differentiate through jit | Equivalent to `jit(grad(f))` |
+| `vmap(grad(f))` | Per-example gradients | Preserves the complete recursive gradient payload |
+| `grad(vmap(f))` | Differentiate a vectorized function | Requires the composed function to return a scalar |
+| `jit(vmap(grad(f)))` | Compiled per-example gradients | Composition of the same three contracts |
 
 ### 6.2 Commutativity Rules
 
@@ -810,10 +742,10 @@ The compiler applies transformations in the following order:
 2. **Lowering** -- Convert typed AST to RISC DAG (spec/01 pipeline).
 3. **Early optimization passes** -- Apply local simplification, CSE, and DCE that do not depend on later transform expansion.
 4. **`grad` expansion** -- Expand all `grad` nodes into backward DAGs.
-5. **`vmap` expansion** -- Expand all `vmap` nodes into batched DAGs (Phase 2).
+5. **`vmap` expansion** -- Expand all `vmap` nodes into batched DAGs.
 6. **Post-transform optimization passes** -- Re-run simplification, CSE, and DCE on the transformed DAG.
 7. **Fusion** -- Fuse eligible post-transform DAG regions for target backends that benefit from fused kernels.
-8. **`jit` boundary insertion** -- Mark compilation boundaries for jit (Phase 2).
+8. **`jit` boundary insertion** -- Mark compilation boundaries for jit.
 9. **Code generation** -- Emit target code.
 
 Steps 3 and 4 are the core "transformation" steps. After expansion, all grad and vmap constructs have been rewritten away, and the DAG consists entirely of RISC primitives.
@@ -836,12 +768,23 @@ This section provides a precise formal definition of the `grad` transformation, 
 ### 7.1 Definitions
 
 A **RISC DAG** is a tuple `(N, E, inputs, outputs)` where:
-- `N` is a set of nodes, each labeled with an operation and a type.
+- `N = [n_1, ..., n_k]` is the canonical ordered node sequence. Each node is
+  labeled with an operation and a type, and its canonical forward node ordinal
+  is its unique position in `N`.
 - `E` is a set of directed edges `(src, dst, port)`, where `port` identifies which input of `dst` the edge connects to.
 - `inputs` is an ordered list of Load nodes (function parameters).
 - `outputs` is an ordered list of nodes whose values constitute the function's return value.
 
-The **topological order** of a DAG is any total ordering of `N` such that for every edge `(src, dst, _)`, `src` precedes `dst`.
+The canonical sequence is topological: for every edge `(src, dst, _)`,
+`src` has a lower canonical ordinal than `dst`. An implementation may use a
+different valid topological work-list internally, but canonical consumer-edge
+order always uses `(ordinal(dst), port)` and therefore cannot change with that
+choice.
+
+A **contribution key** is either the distinguished `SeedKey` or a consumer-edge
+key `(canonical_forward_ordinal(dst), port)`. `SeedKey` orders before every
+consumer-edge key. Before accumulation, contributions are sorted by this key;
+the seed is the sole contribution to the scalar output.
 
 ### 7.2 Adjoint DAG Construction
 
@@ -849,33 +792,36 @@ Given a forward DAG `G = (N, E, inputs, outputs)`:
 
 ```
 function build_adjoint(G, wrt):
-    -- Phase 1: Topological sort
-    topo = topological_sort(N)
+    -- Step 1: Topological sort
+    topo = stable_topological_order(N, tie_break=canonical_forward_ordinal)
     reverse_topo = reverse(topo)
 
-    -- Phase 2: Initialize adjoint map
-    adj = new Map<Node, Node>
+    -- Step 2: Initialize shape-preserving contribution lists
+    contributions = new Map<Node, List<(ContributionKey, Node)>>
     for each node n in N:
-        adj[n] = Const(0, type_of(n))
+        contributions[n] = []
 
-    -- Phase 3: Seed the output
+    -- Step 3: Seed the scalar float output
     assert len(outputs) == 1    -- for scalar output
-    adj[outputs[0]] = Const(1.0, type_of(outputs[0]))
+    contributions[outputs[0]].append((SeedKey, exact_one(type_of(outputs[0]))))
 
-    -- Phase 4: Backward traversal
+    -- Step 4: Backward traversal
     for each node n in reverse_topo:
-        if adj[n] is Const(0):
-            continue  -- skip nodes with no gradient (optimization)
+        upstream = balanced_sum(
+            exact_zero(cotangent_type(type_of(n))),
+            values_sorted_by_key(contributions[n]))
 
         let rule = adjoint_rule(op_of(n))
-        let contributions = rule(inputs_of(n), adj[n])
+        let input_contributions = rule(inputs_of(n), upstream)
 
-        for (input_node, contribution) in zip(inputs_of(n), contributions):
-            adj[input_node] = Add(adj[input_node], contribution)
+        for (input_slot, input_node, contribution) in enumerate_inputs(
+                inputs_of(n), input_contributions):
+            edge_key = (canonical_forward_ordinal(n), input_slot)
+            contributions[input_node].append((edge_key, contribution))
 
-    -- Phase 5: Collect results
-    grads = [adj[p] for p in wrt]
-    return (outputs[0], tuple(grads))
+    -- Step 5: Collect the selected recursive gradient payload
+    grads = [finalize_contributions(p, contributions[p]) for p in wrt]
+    return pack_wrt_gradients(grads)
 ```
 
 ### 7.3 Adjoint Rule Interface
@@ -909,15 +855,19 @@ For a typical loss function (scalar output), there is one output and the seed is
 
 ### 7.5 Handling Non-Differentiable Subgraphs
 
-When the backward traversal encounters a `CmpLt` node:
-1. The adjoint contributions to its inputs are `Const(0)`.
-2. A warning is emitted: `"grad: non-differentiable operation CmpLt at <location>; gradient is zero."`
-3. Traversal continues normally.
+When backward traversal encounters a zero-cotangent operation such as a
+comparison or `shape`, it contributes exact zero to each input named by its
+atom and traversal continues. An implementation may emit a diagnostic note,
+but that note does not change validity or the cotangent.
 
-When the backward traversal encounters a `Cast(x, int_type)` node:
-1. The adjoint contribution is `Const(0)` (integer rounding has zero derivative).
-2. A warning is emitted if the cast is to an integer type.
-3. `Cast(x, float_type)` has adjoint `Cast(g, original_float_type)` -- precision casts are differentiable.
+When traversal encounters an operation whose atom requires structural
+rejection, construction stops with that atom's exact `AdRejectionReason`.
+This includes piecewise-constant float-to-integer conversion and rounding; it
+does not silently insert `Const(0)`. Float-to-float precision casts use their
+declared cast adjoint. A [05-OP-42] `stop_gradient` node is a barrier:
+traversal contributes the shape-preserving exact zero for its argument and
+does not enter the argument's subgraph, so a structurally rejected operation
+inside it does not stop construction.
 
 ### 7.6 Verification
 
@@ -935,9 +885,12 @@ Transformations can produce the following errors:
 
 ### 8.1 `non_differentiable`
 
-**Trigger:** `grad` applied to a function whose `wrt` parameters include non-tensor types (bool, integer, ADT).
+**Trigger:** `grad` applied to an explicit `wrt` parameter whose recursive
+cotangent type contains no differentiable float leaf. Bool, integer, string,
+function, resource, and all-unit ADT parameters meet this condition; an ADT,
+tuple, or List containing a float scalar or tensor leaf does not.
 
-**Message:** `"Cannot differentiate with respect to parameter 'x' of type bool. Only tensor-typed parameters with float precision are differentiable."`
+**Message:** `"Cannot differentiate with respect to parameter 'x': its type contains no differentiable float leaf."`
 
 **Repair:** Suggest excluding the parameter from `wrt`, or restructuring the function.
 
@@ -966,6 +919,14 @@ Transformations can produce the following errors:
 ### 8.5 `shape_mismatch_in_jit`
 
 **Trigger:** A jit-compiled function is called with shapes that don't match any cached compilation. This is not an error -- it triggers recompilation -- but may be logged as a performance warning if it happens frequently.
+
+### 8.6 `batch_varying_extent` (vmap)
+
+**Trigger:** `vmap(f)` where a movement bound, `expand` or `insert` size, or `reshape` target inside `f` depends on the elements of a vmapped tensor argument, so its value could differ between batch elements.
+
+**Message:** `"vmap cannot vectorize an extent that depends on batched tensor elements: the insert size at <site> reads elements of vmapped argument 'x'. Compute the extent from shape() or a scalar argument, or apply the movement outside vmap."`
+
+**Repair:** Suggest deriving the extent from `shape()` or a scalar parameter, or moving the data-dependent movement outside `vmap`.
 
 ---
 

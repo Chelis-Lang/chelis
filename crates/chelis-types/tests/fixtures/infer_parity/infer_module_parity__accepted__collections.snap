@@ -63,33 +63,33 @@
       (lit {span: "surf:215..216", type: (t-prim {} int32)} 0)
       (var {span: "surf:218..224"} values)))
   (def {type: (t-prim {} int64)}
-    count
-    (app {span: "surf:234..245", type: (t-prim {} int64)}
-      (var {span: "surf:234..237"} len)
-      (var {span: "surf:238..244"} values)))
+    item_total
+    (app {span: "surf:239..250", type: (t-prim {} int64)}
+      (var {span: "surf:239..242"} len)
+      (var {span: "surf:243..249"} values)))
   (def {type: (t-adt {} List (t-prim {} int32))}
     first_two
-    (app {span: "surf:258..286", type: (t-adt {} List (t-prim {} int32))}
-      (var {span: "surf:258..262"} take)
-      (var {span: "surf:263..269"} values)
-      (cast {span: "surf:271..285", type: (t-prim {} int64)}
-        (lit {span: "surf:276..277", surf_literal_style: "unsuffixed", type: (t-prim {} int64)} 2)
+    (app {span: "surf:263..291", type: (t-adt {} List (t-prim {} int32))}
+      (var {span: "surf:263..267"} take)
+      (var {span: "surf:268..274"} values)
+      (cast {span: "surf:276..290", type: (t-prim {} int64)}
+        (lit {span: "surf:281..282", surf_literal_style: "unsuffixed", type: (t-prim {} int64)} 2)
         (t-prim {} int64))))
   (def {type: (t-adt {} List (t-tuple {} (t-prim {} int32) (t-prim {} int32)))}
     paired
-    (app {span: "surf:296..315",
+    (app {span: "surf:301..320",
            type: (t-adt {}
                    List
                    (t-tuple {} (t-prim {} int32) (t-prim {} int32)))
          }
-      (var {span: "surf:296..299"} zip)
-      (var {span: "surf:300..306"} values)
-      (var {span: "surf:308..314"} values))))
+      (var {span: "surf:301..304"} zip)
+      (var {span: "surf:305..311"} values)
+      (var {span: "surf:313..319"} values))))
 
 == type env ==
-count : (t-prim {} int64)
 doubled : (t-adt {} List (t-prim {} int32))
 first_two : (t-adt {} List (t-prim {} int32))
+item_total : (t-prim {} int64)
 kept : (t-adt {} List (t-prim {} int32))
 paired : (t-adt {} List (t-tuple {} (t-prim {} int32) (t-prim {} int32)))
 total : (t-prim {} int32)

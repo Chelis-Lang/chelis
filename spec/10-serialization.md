@@ -1,9 +1,5 @@
 # Serialization
 
-**Status:** Partial.
-Text formats are settled enough to reference.
-Binary formats remain intentionally under-specified until there is an implemented owner.
-
 ## 1. Text Forms
 
 - `.ch` is Surf source text in UTF-8
@@ -14,32 +10,60 @@ Deep canonical printing is defined by `spec/03-deep-syntax.md`.
 ## 2. Binary Shell Form
 
 `.chb` is the binary Shell metadata artifact used by the Reef package system.
-Its role is stable, but the exact wire format is still owned by the implementation.
-
-Current `.chb` expectations:
+It carries:
 
 - public package metadata
 - exported symbol metadata
 - compiler compatibility metadata
-- room for future cached products without freezing the public wire layout
+- optional cached compiler products
 
-The project should not publish fake low-level `.chb` layout guarantees while the
-implementation is still expected to evolve.
+The Chelis language does not define a byte-level `.chb` portability contract.
+A `.chb` consumer must validate the embedded compiler-compatibility metadata
+before consuming any package or symbol metadata.
 
-## 3. Compiler API Wire Compatibility
+## 3. Compiler API Wire Contract
 
-The compiler API wire models in `crates/chelis-compiler-api/src/schema.rs` are
-the current machine-facing JSON surface. During this pre-release period, adding
-new tagged variants such as `WireRiscOp::Gather`,
-`WireRiscOp::ScatterAdd`, or internal `WireRiscOp::OneHot` is an additive
-schema change. Producers may emit the new variant after the owning compiler
-behavior lands. `OneHot` is only a transient IR/specialization marker; backends
-must not receive it after specialization.
+WireDag JSON is an exact-version contract. Schema version 7 is explicitly
+present in every payload and is the only accepted version. A missing version,
+versions 1 through 6, and every future version are decode errors before any IR
+node is consumed. There is no versionless default, legacy migration, additive-
+variant tolerance, or best-effort compatibility path.
 
-Consumers should tolerate unknown additive variants where possible and report a
-clear unsupported-variant diagnostic rather than failing only because the enum
-grew. Consumers that intentionally pattern-match exhaustively must treat the
-wire schema as version-coupled to the compiler crate they were built with.
+Version 7 preserves version 6's `WireRiscOp::Count { axes }`; `axes` is the complete
+non-empty vector of unique normalized original-axis positions in strictly
+descending order under [05-OP-29]. An encoder rejects any empty, duplicate,
+increasing, source-order, or out-of-range vector rather than rewriting it,
+and the decoder rejects an empty,
+duplicate, increasing, or out-of-range vector before IR construction.
+
+Version 7 also preserves version 6's padding representation:
+`WireRiscOp::Pad { fill: ScalarValue, ... }`. The scalar tag and payload must
+be the exact active tensor element dtype required by the padded tensor and
+preserve its stored bits; a raw JSON number, an untagged payload, a string-mode
+fill, or a mismatched dtype is a decode error before IR construction. No v5
+numeric-fill migration or inferred fill dtype exists.
+
+Version 7 includes the distinct `WireRiscOp::Relu` and
+`WireRiscOp::ReluAdjoint` identities required by [05-OP-43]. `Relu` has
+exactly one input; `ReluAdjoint` has exactly two, ordered as the forward input
+and incoming cotangent. Every input has the output's exact float dtype and
+dimensions. An unknown identity, a non-float dtype, wrong cardinality,
+unresolved input, or shape/dtype mismatch is a decode error before IR
+construction; the decoder does not replace either identity with an extrema
+operation.
+
+Version 7 represents every runtime movement bound and reshape target with the
+tagged `WireRtDim` carrier defined by [05-MOV-1]. In particular,
+`WireRiscOp::Expand.size` is a `WireRtDim`, never a display string.
+`InputAxis { tensor, axis }` names an absolute nonzero input slot of the owning
+node and a normalized literal int32 axis of that input tensor. `Node { input }`
+names an absolute nonzero input slot whose source is an earlier rank-zero exact
+int64 node. The decoder enforces the owner matrix from
+`spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
+axis range, and the exact input cardinality before IR construction.
+
+Every tagged variant must be known to the version 7 decoder. `OneHot` remains only a transient
+IR/specialization marker and backends must not receive it after specialization.
 
 ## 4. Invariant Revalidation At Decode Boundaries
 
@@ -89,39 +113,8 @@ The chokepoint evaluates the predicate through the evaluator's own
 interpreter; `chelis-compiler-api` does **not** depend on `chelis-prove`,
 so the decode boundary carries no solver and no prove-tier machinery.
 
-### 4.2 V1 reality (no external ADT-value codec exists yet)
-
-As of this release **no production codec materializes a typed ADT value
-from an external payload.** The machine-facing wire surface
-(`crates/chelis-compiler-api/src/schema.rs`) confirms this directly:
-`EvalRequest.bindings` is `BTreeMap<String, TensorValue>` — tensors only;
-`ExecutionValue::Adt` is an output-only shape the evaluator produces from
-program text and is never accepted as an input; and the cache envelope,
-the reef prepared-graph, and the `.chb` shell metadata serialize compiler
-state, source text, and symbol metadata — not domain values. The
-evaluator materializes ADT values from program text, which is the
-construction-discipline surface (checker plus lint), not a codec.
-
-Consequently the decode chokepoint ships with the conformance suite
-(`crates/chelis-compiler-api/tests/invariant_decode.rs`) as its only
-caller in V1, and `decode_adt_value` is documented experimental until a
-real codec consumes it. This is the honest current state: the rule above
-is normative for the first codec that lands, and the chokepoint is the
-contract point it must call, but nothing exercises that boundary in
-production yet.
-
-The pre-check deliberately narrows out representations whose invariants
-would legitimately admit infinities (for example a log-probability field
-wanting `-Inf`): such representations are outside V1's decodable class.
-Any future relaxation must re-derive fail-closed semantics for the
-admitted non-finite values rather than silently reopening the NaN hole.
-
-## 5. Related Serialization Work
-
-Future serialization work may include:
-
-- binary program artifacts for Shell distribution
-- DAG serialization
-- tensor interop formats such as DLPack
-
-These belong to the phases that implement them rather than to speculative prose here.
+An invariant representation whose valid domain contains a non-finite numeric
+field is outside this decode contract. A codec for such a representation
+requires its own normative fail-closed rule that distinguishes every admitted
+non-finite value from NaN and from evaluation failure; it cannot bypass the
+pre-check by convention.

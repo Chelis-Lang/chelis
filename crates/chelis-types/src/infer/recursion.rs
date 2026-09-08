@@ -12,13 +12,13 @@
 //! instantiation than the caller's own — polymorphic recursion — and is
 //! rejected with the atom-citing diagnostic [04-INF-3] requires.
 
+use chelis_unord::{UnordMap, UnordSet};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 use crate::env::Env;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Prim, Scheme, Type, TypeVar};
+use crate::types::{NominalArg, Prim, Scheme, Type, TypeVar, TypeVarRestriction};
 use crate::unify::Subst;
 
 thread_local! {
@@ -29,16 +29,17 @@ struct GroupCtx {
     /// Member name -> member facts at group start, used to make sure a
     /// recorded reference resolved the top-level member and not a local
     /// shadow of the same name, and to select the strict or relaxed rule.
-    members: HashMap<String, MemberSnapshot>,
+    members: UnordMap<String, MemberSnapshot>,
     caller: Option<Caller>,
     occurrences: Vec<Occurrence>,
     /// Fresh tvars minted for in-group instantiations. Pinned against
     /// generalization while the group is being inferred.
-    pinned: HashSet<TypeVar>,
+    pinned: UnordSet<TypeVar>,
 }
 
 struct MemberSnapshot {
     tvars: Vec<TypeVar>,
+    tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
     body: Type,
     /// Whether the member's `def` authored explicit type binders (`[a]`).
     /// Authored parameters take the strict caller's-own-instantiation rule;
@@ -75,11 +76,20 @@ pub(super) fn reset() {
     GROUP_CTX.with(|ctx| *ctx.borrow_mut() = None);
 }
 
+/// Abandon an in-flight recursive group without validating occurrences.
+/// Cancellation and other structured-abort paths use this to discard both
+/// the group record and every temporary generalization pin.
+pub(super) fn abort_group() {
+    GROUP_CTX.with(|ctx| {
+        ctx.borrow_mut().take();
+    });
+}
+
 /// Install the context for one recursive binding group. Member schemes are
 /// snapshotted after any monomorphic prebinding so occurrence recording can
 /// verify it resolved the top-level member.
 pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)>, env: &Env) {
-    let mut members = HashMap::new();
+    let mut members = UnordMap::new();
     for (name, authored_generic) in member_names {
         let Some(scheme) = env.lookup(name) else {
             continue;
@@ -88,6 +98,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
             name.to_string(),
             MemberSnapshot {
                 tvars: scheme.tvars.clone(),
+                tvar_restrictions: scheme.tvar_restrictions.clone(),
                 body: scheme.body.clone(),
                 authored_generic,
             },
@@ -98,7 +109,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
             members,
             caller: None,
             occurrences: Vec::new(),
-            pinned: HashSet::new(),
+            pinned: UnordSet::new(),
         });
     });
 }
@@ -140,11 +151,11 @@ impl Drop for CallerGuard {
 /// the caller's own body (empty for a monomorphically prebound member).
 pub(super) fn begin_caller(
     name: &str,
-    binder_names: Option<&HashSet<String>>,
+    binder_names: Option<&UnordSet<String>>,
     own_instantiation: &[(TypeVar, Type)],
 ) -> CallerGuard {
     let mut binders: Vec<String> = binder_names
-        .map(|set| set.iter().cloned().collect())
+        .map(|set| set.to_sorted().into_iter().cloned().collect())
         .unwrap_or_default();
     binders.sort();
     let own_tvars = own_instantiation
@@ -182,7 +193,9 @@ pub(super) fn should_record_occurrence(name: &str, scheme: &Scheme) -> bool {
         let Some(snapshot) = c.members.get(name) else {
             return false;
         };
-        snapshot.tvars == scheme.tvars && snapshot.body == scheme.body
+        snapshot.tvars == scheme.tvars
+            && snapshot.tvar_restrictions == scheme.tvar_restrictions
+            && snapshot.body == scheme.body
     })
 }
 
@@ -229,6 +242,15 @@ pub(super) fn record_occurrence(
 /// member stays monomorphic in the group's instantiation variables.
 pub(crate) fn tvar_pinned(v: TypeVar) -> bool {
     GROUP_CTX.with(|ctx| ctx.borrow().as_ref().is_some_and(|c| c.pinned.contains(&v)))
+}
+
+#[cfg(test)]
+pub(super) fn group_state_counts() -> (usize, usize) {
+    GROUP_CTX.with(|ctx| {
+        ctx.borrow()
+            .as_ref()
+            .map_or((0, 0), |group| (group.members.len(), group.pinned.len()))
+    })
 }
 
 /// Validate every recorded in-group instantiation under the group's final
@@ -330,8 +352,8 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
 /// unambiguous (one declared binder, one own tvar), the resolved own tvar
 /// renders under its declared name so the diagnostic reads `Box[a]` rather
 /// than `Box[?17]`.
-fn binder_display_names(occ: &Occurrence, subst: &Subst) -> HashMap<TypeVar, String> {
-    let mut names = HashMap::new();
+fn binder_display_names(occ: &Occurrence, subst: &Subst) -> UnordMap<TypeVar, String> {
+    let mut names = UnordMap::new();
     if occ.caller_binder_names.len() == 1 && occ.caller_own_tvars.len() == 1 {
         let resolved = subst.apply(&Type::Var(occ.caller_own_tvars[0]));
         if let Type::Var(v) = resolved {
@@ -341,7 +363,7 @@ fn binder_display_names(occ: &Occurrence, subst: &Subst) -> HashMap<TypeVar, Str
     names
 }
 
-fn render_type(ty: &Type, names: &HashMap<TypeVar, String>, fallback: Option<&str>) -> String {
+fn render_type(ty: &Type, names: &UnordMap<TypeVar, String>, fallback: Option<&str>) -> String {
     match ty {
         Type::Prim(p) => prim_name(*p),
         Type::Var(v) => names.get(v).cloned().unwrap_or_else(|| {
@@ -359,6 +381,16 @@ fn render_type(ty: &Type, names: &HashMap<TypeVar, String>, fallback: Option<&st
                     .collect();
                 format!("{name}[{}]", rendered.join(", "))
             }
+        }
+        Type::KindedAdt(name, args) => {
+            let rendered = args
+                .iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => render_type(ty, names, fallback),
+                    NominalArg::Dimension(dim) => dim.to_string(),
+                })
+                .collect::<Vec<_>>();
+            format!("{name}[{}]", rendered.join(", "))
         }
         Type::Fn(args, ret) => {
             let rendered: Vec<String> = args

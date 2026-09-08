@@ -14,12 +14,11 @@ fn checked_in_c_dtype_header_is_generated_from_the_rust_vocabulary() {
 }
 
 #[test]
-fn generated_c_dtype_decoder_has_a_loud_default() {
+fn generated_c_dtype_header_is_only_the_exact_tag_carrier() {
     let generated = render_runtime_dtype_c_header();
-    assert!(generated.contains("default:"));
-    assert!(generated.contains("invalid Chelis runtime dtype id"));
-    assert!(!generated.contains("default: return CHELIS_F32"));
-    assert!(!generated.contains("default: return sizeof(float)"));
+    assert!(generated.contains("typedef uint8_t chelis_dtype;"));
+    assert!(!generated.contains("switch"));
+    assert!(!generated.contains("size_checked"));
 }
 
 #[test]
