@@ -110,10 +110,14 @@ def archive_config(configuration: str) -> str:
         raise ValueError("CI archives require the checkout's target directory")
     result = subprocess.run(["cargo", "test", "--no-run", "--workspace",
                              *CONFIGURATIONS[configuration], "--message-format=json"],
-                            cwd=ROOT, check=True, stdout=subprocess.PIPE, text=True)
+                            cwd=ROOT, check=False, stdout=subprocess.PIPE, text=True)
     runtime = set()
     for line in result.stdout.splitlines():
         message = json.loads(line)
+        if result.returncode and message.get("reason") == "compiler-message":
+            rendered = message.get("message", {}).get("rendered")
+            if rendered:
+                print(rendered, end="", file=sys.stderr)
         artifact = message.get("target", {})
         if (message.get("reason") == "compiler-artifact" and
                 artifact.get("name") == "chelis_runtime" and
@@ -124,6 +128,7 @@ def archive_config(configuration: str) -> str:
                     if not path.is_file():
                         raise ValueError(f"Missing runtime staticlib: {path}")
                     runtime.add(path.relative_to(target).as_posix())
+    result.check_returncode()
     if not runtime:
         raise ValueError("Current Cargo build did not report a chelis_runtime staticlib")
     config_path = ROOT / ".config/nextest.toml"

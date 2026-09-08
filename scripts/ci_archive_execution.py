@@ -5,6 +5,8 @@ The workspace archive producer runs it with the same pinned nextest as CI.
 """
 
 import json
+import contextlib
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -17,6 +19,31 @@ from scripts import ci_test_archive as archive
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_failed_build_preserves_rust_diagnostics_without_a_manifest(self):
+        target = archive.ROOT / "target"
+        target.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="archive-error-", dir=target) as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "Cargo.toml").write_text('''[package]
+name = "broken-runtime"
+version = "0.0.0"
+edition = "2021"
+[workspace]
+''')
+            (root / "src/lib.rs").write_text('pub fn probe() { nonexistent_probe_function(); }\n')
+            path = root / "broken.tar.zst"
+            errors = io.StringIO()
+            with patch.object(archive, "ROOT", root), \
+                    patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), \
+                    contextlib.redirect_stderr(errors):
+                self.assertEqual(archive.main(["create", "--configuration", "workspace",
+                                               "--archive-file", str(path)]), 1)
+            self.assertIn("E0425", errors.getvalue())
+            self.assertIn("nonexistent_probe_function", errors.getvalue())
+            self.assertIn("src/lib.rs", errors.getvalue())
+            self.assertFalse(path.with_suffix(".zst.json").exists())
+
     def test_real_archives_preserve_selection_failure_and_feature_configuration(self):
         target = archive.ROOT / "target"
         target.mkdir(exist_ok=True)
