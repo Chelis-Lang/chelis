@@ -187,14 +187,44 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
 //
 // The surf parser only admits a literal `axis=N`, so a runtime axis is
 // reachable through the Deep (`.dp`) input path (or any internal IR
-// transform): the program below `chelis check`s clean and pre-fix
-// `chelis build` succeeded, silently lowering the `vmap` over axis 0.
-// Negative parity with #364's `extract_axis_raw`.
+// transform): pre-fix `chelis build` succeeded, silently lowering the `vmap`
+// over axis 0. Negative parity with #364's `extract_axis_raw`.
+//
+// chelis#874 (PP8) MOVED THIS REJECTION TO CHECK TIME, and the rest of this
+// block is the record of that. #524's program no longer checks clean: the
+// `vmap` axis is a `Selector` slot, and reading a bound `int32` parameter
+// there is a [04-TOT-3]/[04-TOT-4] malformed form. Three sentences decide it,
+// and none of them is either test:
+//
+//   * spec/06-transformations.md section 3.1 and section 3.4 type `vmap(f, axis=n)` as
+//     `tensor[D with batch inserted at n, P] -> tensor[D' with batch inserted
+//     at n, P]`. The result type's dimension ORDER is a function of `n`, so an
+//     unknown `n` leaves not merely the extents but the positional sequence
+//     undetermined. `concat` is the documented contrast: spec/04-type-system.md
+//     section 4.5.4 rule 5 admits a dynamic axis precisely because its result can
+//     type every axis `*` at a known rank. `vmap` is given no such rule.
+//   * spec/06-transformations.md section 3.6 and section 8.4 REQUIRE the
+//     `axis_out_of_bounds` diagnostic, "vmap axis 2 is out of bounds for rank 1
+//     tensor", keyed on the axis's value against a rank. A check-time
+//     diagnostic that names the value presupposes the value at check time.
+//   * spec/04-type-system.md section 4.5.3 names the general rule: "a bound
+//     `int32` variable is a runtime value and keeps the static-axis rule".
+//
+// chelis#259 had already reached the same conclusion for the reduce/expand
+// family on the same ground -- "the dimension at position `axis` is removed"
+// is undeterminable without a concrete axis -- and rejected a non-literal axis
+// at check time. `vmap` was simply never given the rejection its siblings got.
+// `lower.rs`'s own guard says so: "a non-constant axis stays a check-time
+// rejection (#259 family), so reaching this site with an unresolvable axis is
+// an internal contract violation".
+//
+// So the test below inverts: same program, same defect, decided one stage
+// earlier. The three constant-axis controls that follow are untouched and
+// still reach the lowering path this block was written to protect.
 // =====================================================================
 
 /// A `vmap` over `tensor[batch, features]` whose mapped axis is the bound
-/// runtime parameter `ax: int32` (a non-constant). Spans are carried on the
-/// axis node so the lowering diagnostic is LOCATED.
+/// runtime parameter `ax: int32` (a non-constant).
 const VMAP_RUNTIME_AXIS_DEEP: &str = r#"
 (defsig {} process
   (t-fn {} (t-tensor {} (d-name {} features) (t-prim {} f32))
@@ -257,39 +287,51 @@ fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnosti
     chelis_ir::lower::try_lower_program(&checked)
 }
 
-/// REJECT: a present-but-non-constant `vmap` mapped axis must lower to a
-/// FATAL, LOCATED diagnostic naming `vmap` and the runtime-axis cause — not
-/// silently default to axis 0 (which pre-fix let `chelis build` succeed).
+/// REJECT: a present-but-non-constant `vmap` mapped axis is rejected by the
+/// CHECKER, naming `vmap` and the shape the slot expects — not silently
+/// defaulted to axis 0 (which pre-fix let `chelis build` succeed), and no
+/// longer deferred to lowering.
+///
+/// This is chelis#524's program and chelis#524's defect. What moved is the
+/// stage: chelis#874 (PP8) made the `vmap` axis a typed `Selector` read, and
+/// the block comment above records the three spec sentences that decide the
+/// axis is static. #524's own class -- no silent default to axis 0 -- is
+/// preserved and strengthened, since the program is now rejected before
+/// effects, linearity, and lowering ever run.
+///
+/// Renamed from `issue524_runtime_vmap_axis_is_fatal_located_lowering_error`.
+/// Its two lost assertions are recorded honestly rather than reconstructed:
+/// the checker's rejection is not `fatal`-flagged, because that flag belongs
+/// to the lowering diagnostic type and has no analogue here, and it carries no
+/// `span_id`, because `MalformedForm` diagnostics from the slot seam are not
+/// span-located. Neither is a PP8 claim. The `extract_axis_raw` fatal arm this
+/// test used to witness is now unreachable from any checked program, which is
+/// what its own doc comment says it should be; it retains no test witness, and
+/// that is recorded in PR #1602 as residual scope rather than papered over
+/// with a replacement fixture.
 #[test]
-fn issue524_runtime_vmap_axis_is_fatal_located_lowering_error() {
-    let checked = check_effects_linearity_deep(VMAP_RUNTIME_AXIS_DEEP);
-    let diag = chelis_ir::lower::try_lower_program(&checked)
-        .expect_err("a runtime vmap axis must REJECT at lowering, not silently default to 0");
+fn issue524_runtime_vmap_axis_is_rejected_at_check_time() {
+    let exprs = chelis_deep::parser::parse_str(VMAP_RUNTIME_AXIS_DEEP).expect("deep parse");
+    let Err(result) = check_ir_program(&exprs) else {
+        panic!("a runtime vmap axis must REJECT at check, not check clean and default to 0");
+    };
+    let malformed: Vec<&chelis_types::errors::CheckError> = result
+        .errors
+        .iter()
+        .filter(|e| matches!(e.kind, chelis_types::errors::CheckErrorKind::MalformedForm))
+        .collect();
     assert!(
-        diag.fatal,
-        "the runtime-axis reject must be FATAL (not host-fallback-absorbable); got {diag:?}"
+        !malformed.is_empty(),
+        "the runtime axis must be a MalformedForm ([04-TOT-4]); got {:?}",
+        result.errors
     );
     assert!(
-        diag.message.contains("vmap") && diag.message.contains("axis"),
-        "the diagnostic must name `vmap` and the axis; got: {}",
-        diag.message
-    );
-    assert!(
-        diag.message.contains("compile-time")
-            && diag
-                .message
-                .contains("runtime axis must be rejected at check time"),
-        "the diagnostic must explain the compile-time-constant requirement (mirroring #364); \
-         got: {}",
-        diag.message
-    );
-    // LOCATED: the axis node carried a span, so the diagnostic must point at
-    // it — a default-to-0 would have no location at all.
-    assert_eq!(
-        diag.span_id.as_deref(),
-        Some("dp:vmap-runtime-axis"),
-        "the reject must be located at the axis sub-expression; got {:?}",
-        diag.span_id
+        malformed
+            .iter()
+            .any(|e| e.message.contains("vmap") && e.message.contains("integer axis")),
+        "the diagnostic must name `vmap` and the expected shape so the author \
+         can see what to write; got {:?}",
+        result.errors
     );
 }
 
