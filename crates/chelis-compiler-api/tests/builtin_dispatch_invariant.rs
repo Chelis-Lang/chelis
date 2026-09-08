@@ -19,7 +19,7 @@
 //! where someone adds a name to `BUILTIN_NAMES` without wiring the
 //! host-runtime arm.
 
-use std::collections::HashSet;
+use chelis_unord::UnordSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -50,7 +50,7 @@ fn runtime_source_path() -> PathBuf {
 /// and the next `fn` definition (or end of file — `eval_builtin` is
 /// currently the last item in `runtime/eval.rs`) for `"name" =>`
 /// patterns.
-fn extracted_dispatched_names() -> HashSet<String> {
+fn extracted_dispatched_names() -> UnordSet<String> {
     let source = fs::read_to_string(runtime_source_path())
         .expect("runtime/eval.rs must be readable from CARGO_MANIFEST_DIR/src");
     let start = source
@@ -74,7 +74,7 @@ fn extracted_dispatched_names() -> HashSet<String> {
     .unwrap_or(source.len());
     let body = &source[start..end];
 
-    let mut out = HashSet::new();
+    let mut out = UnordSet::new();
     for line in body.lines() {
         let trimmed = line.trim_start();
         // Match `"name" =>` at the start of a (possibly-indented) line.
@@ -84,13 +84,30 @@ fn extracted_dispatched_names() -> HashSet<String> {
             && let Some(end_q) = rest.find('"')
         {
             let name = &rest[..end_q];
-            let after = rest[end_q + 1..].trim_start();
+            let mut after = rest[end_q + 1..].trim_start();
+            // An or-pattern arm, `"expand" | "insert" => {`, dispatches every
+            // name in it. Walk the alternatives so a shared arm is not read as
+            // no arm at all for any of them.
+            let mut names = vec![name.to_string()];
+            while let Some(tail) = after.strip_prefix('|') {
+                let tail = tail.trim_start();
+                let Some(rest_alt) = tail.strip_prefix('"') else {
+                    break;
+                };
+                let Some(end_alt) = rest_alt.find('"') else {
+                    break;
+                };
+                names.push(rest_alt[..end_alt].to_string());
+                after = rest_alt[end_alt + 1..].trim_start();
+            }
             if after.starts_with("=>")
-                && name
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                && names
+                    .iter()
+                    .all(|n| n.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
             {
-                out.insert(name.to_string());
+                for n in names {
+                    out.insert(n);
+                }
             }
         }
     }
@@ -100,7 +117,7 @@ fn extracted_dispatched_names() -> HashSet<String> {
 #[test]
 fn every_builtin_name_has_a_host_runtime_arm_or_an_allowlist_entry() {
     let dispatched = extracted_dispatched_names();
-    let allowlisted: HashSet<&str> = HOST_RUNTIME_ALLOWLIST.iter().copied().collect();
+    let allowlisted: UnordSet<&str> = HOST_RUNTIME_ALLOWLIST.iter().copied().collect();
 
     let mut missing: Vec<&str> = BUILTIN_NAMES
         .iter()
@@ -147,7 +164,7 @@ fn allowlist_entries_are_in_builtin_names() {
     // following BUILTIN_NAMES entries are intentionally not dispatched";
     // an entry that no longer appears in BUILTIN_NAMES has no
     // referent.
-    let builtin_set: HashSet<&str> = BUILTIN_NAMES.iter().copied().collect();
+    let builtin_set: UnordSet<&str> = BUILTIN_NAMES.iter().copied().collect();
     let mut stale: Vec<&str> = HOST_RUNTIME_ALLOWLIST
         .iter()
         .copied()

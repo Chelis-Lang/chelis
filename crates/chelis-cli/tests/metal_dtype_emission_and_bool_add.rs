@@ -5,13 +5,14 @@
 //! locks that: rank-1 kernels are HONESTLY TYPED per dtype (`long*` for
 //! int64, `int*` for int32, `bool*` for bool, `half`/`bfloat` for f16/bf16;
 //! the narrow-float rows live in narrow_dtype_matrix.rs), f64 is rejected
-//! with a specific diagnostic, and rank-2+ falls back to a LOUD abort stub
-//! that names itself. No F32 substitution anywhere (contrast chelis#689).
+//! with a specific diagnostic, and unsupported rank-2+ lowering fails through
+//! the typed codegen channel. No F32 substitution anywhere (contrast
+//! chelis#689).
 //!
-//! The #699 Metal symptom is also settled here: an int64 `abs` emits
-//! `// node 0 = Const 0` with a `(int64_t)0LL` fill and the input tensor
-//! absent from the kernel signature - the zero arrives PRE-PLANTED from
-//! `lower_transcendental`; there is no separate Metal bug.
+//! The #699 Metal symptom is also settled here: an int64 `abs` no longer
+//! lowers to a pre-planted `Const 0`. Until Phase 3 supplies a typed,
+//! trapping Metal kernel, emission returns the branded typed unsupported
+//! reason without writing an artifact.
 //!
 //! chelis#726: `add` on bool tensors - the checker accepts it, both host
 //! lanes store the out-of-domain value 2 in a bool-typed tensor (prints
@@ -128,51 +129,65 @@ fn metal_rejects_f64_with_a_specific_diagnostic() {
     );
     assert!(!ok, "Metal must reject f64");
     assert!(
-        stderr.contains("rejects f64"),
+        stderr.contains("f64 value"),
         "the rejection must name f64; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("deliberate [04-TGT-1]"),
+        "the rejection must cite the Metal target contract; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--target c") && stderr.contains("--target hip"),
+        "the rejection must name targets that support f64; got: {stderr}"
     );
 }
 
-/// Rank-2+ falls back to an abort stub that NAMES ITSELF in the emitted
-/// source - the loud fallback shape #703 asks for (contrast the silent
-/// substitutions elsewhere in the audit).
+/// Rank-2+ fails through the typed codegen channel before any artifact exists.
 #[test]
-fn metal_rank2_fallback_is_a_named_abort_stub() {
+fn metal_rank2_is_a_typed_error_without_an_artifact() {
     let (ok, stderr, emitted) = build_metal(
         "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, 2, f32] = add(a, b)\n",
         "metal_rank2",
     );
-    assert!(ok, "{stderr}");
+    assert!(!ok, "rank-2 Metal must fail the build");
     assert!(
-        emitted.contains("fallback stub") && emitted.contains("abort()"),
-        "the rank-2 fallback must be a self-naming abort, not a silent stub"
+        stderr.contains("unsupported:") && stderr.contains("codegen:metal"),
+        "the rank-2 rejection must use the typed codegen channel: {stderr}"
+    );
+    assert!(
+        emitted.is_empty(),
+        "a rejected build wrote an artifact: {emitted}"
     );
 }
 
 /// The #699 Metal symptom, REPLACED at chelis#730 Phase 1: the int64
 /// `abs` def used to arrive with a pre-planted `Const 0` node from
-/// `lower_transcendental` and Metal emitted a zero-filled buffer. The
-/// placeholder now raises, so the build is REJECTED loudly (the DAG lane
-/// refuses; the host-emission fallback's scalar arm refuses the tensor
-/// operand) and no zero-filled emission exists to lock. Replace with a
-/// correctness row when chelis#729 lands integer abs.
+/// `lower_transcendental` and Metal emitted a zero-filled buffer. Phase 2
+/// now preserves a typed integer `Abs` node. Metal's public DAG emitter
+/// rejects that node through the typed error channel without materializing
+/// an abort artifact. Replace this with a
+/// correctness row when the chelis#699 Phase 3 kernel lands.
 #[test]
-fn metal_int64_abs_is_rejected_not_pre_planted_zero() {
+fn metal_int64_abs_is_a_typed_error_not_pre_planted_zero() {
     let (ok, stderr, emitted) = build_metal(
         "def f(a: tensor[4, int64]) -> tensor[4, int64] = abs(a)\n",
         "metal_i64_abs",
     );
-    assert!(
-        !ok,
-        "an int64 abs def must be rejected, never emitted as a zero buffer"
-    );
-    assert!(
-        stderr.contains("unsupported:"),
-        "the rejection must carry the branded diagnostic; got: {stderr}"
-    );
+    assert!(!ok, "the Metal build must reject integer abs");
     assert!(
         !emitted.contains("node 0 = Const 0"),
         "no pre-planted zero emission may be left behind"
+    );
+    assert!(
+        stderr.contains("unsupported:")
+            && stderr.contains(
+                "integer abs code generation waits for the typed, trapping Phase 3 kernel"
+            ),
+        "integer abs must return its branded typed reason; got:\n{stderr}"
+    );
+    assert!(
+        emitted.is_empty(),
+        "a rejected build wrote an artifact: {emitted}"
     );
 }
 
@@ -180,28 +195,26 @@ fn metal_int64_abs_is_rejected_not_pre_planted_zero() {
 // chelis#726 - add on bool tensors
 // ===========================================================================
 
-/// Observed today: eval accepts and prints `data=[2.0, 1.0]` - the value 2
-/// inside a bool-typed tensor (and `to_list` of the same tensor says
-/// `[true, true]`). The correct behavior is a checker rejection; this row
-/// asserts rejection-or-domain-consistency so it goes green on either a
-/// checker fix or an authored bool-arithmetic semantics.
+/// Historical observation: eval accepted and printed `data=[2.0, 1.0]` -
+/// the value 2 inside a bool-typed tensor (while `to_list` of the same
+/// tensor said `[true, true]`). UN-IGNORED at the chelis#729 rework: the
+/// decided chelis#726 disposition landed as a check-time rejection at
+/// the shared operand-dtype chokepoint (chelis#860), so the Err arm is
+/// now the only reachable one and carries the capability citation.
 #[test]
-#[ignore = "chelis#726: add on bool tensors stores 2 in a bool tensor (prints 2.0, to_lists \
-            as true; Metal's typed kernel would compute 1). Must be rejected or made \
-            domain-consistent. Run with \
-            `cargo test -p chelis-cli --test metal_dtype_emission_and_bool_add -- --ignored`."]
 fn bool_tensor_add_is_rejected_or_stays_in_domain() {
     let program = "module M.Main\n\
          def f(x: tensor[2, bool], y: tensor[2, bool]) -> tensor[2, bool] = add(x, y)\n\
          out = print(f(to_tensor([true, false]), to_tensor([true, true])))\n";
     match eval_first_line(program) {
         Err(stderr) => assert!(
-            stderr.contains("bool") || stderr.contains("Type errors"),
-            "a rejection must name the bool-arithmetic problem; got: {stderr}"
+            stderr.contains("chelis#726") && stderr.contains("bool"),
+            "the rejection must carry the chelis#726 capability citation; \
+             got: {stderr}"
         ),
-        Ok(line) => assert!(
-            !line.contains("2.0"),
-            "a bool tensor must never hold the value 2; got: {line}"
+        Ok(line) => panic!(
+            "add on bool tensors must be rejected by the checker \
+             (chelis#726, decided); it evaluated and returned {line}"
         ),
     }
 }

@@ -22,6 +22,131 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
     try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
 }
 
+/// Deep-source pipeline for witnesses Surf cannot express (hand-written
+/// `.dp` shapes; see the chelis#1123 red-team report on PR #1123).
+fn deep_to_dag(source: &str) -> Result<Dag, String> {
+    let deep =
+        chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("deep parse: {e:?}"))?;
+    let checked = check_typed_program(&deep)
+        .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
+    let checked = chelis_effects::check_program(&checked)
+        .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked =
+        check_linearity(&checked).map_err(|errs| format!("linearity failed: {errs:?}"))?;
+    try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
+}
+
+/// chelis#1123/#1131: the end-to-end guard for single rounding. Surf retains
+/// an integer-spelled float literal as an exact Int payload with explicit
+/// source provenance, and lowering finalizes it directly at f32 width.
+#[test]
+fn int_leaf_in_f32_tensor_literal_single_rounds() {
+    let source = r#"
+def main() -> tensor[2, f32] =
+  [18014399583223809, 3]
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+    let bits = dag
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.op {
+            RiscOp::ConstTensor { data } => match data.element_ref(0) {
+                chelis_types::ElementRef::F32(v) => Some(v.to_bits()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("non-uniform literal takes the ConstTensor path with an f32 payload");
+    assert_eq!(
+        bits, 0x5A80_0001,
+        "the integer leaf must round ONCE into f32; 0x5A800000 is the \
+         double-rounded (i as f64 as f32) image"
+    );
+}
+
+/// bf16 sibling of the single-rounding witness. Guards relatively: the DAG payload must equal the sealed
+/// module's single-rounded image, whose absolute value the chelis-types
+/// pins lock; under the double-rounding mutation the two diverge.
+#[test]
+fn int_leaf_in_bf16_tensor_literal_single_rounds() {
+    let source = r#"
+def main() -> tensor[2, bf16] =
+  [18084767253659649, 3]
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+    let stored = dag
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.op {
+            RiscOp::ConstTensor { data } => Some(data.scalar_at(0)),
+            _ => None,
+        })
+        .expect("non-uniform literal takes the ConstTensor path");
+    let expected = chelis_types::finalize_scalar(
+        "test",
+        chelis_types::types::Prim::Bf16,
+        chelis_types::RawScalar::Int(18_084_767_253_659_649),
+    )
+    .expect("in-range integer finalize");
+    assert_eq!(
+        stored, expected,
+        "the bf16 payload must be the single-rounded integer image"
+    );
+}
+
+/// chelis#1123 red-team ask 5 (and chelis#1132): the tensor-level finalize
+/// diagnostic is reachable WITHOUT the chelis#1131 gap - every atom kind
+/// here agrees with its declared prim; the overflow is manufactured by a
+/// `neg` application the checker does not constant-fold. Locks the exact
+/// diagnostic text so the loud replacement for the deleted hand-rolled
+/// integer-lane guards stays live. Surf rejects the equivalent source at
+/// the literal-range check, so the witness is Deep-only; Deep is a
+/// supported input surface.
+#[test]
+fn overflowing_negated_literal_raises_the_finalize_diagnostic() {
+    let source = r#"
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} int8))))
+
+(def {} main (fn {} (params {})
+  (app {} (var {} to_tensor)
+    (app {} (var {} Cons)
+      (app {} (var {} neg) (lit {type: (t-prim {} int8)} -128))
+      (app {} (var {} Cons) (lit {type: (t-prim {} int8)} 1) (var {} Nil))))))
+"#;
+    let err = deep_to_dag(source).expect_err("the literal must not lower");
+    assert!(
+        err.contains("tensor literal does not finalize at its ascribed dtype `int8`"),
+        "expected the [04-NUM-1] finalize diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("overflow in const at int8"),
+        "expected the overflow trap brand, got: {err}"
+    );
+}
+
+/// chelis#1123 red-team finding 3: a literal mixing an explicit cast with a
+/// bare integer literal stages Typed + Raw, whose uniformity keys differ by
+/// construction, so lowering takes the ConstTensor path even though the
+/// finalized elements are equal. Values are identical to a Const splat;
+/// pinned so the node shape is a recorded decision, not an accident.
+#[test]
+fn mixed_cast_and_bare_integer_literal_lowers_to_const_tensor() {
+    let source = r#"
+def main() -> tensor[2, int32] =
+  to_tensor([cast(1, int32), 1])
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+    let data = dag
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.op {
+            RiscOp::ConstTensor { data } => data.to_i64_exact_vec(),
+            _ => None,
+        })
+        .expect("mixed Typed/Raw staging takes the ConstTensor path");
+    assert_eq!(data, vec![1, 1]);
+}
+
 /// A non-uniform literal `to_tensor` should produce a ConstTensor node.
 #[test]
 fn to_tensor_non_uniform_lowers_to_const_tensor() {
@@ -69,7 +194,7 @@ def main() -> tensor[3, f32] =
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
-    assert_eq!(result.data, vec![1.0, 2.0, 3.0]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
 }
 
 /// A uniform-value to_tensor still uses the efficient Const (single-value) path.
@@ -94,7 +219,7 @@ def main() -> tensor[3, f32] =
     let has_const_5 = dag
         .nodes()
         .iter()
-        .any(|n| matches!(&n.op, RiscOp::Const { value } if (*value - 5.0).abs() < f64::EPSILON));
+        .any(|n| matches!(&n.op, RiscOp::Const { value } if (value.as_f64_lossy() - 5.0).abs() < f64::EPSILON));
     assert!(has_const_5, "expected a Const(5.0) node for uniform data");
 }
 
@@ -170,13 +295,12 @@ def main() -> tensor[4, f32] =
     assert_eq!(roots.len(), 1);
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![4]);
-    assert_eq!(result.data, vec![-1.0, 0.0, -3.5, 2.5]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![-1.0, 0.0, -3.5, 2.5]);
 }
 
-/// Verify ConstTensor data is preserved exactly (bit-for-bit) through
-/// the lowering for values that have tricky floating-point representations.
+/// Verify default f32 tensor literals are materialized at their declared width.
 #[test]
-fn const_tensor_preserves_exact_values() {
+fn const_tensor_materializes_f32_values_at_f32_width() {
     let source = r#"
 def main() -> tensor[3, f32] =
   to_tensor([0.1, 0.2, 0.3])
@@ -188,11 +312,71 @@ def main() -> tensor[3, f32] =
 
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![3]);
-    // These values can't be represented exactly in f32, but the f64 pipeline
-    // should preserve them at f64 precision before backend truncation.
-    assert!((result.data[0] - 0.1).abs() < 1e-15, "first element");
-    assert!((result.data[1] - 0.2).abs() < 1e-15, "second element");
-    assert!((result.data[2] - 0.3).abs() < 1e-15, "third element");
+    // chelis#729 Phase 1 re-authoring: an f32-typed ConstTensor stores the
+    // exact f32 image of each literal (per-dtype storage + finalize,
+    // spec/04 section 9 [04-NUM-1..2]). The pre-refactor expectation kept
+    // raw f64 values inside an f32 tensor, which is the chelis#717 defect
+    // class this phase ends; bit-exactness is now AT THE DTYPE.
+    assert_eq!(result.prim(), chelis_types::types::Prim::F32);
+    assert_eq!(
+        result.to_f64_lossy_vec(),
+        vec![0.1f32 as f64, 0.2f32 as f64, 0.3f32 as f64]
+    );
+}
+
+/// An explicitly f32 scalar keeps its f32 value when widened inside an f64
+/// tensor literal. The enclosing tensor dtype must not erase the leaf dtype.
+#[test]
+fn const_tensor_widens_f32_suffixed_leaves_from_their_stored_width() {
+    let source = r#"
+def main() -> tensor[2, f64] =
+  to_tensor([cast(0.1f32, f64), cast(0.3f32, f64)])
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+
+    let roots: Vec<NodeId> = dag.roots().to_vec();
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+
+    assert_eq!(
+        values[&roots[0]].to_f64_lossy_vec(),
+        vec![(0.1_f64 as f32) as f64, (0.3_f64 as f32) as f64]
+    );
+}
+
+/// A cast chain is evaluated at each declared width before the literal is
+/// materialized; widening the result cannot recover the discarded f32 bits.
+#[test]
+fn const_tensor_widens_explicit_inner_f32_casts_from_their_stored_width() {
+    let source = r#"
+def main() -> tensor[2, f64] =
+  to_tensor([cast(cast(0.1, f32), f64), cast(cast(0.3, f32), f64)])
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+
+    let roots: Vec<NodeId> = dag.roots().to_vec();
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+
+    assert_eq!(
+        values[&roots[0]].to_f64_lossy_vec(),
+        vec![(0.1_f64 as f32) as f64, (0.3_f64 as f32) as f64]
+    );
+}
+
+/// Verify explicitly f64 tensor literals retain f64 lexical precision.
+#[test]
+fn const_tensor_preserves_explicit_f64_values() {
+    let source = r#"
+def main() -> tensor[3, f64] =
+  to_tensor([cast(0.1, f64), cast(0.2, f64), cast(0.3, f64)])
+"#;
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
+
+    let roots: Vec<NodeId> = dag.roots().to_vec();
+    let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
+
+    let result = &values[&roots[0]];
+    assert_eq!(result.shape, vec![3]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![0.1, 0.2, 0.3]);
 }
 
 /// Verify a 2D tensor literal with non-uniform rows lowers to ConstTensor.
@@ -218,7 +402,10 @@ def main() -> tensor[2, 3, f32] =
     let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
     let result = &values[&roots[0]];
     assert_eq!(result.shape, vec![2, 3]);
-    assert_eq!(result.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(
+        result.to_f64_lossy_vec(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
 }
 
 /// Verify ConstTensor works through grad: constant has zero gradient.
@@ -247,10 +434,7 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
     assert!(!roots.is_empty(), "should have at least one root");
     let values = eval_tensor_roots_with(&dag, &roots, |name| {
         if name == "x" {
-            Some(TensorValue {
-                data: vec![1.0, 1.0, 1.0],
-                shape: vec![3],
-            })
+            Some(TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]))
         } else {
             None
         }
@@ -258,8 +442,8 @@ def main(x: tensor[3, f32]) -> tensor[3, f32] =
     .expect("eval succeeds");
 
     // Check that results contain no NaN.
-    for (root, val) in &values {
-        for (i, &v) in val.data.iter().enumerate() {
+    for (root, val) in values.to_sorted() {
+        for (i, &v) in val.to_f64_lossy_vec().iter().enumerate() {
             assert!(
                 v.is_finite(),
                 "NaN/Inf in gradient result at root={root:?}, index={i}"
@@ -304,7 +488,7 @@ def main() -> tensor[4, int32] =
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let values = eval_tensor_roots_with(&dag, &roots, |_name| None).expect("eval succeeds");
     let result = &values[&roots[0]];
-    assert_eq!(result.data, vec![10.0, 20.0, 30.0, 40.0]);
+    assert_eq!(result.to_f64_lossy_vec(), vec![10.0, 20.0, 30.0, 40.0]);
 }
 
 /// Diagnostic: verify that the dangling-node issue in full-pipeline grad

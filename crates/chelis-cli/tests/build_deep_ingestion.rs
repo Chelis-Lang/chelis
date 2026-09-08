@@ -116,7 +116,7 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
 
     // Both invocations took the Deep path. Byte equality is the
     // strongest correct assertion for "flag is a no-op": same input,
-    // same path, same output. Previously a HashMap-iteration-order
+    // same path, same output. Previously a UnordMap-iteration-order
     // non-determinism bug in `emit_input_shape_preamble` forced this
     // test to drop down to span-set equality; that bug was fixed by
     // sorting the iteration over input labels (see
@@ -135,6 +135,39 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
         span_count >= sidecar_entries,
         "`.dp` auto-detect must emit >= sidecar entry count `// span:` lines \
          (S6: host_emit now per-node-emits); got {span_count} vs {sidecar_entries}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn build_replaces_a_read_only_stale_runtime_archive() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().expect("tempdir");
+    let out = dir.path().join("model.c");
+    let runtime = dir.path().join("libchelis_runtime.a");
+    fs::write(&runtime, b"stale runtime").expect("write stale runtime");
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o444))
+        .expect("make stale runtime read-only");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            wrapped_dp().to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(&runtime).expect("read replaced runtime"),
+        b"stale runtime",
+        "a successful build must replace stale runtime bytes, not silently reuse them"
     );
 }
 

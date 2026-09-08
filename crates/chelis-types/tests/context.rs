@@ -4,7 +4,10 @@
 //! inner-before-outer registry stacking is the most likely silent-correctness
 //! bug, so these tests must fail loudly if it is mis-implemented.
 
-use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+use chelis_types::{
+    TypeEnv, build_compiled_library_context, build_compiled_library_context_with_base,
+    build_type_env_from_library, check_ir_with_context,
+};
 
 fn parse(src: &str) -> Vec<chelis_deep::Expr> {
     chelis_deep::parser::parse_str(src).expect("deep parse")
@@ -13,6 +16,55 @@ fn parse(src: &str) -> Vec<chelis_deep::Expr> {
 fn build_ctx(library_src: &str) -> TypeEnv {
     let library = parse(library_src);
     build_type_env_from_library(&library).expect("library checks clean")
+}
+
+#[test]
+fn type_environment_matches_its_checked_library_program() {
+    let library = parse("(def {} one (lit {type: (t-prim {} int32)} 1))");
+    let (type_env, checked) =
+        build_compiled_library_context(&library).expect("the library must type-check");
+
+    assert!(type_env.matches_checked_program(&checked));
+}
+
+#[test]
+fn type_environment_rejects_another_checked_library_program() {
+    let first = parse("(def {} one (lit {type: (t-prim {} int32)} 1))");
+    let second = parse("(def {} two (lit {type: (t-prim {} int32)} 2))");
+    let (type_env, _) =
+        build_compiled_library_context(&first).expect("the first library must type-check");
+    let (_, checked) =
+        build_compiled_library_context(&second).expect("the second library must type-check");
+
+    assert!(!type_env.matches_checked_program(&checked));
+}
+
+#[test]
+fn serialized_context_resumes_through_library_and_signature_layers() {
+    let base_library = parse("(def {} library_id (fn {} (params {} value) (var {} value)))");
+    let (base, _) =
+        build_compiled_library_context(&base_library).expect("base library type-checks");
+    let encoded = bincode::serialize(&base).expect("base TypeEnv serializes");
+    let decoded: TypeEnv = bincode::deserialize(&encoded).expect("base TypeEnv deserializes");
+
+    let layer = parse(
+        "(def {} int_use
+            (app {} (var {} library_id) (lit {type: (t-prim {} int32)} 1)))
+         (def {} bool_use
+            (app {} (var {} library_id) (lit {type: (t-prim {} bool)} true)))
+         (def {} layer_id (fn {} (params {} value) (var {} value)))",
+    );
+    let (layer_context, _) = build_compiled_library_context_with_base(&decoded, &layer)
+        .expect("a serialized base resumes before the added library layer");
+
+    let new_code = parse(
+        "(def {} layer_int
+            (app {} (var {} layer_id) (lit {type: (t-prim {} int32)} 2)))
+         (def {} layer_bool
+            (app {} (var {} layer_id) (lit {type: (t-prim {} bool)} false)))",
+    );
+    check_ir_with_context(&layer_context, &new_code)
+        .expect("signature-context checking resumes imported IDs before minting new ones");
 }
 
 // ── ADT exhaustivity probes (must pass before any general stacking work) ──

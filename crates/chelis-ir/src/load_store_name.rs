@@ -56,7 +56,7 @@ use serde::{Deserialize, Serialize};
 /// `#[serde(transparent)]` so its serialized shape is identical to the
 /// previous `String` field — bincode round-trip and JSON wire formats are
 /// preserved.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LoadStoreName(String);
 
@@ -126,7 +126,7 @@ impl LoadStoreName {
     /// Panics with the validation error if the input is invalid.
     ///
     /// Use this when the name is a literal or comes from a source that
-    /// is itself parser-validated (e.g., an `Atom::Symbol` or a
+    /// is itself parser-validated (e.g., an `Atom::Name` or a
     /// `tuple-flatten` prefix). Do NOT use this for producer-supplied
     /// strings where validation could legitimately fail at runtime —
     /// for those, propagate the `Result` from [`LoadStoreName::new`].
@@ -605,19 +605,19 @@ mod tests {
 
     #[test]
     fn hash_and_eq_are_consistent_with_str() {
-        use std::collections::HashMap;
+        use chelis_unord::UnordMap;
 
         let n = LoadStoreName::new("foo").unwrap();
 
-        // HashMap<String, _>::get takes an &str via Borrow<str>. Since
-        // `LoadStoreName: Borrow<str>`, a HashMap<LoadStoreName, _> can
+        // UnordMap<String, _>::get takes an &str via Borrow<str>. Since
+        // `LoadStoreName: Borrow<str>`, a UnordMap<LoadStoreName, _> can
         // also be looked up by &str. Both directions matter at backend
         // call sites.
-        let mut by_string: HashMap<String, usize> = HashMap::new();
+        let mut by_string: UnordMap<String, usize> = UnordMap::new();
         by_string.insert("foo".to_string(), 1);
         assert_eq!(by_string.get(n.as_str()), Some(&1));
 
-        let mut by_name: HashMap<LoadStoreName, usize> = HashMap::new();
+        let mut by_name: UnordMap<LoadStoreName, usize> = UnordMap::new();
         by_name.insert(n.clone(), 2);
         assert_eq!(by_name.get("foo"), Some(&2));
     }

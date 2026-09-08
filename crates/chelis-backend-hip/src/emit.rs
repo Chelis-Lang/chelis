@@ -3,11 +3,41 @@
 //! Generates C source that includes HIP runtime, embeds kernel source strings,
 //! and walks the DAG in topological order launching kernels on GPU.
 
+use std::collections::BTreeMap;
+
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, symbolic_bindings,
+    DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+};
+use chelis_ir::ownership::{
+    HipStorageLane, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_types::{ElementRef, ScalarValue};
+
+fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("Drop".to_string()),
+        format!("verified DAG ownership action at node {}: {detail}", node.0),
+        Stage::Codegen("hip"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "verified ownership and the retained DAG payload must agree exactly; no backend-local ownership fallback is permitted"
+        ),
+    )
+}
+
+fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("storage planning".to_string()),
+        error.to_string(),
+        Stage::Codegen("hip"),
+        chelis_types::deliberate_rejection!(
+            "[04-SHAPE-1]",
+            "HIP storage placement requires the verified exact-capacity plan"
+        ),
+    )
+}
 
 /// chelis#616: the HIP device-kernel lane does not support runtime (node-valued)
 /// movement bounds; `reject_unsupported_hip_ops` (compiler-api + CLI) rejects
@@ -25,6 +55,10 @@ fn hip_bound_to_usize(b: &RtDim) -> usize {
         RtDim::Sym(name) => panic!(
             "HIP backend reached a symbolic movement bound `{name}`; verify rejects \
              symbolic dims outside reshape targets (chelis#616)"
+        ),
+        RtDim::InputAxis { .. } => panic!(
+            "HIP backend reached InputAxis on an owner other than Expand or Reshape; IR \
+             verification must reject that owner before codegen"
         ),
     }
 }
@@ -56,7 +90,7 @@ fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {
 }
 
 use crate::blas;
-use crate::fusion::{FusedInPlaceSpec, fused_in_place_spec};
+use crate::fusion::{FusedReuseMechanics, HipFusedReuse};
 use crate::kernels;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
@@ -75,8 +109,11 @@ pub struct HipEmitter {
     kernel_sources: Vec<(String, String)>,
     /// Planner-driven slot/wrapper ownership.
     plan: MemoryPlan,
+    /// Linear reuse authorities minted by the shared planner. Both kernel
+    /// signatures and host/device wrappers derive mechanics from this map.
+    fused_reuse: BTreeMap<NodeId, HipFusedReuse>,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
-    reduction_inlined: std::collections::HashSet<usize>,
+    reduction_inlined: chelis_unord::UnordSet<usize>,
     /// Worst-case inline staged-reduction scratch requirement outside the slot plan.
     extra_peak_device_bytes_estimate: usize,
     /// Device entrypoints pre-allocate slot storage because borrowed input-backed views
@@ -165,11 +202,63 @@ impl MatmulWrapper {
 }
 
 impl HipEmitter {
+    fn i64_c_literal(value: i64) -> String {
+        if value == i64::MIN {
+            "INT64_MIN".to_string()
+        } else if value < 0 {
+            format!("-INT64_C({})", value.unsigned_abs())
+        } else {
+            format!("INT64_C({value})")
+        }
+    }
+
+    /// The current HIP unary kernel spells `fabsf` for every dtype. Keep
+    /// integer `abs` out of that float-only template until Phase 3 supplies
+    /// the typed, trapping backend kernel (chelis#699).
+    fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        if let Some(node) = dag.first_integer_abs_node() {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("Abs".to_string()),
+                format!("an integer tensor at HIP DAG node {}", node.0),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    689,
+                    "integer abs code generation waits for the typed, trapping Phase 3 \
+                     kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_count(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        if let Some(node) = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Count { .. }))
+        {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("count".to_string()),
+                format!("the HIP kernel set (node {})", node.id.0),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1291,
+                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; \
+                     chelis#1291 owns the dedicated HIP/Metal kernels"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(
-        dag: &Dag,
+        mut storage_plan: VerifiedStoragePlan<HipStorageLane>,
         func_name: &str,
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
+        let dag = storage_plan.emission();
+        Self::reject_integer_abs(dag)?;
+        Self::reject_count(dag)?;
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
         // and WS-A3 (HIP bf16/f16).
         //
@@ -215,16 +304,32 @@ impl HipEmitter {
             }
         }
 
-        let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
+        let reduction_inlined = dag.reduction_inlined_fused_elems();
         let output_specs = Self::output_specs(dag);
-        let output_ids: Vec<NodeId> = output_specs.iter().map(|o| o.id).collect();
-        let plan = MemoryPlan::build(dag, &output_ids, &reduction_inlined);
+        let plan = MemoryPlan::from_shared(&storage_plan);
+        let node_ids = dag.nodes().iter().map(|node| node.id).collect::<Vec<_>>();
+        let mut fused_reuse = BTreeMap::new();
+        for node in node_ids {
+            if let Some(token) = storage_plan
+                .take_reuse_for(node)
+                .map_err(unsupported_storage_plan)?
+            {
+                let has_later_owner = plan.slot_has_later_owner(node);
+                fused_reuse.insert(node, HipFusedReuse::new(token, has_later_owner));
+            }
+        }
+        let dag = storage_plan.emission();
         let mut e = HipEmitter {
             lines: Vec::new(),
             indent: 0,
             kernel_sources: Vec::new(),
             plan,
-            reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
+            fused_reuse,
+            reduction_inlined: reduction_inlined
+                .to_sorted()
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
         };
@@ -284,7 +389,7 @@ impl HipEmitter {
 
         e.line("");
 
-        e.emit_input_shape_preamble(dag, &input_slots, func_name);
+        e.emit_input_shape_preamble(dag, &input_slots, func_name, &output_specs);
         e.line("");
 
         // Emit static kernel module caches
@@ -344,10 +449,9 @@ impl HipEmitter {
                 // Allocate host tensor and transfer from device
                 let ty = &dag.get(output.id).unwrap().output_type;
                 let ndim = Self::ndim(ty);
-                let shape = Self::shape_literal(ty);
                 let dtype = Self::dtype_macro(ty);
                 e.line(&format!(
-                    "outputs[{slot}] = chelis_alloc({ndim}, {shape}, {dtype});"
+                    "outputs[{slot}] = chelis_alloc({ndim}, chelis_output_shape_{slot}, {dtype});"
                 ));
                 e.line(&format!("chelis_device_to_host(outputs[{slot}], d_t{id});"));
             }
@@ -356,7 +460,14 @@ impl HipEmitter {
         e.line("");
 
         // Cleanup: free GPU tensors (skip reduction-inlined FusedElems — never allocated)
-        let cleanup = e.plan.emit_cleanup();
+        let dropped_sources = dag
+            .actions()
+            .filter_map(|action| match action {
+                VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cleanup = e.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             e.lines.push(line);
         }
@@ -388,10 +499,10 @@ impl HipEmitter {
 
     fn emit_device_entrypoint(
         &mut self,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         func_name: &str,
         output_specs: &[OutputSpec],
-        input_slots: &std::collections::HashMap<String, usize>,
+        input_slots: &chelis_unord::UnordMap<String, usize>,
         kernel_names: &[String],
     ) -> Result<(), Unsupported> {
         let expected_inputs = input_slots.len();
@@ -476,7 +587,14 @@ impl HipEmitter {
         }
 
         self.line("");
-        let cleanup = self.plan.emit_cleanup();
+        let dropped_sources = dag
+            .actions()
+            .filter_map(|action| match action {
+                VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cleanup = self.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             self.lines.push(line);
         }
@@ -490,8 +608,8 @@ impl HipEmitter {
     // Kernel collection (first pass)
     // ------------------------------------------------------------------
 
-    fn collect_kernels(&mut self, dag: &Dag) -> Result<(), Unsupported> {
-        let mut seen = std::collections::HashSet::new();
+    fn collect_kernels(&mut self, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
             // Skip reduction-inlined FusedElem nodes (they become part of the
             // reduction kernel).
@@ -576,8 +694,8 @@ impl HipEmitter {
         name.starts_with("kernel_fused_")
     }
 
-    fn input_types(dag: &Dag) -> std::collections::HashMap<String, TensorType> {
-        let mut seen = std::collections::HashMap::<String, TensorType>::new();
+    fn input_types(dag: VerifiedDagView<'_>) -> chelis_unord::UnordMap<String, TensorType> {
+        let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
                 seen.entry(name.as_str().to_string())
@@ -589,22 +707,22 @@ impl HipEmitter {
 
     fn emit_input_shape_preamble(
         &mut self,
-        dag: &Dag,
-        input_slots: &std::collections::HashMap<String, usize>,
+        dag: VerifiedDagView<'_>,
+        input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
+        output_specs: &[OutputSpec],
     ) {
-        // Iteration order over `input_types` (a HashMap) must be
+        // Iteration order over `input_types` (a UnordMap) must be
         // deterministic so the emitted host code is byte-identical
         // across runs. Sort by label; lookups are by name and emitted
         // lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         let input_types = Self::input_types(dag);
-        let mut sorted_labels: Vec<&String> = input_types.keys().collect();
-        sorted_labels.sort();
+        let sorted_labels = input_types.to_sorted();
         // Producer-supplied `func_name` flows into format-string context;
         // sanitize per spec/upstream-bugs/producer-string-sanitization.md.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
-        for label in sorted_labels {
+        for (label, _) in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
             // `label` is `LoadStoreName::as_str()` (validated); route
@@ -620,12 +738,12 @@ impl HipEmitter {
             self.indent -= 1;
             self.line("}");
             self.line(&format!(
-                "if (inputs[{slot}]->ndim != {}) {{",
+                "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", chelis_tensor_rank(inputs[{slot}]));",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -634,11 +752,11 @@ impl HipEmitter {
             for (axis, dim) in ty.dims.iter().enumerate() {
                 if let Some(expected) = Self::known_dim_size(dim) {
                     self.line(&format!(
-                        "if (inputs[{slot}]->shape[{axis}] != {expected}) {{"
+                        "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {expected}) {{"
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -647,14 +765,14 @@ impl HipEmitter {
             }
         }
 
-        for binding in symbolic_bindings(dag) {
+        for binding in dag.symbolic_bindings_interface() {
             let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
             let canonical_slot = input_slots[canonical_label];
             // `binding.name` flows into format-string context; sanitize.
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -662,12 +780,12 @@ impl HipEmitter {
                 let slot = input_slots[occ_label];
                 let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    "if (chelis_tensor_shape(inputs[{slot}], {occ_axis}) != {}) {{",
                     binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%lld but {binding_name_fmt}=%lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {occ_axis}), (long long){});",
                     binding.name
                 ));
                 self.line("abort();");
@@ -675,26 +793,84 @@ impl HipEmitter {
                 self.line("}");
             }
         }
+
+        // chelis#1277 S2b: the same-rank `expand`'s unit-extent claim, on the
+        // host prologue. One derivation, three lanes: this reads the same
+        // `derive_unit_extent_claims` and the same `member_load_axis` the C
+        // emitter and the evaluator read.
+        //
+        // It renders [04-NUM-9] through `chelis_numeric_trap`, which
+        // `chelis_hip_runtime.h` reaches by including `chelis_runtime.h`. The
+        // `abort()` above is the LEGACY rendering for this lane's `Name`
+        // bindings and is chelis#1112's to move; this guard does not adopt it,
+        // because `spec/05-risc-primitives.md` section 2.4.1 sends a failed
+        // claim to a `Domain` trap "placed and rendered per
+        // `spec/04-type-system.md` section 4.7 and [04-NUM-9]".
+        for (load, read_axis) in dag.entry_unit_extent_reads() {
+            let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
+                continue;
+            };
+            let Some(&slot) = input_slots.get(label.as_str()) else {
+                continue;
+            };
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label.as_str());
+            self.line(&format!(
+                "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
+            ));
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.indent -= 1;
+            self.line("}");
+        }
+
+        // Host allocation consumes the published runtime ABI's int64_t shape
+        // carrier. Keep these declarations in the already-classified shape
+        // preamble; device allocations below deliberately retain int[].
+        for (slot, output) in output_specs.iter().enumerate() {
+            let node = dag
+                .get(output.id)
+                .expect("every output spec must reference a DAG node");
+            if matches!(node.op, RiscOp::Load { .. }) {
+                continue;
+            }
+            let dims: Vec<String> = node
+                .output_type
+                .dims
+                .iter()
+                .map(Self::emit_dim_info)
+                .collect();
+            let shape = if dims.is_empty() {
+                "1".to_string()
+            } else {
+                dims.join(", ")
+            };
+            self.line(&format!(
+                "int64_t chelis_output_shape_{slot}[{}] = {{ {shape} }};",
+                Self::ndim(&node.output_type)
+            ));
+        }
     }
 
     fn emit_input_shape_preamble_device(
         &mut self,
-        dag: &Dag,
-        input_slots: &std::collections::HashMap<String, usize>,
+        dag: VerifiedDagView<'_>,
+        input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
-        // Iteration order over `input_types` (a HashMap) must be
+        // Iteration order over `input_types` (a UnordMap) must be
         // deterministic so the emitted device-side code is byte-
         // identical across runs. Sort by label; lookups are by name
         // and emitted lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         let input_types = Self::input_types(dag);
-        let mut sorted_labels: Vec<&String> = input_types.keys().collect();
-        sorted_labels.sort();
+        let sorted_labels = input_types.to_sorted();
         // Format-string-context sanitization for producer-supplied
         // strings per spec/upstream-bugs/producer-string-sanitization.md.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
-        for label in sorted_labels {
+        for (label, _) in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
             let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
@@ -734,7 +910,7 @@ impl HipEmitter {
             }
         }
 
-        for binding in symbolic_bindings(dag) {
+        for binding in dag.symbolic_bindings_interface() {
             let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
             let canonical_slot = input_slots[canonical_label];
             let binding_name_fmt =
@@ -766,7 +942,7 @@ impl HipEmitter {
     fn reduction_kernel_sources(
         &self,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         axis: usize,
     ) -> Result<Vec<(String, String)>, Unsupported> {
         // WS-A4: bind `accumulator` instead of `..`. The kernel-name and
@@ -844,7 +1020,7 @@ impl HipEmitter {
     fn extra_reduction_kernel_sources(
         &self,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<Vec<(String, String)>, Unsupported> {
         // Kernel sources for the four reductions previously deferred to
         // the C backend: Min / Prod / Argmax / Argmin. Argmax/Argmin emit
@@ -884,7 +1060,7 @@ impl HipEmitter {
         &self,
         op: &RiscOp,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<Option<String>, Unsupported> {
         // WS-A2 + WS-A4: kernel-name dispatch must agree with the
         // kernel-source emission in `kernel_source_for_op`. For binary
@@ -904,6 +1080,7 @@ impl HipEmitter {
                 "kernel_add{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            RiscOp::Sub => Some(format!("kernel_sub_{}", kind_for_node(node)?.suffix())),
             RiscOp::Mul => Some(format!(
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -924,7 +1101,36 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
-            RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node)?.suffix())),
+            RiscOp::MaxElem => Some(format!(
+                "kernel_max_elem{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::MinElem => Some(format!(
+                "kernel_min_elem{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                let extrema = match kind {
+                    ExtremaKind::Max => "max",
+                    ExtremaKind::Min => "min",
+                };
+                let selected = match operand {
+                    ExtremaOperand::Left => "left",
+                    ExtremaOperand::Right => "right",
+                };
+                Some(format!(
+                    "kernel_{extrema}_adjoint_{selected}_{}",
+                    kind_for_node(node)?.suffix()
+                ))
+            }
+            RiscOp::Relu => Some(format!(
+                "kernel_relu{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::ReluAdjoint => Some(format!(
+                "kernel_relu_adjoint{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
             RiscOp::CmpLt => {
                 // CmpLt has bool output but operand-precision storage;
                 // dispatch on the operand precision so the kernel name
@@ -1035,19 +1241,19 @@ impl HipEmitter {
                     Self::elem_kind(input_ty)?,
                 ))
             }
-            // `reduce_window_*` HIP codegen is deferred per the
-            // initial-admission scope (issue #254 / spec §2.3.1). The
+            // `reduce_window_*` HIP codegen is excluded by the
+            // target contract ([05-RWIN-2] / spec §2.3.1). The
             // C backend is canonical; returning `None` here means no
             // kernel name is registered, and the launch-emit arm below
             // panics via `todo!` if a `ReduceWindow` node ever reaches
             // codegen on the HIP target.
             RiscOp::ReduceWindow { .. } => None,
-            // `reduce_window_*` adjoint: HIP codegen deferred alongside the
-            // forward op (see above); launch-emit panics via `todo!`.
+            // `reduce_window_*` adjoint: excluded alongside the forward op
+            // under [05-RWIN-2]; launch-emit panics via `todo!`.
             RiscOp::ReduceWindowGrad { .. } => None,
             RiscOp::OneHot { .. } => None,
-            // The runtime `shape` value read is HIP-deferred (chelis#513/
-            // #558); `reject_unsupported_hip_ops` rejects it cleanly before
+            // The runtime `shape` value read is excluded by [05-SHAPE-1];
+            // `reject_unsupported_hip_ops` rejects it cleanly before
             // codegen, so no kernel name is registered. The launch-emit arm
             // below is a defensive `todo!` if one ever reaches codegen.
             RiscOp::Shape { .. } => None,
@@ -1057,6 +1263,12 @@ impl HipEmitter {
             }
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)?),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)?),
+            // Both `reject_unsupported_hip_ops` copies (chelis-cli and
+            // chelis-compiler-api) gate this out before codegen; the
+            // emitter arms below are the backstop if a future caller
+            // reaches the backend without passing a gate.
+            RiscOp::CastTrunc { .. } => None,
+            RiscOp::Count { .. } => None,
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
             // `kernels::shrink_typed`); the kernel name carries the output
@@ -1119,10 +1331,8 @@ impl HipEmitter {
     /// Build the cast kernel name. When src/dst precision agree, this is
     /// the in-precision identity kernel; when they differ, it's the
     /// cross-precision conversion kernel.
-    fn cast_kernel_name(node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
-        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type)?;
-        let src_kind = Self::elem_kind(src_ty)?;
+    fn cast_kernel_name(node: &DagNode, dag: VerifiedDagView<'_>) -> Result<String, Unsupported> {
+        let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             format!("kernel_cast_{}", dst_kind.suffix())
         } else {
@@ -1135,7 +1345,7 @@ impl HipEmitter {
         name: &str,
         op: &RiscOp,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<String, Unsupported> {
         // CmpLt's output type is `bool` (semantically) but the kernel
         // writes 1.0/0.0 of operand precision to the GPU buffer. Use the
@@ -1166,6 +1376,11 @@ impl HipEmitter {
                     kernels::binary_elementwise_typed(name, "+", Self::dtype_c_type(prec))
                 }
             }
+            RiscOp::Sub => kernels::binary_elementwise(
+                name,
+                "-",
+                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+            ),
             RiscOp::Mul => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
@@ -1220,11 +1435,36 @@ impl HipEmitter {
                 );
                 kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
             }
-            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()?),
-            RiscOp::CmpLt => kernels::cmplt(
+            RiscOp::MaxElem | RiscOp::MinElem => {
+                let precision = operand_prec();
+                let is_max = matches!(op, RiscOp::MaxElem);
+                if precision.is_integer() {
+                    kernels::binary_extrema_integer(name, is_max, Self::dtype_c_type(precision))
+                } else {
+                    kernels::binary_extrema(name, is_max, elem_for_unary()?)
+                }
+            }
+            RiscOp::ExtremaAdjoint { kind, operand } => kernels::extrema_adjoint(
                 name,
-                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                matches!(kind, ExtremaKind::Max),
+                matches!(operand, ExtremaOperand::Left),
+                elem_for_unary()?,
             ),
+            RiscOp::Relu => match operand_prec() {
+                Prim::F16 => kernels::relu_reduced(name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_reduced(name, 0x7f80, 0x007f),
+                _ => kernels::relu(name, elem_for_unary()?),
+            },
+            RiscOp::ReluAdjoint => match operand_prec() {
+                Prim::F16 => kernels::relu_adjoint_reduced(name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_adjoint_reduced(name, 0x7f80, 0x007f),
+                _ => kernels::relu_adjoint(name, elem_for_unary()?),
+            },
+            RiscOp::CmpLt => {
+                let operand_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Self::require_result_width_matches_operand(node, operand_ty)?;
+                kernels::cmplt(name, Self::elem_kind(operand_ty)?)
+            }
             RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()?),
             // IEEE reciprocal kernel.
             RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()?),
@@ -1320,9 +1560,13 @@ impl HipEmitter {
             RiscOp::ConstTensor { .. } => kernels::fill(name, elem_for_unary()?),
             RiscOp::Realize => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::CastTrunc { .. } => {
+                return Err(Self::cast_trunc_unsupported(node));
+            }
             RiscOp::Copy => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::FusedElem { ops } => {
-                let aliased_ext = fused_in_place_spec(node, dag).map(|reusable| {
+                let aliased_ext = self.fused_reuse.get(&node.id).map(|reuse| {
+                    let reusable = reuse.mechanics(node.id).reusable_input;
                     node.inputs
                         .iter()
                         .position(|&input| input == reusable)
@@ -1398,10 +1642,12 @@ impl HipEmitter {
 
     /// Cast / Realize / Copy kernel source: in-precision identity when
     /// src and dst kinds agree, cross-precision conversion otherwise.
-    fn cast_kernel_source(name: &str, node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
-        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type)?;
-        let src_kind = Self::elem_kind(src_ty)?;
+    fn cast_kernel_source(
+        name: &str,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<String, Unsupported> {
+        let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             kernels::cast(name, dst_kind)
         } else {
@@ -1451,7 +1697,7 @@ impl HipEmitter {
     // Node emission
     // ------------------------------------------------------------------
 
-    fn emit_node(&mut self, node: &DagNode, dag: &Dag) -> Result<(), Unsupported> {
+    fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
@@ -1462,10 +1708,20 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
-            RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type)?,
-            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
+            RiscOp::Const { value } => {
+                self.emit_const(id, value.as_f64_lossy(), &node.output_type)?
+            }
+            RiscOp::ConstTensor { data } => {
+                self.emit_const_tensor(id, &data.to_f64_lossy_vec(), &node.output_type)?
+            }
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Sub => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -1491,7 +1747,25 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::MaxElem => self.emit_binary_launch(
+            RiscOp::MaxElem | RiscOp::MinElem => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::ExtremaAdjoint { .. } => self.emit_ternary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Relu => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::ReluAdjoint => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -1593,7 +1867,27 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Drop => {}
+            RiscOp::Drop => {
+                let action = dag.action_for_node(node.id).ok_or_else(|| {
+                    unsupported_verified_dag_action(node.id, "missing Drop action")
+                })?;
+                match action {
+                    VerifiedDagAction::BorrowedDrop { node: drop, source }
+                    | VerifiedDagAction::OwnedDrop { node: drop, source }
+                        if drop == node.id && node.inputs.first() == Some(&source) =>
+                    {
+                        if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
+                            self.line(&format!("chelis_gpu_free_view(d_t{});", source.0));
+                        }
+                    }
+                    _ => {
+                        return Err(unsupported_verified_dag_action(
+                            node.id,
+                            "Drop action does not name the exact typed payload source",
+                        ));
+                    }
+                }
+            }
             // WS-A4: bind `accumulator` instead of `..` and thread it
             // through to `emit_reduce_launch` so the launch-side kernel
             // name agrees with the kernel-source-side name (otherwise
@@ -1642,8 +1936,8 @@ impl HipEmitter {
                 // collected by the first pass.
                 self.emit_extra_reduce_launch(id, *axis, &node.inputs, &node.output_type, dag)?;
             }
-            // `reduce_window_*` HIP codegen is deferred per the
-            // initial-admission scope (issue #254 / spec §2.3.1). C is
+            // `reduce_window_*` HIP codegen is excluded by the
+            // target contract ([05-RWIN-2] / spec §2.3.1). C is
             // the canonical backend. A `reduce_window_*` node is rejected
             // before codegen with a clean `unsupported_feature` diagnostic by
             // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); the
@@ -1651,14 +1945,12 @@ impl HipEmitter {
             // HIP stubs above, reached only if some path bypasses that guard.
             RiscOp::ReduceWindow { .. } => {
                 todo!(
-                    "reduce_window_* HIP codegen is deferred (issue #254 / spec/05-risc-primitives.md §2.3.1). \
-                     Use the C backend, or open a follow-up issue if you need GPU windowed reductions."
+                    "reduce_window_* must have been rejected before HIP codegen by [05-RWIN-2]. Use the C backend."
                 )
             }
             RiscOp::ReduceWindowGrad { .. } => {
                 todo!(
-                    "reduce_window_* adjoint (ReduceWindowGrad) HIP codegen is deferred alongside the forward op \
-                     (spec/05-risc-primitives.md §2.3.1). Use the C backend for windowed-reduction gradients."
+                    "ReduceWindowGrad must have been rejected before HIP codegen by [05-RWIN-2]. Use the C backend."
                 )
             }
             RiscOp::OneHot { .. } => {
@@ -1666,15 +1958,14 @@ impl HipEmitter {
                     "HIP backend: internal OneHot must be consumed by specialization before codegen"
                 )
             }
-            // The runtime `shape` value read is HIP-deferred (chelis#513/
-            // #558) and rejected before codegen by
+            // The runtime `shape` value read is excluded by [05-SHAPE-1]
+            // and rejected before codegen by
             // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); this
             // `todo!` is a defensive backstop matching the ReduceWindow
             // stubs above, reached only if some path bypasses that guard.
             RiscOp::Shape { .. } => {
                 todo!(
-                    "runtime `shape` value read HIP codegen is deferred (chelis#513/#558); \
-                     the C backend is canonical for runtime-dim reads. Use `--target c`."
+                    "runtime `shape` value read must have been rejected before HIP codegen by [05-SHAPE-1]. Use `--target c`."
                 )
             }
             RiscOp::Reshape { .. } => {
@@ -1727,16 +2018,27 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
+            RiscOp::Count { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("count".to_string()),
+                    format!("the HIP kernel set (node {})", node.id.0),
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        1291,
+                        "chelis#1291 owns the dedicated HIP/Metal count kernels"
+                    ),
+                ));
+            }
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
             }
             RiscOp::FusedElem { ops } => {
                 let kernel_name = format!("kernel_fused_{}", node.id.0);
-                let in_place =
-                    fused_in_place_spec(node, dag).map(|reusable_input| FusedInPlaceSpec {
-                        reusable_input,
-                        slot_has_later_owner: self.slot_has_later_owner(id),
-                    });
+                let in_place = self
+                    .fused_reuse
+                    .get(&node.id)
+                    .map(|reuse| reuse.mechanics(node.id));
                 self.emit_fused_launch(
                     node.id.0,
                     &kernel_name,
@@ -1801,21 +2103,6 @@ impl HipEmitter {
         }
     }
 
-    /// True iff some node strictly after `id` in topological order also
-    /// owns the slot that `id` owns. Mirrors the C-side
-    /// `slot_has_later_owner` used by the in-place fused-elementwise
-    /// wrapper to decide whether to defer slot allocation to the
-    /// non-aliased fall-back branch.
-    fn slot_has_later_owner(&self, id: usize) -> bool {
-        let slot_id = self.slot_id_for_node(id);
-        self.plan.iter_node_kinds().skip(id + 1).any(|kind| {
-            matches!(
-                kind,
-                NodeMemoryKind::SlotBacked { slot } if *slot == slot_id
-            )
-        })
-    }
-
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
         if self.device_entrypoint_mode {
             return;
@@ -1844,7 +2131,7 @@ impl HipEmitter {
         ));
     }
 
-    fn emit_device_slot_allocations(&mut self, dag: &Dag) {
+    fn emit_device_slot_allocations(&mut self, dag: VerifiedDagView<'_>) {
         let declarations = self
             .plan
             .slots()
@@ -2081,6 +2368,54 @@ impl HipEmitter {
     }
 
     // ------------------------------------------------------------------
+    // Ternary elementwise kernel launch
+    // ------------------------------------------------------------------
+
+    fn emit_ternary_launch(
+        &mut self,
+        id: usize,
+        kernel_name: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let g = inputs[2].0;
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        for (name, source) in [("a", a), ("b", b), ("g", g)] {
+            self.emit_stride_vars(id, name, source);
+            self.line(&format!("int t{id}_{name}_ndim = d_t{source}->ndim;"));
+            self.line(&format!(
+                "int t{id}_{name}_size = d_t{source}->storage_size;"
+            ));
+        }
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &d_t{b}->data, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
+             &d_t{g}->data, {g_stride_refs}, &t{id}_g_ndim, &t{id}_g_size, \
+             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            b_stride_refs = self.stride_arg_refs(id, "b"),
+            g_stride_refs = self.stride_arg_refs(id, "g"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ------------------------------------------------------------------
     // Unary elementwise kernel launch
     // ------------------------------------------------------------------
 
@@ -2131,23 +2466,31 @@ impl HipEmitter {
         let kernel = format!("kernel_uniform_like_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
-        // The PRNG itself is f32; the f64 kernel widens at the final
-        // store. Emit `low` / `high` as `float` regardless of `ty.precision`.
-        //
-        // Issue #251 (parallel #248): narrow `low` / `high` to f32 and
-        // reconstruct each from its exact bit pattern via the
-        // `chelis_f32_from_bits` static inline helper (from the included
-        // `chelis_runtime.h`). The pre-fix `{:.8}f` format string drifted
-        // up to one ULP for ordinary values and collapsed sub-normal-range
-        // inputs like `1e-40` to `0.0f` outright.
+        // [05-OP-8]: bounds have f32 dtype. The f32 kernel consumes those
+        // exact images; the f64 kernel widens the same images exactly and
+        // executes the affine at f64 width.
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
-        self.line(&format!(
-            "float t{id}_low = chelis_f32_from_bits(0x{low_bits:08x}u);"
-        ));
-        self.line(&format!(
-            "float t{id}_high = chelis_f32_from_bits(0x{high_bits:08x}u);"
-        ));
+        match elem {
+            kernels::ElemKind::F32 => {
+                self.line(&format!(
+                    "float t{id}_low = chelis_f32_from_bits(0x{low_bits:08x}u);"
+                ));
+                self.line(&format!(
+                    "float t{id}_high = chelis_f32_from_bits(0x{high_bits:08x}u);"
+                ));
+            }
+            kernels::ElemKind::F64 => {
+                let low_wide_bits = (low as f32 as f64).to_bits();
+                let high_wide_bits = (high as f32 as f64).to_bits();
+                self.line(&format!(
+                    "double t{id}_low = chelis_f64_from_bits(0x{low_wide_bits:016x}uLL);"
+                ));
+                self.line(&format!(
+                    "double t{id}_high = chelis_f64_from_bits(0x{high_wide_bits:016x}uLL);"
+                ));
+            }
+        }
         self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
         self.line(&format!("int t{id}_size = d_t{id}->size;"));
         self.emit_shape_vars(id, "out", id);
@@ -2174,7 +2517,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let values = inputs[0].0;
         let indices = inputs[1].0;
@@ -2235,7 +2578,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let target = inputs[0].0;
         let indices = inputs[1].0;
@@ -2315,7 +2658,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let target = inputs[0].0;
         let indices = inputs[1].0;
@@ -2375,7 +2718,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let data = inputs[0].0;
         let indices = inputs[1].0;
@@ -2438,7 +2781,7 @@ impl HipEmitter {
         inputs: &[NodeId],
         _ops: &[chelis_ir::dag::FusedStep],
         ty: &TensorType,
-        in_place: Option<FusedInPlaceSpec>,
+        in_place: Option<FusedReuseMechanics>,
     ) {
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
@@ -2506,7 +2849,12 @@ impl HipEmitter {
     /// applies: declare the slot variable on the first-owner path and
     /// defer allocation to inside the non-contiguous branch when the
     /// slot has no later owners.
-    fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: FusedInPlaceSpec) {
+    fn emit_fused_in_place_wrapper(
+        &mut self,
+        id: usize,
+        ty: &TensorType,
+        spec: FusedReuseMechanics,
+    ) {
         let slot_id = self.slot_id_for_node(id);
         let slot_is_first_owner = self.plan.slot(slot_id).first_owner == NodeId(id);
         let ndim = Self::ndim(ty);
@@ -2557,7 +2905,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         kind: kernels::ReduceKind,
         // WS-A4: accumulator dtype for Sum reductions (None for Max
         // and other non-accumulator-carrying kinds). Used to compute
@@ -2654,7 +3002,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_ty = &dag.get(inputs[0]).unwrap().output_type;
@@ -2713,7 +3061,7 @@ impl HipEmitter {
         axis: usize,
         reduction_inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let fused_node = dag.get(reduction_inputs[0]).unwrap();
         let ext_inputs = &fused_node.inputs;
@@ -2781,7 +3129,13 @@ impl HipEmitter {
     }
 
     #[allow(dead_code)]
-    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType, dag: &Dag) {
+    fn emit_blas_matmul(
+        &mut self,
+        id: usize,
+        spec: &MatmulEmitSpec,
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
         // WS-A2 / WS-A3: dispatch by `(operand, accumulator)` pair (see
         // the match below). The historical F32-only assertion that lived
         // here was lifted by WS-A2 (admits f64) and WS-A3 (admits
@@ -2927,7 +3281,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         axis: usize,
-        _size: &DimExpr,
+        _size: &RtDim,
         inputs: &[NodeId],
         ty: &TensorType,
     ) {
@@ -3015,11 +3369,11 @@ impl HipEmitter {
         &mut self,
         id: usize,
         padding: &[(usize, usize)],
-        fill: f64,
+        fill: ScalarValue,
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let prec = ty.precision;
@@ -3040,7 +3394,7 @@ impl HipEmitter {
         // Source shape is read from runtime metadata so symbolic/strided
         // inputs bounds-check against their real extents.
         self.emit_shape_vars(id, "srcsh", a);
-        self.emit_typed_scalar_local(&format!("t{id}_fill"), prec, fill);
+        self.emit_typed_scalar_local(&format!("t{id}_fill"), fill);
         self.emit_shape_vars(id, "out", id);
         self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
@@ -3074,7 +3428,7 @@ impl HipEmitter {
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         debug_assert_eq!(
@@ -3112,32 +3466,39 @@ impl HipEmitter {
         self.line("}");
     }
 
-    /// Emit a typed scalar local (`<c_type> name = <reconstructed>;`)
-    /// from an `f64` source value, reconstructing floats from their exact
-    /// bit pattern (no lossy decimal round-trip; sibling of the #189/#250
-    /// fixes) and casting integers/bool directly. Used by the `pad` fill.
-    fn emit_typed_scalar_local(&mut self, name: &str, prec: Prim, value: f64) {
-        match prec {
-            Prim::F32 | Prim::Bool => {
-                let bits = (value as f32).to_bits();
+    /// Emit a typed scalar local from its finalized, dtype-tagged value.
+    fn emit_typed_scalar_local(&mut self, name: &str, value: ScalarValue) {
+        match value.element_ref() {
+            ElementRef::F32(value) => {
+                let bits = value.to_bits();
                 self.line(&format!(
                     "float {name} = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
-            Prim::F64 => {
+            ElementRef::F64(value) => {
                 let bits = value.to_bits();
                 self.line(&format!(
                     "double {name} = chelis_f64_from_bits(0x{bits:016x}uLL);"
                 ));
             }
-            Prim::Int8 => self.line(&format!("int8_t {name} = (int8_t){};", value as i64)),
-            Prim::Int16 => self.line(&format!("int16_t {name} = (int16_t){};", value as i64)),
-            Prim::Int32 => self.line(&format!("int32_t {name} = (int32_t){};", value as i64)),
-            Prim::Int64 => self.line(&format!("int64_t {name} = (int64_t){}LL;", value as i64)),
-            other => panic!(
-                "HIP pad fill: dtype `{}` not in the active set (spec/04-type-system.md §1.1)",
-                other.name()
-            ),
+            ElementRef::F16(value) => self.line(&format!(
+                "uint16_t {name} = UINT16_C(0x{:04x});",
+                value.to_bits()
+            )),
+            ElementRef::Bf16(value) => self.line(&format!(
+                "uint16_t {name} = UINT16_C(0x{:04x});",
+                value.to_bits()
+            )),
+            ElementRef::I8(value) => self.line(&format!("int8_t {name} = INT8_C({value});")),
+            ElementRef::I16(value) => self.line(&format!("int16_t {name} = INT16_C({value});")),
+            ElementRef::I32(value) => self.line(&format!("int32_t {name} = INT32_C({value});")),
+            ElementRef::I64(value) => {
+                self.line(&format!("int64_t {name} = {};", Self::i64_c_literal(value)))
+            }
+            ElementRef::Bool(value) => self.line(&format!(
+                "float {name} = {};",
+                if value { "1.0f" } else { "0.0f" }
+            )),
         }
     }
 
@@ -3279,7 +3640,11 @@ impl HipEmitter {
     /// are admitted (WS-A2). Operands and result must share precision —
     /// the WS-A0 accumulator parameter is checked at the call site.
     #[allow(dead_code)]
-    fn supports_static_hipblas_matmul(dag: &Dag, info: &blas::MatmulInfo, ty: &TensorType) -> bool {
+    fn supports_static_hipblas_matmul(
+        dag: VerifiedDagView<'_>,
+        info: &blas::MatmulInfo,
+        ty: &TensorType,
+    ) -> bool {
         // WS-A2 + WS-A3: f32 / f64 (Sgemm/Dgemm) and bf16 / f16
         // (`hipblasGemmEx` with `HIPBLAS_COMPUTE_32F` per
         // spec/04-type-system.md §5.7.1) all admitted by the static
@@ -3298,7 +3663,7 @@ impl HipEmitter {
     }
 
     fn strided_batched_hipblas_plan(
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         spec: &MatmulEmitSpec,
         ty: &TensorType,
     ) -> Option<StridedBatchedMatmulPlan> {
@@ -3397,7 +3762,7 @@ impl HipEmitter {
         node: &DagNode,
         input_node: &DagNode,
         axis: usize,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> bool {
         Self::total_size(&node.output_type) == 1
             && input_node.output_type.dims.len() <= 1
@@ -3405,18 +3770,42 @@ impl HipEmitter {
             && Self::node_is_statically_contiguous(dag, input_node.id)
     }
 
+    /// The [05-OP-6] rung has no guarded device kernel, so it never
+    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
+    /// These arms exist so a future HIP implementation has to remove
+    /// this rejection deliberately rather than inherit `cast`'s
+    /// unguarded conversion by accident.
+    fn cast_trunc_unsupported(node: &DagNode) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("cast_trunc".to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                759,
+                "the HIP cast kernels emit an unguarded device-side conversion, \
+                 so the [05-OP-6] Domain/Overflow traps have no device \
+                 implementation; the C target is canonical for the named cast ladder"
+            ),
+        )
+    }
+
     #[allow(dead_code)]
-    fn node_is_statically_contiguous(dag: &Dag, id: NodeId) -> bool {
+    fn node_is_statically_contiguous(dag: VerifiedDagView<'_>, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
             RiscOp::Load { .. }
             | RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }
             | RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint
             | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
@@ -3446,6 +3835,7 @@ impl HipEmitter {
             | RiscOp::OneHot { .. }
             | RiscOp::Realize
             | RiscOp::Cast { .. }
+            | RiscOp::CastTrunc { .. }
             | RiscOp::FusedElem { .. }
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Gather { .. }
@@ -3459,32 +3849,14 @@ impl HipEmitter {
             | RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             // `Shape` materializes a fresh rank-0 scalar (trivially
-            // contiguous). It is HIP-rejected before codegen (chelis#513/
-            // #558), so this arm is only for classification completeness.
+            // contiguous). It is HIP-rejected before codegen under
+            // [05-SHAPE-1], so this arm is only for classification completeness.
             | RiscOp::Shape { .. } => true,
+            RiscOp::Count { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
             RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => false,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn bytes_per_element(dtype: Prim) -> usize {
-        match dtype {
-            // WS-A4: i8/i16 element widths.
-            Prim::Int8 => 1,
-            Prim::Int16 => 2,
-            Prim::F32 | Prim::Bool | Prim::Int32 => 4,
-            Prim::F64 | Prim::Int64 => 8,
-            // WS-A3: bf16 / f16 storage is 2 bytes (same as the host
-            // runtime's `chelis_alloc` and the HIP runtime's
-            // `chelis_gpu_dtype_size`).
-            Prim::Bf16 | Prim::F16 => 2,
-            other => panic!(
-                "unsupported HIP dtype in device-memory estimate: {}",
-                other.name()
-            ),
         }
     }
 
@@ -3622,32 +3994,10 @@ impl HipEmitter {
     }
 
     fn dtype_macro(ty: &TensorType) -> &'static str {
-        match ty.precision {
-            Prim::F32 => "CHELIS_F32",
-            Prim::F64 => "CHELIS_F64",
-            Prim::Bool => "CHELIS_BOOL",
-            // WS-A4: admit narrow signed integer dtypes per spec/04-type-system.md §1.1.
-            // Element widths are honored by the runtime allocator
-            // (chelis-runtime/src/lib.rs), and i8/i16 elementwise / reduce_sum
-            // kernels are dispatched via the dtype-suffixed kernel-name path
-            // (kernel_add_i8, kernel_sum_ax0_i8_i32, …) so generated HIP
-            // source operates on the correct C++ type.
-            Prim::Int8 => "CHELIS_I8",
-            Prim::Int16 => "CHELIS_I16",
-            Prim::Int32 => "CHELIS_I32",
-            Prim::Int64 => "CHELIS_I64",
-            // WS-A3: bf16 / f16 admitted alongside the f32 family.
-            // Maps to the matching `CHELIS_BF16` / `CHELIS_F16`
-            // constants in
-            // `crates/chelis-runtime/include/chelis_runtime.h`.
-            Prim::Bf16 => "CHELIS_BF16",
-            Prim::F16 => "CHELIS_F16",
-            other => panic!(
-                "HIP backend supports f32/f64/bf16/f16/bool/int8/int16/int32/int64 \
-                 tensors today; got `{}`.",
-                other.name()
-            ),
-        }
+        ty.precision
+            .runtime_dtype()
+            .unwrap_or_else(|error| panic!("HIP backend does not support this tensor: {error}"))
+            .c_macro()
     }
 
     /// WS-A4: kernel-name suffix encoding the source-level dtype, used
@@ -3661,6 +4011,8 @@ impl HipEmitter {
         match p {
             Prim::F32 => "",
             Prim::F64 => "_f64",
+            Prim::F16 => "_f16",
+            Prim::Bf16 => "_bf16",
             Prim::Bool => "_bool",
             Prim::Int8 => "_i8",
             Prim::Int16 => "_i16",
@@ -3668,38 +4020,135 @@ impl HipEmitter {
             Prim::Int64 => "_i64",
             other => panic!(
                 "HIP kernel suffix not defined for `{}` (active dtype set per \
-                 spec/04-type-system.md §1.1: f32/f64/bool/int8/int16/int32/int64). \
-                 bf16/f16 dispatch is matmul-only (WS-A3) and does not flow \
-                 through this suffix path.",
+                 spec/04-type-system.md §1.1: f32/f64/bf16/f16/bool/int8/int16/int32/int64).",
                 other.name()
             ),
         }
     }
 
+    /// Reject a node whose result is stored at a different width than its
+    /// operands.
+    ///
+    /// [`kernels::cmplt`] and its relatives declare **one** element type and
+    /// use it for both the operand pointers and the result pointer, so the
+    /// emitted kernel writes `result_count * operand_width` bytes into a
+    /// buffer the runtime sized at `result_count * result_width`. That is
+    /// only safe when the two widths agree.
+    ///
+    /// chelis#1360 is what it costs when they stop agreeing silently. `cmplt`
+    /// dispatched on its operand dtype alone and never asked about its bool
+    /// result, which was fine while the HIP runtime stored bool as a four-byte
+    /// `1.0f`/`0.0f` payload. chelis#1308's tagged carrier made bool one byte,
+    /// nothing here noticed, and `x < y` began overrunning its device
+    /// allocation by `3N` bytes while decoding the low bytes of the float
+    /// stream on readback.
+    ///
+    /// Both widths come from [`chelis_vocab::Repr`] rather than a local table,
+    /// so this check cannot drift away from what the allocator actually does.
+    fn require_result_width_matches_operand(
+        node: &DagNode,
+        operand_ty: &TensorType,
+    ) -> Result<(), Unsupported> {
+        let width = |ty: &TensorType| {
+            ty.precision
+                .runtime_dtype()
+                .map(|dtype| dtype.byte_width())
+                .ok()
+        };
+        let (Some(result_width), Some(operand_width)) =
+            (width(&node.output_type), width(operand_ty))
+        else {
+            // A dtype with no runtime representation at all is the ordinary
+            // unsupported-dtype path; let `elem_kind` name it.
+            return Ok(());
+        };
+        if result_width == operand_width {
+            return Ok(());
+        }
+        Err(Unsupported::new(
+            UnsupportedKind::Dtype(node.output_type.precision.name().to_string()),
+            "a HIP kernel template that stores its result at the operand width",
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                1364,
+                "this kernel writes its result at the operand's element width, and the \
+                 result dtype is stored at a different width; emitting it would overrun \
+                 the result allocation (chelis#1360). A typed kernel family for the \
+                 result dtype is chelis#1364"
+            ),
+        ))
+    }
+
+    /// Resolve the two arithmetic families used by the materialization
+    /// template shared by Cast, Copy, and Realize.
+    ///
+    /// A bool source or destination is not part of chelis#689's generic
+    /// float-family fallback class. It needs the exact one-byte read/write and
+    /// checked-cast behavior owned by chelis#1364. Keep that decision at this
+    /// operation-aware seam so unrelated bool arithmetic still receives the
+    /// generic no-typed-kernel rejection from [`Self::elem_kind`].
+    fn cast_elem_kinds(
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(kernels::ElemKind, kernels::ElemKind), Unsupported> {
+        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+        let operation = match &node.op {
+            RiscOp::Cast { .. } => "cast",
+            RiscOp::Copy => "copy",
+            RiscOp::Realize => "realize",
+            _ => unreachable!("cast_elem_kinds is only for Cast, Copy, and Realize"),
+        };
+        if src_ty.precision == Prim::Bool || node.output_type.precision == Prim::Bool {
+            return Err(Unsupported::new(
+                UnsupportedKind::Dtype(Prim::Bool.name().to_string()),
+                format!("HIP {operation} materialization requiring a one-byte bool kernel family"),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1364,
+                    "HIP has no Bool8 materialization family: casts to bool need a checked \
+                     one-byte writer, casts from bool need a one-byte reader, and bool \
+                     Copy/Realize need an exact one-byte identity kernel"
+                ),
+            ));
+        }
+        let dst_kind = Self::elem_kind(&node.output_type)?;
+        let src_kind = Self::elem_kind(src_ty)?;
+        Ok((src_kind, dst_kind))
+    }
+
     /// Map a tensor's precision to a [`kernels::ElemKind`] for kernel
-    /// emission. The HIP runtime stores `bool` tensors as 4-byte values
-    /// (per `chelis_gpu_dtype_size`), so kernels emit them under the
-    /// `f32` path — the cmplt convention is `1.0f`/`0.0f` written into a
-    /// `float *` GPU buffer, and Cast-to-bool likewise materializes a
-    /// 4-byte payload. f64 gets its own variant. Other precisions fall
-    /// outside the WS-A2 scope (bf16/f16 elementwise kernels are
-    /// matmul-only via `hipblasGemmEx` in WS-A3; i8/i16 routes through
-    /// the WS-A4 typed templates via [`Self::dtype_c_type`]) and panic
-    /// so callers see the limit immediately.
+    /// emission. `ElemKind` names an f32/f64 arithmetic kernel family, so
+    /// exactly f32 and f64 map; every other precision is a section C2
+    /// diagnostic. bf16/f16 elementwise kernels are matmul-only via
+    /// `hipblasGemmEx` in WS-A3, and i8/i16 route through the WS-A4 typed
+    /// templates via [`Self::dtype_c_type`].
+    ///
     /// chelis#730 Phase 1 (census row 5, chelis#689): the former `_ =>
     /// ElemKind::F32` wildcard silently dispatched f32 kernels over
     /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (int64
     /// `neg` read 8-byte lanes as 4-byte floats and left half the output
-    /// buffer unwritten). Every precision without an f32/f64 kernel
-    /// family is now a section C2 diagnostic; the ops with typed WS-A4
-    /// templates (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum)
-    /// never call this shorthand. Exhaustive per section C4.1 - no
-    /// wildcard arm.
+    /// buffer unwritten). The ops with typed WS-A4 templates
+    /// (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum) never call
+    /// this shorthand. Exhaustive per section C4.1 - no wildcard arm.
+    ///
+    /// chelis#1360: `bool` used to map here too, because the HIP runtime
+    /// stored bool tensors as 4-byte `1.0f`/`0.0f` payloads and the f32
+    /// family happened to have the right width. chelis#1308 replaced that
+    /// encoding with the tagged carrier's one-byte `Repr::Bool8`, and the
+    /// arm became the same defect chelis#689 closed: `cmplt` and
+    /// `Cast`-to-bool wrote `N * 4` bytes into an `N * 1` byte
+    /// `hipMalloc`, and the one-byte readback decoded the low bytes of the
+    /// float stream. bool now rejects, because HIP has no bool kernel
+    /// family to dispatch to - restoring the f32-encoded payload would
+    /// undo chelis#1308 and put this lane back into chelis#892's shape.
+    /// A real one-byte bool family is chelis#1364; it owes a device-side
+    /// checked cast, which this lane never had even at four bytes.
     fn elem_kind(ty: &TensorType) -> Result<kernels::ElemKind, Unsupported> {
         Ok(match ty.precision {
-            Prim::F32 | Prim::Bool => kernels::ElemKind::F32,
+            Prim::F32 => kernels::ElemKind::F32,
             Prim::F64 => kernels::ElemKind::F64,
-            Prim::F16
+            Prim::Bool
+            | Prim::F16
             | Prim::Bf16
             | Prim::F8e4m3
             | Prim::Int8
@@ -3711,10 +4160,13 @@ impl HipEmitter {
                     UnsupportedKind::Dtype(ty.precision.name().to_string()),
                     "a HIP kernel family with f32/f64 variants only",
                     Stage::Codegen("hip"),
-                    "this op has no typed HIP kernel for the operand dtype; the former \
-                     silent F32 fallback emitted a corrupting kernel (chelis#689). \
-                     Cast to f32/f64, or use the ops with typed templates \
-                     (add/mul/div and the i8/i16 promoted sum)",
+                    chelis_types::unimplemented_rejection!(
+                        689,
+                        "this op has no typed HIP kernel for the operand dtype; the former \
+                         silent F32 fallback emitted a corrupting kernel (chelis#689). \
+                         Cast to f32/f64, or use the ops with typed templates \
+                         (add/mul/div and the i8/i16 promoted sum)"
+                    ),
                 ));
             }
         })
@@ -3729,11 +4181,17 @@ impl HipEmitter {
         match p {
             Prim::F32 => "float",
             Prim::F64 => "double",
-            Prim::Bool => "float", /* bool tensors store as float on the GPU lane */
+            /* chelis#1308's tagged carrier stores bool as `Repr::Bool8`:
+             * exactly one byte, holding exactly 0 or 1 (`Bool8::get` is
+             * `== 1`, and `Bool8::from_u8` rejects every other byte). Use
+             * an exact-width unsigned type, never `bool`, whose width C++
+             * does not fix. This said "float" until chelis#1360. */
+            Prim::Bool => "unsigned char",
             Prim::Int8 => "int8_t",
             Prim::Int16 => "int16_t",
             Prim::Int32 => "int32_t",
             Prim::Int64 => "int64_t",
+            Prim::F16 | Prim::Bf16 => "uint16_t",
             other => panic!(
                 "HIP element type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
                 other.name()
@@ -3745,9 +4203,9 @@ impl HipEmitter {
     // Input/output label logic (identical to C backend)
     // ------------------------------------------------------------------
 
-    pub fn input_labels(dag: &Dag) -> Vec<String> {
+    pub fn input_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
         let mut labels = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op
                 && seen.insert(name.as_str().to_string())
@@ -3758,16 +4216,16 @@ impl HipEmitter {
         labels
     }
 
-    pub fn output_labels(dag: &Dag) -> Vec<String> {
+    pub fn output_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
         Self::output_specs(dag)
             .into_iter()
             .map(|o| o.label)
             .collect()
     }
 
-    fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
+    fn output_specs(dag: VerifiedDagView<'_>) -> Vec<OutputSpec> {
         let mut specs = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
 
         for node in dag.nodes() {
             if let RiscOp::Store { name } = &node.op
@@ -3799,7 +4257,7 @@ impl HipEmitter {
         specs
     }
 
-    fn input_slots(labels: &[String]) -> std::collections::HashMap<String, usize> {
+    fn input_slots(labels: &[String]) -> chelis_unord::UnordMap<String, usize> {
         labels
             .iter()
             .cloned()
@@ -3812,7 +4270,178 @@ impl HipEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+
+    fn emit_test_dag(
+        dag: &Dag,
+        name: &str,
+    ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
+        let verified = crate::testing::verified_dag(dag)
+            .expect("HIP emitter unit-test DAG must verify ownership");
+        let plan = chelis_ir::ownership::plan_hip_storage(verified)
+            .expect("HIP emitter unit-test DAG must plan exact storage");
+        HipEmitter::emit_dag(plan, name)
+    }
+
+    #[test]
+    fn drop_releases_exact_device_descriptor_once() {
+        let mut dag = Dag::new();
+        let source = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(RiscOp::Drop, vec![source], TensorType::scalar_f32(), None);
+
+        let (source, _) = emit_test_dag(&dag, "verified_drop").unwrap();
+        assert_eq!(
+            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            2,
+            "host and device entrypoints each consume the exact verified descriptor once:\n{source}"
+        );
+    }
+
+    #[test]
+    fn borrowed_drop_is_a_logical_discard_without_a_device_release() {
+        let mut dag = Dag::new();
+        let borrowed = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(RiscOp::Drop, vec![borrowed], TensorType::scalar_f32(), None);
+        let output = dag.add_node(RiscOp::Copy, vec![borrowed], TensorType::scalar_f32(), None);
+        dag.add_root(output);
+
+        let (source, _) = emit_test_dag(&dag, "borrowed_drop").unwrap();
+        assert_eq!(
+            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            2,
+            "the borrowed descriptor may be cleaned up once per host/device entrypoint, but the logical Drop must not add a third release:\n{source}"
+        );
+    }
+
+    /// Width of a C type spelling this backend is allowed to emit.
+    ///
+    /// The list is closed on purpose, and an unrecognised spelling is a test
+    /// failure rather than a skipped row: an allowlist of "known widths" can
+    /// never be complete, so a new spelling has to be classified here before
+    /// it can reach a kernel. Same discipline the capacity census applies to
+    /// C type words.
+    fn c_type_width(spelling: &str) -> usize {
+        match spelling {
+            "unsigned char" | "int8_t" => 1,
+            "uint16_t" | "int16_t" => 2,
+            "float" | "int32_t" => 4,
+            "double" | "int64_t" => 8,
+            other => panic!(
+                "unclassified HIP element type `{other}`: add it to this table with its \
+                 exact width before emitting it (chelis#1360)"
+            ),
+        }
+    }
+
+    /// chelis#1360's tripwire.
+    ///
+    /// Every dtype the emitter is willing to name a device C type for must name
+    /// one whose width equals the width the runtime allocates for it. The
+    /// defect this catches is not a wrong line of code anywhere: it is two
+    /// constants in different files disagreeing, which every individual
+    /// emission site reads as correct.
+    ///
+    /// Before chelis#1308 this passed with `Prim::Bool => "float"`, because
+    /// `Repr::Bool` was four bytes. chelis#1308 made it `Repr::Bool8`, and this
+    /// assertion is what should have gone red that day.
+    ///
+    /// `Prim` is matched exhaustively so that adding a dtype stops this
+    /// compiling until the new dtype is classified, rather than silently
+    /// leaving it unchecked.
+    #[test]
+    fn every_emittable_dtype_c_type_has_the_runtime_storage_width() {
+        for prim in [
+            Prim::F32,
+            Prim::F64,
+            Prim::Bool,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::F16,
+            Prim::Bf16,
+        ] {
+            // Exhaustive by construction: a new `Prim` variant makes this
+            // match non-exhaustive and fails the build.
+            match prim {
+                Prim::F32
+                | Prim::F64
+                | Prim::Bool
+                | Prim::Int8
+                | Prim::Int16
+                | Prim::Int32
+                | Prim::Int64
+                | Prim::F16
+                | Prim::Bf16
+                | Prim::F8e4m3
+                | Prim::String => {}
+            }
+            let runtime_width = prim
+                .runtime_dtype()
+                .unwrap_or_else(|error| panic!("{} has no runtime dtype: {error}", prim.name()))
+                .byte_width();
+            let emitted = HipEmitter::dtype_c_type(prim);
+            assert_eq!(
+                c_type_width(emitted),
+                runtime_width,
+                "HIP emits `{emitted}` for `{}`, which the runtime stores at {runtime_width} \
+                 byte(s); a kernel over that buffer would read or write the wrong span",
+                prim.name()
+            );
+        }
+    }
+
+    /// The `ElemKind` arithmetic families carry the same obligation: an
+    /// `ElemKind` reached from a dtype must spell a C type of that dtype's
+    /// storage width, or the kernel walks the buffer at the wrong stride.
+    #[test]
+    fn every_elem_kind_family_matches_its_dtype_storage_width() {
+        for prim in [Prim::F32, Prim::F64] {
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(1)],
+                precision: prim,
+            };
+            let kind = HipEmitter::elem_kind(&ty).expect("f32/f64 have kernel families");
+            let runtime_width = prim.runtime_dtype().expect("runtime dtype").byte_width();
+            assert_eq!(
+                c_type_width(kind.c_type()),
+                runtime_width,
+                "{}",
+                prim.name()
+            );
+        }
+
+        // bool has no arithmetic family. It mapped to `ElemKind::F32` until
+        // chelis#1360, which is exactly the four-versus-one byte mismatch the
+        // test above now forbids at the C-type level.
+        let bool_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::Bool,
+        };
+        assert!(
+            HipEmitter::elem_kind(&bool_ty).is_err(),
+            "bool must not resolve to an f32/f64 arithmetic kernel family"
+        );
+    }
+
+    #[test]
+    fn issue_878_i64_pad_literal_spelling_is_portable_at_signed_min() {
+        assert_eq!(HipEmitter::i64_c_literal(i64::MIN), "INT64_MIN");
+        assert_eq!(
+            HipEmitter::i64_c_literal(-9_007_199_254_740_993),
+            "-INT64_C(9007199254740993)"
+        );
+    }
+    use chelis_ir::dag::{Dag, FusedInput, FusedStep, FusedStepOp};
 
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
@@ -3835,6 +4464,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn integer_abs_is_rejected_before_the_float_unary_template() {
+        let ty = vec_i64(1);
+
+        let mut direct = Dag::new();
+        let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+        direct.set_roots(vec![out]);
+        let err = match emit_test_dag(&direct, "integer_abs") {
+            Err(error) => error,
+            Ok(_) => panic!("integer abs must not enter the HIP fabsf template"),
+        };
+        assert!(err.to_string().contains("unsupported: op `Abs`"));
+
+        let mut fused = Dag::new();
+        let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let out = fused.add_node(
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Abs,
+                    input_indices: vec![FusedInput::External(0)],
+                }],
+            },
+            vec![x],
+            ty,
+            None,
+        );
+        fused.set_roots(vec![out]);
+        let err = match emit_test_dag(&fused, "fused_integer_abs") {
+            Err(error) => error,
+            Ok(_) => panic!("fused integer abs must not bypass the HIP guard"),
+        };
+        assert!(err.to_string().contains("unsupported: op `Abs`"));
+    }
+
     fn mat_f32(rows: usize, cols: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
@@ -3845,13 +4509,43 @@ mod tests {
     fn fused_mul_reusable_input_dag() -> Dag {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let ops = vec![FusedStep {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
         let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
         dag.set_reusable_input(fused, x);
+        dag
+    }
+
+    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+        let scale = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(
+            RiscOp::FusedElem { ops },
+            vec![owned, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, owned);
+        dag.add_root(fused);
         dag
     }
 
@@ -3890,24 +4584,25 @@ mod tests {
         );
         dag.add_root(out);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_sparse").unwrap();
 
         assert!(hip.contains("kernel_scatter_add_i64"));
         assert!(hip.contains("const long long *indices"));
         assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
     }
 
-    /// Perf-F2(b) shipped: with a single-consumer reusable input
-    /// (here `x`, the FusedElem's first external), the kernel ships
+    /// A program-owned `Copy` with a terminal fused use receives the shared
+    /// reuse token. The kernel ships
     /// the in-place shape — `__restrict__` only on non-aliased
     /// externals (`ext1`), never on the aliased external (`ext0`) or
     /// `out`.
     #[test]
     fn fused_reusable_input_emits_hip_in_place_restrict_shape() {
-        let dag = fused_mul_reusable_input_dag();
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let dag = fused_mul_program_owned_reusable_input_dag();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
-        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_3("));
+        assert!(hip.contains("d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size);"));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
         assert!(!hip.contains("const float *__restrict__ ext0"));
         // Output must NOT carry __restrict__ — it aliases ext0.
@@ -3915,6 +4610,64 @@ mod tests {
         // Non-aliased externals (ext1 here, the const scale) MUST
         // carry __restrict__ in the in-place shape.
         assert!(hip.contains("const float *__restrict__ ext1"));
+    }
+
+    /// chelis#1214: a reusable program input is
+    /// caller-owned and must not supply the produced tensor's storage.
+    #[test]
+    fn fused_in_place_does_not_alias_a_caller_owned_input() {
+        let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+
+        assert!(
+            !hip.contains("d_t0->data, d_t0->storage_size"),
+            "the fused output must not reuse caller-owned input bytes; got:\n{hip}"
+        );
+    }
+
+    /// chelis#1214: metadata views preserve the
+    /// caller-owned provenance of their source storage.
+    #[test]
+    fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            mat_f32(2, 2),
+            None,
+        );
+        let flat = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Lit(4)],
+            },
+            vec![x],
+            vec_f32(4),
+            None,
+        );
+        let scale = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let fused = dag.add_node(
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Mul,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+            vec![flat, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, flat);
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+
+        assert!(
+            !hip.contains("d_t1->data, d_t1->storage_size"),
+            "the fused output must not reuse a caller-owned view's bytes; got:\n{hip}"
+        );
     }
 
     /// Negative: a FusedElem with no `reusable_input` set must still
@@ -3925,7 +4678,12 @@ mod tests {
     fn fused_without_reusable_input_keeps_non_in_place_kernel_shape() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let scale = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let scale = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let ops = vec![FusedStep {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
@@ -3934,7 +4692,7 @@ mod tests {
         // No set_reusable_input call — the in-place gate must reject.
         dag.add_root(fused);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
         assert!(hip.contains("const float *ext0"));
@@ -3957,9 +4715,14 @@ mod tests {
         // reparses to a different (zero) bit pattern.
         let value = 1e-40_f64;
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f32(4), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(Prim::F32, value),
+            vec![],
+            vec_f32(4),
+            None,
+        );
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         let want_bits = (value as f32).to_bits();
         assert_ne!(
@@ -3986,9 +4749,14 @@ mod tests {
         // 1.0 / 3.0 has no exact decimal form; pin the exact f64 bits.
         let value = 1.0_f64 / 3.0_f64;
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::Const { value }, vec![], vec_f64(4), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(Prim::F64, value),
+            vec![],
+            vec_f64(4),
+            None,
+        );
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         let want_bits = value.to_bits();
         let needle = format!("chelis_f64_from_bits(0x{want_bits:016x}uLL)");
@@ -4007,14 +4775,22 @@ mod tests {
         let low = 1e-40_f64; // denormal f32: lost by `%.8`
         let high = 1.0_f64 / 3.0_f64; // off-by-ULP under `%.8`
         let mut dag = Dag::new();
-        let u = dag.add_node(
-            RiscOp::UniformLike { low, high, seed: 7 },
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
             vec![],
             vec_f32(8),
             None,
         );
+        let u = dag.add_node(
+            RiscOp::UniformLike { low, high, seed: 7 },
+            vec![like],
+            vec_f32(8),
+            None,
+        );
         dag.add_root(u);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
@@ -4037,8 +4813,46 @@ mod tests {
         // Negative parity: no lossy decimal literal for the collapsed
         // denormal `low`.
         assert!(
-            !hip.contains("float t0_low = 0.00000000f;"),
+            !hip.contains("float t1_low = 0.00000000f;"),
             "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
+        );
+    }
+
+    #[test]
+    fn issue_937_uniform_like_f64_uses_f64_sampler_and_bounds() {
+        let low = 0.1_f64;
+        let high = 0.9_f64;
+        let mut dag = Dag::new();
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f64(8),
+            None,
+        );
+        let u = dag.add_node(
+            RiscOp::UniformLike {
+                low,
+                high,
+                seed: 17,
+            },
+            vec![like],
+            vec_f64(8),
+            None,
+        );
+        dag.add_root(u);
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+
+        assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
+        assert!(hip.contains("double t1_low = chelis_f64_from_bits("));
+        assert!(hip.contains("double t1_high = chelis_f64_from_bits("));
+        assert!(hip.contains("double low, double high"));
+        assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
+        assert!(
+            !hip.lines()
+                .any(|line| line.contains("out[i]") && line.contains("sample_f32")),
+            "f64 HIP output must not widen an f32 random sample:\n{hip}"
         );
     }
 }

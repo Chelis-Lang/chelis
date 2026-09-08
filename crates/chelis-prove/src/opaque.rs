@@ -14,10 +14,12 @@
 //! `invariant_amenability` recorded on a `.dp` is NOT trusted: it is
 //! recomputed from the predicate via `chelis_pred::classify_predicate`.
 
-use std::collections::{HashMap, HashSet};
+use chelis_deep::DeepTag;
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_pred::PredAmenability;
+use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 
@@ -154,43 +156,41 @@ impl OpaqueInvariant {
 // Deep node helpers (mirrors chelis-pred's structural helpers)
 // ===========================================================================
 
-fn tag(expr: &Expr) -> Option<&str> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-    {
-        Some(s.as_str())
-    } else {
-        None
+fn tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::Node(node, _) => Some(node.tag()),
+        Expr::List(list, _) => list.tag(),
+        _ => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
 fn symbol_text(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }
 
 fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Map(map, _)) = list.elements.get(1)
-    {
-        return map
-            .entries
-            .iter()
-            .find_map(|(k, v)| (k == key).then_some(v));
-    }
-    None
+    let meta = match expr {
+        Expr::Node(node, _) => node.meta(),
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    meta.entries
+        .iter()
+        .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
 }
 
 // ===========================================================================
@@ -222,7 +222,7 @@ pub struct OpaqueInvariantRejection {
 pub fn collect_opaque_invariants_and_rejections(
     exprs: &[Expr],
 ) -> (Vec<OpaqueInvariant>, Vec<OpaqueInvariantRejection>) {
-    let mut deftypes: HashMap<String, &Expr> = HashMap::new();
+    let mut deftypes: UnordMap<String, &Expr> = UnordMap::new();
     index_deftypes(exprs, &mut deftypes);
     let mut oks = Vec::new();
     let mut errs = Vec::new();
@@ -241,28 +241,26 @@ pub fn collect_opaque_invariant_rejections(exprs: &[Expr]) -> Vec<OpaqueInvarian
 /// Index every `deftype` in the program (recursing module wrappers) by its
 /// type name, so a nested-record field type (`t-adt` naming another record)
 /// resolves while the field model is built.
-fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut HashMap<String, &'a Expr>) {
+fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut UnordMap<String, &'a Expr>) {
     for expr in exprs {
-        if tag(expr) == Some("deftype")
+        if tag(expr) == Some(DeepTag::Deftype)
             && let Some(name) = children(expr).first().and_then(|n| symbol_text(n))
         {
             out.entry(name.to_string()).or_insert(expr);
         }
-        if let Expr::List(list, _) = expr {
-            for child in list.elements.iter().skip(2) {
-                index_deftypes(std::slice::from_ref(child), out);
-            }
+        for child in children(expr) {
+            index_deftypes(std::slice::from_ref(child), out);
         }
     }
 }
 
 fn collect_in<'a>(
     expr: &'a Expr,
-    deftypes: &HashMap<String, &'a Expr>,
+    deftypes: &UnordMap<String, &'a Expr>,
     oks: &mut Vec<OpaqueInvariant>,
     errs: &mut Vec<OpaqueInvariantRejection>,
 ) {
-    if tag(expr) == Some("deftype") {
+    if tag(expr) == Some(DeepTag::Deftype) {
         match opaque_invariant_from_deftype(expr, deftypes) {
             Some(Ok(inv)) => oks.push(inv),
             Some(Err(rej)) => errs.push(rej),
@@ -270,10 +268,8 @@ fn collect_in<'a>(
         }
     }
     // Recurse into module wrappers and any nesting.
-    if let Expr::List(list, _) = expr {
-        for child in list.elements.iter().skip(2) {
-            collect_in(child, deftypes, oks, errs);
-        }
+    for child in children(expr) {
+        collect_in(child, deftypes, oks, errs);
     }
 }
 
@@ -284,7 +280,7 @@ fn collect_in<'a>(
 /// - `Some(Ok(_))` -- a modelable invariant.
 fn opaque_invariant_from_deftype(
     deftype: &Expr,
-    deftypes: &HashMap<String, &Expr>,
+    deftypes: &UnordMap<String, &Expr>,
 ) -> Option<Result<OpaqueInvariant, OpaqueInvariantRejection>> {
     // Require opaque: true and an invariant fn node in the metadata. Absent
     // either, this is not an invariant-carrying opaque type -> skip.
@@ -296,7 +292,7 @@ fn opaque_invariant_from_deftype(
         return None;
     }
     let predicate = meta_value(deftype, "invariant")?.clone();
-    if tag(&predicate) != Some("fn") {
+    if tag(&predicate) != Some(DeepTag::Fn) {
         return None;
     }
 
@@ -320,7 +316,7 @@ fn opaque_invariant_from_deftype(
             "invariant on opaque type `{type_name}` has a malformed binder"
         ));
     };
-    let Some(variant) = kids.iter().find(|c| tag(c) == Some("variant")) else {
+    let Some(variant) = kids.iter().find(|c| tag(c) == Some(DeepTag::Variant)) else {
         return reject(format!(
             "opaque type `{type_name}` carries an invariant but is not a single record variant"
         ));
@@ -337,7 +333,7 @@ fn opaque_invariant_from_deftype(
     };
     let mut fields = Vec::new();
     for field in var_kids.iter().skip(1) {
-        if tag(field) != Some("field") {
+        if tag(field) != Some(DeepTag::Field) {
             return reject(format!(
                 "opaque type `{type_name}` is a positional variant, which cannot carry a \
                  mechanically verifiable invariant"
@@ -352,7 +348,7 @@ fn opaque_invariant_from_deftype(
                 "field `{fname}` of opaque type `{type_name}` has no type"
             ));
         };
-        let mut visiting = HashSet::new();
+        let mut visiting = UnordSet::new();
         let Some(fty) = field_type_from_deep(fty_node, deftypes, &mut visiting) else {
             return reject(format!(
                 "field `{fname}` of opaque type `{type_name}` has a representation type the prover \
@@ -385,7 +381,7 @@ fn opaque_invariant_from_deftype(
 fn predicate_binder(fn_node: &Expr) -> Option<String> {
     let kids = children(fn_node);
     let params = kids.first()?;
-    if tag(params) != Some("params") {
+    if tag(params) != Some(DeepTag::Params) {
         return None;
     }
     let pkids = children(params);
@@ -395,10 +391,16 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
         return Some(name.to_string());
     }
     // A typed-param list `(p {type: ...})`: head symbol is the name.
-    if let Expr::List(list, _) = first
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
+    let elements = match first {
+        Expr::BareList(elements, _) => Some(elements.as_slice()),
+        Expr::List(list, _) => Some(list.elements.as_slice()),
+        _ => None,
+    };
+    if let Some(name) = elements
+        .and_then(|elements| elements.first())
+        .and_then(symbol_text)
     {
-        return Some(s.clone());
+        return Some(name.to_string());
     }
     None
 }
@@ -413,21 +415,21 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
 /// checker uses, so the checker and the prover agree on the value class.
 fn field_type_from_deep(
     ty: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> Option<FieldType> {
     match tag(ty)? {
-        "t-prim" => {
+        DeepTag::TPrim => {
             let name = symbol_text(children(ty).first()?)?;
             chelis_types::invariants::invariant_value_class_prim(name)
                 .then(|| FieldType::Scalar(name.to_string()))
         }
-        "t-tensor" => {
+        DeepTag::TTensor => {
             let kids = children(ty);
             // Last child is the precision t-prim; preceding are dims.
             let precision = {
                 let last = kids.last()?;
-                (tag(last) == Some("t-prim"))
+                (tag(last) == Some(DeepTag::TPrim))
                     .then(|| symbol_text(children(last).first()?))
                     .flatten()?
             };
@@ -437,7 +439,7 @@ fn field_type_from_deep(
             let mut dims = Vec::new();
             for dim in &kids[..kids.len().saturating_sub(1)] {
                 // Literal dims only (`(d-lit {} N)`); symbolic dims reject.
-                if tag(dim) == Some("d-lit")
+                if tag(dim) == Some(DeepTag::DLit)
                     && let Some(Expr::Atom(Atom::Int(n), _)) = children(dim).first()
                     && *n >= 0
                 {
@@ -451,7 +453,7 @@ fn field_type_from_deep(
                 precision: precision.to_string(),
             })
         }
-        "t-adt" => {
+        DeepTag::TAdt => {
             // A nested single-variant record: resolve the referenced deftype
             // and model it as `FieldType::Record` (the V1 nested-record class,
             // spec/04 / RFC D-WF). A generic instantiation (a type argument) or
@@ -480,18 +482,21 @@ fn field_type_from_deep(
 /// field model the prover flattens (`p.inner.value`).
 fn record_field_type(
     deftype: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> Option<FieldType> {
     let kids = children(deftype);
-    let variants: Vec<_> = kids.iter().filter(|c| tag(c) == Some("variant")).collect();
+    let variants: Vec<_> = kids
+        .iter()
+        .filter(|c| tag(c) == Some(DeepTag::Variant))
+        .collect();
     if variants.len() != 1 {
         return None;
     }
     let var_kids = children(variants[0]);
     let mut fields = Vec::new();
     for field in var_kids.iter().skip(1) {
-        if tag(field) != Some("field") {
+        if tag(field) != Some(DeepTag::Field) {
             return None;
         }
         let fk = children(field);
@@ -513,7 +518,7 @@ fn record_field_type(
 /// (`sum(p.weights) >= 1.0 - eps` references `eps`). Resolved to concrete
 /// `f64` values by the caller (RFC D-WF: in-grammar constant defs whose
 /// bodies are themselves in-grammar).
-pub type ConstEnv = std::collections::HashMap<String, f64>;
+pub type ConstEnv = chelis_unord::UnordMap<String, f64>;
 
 /// Context threaded through predicate lowering: the binder name, the
 /// dotted path prefix of the binder value, the binder's fields (so `sum`
@@ -578,14 +583,14 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     fn defsig_prim(exprs: &[Expr], name: &str) -> Option<String> {
         fn prim_of_type(ty: &Expr) -> Option<String> {
             match tag(ty)? {
-                "t-prim" => symbol_text(children(ty).first()?).map(str::to_string),
-                "t-fn" => prim_of_type(children(ty).last()?),
+                DeepTag::TPrim => symbol_text(children(ty).first()?).map(str::to_string),
+                DeepTag::TFn => prim_of_type(children(ty).last()?),
                 _ => None,
             }
         }
         fn scan(exprs: &[Expr], name: &str) -> Option<String> {
             for expr in exprs {
-                if tag(expr) == Some("defsig") {
+                if tag(expr) == Some(DeepTag::Defsig) {
                     let kids = children(expr);
                     if kids.first().and_then(symbol_text) == Some(name)
                         && let Some(ty) = kids.get(1)
@@ -594,9 +599,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
                         return Some(prim);
                     }
                 }
-                if let Expr::List(list, _) = expr
-                    && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
-                {
+                if let Some(found) = scan(children(expr), name) {
                     return Some(found);
                 }
             }
@@ -605,31 +608,27 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
         scan(exprs, name)
     }
     fn lit_type_prim(expr: &Expr) -> Option<String> {
-        if tag(expr) != Some("lit") {
+        if tag(expr) != Some(DeepTag::Lit) {
             return None;
         }
-        if let Expr::List(list, _) = expr
-            && let Some(Expr::Map(meta, _)) = list.elements.get(1)
+        if let Some(ty) = meta_value(expr, "type")
+            && tag(ty) == Some(DeepTag::TPrim)
         {
-            for (k, v) in &meta.entries {
-                if k == "type" && tag(v) == Some("t-prim") {
-                    return symbol_text(children(v).first()?).map(str::to_string);
-                }
-            }
+            return symbol_text(children(ty).first()?).map(str::to_string);
         }
         None
     }
     /// The constant a body references, if the body is a bare `(var other)`
     /// or a zero-arg `(app (var other))`.
     fn referenced_const(body: &Expr) -> Option<&str> {
-        if tag(body) == Some("var") {
+        if tag(body) == Some(DeepTag::Var) {
             return symbol_text(children(body).first()?);
         }
-        if tag(body) == Some("app") {
+        if tag(body) == Some(DeepTag::App) {
             let kids = children(body);
             if kids.len() == 1 {
                 let callee = kids.first()?;
-                if tag(callee) == Some("var") {
+                if tag(callee) == Some(DeepTag::Var) {
                     return symbol_text(children(callee).first()?);
                 }
             }
@@ -639,21 +638,19 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     fn const_body<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
         fn scan<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
             for expr in exprs {
-                if tag(expr) == Some("def") {
+                if tag(expr) == Some(DeepTag::Def) {
                     let kids = children(expr);
                     if kids.first().and_then(symbol_text) == Some(name)
                         && let Some(body) = kids.get(1)
                     {
-                        return if tag(body) == Some("fn") {
+                        return if tag(body) == Some(DeepTag::Fn) {
                             children(body).get(1)
                         } else {
                             Some(body)
                         };
                     }
                 }
-                if let Expr::List(list, _) = expr
-                    && let Some(found) = scan(&list.elements[2.min(list.elements.len())..], name)
-                {
+                if let Some(found) = scan(children(expr), name) {
                     return Some(found);
                 }
             }
@@ -670,7 +667,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     // referential chain instead. The declared (defsig) type is authoritative
     // over the body literal's own tag.
     let mut current = name.to_string();
-    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut visited: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     loop {
         if !visited.insert(current.clone()) {
             // Re-entered a name already on the chain: a cycle. No declared
@@ -734,7 +731,7 @@ fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
 }
 
 fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
-    if tag(expr) == Some("app") {
+    if tag(expr) == Some(DeepTag::App) {
         let kids = children(expr);
         let callee = kids.first()?;
         let name = symbol_text(children(callee).first()?)?;
@@ -748,12 +745,12 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
     if let Expr::Atom(Atom::Bool(b), _) = expr {
         return Some(SmtExpr::BoolLit(*b));
     }
-    if tag(expr) == Some("lit")
+    if tag(expr) == Some(DeepTag::Lit)
         && let Some(Expr::Atom(Atom::Bool(b), _)) = children(expr).first()
     {
         return Some(SmtExpr::BoolLit(*b));
     }
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_bool(kids.first()?, ctx)?;
         let t = lower_bool(kids.get(1)?, ctx)?;
@@ -775,11 +772,12 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
                 .collect::<Option<Vec<_>>>()?,
         )),
         "not" => Some(SmtExpr::Not(Box::new(lower_bool(args.first()?, ctx)?))),
-        "eq" | "neq" | "cmplt" | "lte" | "gte" => {
+        "eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" => {
             let op = match name {
                 "eq" => CmpOp::Eq,
                 "neq" => CmpOp::Ne,
                 "cmplt" => CmpOp::Lt,
+                "gt" => CmpOp::Gt,
                 "lte" => CmpOp::Le,
                 "gte" => CmpOp::Ge,
                 _ => unreachable!(),
@@ -797,9 +795,9 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
             coerce_cmp_operands(&mut l, &mut r, ctx);
             Some(SmtExpr::Cmp(op, Box::new(l), Box::new(r)))
         }
-        // `>` / `<` desugar to gte/cmplt with swapped operands already, so
-        // only the five comparison symbols appear. Anything else is not a
-        // boolean-shaped node we can lower.
+        // `<` desugars to `cmplt` and `>` to `gt` with authored operand
+        // order (chelis#1180); `<=`/`>=` to `lte`/`gte`. Anything else is
+        // not a boolean-shaped node we can lower.
         _ => None,
     }
 }
@@ -877,7 +875,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
         Expr::Atom(Atom::Int(v), _) => return Some(SmtExpr::IntLit(*v)),
         _ => {}
     }
-    if tag(expr) == Some("lit") {
+    if tag(expr) == Some(DeepTag::Lit) {
         return match children(expr).first() {
             Some(Expr::Atom(Atom::Float(v), _)) => Some(SmtExpr::RealLit(*v)),
             Some(Expr::Atom(Atom::Int(v), _)) => Some(SmtExpr::IntLit(*v)),
@@ -885,7 +883,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
         };
     }
     // Field projection: `(access (var binder|path) field)` -> dotted var.
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         return access_path(expr, ctx.binder, ctx.prefix).map(SmtExpr::Var);
     }
     // A bare `(var name)`: an in-module constant reference. Resolve it
@@ -895,7 +893,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
     // mismatch an Int-sorted field var and abort cvc5 in a precondition. An
     // unknown constant means the caller could not resolve it in-grammar, so
     // the predicate is not lowerable here and the property falls to Tier C.
-    if tag(expr) == Some("var") {
+    if tag(expr) == Some(DeepTag::Var) {
         let name = symbol_text(children(expr).first()?)?;
         return ctx
             .consts
@@ -903,7 +901,7 @@ fn lower_arith(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
             .copied()
             .map(|value| lower_const_ref(ctx.exprs, name, value));
     }
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_bool(kids.first()?, ctx)?;
         let t = lower_arith(kids.get(1)?, ctx)?;
@@ -982,11 +980,11 @@ fn access_path(expr: &Expr, binder: &str, prefix: &str) -> Option<String> {
     let target = kids.first()?;
     let field = symbol_text(kids.get(1)?)?;
     // Base: the binder var.
-    if tag(target) == Some("var") && symbol_text(children(target).first()?) == Some(binder) {
+    if tag(target) == Some(DeepTag::Var) && symbol_text(children(target).first()?) == Some(binder) {
         return Some(format!("{prefix}.{field}"));
     }
     // Nested access: recurse.
-    if tag(target) == Some("access") {
+    if tag(target) == Some(DeepTag::Access) {
         let base = access_path(target, binder, prefix)?;
         return Some(format!("{base}.{field}"));
     }
@@ -1018,7 +1016,7 @@ pub enum GenMethod {
 /// materializes.
 #[derive(Debug, Clone)]
 pub struct GeneratedBinder {
-    pub env: BTreeMap<String, f64>,
+    pub env: BTreeMap<String, ScalarValue>,
     pub value_expr: Expr,
     pub method: GenMethod,
 }
@@ -1277,8 +1275,68 @@ pub fn generate_binder(
 /// the generator's `validate_env` both call this, so a non-finite
 /// representation leaf can never slip through one path while the other
 /// rejects it.
-pub fn any_non_finite(values: impl IntoIterator<Item = f64>) -> bool {
-    values.into_iter().any(|v| !v.is_finite())
+pub fn any_non_finite(values: impl IntoIterator<Item = ScalarValue>) -> bool {
+    values
+        .into_iter()
+        .any(|value| value.prim().is_float() && !value.as_f64_lossy().is_finite())
+}
+
+/// Preserve the execution wire dtype while crossing into the concrete prover.
+/// Exhaustive matching makes a future wire dtype fail to compile here instead
+/// of silently joining a lossy fallback.
+pub(crate) fn tensor_element_scalar(
+    elements: &chelis_compiler_api::schema::TensorElements,
+    index: usize,
+) -> Option<ScalarValue> {
+    use chelis_compiler_api::schema::TensorElements;
+    match elements {
+        TensorElements::F64(values) => {
+            scalar_from_f64("prove-wire", Prim::F64, *values.get(index)?).ok()
+        }
+        TensorElements::F32(values) => {
+            scalar_from_f64("prove-wire", Prim::F32, f64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::F16(values) => {
+            scalar_from_f64("prove-wire", Prim::F16, *values.get(index)?).ok()
+        }
+        TensorElements::Bf16(values) => {
+            scalar_from_f64("prove-wire", Prim::Bf16, *values.get(index)?).ok()
+        }
+        TensorElements::Int64(values) => {
+            scalar_from_i64("prove-wire", Prim::Int64, *values.get(index)?).ok()
+        }
+        TensorElements::Int32(values) => {
+            scalar_from_i64("prove-wire", Prim::Int32, i64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::Int16(values) => {
+            scalar_from_i64("prove-wire", Prim::Int16, i64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::Int8(values) => {
+            scalar_from_i64("prove-wire", Prim::Int8, i64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::Bool(values) => {
+            scalar_from_i64("prove-wire", Prim::Bool, i64::from(*values.get(index)?)).ok()
+        }
+    }
+}
+
+fn scalar_json(value: ScalarValue) -> serde_json::Value {
+    if let Some(value) = value.as_bool_exact() {
+        serde_json::Value::from(value)
+    } else if let Some(value) = value.as_i64_exact() {
+        serde_json::Value::from(value)
+    } else {
+        serde_json::Value::from(value.as_f64_lossy())
+    }
+}
+
+/// User-facing counterexample shape for a typed flattened environment.
+pub fn generated_env_json(env: &BTreeMap<String, ScalarValue>) -> serde_json::Value {
+    serde_json::Value::Object(
+        env.iter()
+            .map(|(name, value)| (name.clone(), scalar_json(*value)))
+            .collect(),
+    )
 }
 
 /// Validate a flattened field env against the predicate. When the
@@ -1286,7 +1344,7 @@ pub fn any_non_finite(values: impl IntoIterator<Item = f64>) -> bool {
 /// the env keys are exactly the lowered var names so the two agree by
 /// construction.
 fn validate_env(
-    env: &BTreeMap<String, f64>,
+    env: &BTreeMap<String, ScalarValue>,
     _inv: &OpaqueInvariant,
     predicate: &Option<SmtExpr>,
     _consts: &ConstEnv,
@@ -1302,8 +1360,7 @@ fn validate_env(
             if any_non_finite(env.values().copied()) {
                 return false;
             }
-            let hash: std::collections::HashMap<String, f64> =
-                env.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let hash = env.iter().map(|(k, v)| (k.clone(), *v)).collect();
             // STRICT validation (CR-2 / CR-5 / CR-10): invariant-sample
             // acceptance uses exact `==`/`!=`, never the fuzz `1e-10`
             // tolerance. An epsilon-validated sample would weaken exactly
@@ -1322,7 +1379,7 @@ fn sample_fields_flat(
     fields: &[(String, FieldType)],
     prefix: &str,
     rng: &mut GenRng,
-) -> BTreeMap<String, f64> {
+) -> BTreeMap<String, ScalarValue> {
     let mut env = BTreeMap::new();
     for (name, fty) in fields {
         let path = format!("{prefix}.{name}");
@@ -1335,23 +1392,53 @@ fn sample_field_into(
     path: &str,
     fty: &FieldType,
     rng: &mut GenRng,
-    env: &mut BTreeMap<String, f64>,
+    env: &mut BTreeMap<String, ScalarValue>,
 ) {
     match fty {
         FieldType::Scalar(name) => {
-            let v = if let Some((lo, hi)) = int_sample_bounds(name) {
-                rng.next_i64(lo, hi) as f64
+            let value = if let Some((lo, hi)) = int_sample_bounds(name) {
+                scalar_from_i64(
+                    "prove-opaque-sample",
+                    Prim::parse_name(name).expect("integer width is a Prim"),
+                    rng.next_i64(lo, hi),
+                )
+                .expect("integer sample bounds are representable")
             } else if name == "bool" {
-                if rng.next_bool() { 1.0 } else { 0.0 }
+                scalar_from_i64(
+                    "prove-opaque-sample",
+                    Prim::Bool,
+                    i64::from(rng.next_bool()),
+                )
+                .expect("boolean samples are exactly zero or one")
             } else {
-                rng.next_f64(-10.0, 10.0)
+                scalar_from_f64(
+                    "prove-opaque-sample",
+                    Prim::parse_name(name).expect("opaque scalar dtype is classified"),
+                    rng.next_f64(-10.0, 10.0),
+                )
+                .expect("sample is valid at its declared float width")
             };
-            env.insert(path.to_string(), v);
+            env.insert(path.to_string(), value);
         }
-        FieldType::Tensor { dims, .. } => {
+        FieldType::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
+            let prim = Prim::parse_name(precision).expect("opaque tensor dtype is classified");
             for i in 0..count {
-                env.insert(format!("{path}.{i}"), rng.next_f64(-10.0, 10.0));
+                let value = if let Some((lo, hi)) = int_sample_bounds(precision) {
+                    scalar_from_i64("prove-opaque-sample", prim, rng.next_i64(lo, hi))
+                        .expect("integer tensor sample bounds are representable")
+                } else if precision == "bool" {
+                    scalar_from_i64(
+                        "prove-opaque-sample",
+                        Prim::Bool,
+                        i64::from(rng.next_bool()),
+                    )
+                    .expect("boolean tensor samples are exactly zero or one")
+                } else {
+                    scalar_from_f64("prove-opaque-sample", prim, rng.next_f64(-10.0, 10.0))
+                        .expect("tensor sample is valid at its declared float width")
+                };
+                env.insert(format!("{path}.{i}"), value);
             }
         }
         FieldType::Record(inner) => {
@@ -1364,9 +1451,9 @@ fn sample_field_into(
 
 /// Build the Deep record value `(record Ctor (kv {} field <lit-or-tensor>)
 /// ...)` from a flattened env.
-fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, f64>) -> Expr {
+fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, ScalarValue>) -> Expr {
     let mut children = vec![Expr::Atom(
-        Atom::Symbol(inv.ctor_name.clone()),
+        Atom::Name(inv.ctor_name.clone()),
         chelis_deep::Span::new(0, 0),
     )];
     for (name, fty) in &inv.fields {
@@ -1377,23 +1464,41 @@ fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, f64>) -> Expr
     record_node(children)
 }
 
-fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) -> Expr {
+fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, ScalarValue>) -> Expr {
     match fty {
         FieldType::Scalar(name) => {
             if is_int_width(name) {
-                int_lit(*env.get(path).unwrap_or(&0.0) as i64, name)
+                int_lit(
+                    env.get(path)
+                        .and_then(ScalarValue::as_i64_exact)
+                        .expect("generated integer field is present and exact"),
+                    name,
+                )
             } else if name == "bool" {
-                bool_lit(*env.get(path).unwrap_or(&0.0) != 0.0)
+                bool_lit(
+                    env.get(path)
+                        .and_then(ScalarValue::as_bool_exact)
+                        .expect("generated bool field is present and exact"),
+                )
             } else {
-                float_lit(*env.get(path).unwrap_or(&0.0), name)
+                float_lit(
+                    env.get(path)
+                        .map(ScalarValue::as_f64_lossy)
+                        .expect("generated float field is present"),
+                    name,
+                )
             }
         }
         FieldType::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
-            let values: Vec<f64> = (0..count)
-                .map(|i| *env.get(&format!("{path}.{i}")).unwrap_or(&0.0))
+            let values: Vec<ScalarValue> = (0..count)
+                .map(|i| {
+                    env.get(&format!("{path}.{i}"))
+                        .copied()
+                        .unwrap_or_else(|| zero_scalar(precision))
+                })
                 .collect();
-            tensor_value_expr(dims, precision, &values)
+            tensor_value_expr_typed(dims, precision, &values)
         }
         FieldType::Record(inner) => {
             // A nested record value: `(record InnerCtor ...)`. The inner
@@ -1401,7 +1506,7 @@ fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) ->
             // bare record with field kvs (the evaluator resolves the
             // single-variant ctor by field set).
             let mut children = vec![Expr::Atom(
-                Atom::Symbol("__nested".to_string()),
+                Atom::Name("__nested".to_string()),
                 chelis_deep::Span::new(0, 0),
             )];
             for (n, f) in inner {
@@ -1414,15 +1519,16 @@ fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) ->
 }
 
 /// Constructor-based proposal: pick a producer, sample its raw inputs,
-/// evaluate it, Option-unwrap failures, and read back the produced
-/// record's field values into a flattened env. Returns `None` on producer
-/// failure (None result) or an unreadable output.
+/// evaluate it, Option-unwrap failures, and read back the produced record's
+/// field values into the legacy f64 env. The conversion is deliberately
+/// named lossy until chelis#688 / #729 Phase 2 replaces that env. Returns
+/// `None` on producer failure (None result) or an unreadable output.
 fn propose_via_constructor(
     inv: &OpaqueInvariant,
     module_source: &str,
     producers: &[GenProducer],
     rng: &mut GenRng,
-) -> Option<BTreeMap<String, f64>> {
+) -> Option<BTreeMap<String, ScalarValue>> {
     let idx = (rng.next_u64() as usize) % producers.len();
     let producer = &producers[idx];
 
@@ -1456,7 +1562,8 @@ fn propose_via_constructor(
     Some(env)
 }
 
-/// Read one representation field of a producer's result into `env`.
+/// Lossily read one representation field of a producer's result into the
+/// legacy f64 `env`.
 /// Returns `Some(true)` on success, `Some(false)` when the producer
 /// returned `None` (failure to unwrap), `None` on evaluation error.
 #[allow(clippy::too_many_arguments)]
@@ -1468,7 +1575,7 @@ fn read_produced_field(
     field: &str,
     fty: &FieldType,
     field_path: &str,
-    env: &mut BTreeMap<String, f64>,
+    env: &mut BTreeMap<String, ScalarValue>,
 ) -> Option<bool> {
     // The probe binds `r = producer(args)` (Option-unwrapped to a fresh
     // var via match when wrapped), accesses `r.<field>`, and we read the
@@ -1491,7 +1598,7 @@ fn read_produced_field(
         let_block("__r", call, access)
     };
     let probe_def = node_def(probe, body);
-    let exprs = chelis_deep::parser::parse_str(module_source).ok()?;
+    let exprs = chelis_deep::parser::parse_and_stamp_file(module_source).ok()?;
     let program = inject_into_module_with_source(&exprs, type_name, probe_def);
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
@@ -1509,52 +1616,82 @@ fn read_produced_field(
     };
     use chelis_compiler_api::schema::ExecutionValue;
     match fty {
-        FieldType::Tensor { dims, .. } => {
+        FieldType::Tensor { dims, precision } => {
             // A tensor field access yields a Tensor value.
             let ExecutionValue::Tensor { value } = &root.value else {
                 return None;
             };
-            // A None result yields the NaN-filled sentinel: treat as failure.
-            if value.data.iter().any(|v| v.is_nan()) {
-                return Some(false);
-            }
             let count = dims.iter().product::<usize>().max(1);
             if value.data.len() != count {
                 return None;
             }
-            for (i, v) in value.data.iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), *v);
+            let expected = Prim::parse_name(precision)?;
+            for i in 0..count {
+                let value = tensor_element_scalar(&value.data, i)?;
+                if value.prim() != expected {
+                    return None;
+                }
+                // A None result yields the NaN-filled sentinel: treat as failure.
+                if value.prim().is_float() && value.as_f64_lossy().is_nan() {
+                    return Some(false);
+                }
+                env.insert(format!("{field_path}.{i}"), value);
             }
         }
-        _ => {
-            // A scalar field access yields a scalar ExecutionValue (RT3-F3:
-            // a rank-0 access returns Float64 / Int64 / Bool, not a
-            // single-element Tensor). Extract the scalar; a NaN result is
-            // the None-sentinel and counts as a producer failure.
-            let v = match &root.value {
-                ExecutionValue::Float64 { value } => *value,
-                ExecutionValue::Int64 { value } => *value as f64,
-                ExecutionValue::Bool { value } => {
-                    if *value {
-                        1.0
-                    } else {
-                        0.0
-                    }
+        FieldType::Scalar(prim_name) => {
+            // A scalar field access yields the exact-width scalar
+            // ExecutionValue variant. Preserve that carrier identity rather
+            // than widening through Float64 / Int64 or accepting a tagged
+            // dtype substitution. A NaN result is the None-sentinel and
+            // counts as a producer failure.
+            let prim = Prim::parse_name(prim_name)?;
+            let value = match &root.value {
+                ExecutionValue::Float16 { value } if prim == Prim::F16 => {
+                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Bfloat16 { value } if prim == Prim::Bf16 => {
+                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Float32 { value } if prim == Prim::F32 => {
+                    scalar_from_f64("prove-produced-field", prim, f64::from(*value)).ok()?
+                }
+                ExecutionValue::Float64 { value } if prim == Prim::F64 => {
+                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Int8 { value } if prim == Prim::Int8 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
+                }
+                ExecutionValue::Int16 { value } if prim == Prim::Int16 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
+                }
+                ExecutionValue::Int32 { value } if prim == Prim::Int32 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
+                }
+                ExecutionValue::Int64 { value } if prim == Prim::Int64 => {
+                    scalar_from_i64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Bool { value } if prim == Prim::Bool => {
+                    scalar_from_i64("prove-produced-field", Prim::Bool, i64::from(*value)).ok()?
                 }
                 // A rank-0/single-element tensor scalar, defensively.
                 ExecutionValue::Tensor { value }
                     if value.shape.iter().product::<usize>().max(1) == 1
                         && !value.data.is_empty() =>
                 {
-                    value.data[0]
+                    let value = tensor_element_scalar(&value.data, 0)?;
+                    if value.prim() != prim {
+                        return None;
+                    }
+                    value
                 }
                 _ => return None,
             };
-            if v.is_nan() {
+            if value.prim().is_float() && value.as_f64_lossy().is_nan() {
                 return Some(false);
             }
-            env.insert(field_path.to_string(), v);
+            env.insert(field_path.to_string(), value);
         }
+        FieldType::Record(_) => return None,
     }
     Some(true)
 }
@@ -1572,8 +1709,26 @@ fn sample_raw_input_expr(kind: &GenParamKind, rng: &mut GenRng) -> Expr {
         }
         GenParamKind::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
-            let values: Vec<f64> = (0..count).map(|_| rng.next_f64(-10.0, 10.0)).collect();
-            tensor_value_expr(dims, precision, &values)
+            let prim = Prim::parse_name(precision).expect("producer tensor dtype is classified");
+            let values = (0..count)
+                .map(|_| {
+                    if let Some((lo, hi)) = int_sample_bounds(precision) {
+                        scalar_from_i64("prove-producer-sample", prim, rng.next_i64(lo, hi))
+                            .expect("integer tensor sample bounds are representable")
+                    } else if precision == "bool" {
+                        scalar_from_i64(
+                            "prove-producer-sample",
+                            Prim::Bool,
+                            i64::from(rng.next_bool()),
+                        )
+                        .expect("boolean tensor sample is exactly zero or one")
+                    } else {
+                        scalar_from_f64("prove-producer-sample", prim, rng.next_f64(-10.0, 10.0))
+                            .expect("float tensor sample is valid at its declared width")
+                    }
+                })
+                .collect::<Vec<_>>();
+            tensor_value_expr_typed(dims, precision, &values)
         }
     }
 }
@@ -1603,10 +1758,7 @@ fn contains_equality_atom(expr: &Expr) -> bool {
     {
         return true;
     }
-    if let Expr::List(list, _) = expr {
-        return list.elements.iter().skip(2).any(contains_equality_atom);
-    }
-    false
+    children(expr).iter().any(contains_equality_atom)
 }
 
 fn is_two_sided_band(expr: &Expr) -> bool {
@@ -1660,14 +1812,14 @@ fn eval_const_arith(expr: &Expr, binder: &str, consts: &ConstEnv) -> Option<f64>
         Expr::Atom(Atom::Float(v), _) => Some(*v),
         Expr::Atom(Atom::Int(v), _) => Some(*v as f64),
         _ => {
-            if tag(expr) == Some("lit") {
+            if tag(expr) == Some(DeepTag::Lit) {
                 return match children(expr).first() {
                     Some(Expr::Atom(Atom::Float(v), _)) => Some(*v),
                     Some(Expr::Atom(Atom::Int(v), _)) => Some(*v as f64),
                     _ => None,
                 };
             }
-            if tag(expr) == Some("var") {
+            if tag(expr) == Some(DeepTag::Var) {
                 let name = symbol_text(children(expr).first()?)?;
                 if name == binder {
                     return None;
@@ -1698,7 +1850,7 @@ fn span0() -> chelis_deep::Span {
     chelis_deep::Span::new(0, 0)
 }
 fn sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), span0())
+    Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
     let mut elements = vec![sym(tag), Expr::Map(Default::default(), span0())];
@@ -1733,24 +1885,14 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
     )
 }
 fn float_lit(v: f64, prim: &str) -> Expr {
-    let lit = typed_lit("f32", Expr::Atom(Atom::Float(v), span0()));
-    if prim == "f64" {
-        node("cast", vec![lit, node("t-prim", vec![sym("f64")])])
-    } else {
-        lit
-    }
+    typed_lit(prim, Expr::Atom(Atom::Float(v), span0()))
 }
-/// A width-appropriate integer literal for a record field value: int32 is
-/// the literal default; any other integer width casts an int32 literal to
-/// the target width (review 5), so an int8/int16/int64 field value is
-/// well-typed rather than a bare int32 literal that mismatches the field.
+/// A width-appropriate integer literal for an internal Deep value. This is
+/// already below Surf's unsuffixed-literal defaulting boundary, so stamp the
+/// declared dtype directly; routing an int64 payload through an int32 literal
+/// would reject exact values outside the int32 range before the cast ran.
 fn int_lit(v: i64, prim: &str) -> Expr {
-    let lit = typed_lit("int32", Expr::Atom(Atom::Int(v), span0()));
-    if prim == "int32" {
-        lit
-    } else {
-        node("cast", vec![lit, node("t-prim", vec![sym(prim)])])
-    }
+    typed_lit(prim, Expr::Atom(Atom::Int(v), span0()))
 }
 fn bool_lit(v: bool) -> Expr {
     typed_lit("bool", Expr::Atom(Atom::Bool(v), span0()))
@@ -1760,16 +1902,35 @@ fn deep_cons_list(items: Vec<Expr>) -> Expr {
         app_node(vec![var_node("Cons"), item, tail])
     })
 }
-/// Public wrapper: build a fixed-shape tensor value Deep expr (a
-/// `to_tensor`/`pad_sequences` of typed float literals) for a sampled
-/// producer input. Used by the obligation engine's Tier C tensor-input
-/// sampling.
-pub fn tensor_value_expr_pub(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
-    tensor_value_expr(dims, precision, values)
-}
-
-fn tensor_value_expr(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
-    let scalar = |v: f64| float_lit(v, precision);
+pub(crate) fn tensor_value_expr_typed(
+    dims: &[usize],
+    precision: &str,
+    values: &[ScalarValue],
+) -> Expr {
+    let expected = Prim::parse_name(precision).expect("sampled tensor dtype is classified");
+    let scalar = |value: ScalarValue| {
+        assert_eq!(
+            value.prim(),
+            expected,
+            "sampled tensor element must carry its declared dtype"
+        );
+        if is_int_width(precision) {
+            int_lit(
+                value
+                    .as_i64_exact()
+                    .expect("integer tensor value has an exact integer payload"),
+                precision,
+            )
+        } else if precision == "bool" {
+            bool_lit(
+                value
+                    .as_bool_exact()
+                    .expect("bool tensor value has an exact boolean payload"),
+            )
+        } else {
+            float_lit(value.as_f64_lossy(), precision)
+        }
+    };
     if dims.len() <= 1 {
         app_node(vec![
             var_node("to_tensor"),
@@ -1781,12 +1942,44 @@ fn tensor_value_expr(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
             .chunks(cols)
             .map(|row| deep_cons_list(row.iter().copied().map(scalar).collect()))
             .collect::<Vec<_>>();
-        app_node(vec![
-            var_node("pad_sequences"),
-            deep_cons_list(rows),
-            scalar(0.0),
-        ])
+        let zero = if is_int_width(precision) {
+            int_lit(0, precision)
+        } else if precision == "bool" {
+            bool_lit(false)
+        } else {
+            float_lit(0.0, precision)
+        };
+        app_node(vec![var_node("pad_sequences"), deep_cons_list(rows), zero])
     }
+}
+
+fn zero_scalar(precision: &str) -> ScalarValue {
+    let prim = Prim::parse_name(precision).expect("tensor dtype is classified");
+    if precision == "bool" || is_int_width(precision) {
+        scalar_from_i64("prove-opaque-default", prim, 0)
+            .expect("zero is representable at every integer/bool dtype")
+    } else {
+        scalar_from_f64("prove-opaque-default", prim, 0.0)
+            .expect("zero is representable at every float dtype")
+    }
+}
+
+pub(crate) fn scalar_values_json(values: &[ScalarValue]) -> serde_json::Value {
+    serde_json::Value::Array(
+        values
+            .iter()
+            .copied()
+            .map(|value| {
+                if let Some(value) = value.as_bool_exact() {
+                    serde_json::Value::from(value)
+                } else if let Some(value) = value.as_i64_exact() {
+                    serde_json::Value::from(value)
+                } else {
+                    serde_json::Value::from(value.as_f64_lossy())
+                }
+            })
+            .collect(),
+    )
 }
 fn node_def(name: &str, body: Expr) -> Expr {
     node("def", vec![sym(name), body])
@@ -1873,32 +2066,50 @@ fn sentinel_for(fty: &FieldType) -> Expr {
 /// in-module-legal.
 fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
     fn module_defines(expr: &Expr, type_name: &str) -> bool {
-        if tag(expr) == Some("deftype")
+        if tag(expr) == Some(DeepTag::Deftype)
             && children(expr).first().and_then(symbol_text) == Some(type_name)
         {
             return true;
         }
-        if let Expr::List(l, _) = expr {
-            return l.elements.iter().any(|c| module_defines(c, type_name));
-        }
-        false
+        children(expr)
+            .iter()
+            .any(|child| module_defines(child, type_name))
     }
     let mut out = Vec::with_capacity(exprs.len());
     let mut injected = false;
     for expr in exprs {
         let stripped = strip_invariant_metadata(expr);
         if !injected
-            && tag(&stripped) == Some("module")
+            && tag(&stripped) == Some(DeepTag::Module)
             && module_defines(&stripped, type_name)
-            && let Expr::List(l, span) = &stripped
         {
-            let mut elements = l.elements.clone();
-            elements.push(def.clone());
-            out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
-            injected = true;
-        } else {
-            out.push(stripped);
+            match &stripped {
+                // The probe `def` this module receives is built in the
+                // deprecated legacy `List` carrier (see `node` above), so it
+                // cannot be pushed under a stamped `Module` Node: that node
+                // revalidates its whole subtree and rejects a raw
+                // closed-vocabulary tag below the gate. Inject into the
+                // module's canonical List form instead. The result is printed
+                // and reparsed by `eval_selected` immediately below, so the
+                // carrier is transient and the emitted text is unchanged.
+                Expr::Node(node, span) => {
+                    let mut elements = node.to_list(*span).elements;
+                    elements.push(def.clone());
+                    out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
+                    injected = true;
+                    continue;
+                }
+                Expr::List(list, span) => {
+                    let mut elements = list.elements.clone();
+                    elements.push(def.clone());
+                    out.push(Expr::List(chelis_deep::ast::List { elements }, *span));
+                    injected = true;
+                    continue;
+                }
+                _ => {}
+            }
         }
+        out.push(stripped);
     }
     if !injected {
         out.push(def);
@@ -1910,10 +2121,27 @@ fn inject_into_module_with_source(exprs: &[Expr], type_name: &str, def: Expr) ->
 /// every deftype, recursively. Keeps `opaque: true` so opacity is intact.
 fn strip_invariant_metadata(expr: &Expr) -> Expr {
     match expr {
+        Expr::Node(node, span) => {
+            let tag = node.tag();
+            let mut meta = node.meta().clone();
+            if tag == DeepTag::Deftype {
+                meta.entries
+                    .retain(|(key, _)| key != "invariant" && key != "invariant_amenability");
+            }
+            let children = node
+                .children_slice()
+                .iter()
+                .map(strip_invariant_metadata)
+                .collect();
+            Expr::Node(
+                Box::new(chelis_deep::node::Node::new(tag, meta, children)),
+                *span,
+            )
+        }
         Expr::List(list, span) => {
             let mut elements: Vec<Expr> =
                 list.elements.iter().map(strip_invariant_metadata).collect();
-            if list.elements.first().and_then(symbol_text) == Some("deftype")
+            if list.tag() == Some(DeepTag::Deftype)
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
                 let kept: Vec<(String, Expr)> = map
@@ -1926,6 +2154,16 @@ fn strip_invariant_metadata(expr: &Expr) -> Expr {
             }
             Expr::List(chelis_deep::ast::List { elements }, *span)
         }
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements.iter().map(strip_invariant_metadata).collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: data.head.clone(),
+            meta: data.meta.clone(),
+            children: data.children.iter().map(strip_invariant_metadata).collect(),
+            span: data.span,
+        })),
         other => other.clone(),
     }
 }

@@ -57,7 +57,7 @@ fn sig_dim_unification_mismatched_concrete_args_is_caught() {
         "module DimUnify\n\
          sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def pair_id(x, y) = x\n\
-         def call_it(a: &tensor[2, f32], b: &tensor[3, f32]) -> tensor[2, f32] = {\n  pair_id(a, b)\n}\n",
+         def call_it(a: &tensor[2, f32], b: &tensor[3, f32]) -> tensor[2, f32] = pair_id(a, b)\n",
     );
     fmt_inplace(&fixture);
 
@@ -85,7 +85,7 @@ fn sig_dim_unification_matched_concrete_args_passes_dim_check() {
         "module DimUnify\n\
          sig pair_id: &tensor[n, f32] -> &tensor[n, f32] -> tensor[n, f32]\n\
          def pair_id(x, y) = x\n\
-         def call_it(a: &tensor[4, f32], b: &tensor[4, f32]) -> tensor[4, f32] = {\n  pair_id(a, b)\n}\n",
+         def call_it(a: &tensor[4, f32], b: &tensor[4, f32]) -> tensor[4, f32] = pair_id(a, b)\n",
     );
     fmt_inplace(&fixture);
 

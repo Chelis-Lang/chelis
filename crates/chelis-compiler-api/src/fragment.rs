@@ -33,31 +33,31 @@
 //!
 //! ## The pipeline
 //!
-//! `check_body_replacement` runs the same four passes `cmd_check_one_deep` runs,
-//! in the same pinned order, over the rewritten module, returning the first
-//! failing pass as a tagged [`ReplacementError`]:
+//! `check_body_replacement` delegates to the canonical compiler-API pipeline.
+//! The pipeline runs these stages in a fixed order:
 //!
-//! 1. `chelis_types::check_ir_fitness` (whole-module structural/type fitness,
-//!    including the cross-def `detect_trivial_non_terminating_fns` and
-//!    `detect_top_level_binding_cycles` detectors) -> [`ReplacementError::Type`]
-//! 2. `chelis_types::check_typed_program` (whole-module HM inference) ->
-//!    [`ReplacementError::Type`]
-//! 3. `chelis_effects::check_program` (effects; descends into the `(module ...)`
-//!    wrapper the rewritten module carries) -> [`ReplacementError::Effect`]
-//! 4. `chelis_types::check_linearity` -> [`ReplacementError::Linearity`]
+//! 1. Combined type analysis produces fitness and one typed program.
+//! 2. The effect check returns [`ReplacementError::Effect`] on rejection.
+//! 3. The linearity check returns [`ReplacementError::Linearity`] on rejection.
 //!
-//! The rewritten module is `(module ...)`-wrapped (it comes from
-//! [`chelis_deep::splice_function_body`]), so the effect pass MUST descend into
-//! that wrapper; the whole-module effect validators do.
+//! Type analysis returns [`ReplacementError::Type`] on rejection. It also
+//! rejects unsafe recursion groups and top-level binding cycles before later
+//! stages start.
 //!
-//! `check_ir_fitness` runs first for the same reason `cmd_check_one_deep` runs
-//! it first: it rejects a base-case-free recursion group promptly, before the
-//! whole-module inference (`check_typed_program`) that can wedge on such a
-//! module, so the tool path does not hang.
+//! The rewritten module contains a `(module ...)` wrapper. The shared effect
+//! transition checks declarations inside that wrapper.
+//!
+//! Callers cannot construct a false validation proof:
+//!
+//! ```compile_fail
+//! use chelis_compiler_api::ValidatedModule;
+//!
+//! let _ = ValidatedModule(Vec::new());
+//! ```
 
 use chelis_deep::Expr;
 
-use crate::schema::Span;
+use crate::schema::DiagnosticSpan;
 
 /// A whole-module edit rejected by the compiler-owned validation pipeline.
 ///
@@ -70,7 +70,7 @@ pub enum EditValidationError {
     /// rejected the rewritten module.
     Type {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0.
         deep_path: Option<DeepErrorPath>,
@@ -78,7 +78,7 @@ pub enum EditValidationError {
     /// The effect pass (`check_program`) rejected the rewritten module.
     Effect {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0.
         deep_path: Option<DeepErrorPath>,
@@ -86,7 +86,7 @@ pub enum EditValidationError {
     /// The linearity pass (`check_linearity`) rejected the rewritten module.
     Linearity {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0.
         deep_path: Option<DeepErrorPath>,
@@ -128,7 +128,7 @@ pub enum ReplacementError {
     /// binding rather than a function).
     NameResolution {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
     },
     /// The fitness or type pass (`check_ir_fitness` or `check_typed_program`)
     /// rejected the rewritten module. This covers cross-def structural
@@ -137,7 +137,7 @@ pub enum ReplacementError {
     /// reports.
     Type {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0; populating it later adds no new field.
         deep_path: Option<DeepErrorPath>,
@@ -148,7 +148,7 @@ pub enum ReplacementError {
     /// held caller declared not to perform it.
     Effect {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0; populating it later adds no new field.
         deep_path: Option<DeepErrorPath>,
@@ -156,7 +156,7 @@ pub enum ReplacementError {
     /// The linearity pass (`check_linearity`) rejected the rewritten module.
     Linearity {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0; populating it later adds no new field.
         deep_path: Option<DeepErrorPath>,
@@ -200,81 +200,66 @@ pub struct DeepErrorPath {
     pub path: chelis_deep::DeepPath,
 }
 
-/// A clean body replacement.
+/// A Deep module that passed the complete compiler-owned edit check.
 ///
-/// `rewritten_module` is the full module with the target body replaced (the
-/// same program full `chelis check` would be run on, and was run on, here).
-/// `checks_clean` is a marker that the whole-module pipeline accepted; it is
-/// always `true` on a returned `Ok` and exists so a consumer can assert the
-/// success path without inspecting the absence of an error.
+/// Only [`check_whole_module_edit`] constructs this proof. Callers can inspect
+/// or consume the checked expressions, but cannot attach proof to unchecked expressions.
 #[derive(Debug, Clone)]
-pub struct ReplacementReport {
-    /// The full rewritten module (held decls plus the spliced def), in
-    /// canonical declaration order.
-    pub rewritten_module: Vec<Expr>,
-    /// Always `true`: full `chelis check` of `rewritten_module` accepted.
-    pub checks_clean: bool,
+pub struct ValidatedModule(Vec<Expr>);
+
+impl ValidatedModule {
+    pub fn as_exprs(&self) -> &[Expr] {
+        &self.0
+    }
+
+    pub fn into_exprs(self) -> Vec<Expr> {
+        self.0
+    }
 }
 
-/// A clean whole-module edit.
-///
-/// `rewritten_module` is the exact Deep program the validation pipeline
-/// accepted. `checks_clean` is always `true` on `Ok` and exists as an explicit
-/// success marker for edit-tool callers.
+/// A clean body replacement with proof for the complete rewritten module.
 #[derive(Debug, Clone)]
-pub struct EditValidationReport {
-    /// The full rewritten module accepted by the compiler-owned pipeline.
-    pub rewritten_module: Vec<Expr>,
-    /// Always `true`: full validation of `rewritten_module` accepted.
-    pub checks_clean: bool,
+pub struct ReplacementReport {
+    pub validated_module: ValidatedModule,
 }
 
 /// Run the compiler-owned whole-module validation pipeline over an edited Deep
 /// module.
 ///
-/// The pass order matches `cmd_check_one_deep`: `check_ir_fitness` ->
-/// `check_typed_program` -> `check_program` (effects) -> `check_linearity`.
-/// The first failing pass is returned as a tagged error.
+/// The shared transition runs type analysis, effects, and linearity in order.
+/// The first failed stage returns a tagged error.
 pub fn check_whole_module_edit(
     rewritten_module: Vec<Expr>,
-) -> Result<EditValidationReport, EditValidationError> {
-    // Pass 1: structural/type fitness. Runs first because it rejects a
-    // base-case-free recursion group promptly, before the whole-module
-    // inference that can wedge on such a module.
-    let fitness = chelis_types::check_ir_fitness(&rewritten_module);
-    if !fitness.errors.is_empty() {
-        return Err(EditValidationError::Type {
-            message: join_messages(fitness.errors.iter().map(|error| error.message.as_str())),
-            location: None,
-            deep_path: None,
-        });
-    }
+) -> Result<ValidatedModule, EditValidationError> {
+    let prepared = crate::pipeline::prepare_deep(rewritten_module.clone(), None);
+    let analysis = match crate::pipeline::analyze_prepared(prepared) {
+        crate::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+        crate::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+            return Err(EditValidationError::Type {
+                message: join_messages(fitness.errors.iter().map(|error| error.message.as_str())),
+                location: None,
+                deep_path: None,
+            });
+        }
+    };
 
-    // Pass 2: whole-module HM type inference.
-    let typed = chelis_types::check_typed_program(&rewritten_module)
-        .map_err(|report| infer_result_to_type_error(&report))?;
-
-    // Pass 3: effects. The validators descend into the `(module ...)` wrapper,
-    // so a declared-pure body that performs `Random`/`Io` is rejected, and so
-    // is an effect that propagates to a held caller declared not to perform it.
-    let effected =
-        chelis_effects::check_program(&typed).map_err(|errors| EditValidationError::Effect {
-            message: join_messages(errors.iter().map(|error| error.message.as_str())),
-            location: None,
-            deep_path: None,
+    crate::pipeline::complete_checks(analysis, crate::pipeline::SemanticContext::Isolated)
+        .map_err(|rejection| match rejection {
+            crate::pipeline::SemanticRejection::Effects { errors } => EditValidationError::Effect {
+                message: join_messages(errors.iter().map(|error| error.message.as_str())),
+                location: None,
+                deep_path: None,
+            },
+            crate::pipeline::SemanticRejection::Linearity { errors } => {
+                EditValidationError::Linearity {
+                    message: join_messages(errors.iter().map(|error| error.message.as_str())),
+                    location: None,
+                    deep_path: None,
+                }
+            }
         })?;
 
-    // Pass 4: linearity.
-    chelis_types::check_linearity(&effected).map_err(|errors| EditValidationError::Linearity {
-        message: join_messages(errors.iter().map(|error| error.message.as_str())),
-        location: None,
-        deep_path: None,
-    })?;
-
-    Ok(EditValidationReport {
-        rewritten_module,
-        checks_clean: true,
-    })
+    Ok(ValidatedModule(rewritten_module))
 }
 
 /// Check replacing the body of `target_qualified_name` in `module` with
@@ -282,13 +267,11 @@ pub fn check_whole_module_edit(
 ///
 /// This is the primary body-replacement surface. It resolves the target,
 /// splices `new_body` into the module, and runs the same whole-module pipeline
-/// `cmd_check_one_deep` runs, in the same pinned order:
-/// `check_ir_fitness` -> `check_typed_program` -> `check_program` (effects) ->
-/// `check_linearity`. On success it returns the full rewritten module; on
-/// rejection it returns a tagged [`ReplacementError`] naming the first failing
-/// pass (a fitness or type rejection is tagged `Type`).
+/// `cmd_check_one_deep` runs. On success, it returns the full rewritten module.
+/// On rejection, it returns a tagged [`ReplacementError`] for the first failed
+/// stage. A type-analysis rejection uses the `Type` tag.
 ///
-/// The verdict EQUALS full `chelis check` of the returned `rewritten_module`
+/// The verdict EQUALS full `chelis check` of the returned validation proof
 /// BY CONSTRUCTION: there is no separate scoped analysis. Closure-scoped
 /// validation is the future optimization; see the module docs.
 pub fn check_body_replacement(
@@ -307,13 +290,10 @@ pub fn check_body_replacement(
         chelis_deep::splice_function_body(module, target_qualified_name, new_body.clone())
             .map_err(resolve_error_to_replacement_error)?;
 
-    let report =
+    let validated_module =
         check_whole_module_edit(rewritten_module).map_err(edit_error_to_replacement_error)?;
 
-    Ok(ReplacementReport {
-        rewritten_module: report.rewritten_module,
-        checks_clean: report.checks_clean,
-    })
+    Ok(ReplacementReport { validated_module })
 }
 
 /// Map a [`chelis_deep::ResolveError`] to a [`ReplacementError::NameResolution`].
@@ -359,17 +339,6 @@ fn edit_error_to_replacement_error(error: EditValidationError) -> ReplacementErr
     }
 }
 
-/// Map a type-check [`chelis_types::InferResult`] failure to a
-/// [`EditValidationError::Type`]. The underlying `CheckError`s carry no span
-/// today, so `location` is `None`.
-fn infer_result_to_type_error(report: &chelis_types::InferResult) -> EditValidationError {
-    EditValidationError::Type {
-        message: join_messages(report.errors.iter().map(|error| error.message.as_str())),
-        location: None,
-        deep_path: None,
-    }
-}
-
 /// Join one-or-more diagnostic messages into a single string, one per line, so
 /// a multi-error pass surfaces every message rather than only the first.
 fn join_messages<'a>(messages: impl Iterator<Item = &'a str>) -> String {
@@ -379,7 +348,7 @@ fn join_messages<'a>(messages: impl Iterator<Item = &'a str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_deep::Atom;
+    use chelis_deep::DeepTag;
 
     /// Render Surf source to canonical Deep, as `chelis deep` does for `.ch`.
     fn render_deep(surf: &str) -> Vec<Expr> {
@@ -400,10 +369,7 @@ mod tests {
                 let Expr::List(list, _) = expr else {
                     return None;
                 };
-                let is_module = matches!(
-                    list.elements.first(),
-                    Some(Expr::Atom(Atom::Symbol(t), _)) if t == "module"
-                );
+                let is_module = list.tag() == Some(DeepTag::Module);
                 if !is_module {
                     return None;
                 }
@@ -421,10 +387,39 @@ mod tests {
         let module = render_deep(TWO_FN);
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = mul(x, x)\n", "h");
         let report = check_body_replacement(&module, "f", &new_body).expect("accept");
-        assert!(report.checks_clean);
+        let rewritten_module = report.validated_module.as_exprs();
         // The rewritten module still resolves `f` and `g`.
-        chelis_deep::resolve_function(&report.rewritten_module, "f").expect("f present");
-        chelis_deep::resolve_function(&report.rewritten_module, "g").expect("g present");
+        chelis_deep::resolve_function(rewritten_module, "f").expect("f present");
+        chelis_deep::resolve_function(rewritten_module, "g").expect("g present");
+    }
+
+    #[test]
+    fn whole_module_accept_returns_the_checked_expressions() {
+        let rewritten_module = render_deep(TWO_FN);
+        let validated = check_whole_module_edit(rewritten_module.clone()).expect("accept");
+        assert_eq!(validated.as_exprs(), rewritten_module.as_slice());
+        assert_eq!(validated.into_exprs(), rewritten_module);
+    }
+
+    #[test]
+    fn whole_module_rejections_return_no_validation_proof() {
+        let fixtures = [
+            ("module M\ndef broken() -> int32 = missing\n", "check"),
+            (
+                "module M\ndef noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+                "effects",
+            ),
+            (
+                "module M\ndef broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n",
+                "linearity",
+            ),
+        ];
+
+        for (source, expected_stage) in fixtures {
+            let error = check_whole_module_edit(render_deep(source))
+                .expect_err("the rejected module must not return a validation proof");
+            assert_eq!(error.stage(), expected_stage);
+        }
     }
 
     #[test]
@@ -460,7 +455,7 @@ mod tests {
         // `chelis check` re-infers `f`'s signature from the rewritten body, and
         // a well-typed identity body checks clean. No special rejection is
         // needed; the tool's verdict equals full check by construction.
-        let module = chelis_deep::parser::parse_str(
+        let module = chelis_deep::parse_and_stamp_file(
             "(module {} m \
                (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
         )
@@ -468,7 +463,7 @@ mod tests {
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");
         let report = check_body_replacement(&module, "f", &new_body)
             .expect("defsig-less target checks clean under whole-module routing");
-        assert!(report.checks_clean);
+        assert!(!report.validated_module.as_exprs().is_empty());
     }
 
     #[test]
@@ -478,7 +473,7 @@ mod tests {
         let module = render_deep(TWO_FN);
         let new_body = render_body("module M\ndef h(x: f32) -> f32 = x\n", "h");
         let report = check_body_replacement(&module, "f", &new_body).expect("accept");
-        assert!(report.checks_clean);
+        assert!(!report.validated_module.as_exprs().is_empty());
     }
 
     /// A `ping`/`pong` mutually-recursive pair where `ping` holds the sole base

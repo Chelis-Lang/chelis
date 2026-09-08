@@ -212,11 +212,14 @@ fn near_miss_names_still_check_clean() {
     }
 }
 
-/// Scope pin: value-position parameters and block-locals may reuse
-/// builtin names. They bind values, not call-site dispatch — verified
-/// on all three lanes in the owning issue investigation (check clean,
-/// eval and C backend both produce [1.0, 0.0]) — so the §8.6 rule
-/// deliberately does not bind to them.
+/// Scope pin: VALUE-POSITION parameters and block-locals may reuse
+/// builtin names — verified on all three lanes in the owning issue
+/// investigation (check clean, eval and C backend both produce
+/// [1.0, 0.0]) — so the §8.6 rule deliberately does not bind to them.
+///
+/// Call position follows the same lexical rule: the innermost callable
+/// binding wins over the builtin in every lane (spec/04-type-system.md
+/// §8.6, chelis#1076).
 #[test]
 fn value_params_and_locals_may_reuse_builtin_names() {
     let param_case = surf_to_deep(
@@ -260,4 +263,68 @@ fn inline_annotated_def_reports_exactly_one_error() {
          BuiltinShadowing error; got {errs:?}"
     );
     assert!(errs[0].0.contains("`def relu`"), "got: {}", errs[0].0);
+}
+
+/// chelis#1076: callable parameters named like builtins follow ordinary
+/// lexical scope. The checker must accept both a def parameter and a lambda
+/// parameter in call position; eval/build parity is pinned at the CLI layer.
+#[test]
+fn builtin_named_param_called_in_body_is_accepted() {
+    let called = surf_to_deep(
+        "module ParamCall\n\
+         def apply(round_to: (f64 -> int64 -> f64), x: f64) -> f64 = round_to(x, cast(0, int64))\n",
+    );
+    let called_result = check_ir_program(&called);
+    assert!(
+        called_result.is_ok(),
+        "calling a builtin-named parameter must follow lexical scope; got {:?}",
+        called_result.err().map(|report| report.errors)
+    );
+
+    // Lambda parameters get the same treatment.
+    let lambda = surf_to_deep(
+        "module LambdaCall\n\
+         g = fn (map: (f64 -> f64)) -> map(1.5f64)\n",
+    );
+    let lambda_result = check_ir_program(&lambda);
+    assert!(
+        lambda_result.is_ok(),
+        "calling a builtin-named lambda parameter must follow lexical scope; got {:?}",
+        lambda_result.err().map(|report| report.errors)
+    );
+
+    // A DIFFERENT (non-shadowed) callee alongside a builtin-named value
+    // parameter stays accepted: only the call-position shape is rejected.
+    let value_only = surf_to_deep(
+        "module ValueOnly\n\
+         def f(sum: &tensor[batch, f32]) -> tensor[batch, f32] = relu(sum)\n\
+         out = f(to_tensor([1.0, -2.0]))\n",
+    );
+    assert!(
+        check_ir_program(&value_only).is_ok(),
+        "value-position builtin-named params must stay accepted"
+    );
+}
+
+#[test]
+fn builtin_named_non_callable_local_still_rejects_as_a_type_error() {
+    let deep = surf_to_deep(
+        "module NonCallable\n\
+         def f(x: f64) -> f64 = {\n\
+           round_to = x\n\
+           round_to(x, cast(0, int64))\n\
+         }\n",
+    );
+    let err = check_ir_program(&deep).expect_err("a scalar local is not callable");
+    assert!(
+        err.errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::TypeMismatch)
+                && error.message.contains("f64 vs (f64, int64)")
+        }) && err
+            .errors
+            .iter()
+            .all(|error| !matches!(error.kind, CheckErrorKind::BuiltinShadowing)),
+        "lexical precedence must diagnose the selected scalar local rather than fall back to the builtin: {:?}",
+        err.errors
+    );
 }

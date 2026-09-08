@@ -2,12 +2,11 @@
 //! section C5 live-site conversions of `spec/design/loud_unsupported.md`.
 //!
 //! Part II's law: every conversion lands with a test that the formerly
-//! substituted case now fails loudly with the branded section C2 shape
-//! (`unsupported: <what> on <context> (<stage>); <hint>`), plus a control
-//! that the supported neighbor still works. The acceptance-shaped tests
-//! (reject-or-correct) live in their original files and are un-ignored by
-//! the same change set; THIS file pins the brand and the controls the
-//! conversions must not break.
+//! substituted case either fails loudly with the branded section C2 shape
+//! (`unsupported: <what> on <context> (<stage>); <authority>: <hint>`) or computes the
+//! authored value, plus a control that the supported neighbor still works.
+//! Phase 3 turns the narrow-scalar and scalar-math rows below from rejection
+//! locks into exact positive controls while preserving the other negatives.
 //!
 //! Rows covered here: 2 (the builtin stub, chelis#682/#704/#705/#715),
 //! 3 (to_string, chelis#734), 6/7 (narrow scalars, chelis#714/#718).
@@ -135,7 +134,7 @@ fn c_run_first_line(program: &str, name: &str) -> Result<String, String> {
 
 /// Assert a build rejection carries the frozen section C2 shape: the
 /// `error:` surfacing, the literal `unsupported: ` brand, the ` on `
-/// context clause, a parenthesized stage, and the `; ` hint separator.
+/// context clause, a parenthesized stage, and a typed authority clause.
 fn assert_branded_rejection(stderr: &str, what_fragment: &str, ctx: &str) {
     assert!(
         stderr.contains("error:"),
@@ -150,40 +149,32 @@ fn assert_branded_rejection(stderr: &str, what_fragment: &str, ctx: &str) {
         "{ctx}: the diagnostic must name `{what_fragment}`; got: {line}"
     );
     assert!(
-        line.contains(" on ") && line.contains("); "),
-        "{ctx}: the diagnostic must follow the frozen \
-         `unsupported: <what> on <context> (<stage>); <hint>` shape; got: {line}"
+        line.contains(" on ")
+            && (line.contains("); deliberate [") || line.contains("); unimplemented chelis#")),
+        "{ctx}: the diagnostic must follow the authority-bearing \
+         `unsupported: <what> on <context> (<stage>); <authority>: <hint>` shape; got: {line}"
     );
 }
 
 // ===========================================================================
-// Row 2 (chelis#682/#704/#705/#715): the builtin stub arm, branded.
+// Row 2 (chelis#704/#705/#715): the remaining host-only stub arm, branded.
 // ===========================================================================
 
-/// The three op families that used to hit the stub - bitwise, scalar
-/// activations, host-only builtins - now fail the build with the branded
-/// diagnostic naming the builtin, and leave no stub marker behind.
+/// The remaining host-only builtin that used to hit the stub fails the build
+/// with the branded diagnostic naming the builtin and leaves no stub marker
+/// behind. Scalar math moved to exact compiled support in chelis#729 Phase 3.
+///
+/// The former bitwise case was promoted to supported C lowering in
+/// chelis#682 and is covered by the positive precision matrix.
 #[test]
 fn stubbed_builtins_are_rejected_with_the_branded_shape() {
-    let cases: &[(&str, &str, &str)] = &[
-        (
-            "bitand_682",
-            "def f() -> int64 = bitand(cast(12, int64), cast(10, int64))\nout = f()\n",
-            "bitand",
-        ),
-        (
-            "scalar_floor_715",
-            "def f(x: f32) -> f32 = floor(x)\nout = f(3.5)\n",
-            "floor",
-        ),
-        (
-            "tensor_scan_705",
-            "def gen() -> tensor[5, f32] = \
+    let cases: &[(&str, &str, &str)] = &[(
+        "tensor_scan_705",
+        "def gen() -> tensor[5, f32] = \
              tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
              out = gen()\n",
-            "tensor_scan",
-        ),
-    ];
+        "tensor_scan",
+    )];
     for (name, program, builtin) in cases {
         let (ok, stderr, emitted) = c_build(program, name);
         assert!(
@@ -280,35 +271,27 @@ fn to_string_scalar_arms_still_work() {
 
 /// Rows 6/7, adjudicated by execution at Phase 1 (B2.5):
 ///
-/// * The PARAM-typed narrow scalar (the annotation parses to
-///   `HostType::Unknown` and the value flows Unknown into the operator
-///   arm) is REJECTED at the emission baking point with the branded
-///   diagnostic - this is the guard's contract.
-/// * The CAST-LITERAL shape (chelis#714's headline repro,
-///   `add(cast(0.5, f16), cast(0.25, f16))`, formerly a binary printing
-///   0 via the int64_t default) no longer substitutes: with the Int64
-///   guess removed, the values flow as doubles and 0.5 + 0.25 prints
-///   0.75. The RESIDUAL is that the compiled lane computes at double
-///   without f16 per-op rounding (eval: 2048 + 1 -> 2048; C: 2049) -
-///   that is the chelis#714/#717 dtype-SEMANTICS half owned by
-///   chelis#729, locked red by narrow_dtype_matrix's ignored boundary
-///   rows, not a value substitution.
+/// Both parameter and cast-literal shapes now cross the same exact typed
+/// target boundary. The old cast-literal "success" was a widened-double
+/// accident, not proof of an f16 ABI; Phase 3 locks both shapes to the real
+/// representation and own-width arithmetic.
 #[test]
-fn narrow_scalar_arithmetic_rejects_or_computes_never_zero() {
-    // Param-typed shape: branded rejection.
+fn narrow_scalar_arithmetic_computes_at_declared_width() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    // Param-typed shape: exact f16 multiplication.
     let f16_param_program = "module M.Main\n\
          def f(x: f16) -> f16 = mul(x, cast(2.0, f16))\n\
          out = print(f(cast(0.25, f16)))\n";
-    let (ok, stderr, _) = c_build(f16_param_program, "f16_param_p1");
-    assert!(
-        !ok,
-        "param-typed f16 scalar arithmetic must fail the build (census rows 6/7)"
+    assert_eq!(
+        c_run_first_line(f16_param_program, "f16_param_p1")
+            .expect("param-typed f16 arithmetic must compile and run"),
+        "0.5"
     );
-    assert_branded_rejection(&stderr, "mul", "f16_param_p1");
 
-    // Cast-literal shape: the int64_t zero substitution is dead - the
-    // program either rejects loudly or computes the true value; it must
-    // never print the chelis#714 zero again.
+    // Cast-literal shape reaches the identical exact target decision.
     let f16_program = "module M.Main\n\
          def f() -> f16 = add(cast(0.5, f16), cast(0.25, f16))\n\
          out = print(f())\n";
@@ -316,18 +299,11 @@ fn narrow_scalar_arithmetic_rejects_or_computes_never_zero() {
         eval_first_line(f16_program).expect("eval computes f16 scalars"),
         "0.75"
     );
-    if c_toolchain_available() {
-        match c_run_first_line(f16_program, "f16_add_p1") {
-            Err(stderr) => assert!(
-                stderr.contains("unsupported:") || stderr.contains("error:"),
-                "a rejection must be loud; got: {stderr}"
-            ),
-            Ok(line) => assert_eq!(
-                line, "0.75",
-                "the compiled lane must never substitute zero (chelis#714)"
-            ),
-        }
-    }
+    assert_eq!(
+        c_run_first_line(f16_program, "f16_add_p1")
+            .expect("cast-literal f16 arithmetic must compile and run"),
+        "0.75"
+    );
 }
 
 /// Control: f32/f64/int64 scalar arithmetic - the resolved host types -

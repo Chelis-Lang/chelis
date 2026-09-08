@@ -2,7 +2,7 @@
 //! DAG node. Unit + pipeline coverage for the value node itself: lowering,
 //! verification (positive + negative), evaluation, and AD-transparency.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
@@ -45,26 +45,34 @@ fn shape_node_evaluates_to_runtime_extent() {
     let s0 = dag.add_node(
         RiscOp::Shape { axis: 0 },
         vec![x],
-        scalar_int_ty(Prim::Int32),
+        scalar_int_ty(Prim::Int64),
         None,
     );
     let s1 = dag.add_node(
         RiscOp::Shape { axis: 1 },
         vec![x],
-        scalar_int_ty(Prim::Int32),
+        scalar_int_ty(Prim::Int64),
         None,
     );
 
     // Feed a concrete 2x3 input; extents are 2 and 3.
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
     );
     let values = eval_tensor_with(&dag, |name| inputs.get(name).cloned()).expect("eval");
     assert_eq!(values[&s0].shape, Vec::<usize>::new(), "extent is a scalar");
-    assert_eq!(values[&s0].data, vec![2.0], "axis 0 extent == 2");
-    assert_eq!(values[&s1].data, vec![3.0], "axis 1 extent == 3");
+    assert_eq!(
+        values[&s0].to_f64_lossy_vec(),
+        vec![2.0],
+        "axis 0 extent == 2"
+    );
+    assert_eq!(
+        values[&s1].to_f64_lossy_vec(),
+        vec![3.0],
+        "axis 1 extent == 3"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +93,7 @@ fn verify_shape(input_dims: Vec<DimInfo>, axis: usize, out_ty: TensorType) -> Ve
 
 #[test]
 fn shape_node_verify_rejects_out_of_range_axis() {
-    let errs = verify_shape(vec![DimInfo::Lit(4)], 3, scalar_int_ty(Prim::Int32));
+    let errs = verify_shape(vec![DimInfo::Lit(4)], 3, scalar_int_ty(Prim::Int64));
     assert!(
         errs.iter()
             .any(|e| e.contains("shape read") && e.contains("axis")),
@@ -98,7 +106,7 @@ fn shape_node_verify_rejects_non_scalar_output() {
     let errs = verify_shape(
         vec![DimInfo::Lit(4)],
         0,
-        tensor_ty(vec![DimInfo::Lit(1)], Prim::Int32),
+        tensor_ty(vec![DimInfo::Lit(1)], Prim::Int64),
     );
     assert!(
         errs.iter().any(|e| e.contains("rank-0 scalar")),
@@ -110,7 +118,7 @@ fn shape_node_verify_rejects_non_scalar_output() {
 fn shape_node_verify_rejects_non_integer_output() {
     let errs = verify_shape(vec![DimInfo::Lit(4)], 0, scalar_int_ty(Prim::F32));
     assert!(
-        errs.iter().any(|e| e.contains("integer scalar")),
+        errs.iter().any(|e| e.contains("exact int64 scalar")),
         "non-integer output must be rejected; errs = {errs:?}"
     );
 }
@@ -147,7 +155,7 @@ fn shape_node_is_ad_transparent_with_zero_adjoint() {
     let sh = dag.add_node(
         RiscOp::Shape { axis: 0 },
         vec![x],
-        scalar_int_ty(Prim::Int32),
+        scalar_int_ty(Prim::Int64),
         None,
     );
     let loss = dag.add_node(
@@ -166,7 +174,7 @@ fn shape_node_is_ad_transparent_with_zero_adjoint() {
         .dag
         .nodes()
         .iter()
-        .any(|n| matches!(&n.op, RiscOp::Const { value } if *value == 0.0));
+        .any(|n| matches!(&n.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0));
     assert!(
         has_zero_const,
         "Shape adjoint must route a zero cotangent to the input"

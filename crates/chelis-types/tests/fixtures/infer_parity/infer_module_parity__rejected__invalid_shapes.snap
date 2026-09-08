@@ -1,0 +1,18 @@
+typed_nodes = 10
+total_nodes = 12
+diagnostics = 2
+
+[0] kind = DimensionMismatch
+    message = dimension mismatch: Lit(32) vs Lit(16)
+    severity = 0.8
+    expected = None
+    got = None
+    span_offset = None
+    span_id = None
+[1] kind = DimensionMismatch
+    message = reshape target has 25 elements but input tensor has 24
+    severity = 0.8
+    expected = None
+    got = None
+    span_offset = None
+    span_id = None

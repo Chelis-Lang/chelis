@@ -36,10 +36,9 @@ fn list_tag(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // element-0 string.
+    list.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
@@ -70,7 +69,7 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
         return None;
     };
     match var_list.elements.get(2) {
-        Some(Expr::Atom(Atom::Symbol(name), _)) => Some(name.as_str()),
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -94,6 +93,35 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
             visit(&meta.expr, f);
         }
+        Expr::Node(node, _) => {
+            for (_, value) in &node.meta().entries {
+                visit(value, f);
+            }
+            for child in node.children_iter() {
+                match child {
+                    chelis_deep::node::ChildRef::Expr(expr)
+                    | chelis_deep::node::ChildRef::Syntax(expr)
+                    | chelis_deep::node::ChildRef::Type(expr)
+                    | chelis_deep::node::ChildRef::EffectHandler(expr)
+                    | chelis_deep::node::ChildRef::Bypass(expr) => visit(expr, f),
+                    chelis_deep::node::ChildRef::Binder(_)
+                    | chelis_deep::node::ChildRef::Selector(_) => {}
+                }
+            }
+        }
+        Expr::BareList(elements, _) => {
+            for child in elements {
+                visit(child, f);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                visit(value, f);
+            }
+            for child in &data.children {
+                visit(child, f);
+            }
+        }
         Expr::Atom(_, _) => {}
     }
 }
@@ -105,7 +133,7 @@ fn is_named_def(expr: &Expr, def_name: &str) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Symbol(name), _)) if name == def_name)
+    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
 }
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
@@ -153,7 +181,7 @@ type P =
   | P { v: tensor[2, f32] }
 type V =
   | V { v: tensor[2, f32] }
-def take_four(a: P, b: P, c: P, d: V) -> f32 = { cast(0.0, f32) }
+def take_four(a: P, b: P, c: P, d: V) -> f32 = cast(0.0, f32)
 ";
 
 #[test]
@@ -255,14 +283,14 @@ fn expand_error_inline_size_still_fires_form3_gate_once() {
     // Form-3 gate: the #469 sourceless-size reject must fire EXACTLY ONCE
     // (not skipped, not doubled), and never an ICE.
     let msgs = reject_messages(
-        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = \
-         expand(b, 0, add(t.1, cast(1, int32)))\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = \
+         insert(b, 0, add(t.1, cast(1, int64)))\n",
         "3c: expand Error size",
     );
     let form3: Vec<_> = msgs
         .iter()
         .filter(|m| {
-            m.contains("expand")
+            m.contains("insert")
                 && m.contains("no tensor in scope carries it")
                 && m.contains("chelis#469")
         })

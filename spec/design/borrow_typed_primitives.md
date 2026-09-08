@@ -32,10 +32,13 @@ marks an unannotated parameter as read-only.
 
 ## Backend Boundary
 
-Borrowing is erased before IR and backend lowering. The implicit-linearity model adds
-explicit `RiscOp::Copy` and `RiscOp::Drop` liveness nodes after checking; backends emit
-no computation for `Drop`, and slot planners use it as the authoritative live-range
-close.
+At the controlling target, the source spelling of a borrow is erased before backend
+lowering, but the checked ownership disposition is not. The current implicit-linearity
+delivery records only `RiscOp::Copy` and `RiscOp::Drop`; the successor contract in
+`spec/design/compiled_value_ownership.md` lowers every use as borrow, move, or clone
+and admits backends only after ownership verification. Slot planners use terminal
+consumes and `Drop` as authoritative live-range closes, and generated host code emits
+the matching heap release rather than reconstructing ownership from aliases.
 
 ## Standard Library
 
@@ -63,7 +66,7 @@ Required coverage for this feature:
 - a borrowed local owner that is never consumed reports the specialized diagnostic
 - returning a borrow from a function is rejected
 - `grad(f)(x)` works when `f` takes `&tensor`
-- `vmap(f, axis=0)(xs)` works when `f` takes `&tensor`
+- `vmap(f)(xs)` works when `f` takes `&tensor`
 - Deep validation accepts `t-ref` and keeps the 62-tag vocabulary closed
 - macro-expanded programs continue through check/build when borrow nodes are present
 - read-only `List` / `Dict` queries (`len`, `index`) auto-borrow their container and do

@@ -1,0 +1,128 @@
+name: Nix Packages
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+concurrency:
+  group: nix-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nix-linux-x86-64:
+    name: Nix Packages (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # The complete native package checks take tens of minutes on hosted
+    # runners, so they run only on an explicit dispatch or a published release.
+    env:
+      # max-jobs bounds concurrent derivation builds to the hosted runner
+      # memory; cores = 0 gives each build every runner core.
+      NIX_CONFIG: |
+        sandbox = true
+        max-jobs = 2
+        cores = 0
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+    steps:
+      # The hosted runner root disk cannot hold the cold Nix closure next to
+      # the preinstalled toolchains this job never uses.
+      - name: Reclaim runner disk space
+        shell: bash
+        run: sudo python3 -c 'import shutil; [shutil.rmtree(path, ignore_errors=True) for path in ("/usr/share/dotnet", "/usr/local/lib/android", "/usr/local/.ghcup", "/opt/hostedtoolcache/CodeQL")]'
+      - uses: actions/checkout@v6
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+      - name: Verify the runner system
+        run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "x86_64-linux", system'
+      - name: Verify the Nix sandbox
+        run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
+      - name: Compute the cvc5 toolchain cache key
+        id: cvc5-key
+        run: python3 -c 'import os, pathlib, subprocess; drv = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
+      - name: Restore the cvc5 toolchain closure
+        id: cvc5-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
+      - name: Import the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit == 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+      - name: Create the project Python environment
+        run: uv venv --python 3.11 .venv
+      - name: Run the Devenv shell smoke checks
+        run: devenv test --no-tui
+      - name: Run the Nix flake contract suite
+        run: .venv/bin/python scripts/test_nix_flake_contract.py
+      - name: Run the complete native flake check set
+        run: nix flake check --print-build-logs
+      - name: Export the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--to", "file:///tmp/chelis-cvc5-cache", out], check=True)'
+      - name: Save the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
+
+  nix-darwin-arm64:
+    name: Nix Packages (aarch64-darwin)
+    # Keep release and manual coverage native on both supported systems.
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      NIX_CONFIG: |
+        sandbox = true
+        max-jobs = 1
+        cores = 0
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+      - name: Verify the runner system
+        run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "aarch64-darwin", system'
+      - name: Verify the Nix sandbox
+        run: python3 -c 'import subprocess; value = subprocess.check_output(["nix", "config", "show", "sandbox"], text=True).strip(); assert value == "true", value'
+      - name: Compute the cvc5 toolchain cache key
+        id: cvc5-key
+        run: python3 -c 'import os, pathlib, subprocess; drv = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.aarch64-darwin.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
+      - name: Restore the cvc5 toolchain closure
+        id: cvc5-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
+      - name: Import the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit == 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.aarch64-darwin.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+      - name: Create the project Python environment
+        run: uv venv --python 3.11 .venv
+      - name: Run the Devenv shell smoke checks
+        run: devenv test --no-tui
+      - name: Run the Nix flake contract suite
+        run: .venv/bin/python scripts/test_nix_flake_contract.py
+      - name: Run the complete native flake check set
+        run: nix flake check --print-build-logs
+      - name: Export the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.aarch64-darwin.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--to", "file:///tmp/chelis-cvc5-cache", out], check=True)'
+      - name: Save the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}

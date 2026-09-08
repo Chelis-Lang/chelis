@@ -20,14 +20,18 @@ record_fields = { "{" ~ field_decl ~ ("," ~ field_decl)* ~ ","? ~ "}" }
 tuple_fields = { "(" ~ type_expr ~ ("," ~ type_expr)* ~ ","? ~ ")" }
 field_decl = { ident ~ ":" ~ type_expr }
 
-sig_decl = { SIG ~ ident ~ ":" ~ type_expr ~ effect_suffix? }
+sig_decl = { SIG ~ ident ~ type_binders? ~ ":" ~ type_expr ~ effect_suffix? }
 property_decl = {
   AT ~ PROPERTY ~ ident ~ FORALL ~ params ~ (WHERE ~ property_where_list)? ~ ":" ~ expr ~ property_option*
 }
 property_where_list = { expr ~ ("," ~ expr)* ~ ","? }
 property_option = { WITH ~ (TOLERANCE | SEED | SAMPLES) ~ "=" ~ expr }
-fun_decl = { DEF ~ ident ~ dim_params? ~ params? ~ return_type? ~ effect_suffix? ~ "=" ~ expr }
-dim_params = { "[" ~ ident ~ ("," ~ ident)* ~ ","? ~ "]" }
+fun_decl = { DEF ~ ident ~ type_binders? ~ params? ~ return_type? ~ effect_suffix? ~ "=" ~ expr }
+// spec/02-surf-syntax.md §P4b/§P4c: an unkinded binder list, each entry
+// optionally bounded by one of the three closed dtype families.
+type_binders = { "[" ~ type_binder ~ ("," ~ type_binder)* ~ ","? ~ "]" }
+type_binder = { ident ~ (":" ~ dtype_family)? }
+dtype_family = { "Float" | "Int" | "Numeric" }
 params = { "(" ~ param ~ ("," ~ param)* ~ ","? ~ ")" | "(" ~ ")" }
 param = { ident ~ (":" ~ type_expr)? }
 return_type = { (":" | ARROW) ~ type_expr }

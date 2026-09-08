@@ -10,7 +10,7 @@
 //! Root cause (a C-backend host-lowering defect, NOT grad-specific): a
 //! scalar-returning function body is lowered statement-by-statement in the
 //! host lane. A `let k = expand(scalar_to_tensor(cast(2.5, f32)),
-//! cast(0, int32), cast(2, int32))` binding lost its tensor type because:
+//! cast(0, int32), cast(2, int64))` binding lost its tensor type because:
 //!
 //!   * `expr_int_literal` did not see through `cast(0, int32)` /
 //!     `cast(2, int32)`, so `infer_app_expr_host_type`'s `expand` shape
@@ -90,7 +90,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),
@@ -182,7 +187,7 @@ fn compile_and_run_emitted(build_dir: &Path, kernel_c: &Path) -> String {
 fn issue_300_grad_const_expand_kernel_compiles_and_runs() {
     let source = "module Repro.GradExpandConst\n\
 def f(x: tensor[2, f32]) -> f32 = {\n  \
-  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n  \
+  k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
@@ -205,7 +210,7 @@ out = df(to_tensor([3.0, 4.0]))\n";
 fn issue_300_forward_scalar_const_expand_compiles_and_runs() {
     let source = "module Repro.ForwardConstExpand\n\
 def h(x: tensor[2, f32]) -> f32 = {\n  \
-  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n  \
+  k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 out = h(to_tensor([3.0, 4.0]))\n";
@@ -230,7 +235,7 @@ out = h(to_tensor([3.0, 4.0]))\n";
 fn issue_300_scale_const_expand_materializes_value() {
     let source = "module Repro.ScaleConstExpand\n\
 def scale(x: tensor[2, f32]) -> tensor[2, f32] = {\n  \
-  k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))\n  \
+  k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n  \
   mul(x, k)\n\
 }\n\
 out = scale(to_tensor([3.0, 4.0]))\n";
@@ -284,7 +289,7 @@ fn chelis_eval(source: &str, stem: &str) -> String {
 fn issue_308_const_expand_f64_exact_precision() {
     let source = "module Repro.ScaleConstExpandF64\n\
 def scale64(x: tensor[2, f64]) -> tensor[2, f64] = {\n  \
-  k = expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int32))\n  \
+  k = insert(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int64))\n  \
   mul(x, k)\n\
 }\n\
 out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
@@ -323,7 +328,7 @@ out = scale64(cast(to_tensor([1.0, 1.0]), f64))\n";
 fn issue_308_forward_scalar_const_expand_f64_exact() {
     let source = "module Repro.FwdConstExpandF64\n\
 def h(x: tensor[2, f64]) -> f64 = {\n  \
-  k = expand(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int32))\n  \
+  k = insert(scalar_to_tensor(cast(1.1, f64)), cast(0, int32), cast(2, int64))\n  \
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 out = h(cast(to_tensor([1.0, 1.0]), f64))\n";

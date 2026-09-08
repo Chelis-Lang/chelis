@@ -19,14 +19,17 @@ Treat all other evidence as supporting material, not the completion decision its
 
 ## Default Gate
 
-The minimum gate is:
+The gate is `scripts/gate.py`; do not hand-type `cargo test --workspace` in its place:
 
 ```sh
-cargo build --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
+python3 scripts/gate.py --fast   # before every push
+python3 scripts/gate.py --local  # once per pull request, on the committed candidate, before ready-for-review
+python3 scripts/gate.py --list   # the canonical command list with local/CI ownership
 ```
+
+The workspace nextest stage is CI-owned and macOS Smoke is the authoritative workspace
+oracle. Completion evidence is CI green on the candidate head plus the phase's named
+oracle, never a local workspace run alone.
 
 ## Additional Required Checks
 

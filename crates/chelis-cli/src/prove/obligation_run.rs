@@ -10,8 +10,7 @@
 //! folds them into the prove summary.
 //!
 //! Gated on the `chelis-prove` optional dependency (the same gate the
-//! Tier B SMT lowering uses).
-#![cfg(feature = "chelis-prove")]
+//! Tier B SMT lowering uses) by the parent module declaration.
 
 use chelis_prove::CompositeVerdict;
 use chelis_prove::obligation_engine::{
@@ -68,11 +67,9 @@ pub(super) fn run_obligations(
     status
 }
 
-/// Type-check an already-linked Surf declaration set without collecting
-/// producer obligations. This preserves the prove command's module-check
-/// invariant for imported files that have no opaque producers, while avoiding
-/// a lossy Surf-source round-trip through linker-internal names.
-pub(super) fn check_linked_decls(
+/// Type-check a bare Surf declaration set without collecting producer
+/// obligations.
+pub(super) fn check_unlinked_decls(
     decls: &[Decl],
     options: &ProveOptions<'_>,
     totals: &mut Summary,
@@ -89,6 +86,43 @@ pub(super) fn check_linked_decls(
         return Status::Error;
     }
     Status::Passed
+}
+
+/// Type-check an already-linked Reef declaration closure before any property
+/// verdict is emitted.
+///
+/// Linked imports must be checked through the compiler's layered seam: it
+/// installs the linker provenance guard and checks the non-stdlib declarations
+/// against the stdlib signature context. Feeding the same declarations to the
+/// bare `check_typed_program` path loses that context and can report imported
+/// names as unbound even though the linker resolved them (chelis#923/#924).
+pub(super) fn check_linked_decls(
+    stdlib_decls: &[Decl],
+    stdlib_source_digest: [u8; 32],
+    non_stdlib_decls: &[Decl],
+    options: &ProveOptions<'_>,
+    totals: &mut Summary,
+) -> Status {
+    match chelis_compiler_api::check_layered(stdlib_decls, stdlib_source_digest, non_stdlib_decls) {
+        Ok(Some(_)) => Status::Passed,
+        Ok(None) => {
+            let mut decls = stdlib_decls.to_vec();
+            decls.extend_from_slice(non_stdlib_decls);
+            check_unlinked_decls(&decls, options, totals)
+        }
+        Err(error) => {
+            let mut messages = error
+                .errors
+                .iter()
+                .map(|diagnostic| diagnostic.message.clone())
+                .collect::<Vec<_>>();
+            if messages.is_empty() {
+                messages.push(error.stage);
+            }
+            emit_check_failure(options, &messages, totals);
+            Status::Error
+        }
+    }
 }
 
 /// Emit a module type-check failure as a prove error record (RT3-F2). The

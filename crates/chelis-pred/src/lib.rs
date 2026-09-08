@@ -27,6 +27,7 @@
 //! here; it lives in `chelis-prove` so this crate stays prove-independent
 //! and the existing tide amenability surface stays stable (RFC D-PRED).
 
+use chelis_deep::DeepTag;
 use chelis_deep::{Atom, Expr};
 
 /// Amenability of a predicate to SMT reasoning. Mirrors the existing
@@ -98,9 +99,10 @@ pub const TRANSCENDENTAL_WHITELIST: &[&str] = &["sqrt", "exp", "log", "sin", "co
 const ARITH_OPS: &[&str] = &["add", "sub", "mul", "div", "neg"];
 
 /// Comparison operators admitted in the predicate grammar. Names are the
-/// desugared Deep operator symbols (`>`/`>=` desugar to `cmplt`/`gte`
-/// etc.). `eq`/`neq` are the `==`/`!=` forms.
-const COMPARISON_OPS: &[&str] = &["eq", "neq", "cmplt", "lte", "gte"];
+/// desugared Deep operator symbols (`<` desugars to `cmplt`, `>` to `gt`
+/// with authored operand order per chelis#1180, `<=`/`>=` to `lte`/`gte`).
+/// `eq`/`neq` are the `==`/`!=` forms.
+const COMPARISON_OPS: &[&str] = &["eq", "neq", "cmplt", "gt", "lte", "gte"];
 
 /// Boolean connectives admitted in the predicate grammar.
 const BOOL_OPS: &[&str] = &["and", "or", "not"];
@@ -127,34 +129,30 @@ pub enum PredGrammarError {
 // Node helpers (structural; metadata-agnostic)
 // ===========================================================================
 
-/// The tag (head symbol) of a list node, if it is a 3-tuple node.
-fn tag(expr: &Expr) -> Option<&str> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-    {
-        Some(s.as_str())
-    } else {
-        None
+/// The decoded tag of a list node, if it is a stamped 3-tuple node.
+fn tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::List(list, _) => list.tag(),
+        Expr::Node(node, _) => Some(node.tag()),
+        _ => None,
     }
 }
 
 /// The children of a 3-tuple node `(tag {meta} children...)`, skipping
 /// the tag and the metadata map at index 1.
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
 /// If `expr` is `(var {} name)`, return `name`.
 fn var_name(expr: &Expr) -> Option<&str> {
-    if tag(expr) == Some("var") {
+    if tag(expr) == Some(DeepTag::Var) {
         let kids = children(expr);
-        if let Some(Expr::Atom(Atom::Symbol(s), _)) = kids.first() {
+        if let Some(Expr::Atom(Atom::Name(s), _)) = kids.first() {
             return Some(s.as_str());
         }
     }
@@ -164,7 +162,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
 /// If `expr` is an application `(app {} callee args...)`, return
 /// `(callee, args)`.
 fn as_app(expr: &Expr) -> Option<(&Expr, &[Expr])> {
-    if tag(expr) == Some("app") {
+    if tag(expr) == Some(DeepTag::App) {
         let kids = children(expr);
         if let Some((callee, args)) = kids.split_first() {
             return Some((callee, args));
@@ -182,7 +180,7 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
 /// Accepts the binder either as a bare `<binder>` symbol (the canonical
 /// schema, RFC D-META) or wrapped in a `var`/typed-param list.
 fn fn_parts(fn_node: &Expr) -> Option<(String, &Expr)> {
-    if tag(fn_node) != Some("fn") {
+    if tag(fn_node) != Some(DeepTag::Fn) {
         return None;
     }
     let kids = children(fn_node);
@@ -191,7 +189,7 @@ fn fn_parts(fn_node: &Expr) -> Option<(String, &Expr)> {
     }
     let params = &kids[0];
     let body = &kids[1];
-    if tag(params) != Some("params") {
+    if tag(params) != Some(DeepTag::Params) {
         return None;
     }
     let param_kids = children(params);
@@ -207,17 +205,17 @@ fn fn_parts(fn_node: &Expr) -> Option<(String, &Expr)> {
 /// the name symbol.
 fn binder_name(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.clone()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.clone()),
         _ => {
             if let Some(name) = var_name(expr) {
                 return Some(name.to_string());
             }
             if let Expr::List(list, _) = expr
-                && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-                && s != "var"
-                && s != "params"
+                && list.tag().is_none()
+                && let Some(Expr::Atom(Atom::Name(s), _)) = list.elements.first()
             {
-                // typed-param list `(name {type: ...})`
+                // typed-param list `(name {type: ...})`; a stamped
+                // vocabulary head (var/params/...) is never a binder name.
                 return Some(s.clone());
             }
             None
@@ -263,7 +261,7 @@ fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
         }
         return;
     }
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         // (access {} <target> <field-symbol>): recurse into the target
         // only; the field symbol is a selector, not a variable.
         let kids = children(expr);
@@ -275,6 +273,10 @@ fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
     if let Expr::List(list, _) = expr {
         // Skip the tag and metadata map; recurse into children only.
         for child in list.elements.iter().skip(2) {
+            collect_free_vars(child, binder, out);
+        }
+    } else if let Expr::Node(node, _) = expr {
+        for child in node.children_slice() {
             collect_free_vars(child, binder, out);
         }
     }
@@ -314,18 +316,26 @@ fn check_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }
         Expr::List(_, _) => check_list_in_grammar(expr),
+        // Bridge: reconstruct List so tag/children accessors work unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            check_list_in_grammar(&bridged)
+        }
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            Err(PredGrammarError::DisallowedNode(node_desc(expr)))
+        }
     }
 }
 
 fn check_list_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
     let t = tag(expr).ok_or_else(|| PredGrammarError::DisallowedNode(node_desc(expr)))?;
     match t {
-        "lit" => Ok(()),
+        DeepTag::Lit => Ok(()),
         // The binder reference and in-module constant references both
         // surface as bare `var` nodes; scoping is the caller's job.
-        "var" => Ok(()),
+        DeepTag::Var => Ok(()),
         // Field projection on the binder (or nested records).
-        "access" => {
+        DeepTag::Access => {
             let kids = children(expr);
             if let Some(target) = kids.first() {
                 check_in_grammar(target)
@@ -333,13 +343,13 @@ fn check_list_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
                 Err(PredGrammarError::DisallowedNode(node_desc(expr)))
             }
         }
-        "if" => {
+        DeepTag::If => {
             for child in children(expr) {
                 check_in_grammar(child)?;
             }
             Ok(())
         }
-        "app" => check_app_in_grammar(expr),
+        DeepTag::App => check_app_in_grammar(expr),
         _ => Err(PredGrammarError::DisallowedNode(node_desc(expr))),
     }
 }
@@ -354,7 +364,7 @@ fn check_app_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
         // `sum` over a binder field projection only. The argument must
         // be an `access` (well-formedness of the tensor shape is the
         // checker's job; chelis-pred admits the grammar shape).
-        if args.len() == 1 && tag(&args[0]) == Some("access") {
+        if args.len() == 1 && tag(&args[0]) == Some(DeepTag::Access) {
             return check_in_grammar(&args[0]);
         }
         return Err(PredGrammarError::BadSum);
@@ -375,14 +385,17 @@ fn check_app_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
 
 fn node_desc(expr: &Expr) -> String {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => format!("symbol `{s}`"),
+        Expr::Atom(Atom::Name(s), _) => format!("symbol `{s}`"),
         Expr::Atom(_, _) => "literal".to_string(),
         Expr::Map(_, _) => "map".to_string(),
         Expr::MetaExpr(_, _) => "meta-expr".to_string(),
         Expr::List(_, _) => match tag(expr) {
-            Some(t) => format!("`{t}` node"),
+            Some(t) => format!("`{}` node", t.as_str()),
             None => "malformed list".to_string(),
         },
+        Expr::Node(node, _) => format!("`{}` node", node.tag().as_str()),
+        Expr::BareList(_, _) => "bare list".to_string(),
+        Expr::UnknownForm(_) => "unknown form".to_string(),
     }
 }
 
@@ -451,7 +464,7 @@ fn subexprs(expr: &Expr) -> Vec<&Expr> {
         return args.iter().collect();
     }
     match tag(expr) {
-        Some("if") | Some("access") => children(expr).iter().collect(),
+        Some(DeepTag::If) | Some(DeepTag::Access) => children(expr).iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -465,10 +478,10 @@ fn is_constant(expr: &Expr, binder: &str) -> bool {
     match expr {
         Expr::Atom(Atom::Int(_) | Atom::Float(_) | Atom::Bool(_) | Atom::Str(_), _) => true,
         _ => match tag(expr) {
-            Some("lit") => true,
-            Some("var") => var_name(expr) != Some(binder),
-            Some("access") => false,
-            Some("app") => {
+            Some(DeepTag::Lit) => true,
+            Some(DeepTag::Var) => var_name(expr) != Some(binder),
+            Some(DeepTag::Access) => false,
+            Some(DeepTag::App) => {
                 let name = app_callee_name(expr);
                 if name == Some("sum") {
                     // sum over a binder field is non-constant.

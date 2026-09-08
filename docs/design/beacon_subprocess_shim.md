@@ -28,7 +28,7 @@ cvc5-named symbol, so the default (non-smt) build stays solver-free (the
 
 The frozen `DischargeEngine::discharge(&self, goal: &Goal, timeout_ms)` gives the
 shim only the `Goal`, whose `IrHandle` carries `dag_hash` + `root_index` and NO
-bytes (frozen by the seam contract §2). The serialized `WireDag` v1 bytes the
+bytes (frozen by the seam contract §2). The serialized exact-version `WireDag` v6 bytes the
 shim must transport to Beacon live in `graph_extract::ExtractedGoal.wire_dag_bytes`,
 which never enters the `Goal`.
 
@@ -75,8 +75,8 @@ is:
 
 ```json
 {
-  "schema_version": 1,
-  "wire_dag_v1_base64": "<base64 of the EXACT WireDag v1 bytes from the store>",
+  "schema_version": 2,
+  "wire_dag_v6_base64": "<base64 of the EXACT WireDag v6 bytes from the store>",
   "expected_dag_sha256": "<goal.ir.dag_hash()>",
   "root_index": <goal.ir.root_index()>,
   "inputs": [{"name": "...", "lo": <f64>, "hi": <f64>}, ...],
@@ -89,7 +89,7 @@ is:
 
 INVARIANTS:
 
-- `wire_dag_v1_base64` is base64 of the EXACT bytes the store holds — NO parse,
+- `wire_dag_v6_base64` is base64 of the EXACT bytes the store holds — NO parse,
   reformat, or re-serialize between the WI-3 bytes and the base64. The bytes the
   producer hashed are the bytes that travel.
 - `expected_dag_sha256` is `goal.ir.dag_hash()`. Before trusting any report, the

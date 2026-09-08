@@ -1,0 +1,10 @@
+[package]
+name = "checkpoint-raw-offset-compile-fail"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+chelis-types = { path = "../../..", features = ["checkpoint-compile-probe"] }

@@ -1,13 +1,10 @@
 # spec/03-deep-syntax.md — Chelis Deep Syntax Specification
 
-**Status:** v0.2 (post design sprint)
 **Scope:** The primary machine interface. Everything an AI agent or compiler needs to construct, parse, validate, and transform Deep programs.
 
-**Executable surface note:** the 62-tag vocabulary documented here remains the
-authoritative shipped Deep grammar. Future Phase `3c` / `3d` / `3g` language-
-completeness work may add new Deep forms or keep some functionality as built-in helper
-calls, but that future surface is not yet part of the active closed vocabulary unless
-this document is explicitly revised to say so.
+The 62-tag vocabulary documented here is closed. A form outside that vocabulary is not
+Deep unless the controlling specification adds it and updates the vocabulary census in
+the same change.
 
 ---
 
@@ -32,13 +29,14 @@ symbols: `[A-Za-z_][A-Za-z0-9_]*`. This admits producer-specific keys such as
 `c_earchin_role` while preserving the no-hyphen rule that keeps Deep symbols
 portable across Surf and Reef boundaries.
 
-**Active keys:**
+**Defined keys:**
 
 | Key | Value | Semantics |
 |---|---|---|
 | `type` | type-expr node | Type annotation (checked, not trusted) |
 | `loc` | `(loc file line col)` | Source location for error reporting |
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
+| `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig`'s binders; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
 | `span` | string | External-source span identifier (see §1.1.1) |
@@ -50,29 +48,42 @@ portable across Surf and Reef boundaries.
 | `property_tolerance` | expr | Optional property runner tolerance metadata |
 | `property_seed` | expr | Optional property runner seed metadata |
 | `property_samples` | expr | Optional property runner sample-count metadata |
+| `property_contracts` | `(tuple {} string...)` | Ordered repeatable standard-contract dependencies authored with `with contract = "..."` |
 | `opaque` | `true` | On a `deftype`: the type is opaque (see §2.2) |
 | `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
+| `surf_path` | string | Exact canonical Surf module path spelling; permitted only on `module`, `import`, and `import-all`; its ASCII-lowercased value must equal the node's lowered module-path child |
+| `surf_dim_group_size` | positive integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; permitted only on the first member |
+| `surf_pipe_stage` | `"call-first"` | First-argument call-stage origin; permitted only on an `fn` child used as a non-initial `pipe` stage |
+| `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Numeric literal origin; permitted only on `lit` |
+| `surf_binding_type` | `"inferred"` / `"explicit"` | Block-binding type origin; permitted only on the expression child of a `bind` name/value pair |
 
-**Reserved for later phases:**
+The `surf_*` namespace is closed. A public Deep parser or programmatic
+validator MUST reject an unknown `surf_*` key. Resugaring MUST also reject a
+known key with any value or placement outside the table above; a standalone
+metadata map or metadata-expression wrapper is not a permitted
+placement. These five keys preserve only surface distinctions that canonical
+Deep otherwise erases; they do not change evaluation. Producers MUST NOT use
+the namespace for arbitrary provenance.
+
+**Reserved metadata:**
 
 | Key | Value | Semantics |
 |---|---|---|
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
-| `span_*` | reserved | Future richer span fields (see §1.1.1) |
+| `span_*` | reserved | Span-metadata extension namespace (see §1.1.1) |
 
-**Metadata propagation through transformations.** Metadata fields are
-preserved by all spec-defined transformations and round-trip through the
-canonical form (§6). Cross-tool provenance (the `span` field in
-particular) is intended to survive the full compile pipeline once the
-in-flight span survival work lands; see
-`spec/design/chelis_span_survival.md` for the phased S0–S5 plan.
+**Metadata propagation through transformations.** Semantic metadata and the
+validated surface-fidelity keys are preserved by all spec-defined
+transformations. Derived metadata may be recomputed according to §6.3.2.
+Cross-tool provenance (the `span` field in particular) remains governed by
+the span-survival contract below.
 
 #### 1.1.1 External-source spans (`span`, `span_*` namespace)
 
 The `span` metadata key carries a string identifier issued by an external
-producer (today: Octant's LaTeX-to-Deep translator, which writes
+producer (for example, Octant's LaTeX-to-Deep translator, which writes
 `{span: "n_001"}` and ships a sidecar `<input>.spans.json` mapping each ID to
 the original LaTeX byte range). Chelis treats `span` values as opaque strings
 and preserves them end-to-end through parsing, IR lowering, optimization
@@ -88,9 +99,8 @@ rules as producer-supplied Deep spans. If a programmatic Surf AST has no real
 source byte range, the desugarer omits `span` and downstream synthesized-node
 fallbacks remain available.
 
-The `span_*` prefix is reserved for future richer span data. If a need arises
-to embed byte offsets or file identifiers directly inside Deep metadata
-(rather than indirecting through a sidecar), they MUST be added under the
+The `span_*` prefix is the extension namespace for richer span data. Embedded
+byte offsets or file identifiers (rather than sidecar references) MUST use the
 `span_*` namespace (`span_start`, `span_end`, `span_file`, …). Competing keys
 that carry span-related data outside the `span_*` namespace are forbidden so
 tooling has a stable contract.
@@ -101,7 +111,7 @@ sub-nodes from a parentless intrinsic, etc.), the canonical `span` value uses
 the form `__synthesized_<pass>__` (double-underscore wrap, lowercase pass
 name). This shape is reserved — external producers MUST NOT emit span IDs
 matching `__synthesized_*__`; chelis MUST NOT mint a synthesized marker that
-omits the wrap. Currently defined markers:
+omits the wrap. Defined markers:
 
 | Marker | Issued by |
 |---|---|
@@ -178,23 +188,22 @@ The architectural rule, applied uniformly: **every producer-supplied
 string that flows into generated source must be validated at its trust
 boundary** — at parse time when the value enters via Deep text, or at
 construction time when the value enters via direct IR construction.
-Future IR fields that admit producer-supplied strings (module names,
-type names, effect names, etc.) must follow the same pattern. The
-deferred per-emission-context defense-in-depth work (comment-context
-shared sanitizer, format-string-context sanitizer, comprehensive backend
-audit) is tracked at `spec/upstream-bugs/producer-string-sanitization.md`.
+Every IR field that admits a producer-supplied string (module names, type names,
+effect names, and similar values) follows the same pattern. Each emission context must
+apply a context-appropriate sanitizer, including separate comment and format-string
+handling.
 
-**Provenance metadata (Phase 2c).** After macro expansion, each node in the expanded
+**Provenance metadata.** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
 originated from.
-Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0))`.
+Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0.0))`.
 Provenance is informational — it does not affect parsing, type checking, or evaluation.
 The node is a standard `app` node; the `source` key is ignored by all compiler passes
 except error reporting.
-The shipped provenance format is `{source: (macro-name original-arg...)}` where the
+The provenance format is `{source: (macro-name original-arg...)}` where the
 value is a plain Deep list recording the macro name and original invocation arguments.
 
-**Macro boundary rule (Phase 2c).** LLM-facing Deep is always expanded Deep. Macro
+**Macro boundary rule.** LLM-facing Deep is always expanded Deep. Macro
 definition and invocation forms may exist as compiler-internal or pre-expansion syntax,
 but the AST surfaced to AI generation, repair, fitness scoring, decompilation
 workflows, or downstream transforms contains only ordinary Deep nodes plus optional
@@ -266,6 +275,40 @@ using it forges module identity through the name stem
 | `field` | `(field {} name type-expr)` | Named field in variant |
 | `defdim` | `(defdim {} name)` | Dimension name declaration |
 
+A `defsig` annotates a Chelis `def`; it does not declare a runtime symbol or
+an externally supplied implementation. Every `defsig` therefore has exactly
+one same-name `def` in the same module and check unit. A `def` may omit its
+`defsig` and use inference. Imports and an existing library context do not
+satisfy this pairing rule: a new unit cannot redeclare an imported name with
+an unbacked signature. A capability supplied by a host or another lane uses
+that capability's explicit typed declaration form, never an orphan `defsig`.
+After every authored source module has passed this rule, a trusted package
+linker may materialize a dependency interface as signature-only internal
+records whose bodies remain in the supplying artifact. Those records are not
+an authored check unit, use the linker's reserved-name/provenance channel, and
+cannot be produced by source-level `defsig` syntax.
+
+A `defsig` may carry `dtype_bounds` metadata restricting its implicitly
+bound type variables to a dtype family (`spec/04-type-system.md` §5.9
+[04-DTYPE-2]):
+
+```lisp
+(defsig {dtype_bounds: {p: int}} arange
+  (t-fn {} (t-var {} p) (t-var {} p)
+    (t-tensor {} (d-var {} n) (t-var {} p))))
+```
+
+The value is a metadata map whose keys are binder names and whose values
+are the family names `float`, `int`, and `numeric`, spelled lowercase as
+effect names are. A key naming a variable the declaration does not bind, a
+key naming a `d-var` or `d-rank`, an unknown family name, and a value that
+is not a family name are each type-resolution errors. Bounds ride in
+metadata for the same reason an opaque invariant does: a `defsig` *child*
+node would change its fixed two-child shape and grow the closed tag
+vocabulary. A `def` does not carry this key: the declaration's signature
+owns its binders, so `dtype_bounds` on a `def` is a declaration error
+whose diagnostic names the signature.
+
 `deftype` may carry `opaque: true` metadata:
 
 ```lisp
@@ -316,9 +359,9 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `fn` | `(fn {} (params ...) body)` | Anonymous function |
+| `fn` | `(fn {} (params {} ...) body)` | Anonymous function |
 | `app` | `(app {} func arg...)` | Function application |
-| `let` | `(let {} (bind name₁ expr₁ ...) body)` | Sequential let binding |
+| `let` | `(let {} (bind {} name₁ expr₁ ...) body)` | Sequential let binding |
 | `match` | `(match {} scrutinee arm...)` | Pattern match |
 | `arm` | `(arm {} pattern guard body)` | Match arm; guard is `()` if absent |
 | `if` | `(if {} cond then else)` | Conditional |
@@ -330,9 +373,9 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `block` | `(block {} expr₁ ... exprₙ)` | Sequenced expressions; value is last |
 | `tuple` | `(tuple {} expr₁ expr₂ ...)` | Tuple construction |
 | `tuple-get` | `(tuple-get {} expr index)` | Tuple element access |
-| `record-update` | `(record-update {} expr (kv {} k v) ...)` | Functional record update (reserved; Phase 1) |
-| `par` | `(par {} expr₁ expr₂ ...)` | Parallel evaluation (v1: sequential) |
-| `handle-effect` | `(handle-effect {effect: name} arg body)` | Phase 2a effect handler block |
+| `record-update` | `(record-update {} expr (kv {} k v) ...)` | Reserved functional record update |
+| `par` | `(par {} expr₁ expr₂ ...)` | Scheduler-independent parallel evaluation |
+| `handle-effect` | `(handle-effect {effect: name} arg body)` | Effect handler block |
 
 ### 2.4 Patterns
 
@@ -350,14 +393,77 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (active set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; `f8e4m3` is reserved/deferred per §1.1.1; unsigned types are out of scope per §1.1.2) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
-| `t-adt` | `(t-adt {} Name type-arg...)` | ADT type application |
+| `t-adt` | `(t-adt {} Name nominal-arg...)` | ADT/type-alias application; each argument is a type expression or a non-rank dimension expression according to the target header |
 | `t-var` | `(t-var {} name)` | Type variable |
 | `t-unit` | `(t-unit {})` | Unit type |
 | `t-tuple` | `(t-tuple {} type₁ type₂ ...)` | Tuple type |
+
+#### 2.5.1 Type-expression resolution and binders
+
+Type expressions are recursively resolved before they may enter the checked
+environment or a cached compiler context. Resolution is fail-closed:
+
+- `t-prim` has exactly one symbol child and that symbol is in the language or
+  explicitly-reserved primitive vocabulary owned by `spec/04-type-system.md`
+  §1.1. An unknown primitive name is a type error, not an inference hole.
+- `t-adt` has a symbol head naming a precollected `deftype` or `typealias`
+  header and exactly that header's declared number of nominal arguments.
+  A type-kinded slot contains a type expression. A dimension-kinded slot
+  contains `d-name`, `d-var`, or `d-lit`; `d-rank` is not a nominal argument.
+  A `t-var` emitted for a symbolic Surf argument is resolved as a dimension
+  variable only when the target header gives that slot dimension kind. Header
+  kinds are collected before bodies are resolved under [04-ADT-3], so
+  self-recursive, mutually recursive, alias-mediated, and forward nominal
+  references are legal; unknown names, wrong arities, and wrong argument kinds
+  are errors.
+  The precollected header environment remains in scope for the entire check unit,
+  including annotations in declaration bodies. A rejected declaration body is
+  not installed in the reusable ADT/alias registry, but its already-declared
+  header remains visible until the failing check ends so downstream references
+  do not add a spurious `unknown nominal` cascade.
+- `t-var`, `d-var`, and `d-rank` introduce no binding by themselves. A name is
+  legal only when the surrounding resolution context supplies it: the
+  explicit parameter list of a `deftype`/`typealias`, the implicit-generic
+  binder set of one `defsig`, or trusted compiler-generated metadata. The
+  special `(t-var {} _)` form is an inference hole only at a use site that
+  explicitly admits holes; it is not a way to leave a declaration field or
+  alias body unresolved.
+- A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
+  first occurrence and reuses that binding throughout the signature. Its
+  `dtype_bounds` metadata attaches a dtype family to a named `t-var` binder;
+  the bound restricts every occurrence of that name, and a bounded name used
+  in a dimension or rank position is an error. A
+  `deftype` or `typealias` binds only names in its explicit parameter list and
+  assigns each one exactly one header kind, `Type` or single `Dimension`, under
+  [04-ADT-3]; a declaration parameter cannot bind a `d-rank` spread. An
+  undeclared variable name, a rank use, or conflicting type/dimension uses are
+  errors. Surf declaration desugaring is scope-aware: a declared parameter
+  becomes the variable form selected by that fixed header kind, while an
+  unlisted symbolic tensor axis is emitted as `d-name` rather than inventing
+  an implicit declaration binder.
+- `t-fn` has at least one child (the last is its return type), `t-ref` has
+  exactly one child, `t-tensor` has at least one child (the last is a
+  primitive or bound type-variable precision), `t-unit` has no children, and
+  every nested type and dimension child must resolve. Resolution never drops
+  an invalid child, substitutes a wildcard/fresh variable for malformed
+  input, or admits an unchecked nominal name.
+- A bare atom or an expression tag in a type position is malformed. The sole
+  alternate spelling is a language primitive symbol in a `cast` target (for
+  example `(cast {} x f16)`); it resolves with
+  the same meaning as `(t-prim {} f16)`. Bare forms remain non-canonical and
+  are not accepted in declaration fields, aliases, signatures, or metadata.
+  Both cast spellings cross this same resolver before cast semantics are
+  classified: canonical `t-prim` still requires exactly one symbol child, so
+  `(cast {} x (t-prim {} f16 extra))` is malformed rather than a cast to
+  `f16` with an ignored child.
+
+Each invalid type expression produces one owning checker diagnostic. Parents
+propagate that witnessed failure without re-reporting it, so a malformed
+nested type cannot be silently accepted or produce diagnostic spray.
 
 ### 2.6 Dimension Expressions
 
@@ -368,6 +474,12 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `d-lit` | `(d-lit {} 512)` | Literal dimension size |
 | `d-rank` | `(d-rank {} r)` | Rank variable — a name-preserving spread standing for a run of dims (rank polymorphism). Tier-2 uses it as the sole dim child; Tier-3 (§4.5.3) allows it interleaved with concrete anchors (`(t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32))`). A given rank name appears at most once per `t-tensor`. |
 
+Every dimension tag has exactly one child: a symbol for `d-name`, `d-var`,
+and `d-rank`, or an integer for `d-lit`. Unknown tags, missing/extra children,
+wrong child kinds, and unbound `d-var`/`d-rank` names are type-resolution
+errors. `d-name` is a concrete symbolic axis label (with `*` the explicit
+wildcard spelling); it does not allocate an inference variable.
+
 ### 2.7 Transforms
 
 | Tag | Form | Semantics |
@@ -376,8 +488,8 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `vmap` | `(vmap {} expr dim)` | Vectorization |
 | `jit` | `(jit {} expr)` | Compilation trigger |
 | `realize` | `(realize {} expr)` | Force DAG evaluation |
-| `cast` | `(cast {} expr target-type)` | Precision cast |
-| `copy` | `(copy {} expr)` | Explicit tensor duplication (Phase 2: linearity) |
+| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional `trunc` mode selects [05-OP-6] |
+| `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
 
 ### 2.8 Metaprogramming
@@ -415,18 +527,12 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | Helpers | 5 | params, bind, kv, effects, resource |
 | **Total** | **62** | |
 
-### 2.11 Planned Phase 3+ Expansion Note
+### 2.11 Vocabulary Extension
 
-The remaining practical Phase 3 work is expected to stress Deep in new directions:
-
-- first-class host-language scalars and strings
-- collection values such as lists and dictionaries
-- file/data/tokenizer helper surfaces
-
-Those additions are not active Deep tags today.
-If Chelis later needs dedicated Deep tags for those features, this closed-vocabulary
-section and the tag-count summary must be revised at the same time. Until then, the
-current 62-tag count remains the authoritative shipped grammar.
+Any feature that requires a dedicated Deep form must revise this closed-vocabulary
+section, structural validation, canonical printing, and the tag-count summary in the
+same semantic change. Functionality expressed through ordinary calls does not allocate
+a new tag.
 
 ---
 
@@ -439,15 +545,19 @@ These names are available without import. They are NOT tags — they are functio
 The irreducible computational basis. All tensor computation decomposes to these during IR lowering.
 
 **Elementwise:** `add`, `mul`, `exp`, `log`, `sin`, `sqrt`, `cmplt`, `max_elem`
-**Reduce:** `sum`, `max_reduce` (over axis)
-**Movement:** `reshape`, `permute`, `expand`, `pad`, `shrink`, `stride`
+**Reduce:** `sum`, `count`, `max_reduce` (over one-or-more positional or
+one-or-more named axes, never a mixture)
+**Movement:** `reshape`, `permute`, `expand`, `insert`, `pad`, `shrink`, `stride`
 **Memory:** `const`, `load`
 
 ### 3.2 Derived Functions
 
-Convenience functions that the compiler lowers to RISC primitive compositions during IR construction. The desugarer emits these; the IR pass decomposes them.
+Convenience functions with ordinary call syntax and operation-specific lowering
+points. The desugarer emits their typed identities. An identity remains intact
+through every semantic transform its governing atom names, including AD, and
+only then may the IR passes decompose it to RISC primitives.
 
-`sub`, `div`, `neg`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`
+`sub`, `div`, `neg`, `lt`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`, `stop_gradient`
 
 ### 3.3 Standard Library (imported)
 
@@ -471,13 +581,19 @@ Deep uses explicit multi-argument application, not currying:
 
 If `f` expects 3 arguments and receives 2, this is a **type error**, not partial application.
 
+A nested application is nevertheless a distinct valid shape when the inner
+application returns a function value. `(app {} (app {} f x) y)` is not
+flattened to `(app {} f x y)`; canonical Surf writes it `(f(x))(y)`. The same
+grouped-callee rule preserves `if`, `fn`, unary, and other expression-valued
+callees.
+
 ### 4.2 Partial Application
 
 Explicit closure construction:
 
 ```scheme
 ;; f(x, _, z) where _ is the partial hole
-(fn {} (params y) (app {} (var {} f) (var {} x) (var {} y) (var {} z)))
+(fn {} (params {} y) (app {} (var {} f) (var {} x) (var {} y) (var {} z)))
 ```
 
 ### 4.3 Operators
@@ -488,9 +604,33 @@ All operators desugar to `(app {} (var {} op) ...)`. No infix operators in Deep.
 ;; a + b
 (app {} (var {} add) (var {} a) (var {} b))
 
-;; a - b (sub is a derived built-in, lowered to add(a, neg(b)) at IR level)
+;; a - b (sub remains a direct Tier-1 RISC identity after lowering)
 (app {} (var {} sub) (var {} a) (var {} b))
 ```
+
+### 4.4 Evaluation Order
+
+In `(app {} f a₁ ... aₙ)`, the argument expressions `a₁ ... aₙ` evaluate in
+written order, left to right, each to completion before the next begins, and
+all before the application itself. Observable effects occur in that order,
+and the first argument whose evaluation traps determines the trap the
+application raises; later arguments are not evaluated after a trap.
+
+This order is a semantic contract in every executable lane, not an
+implementation convenience. Value-level rewrites — a derived built-in's
+lowering to RISC primitives (`spec/05-risc-primitives.md` §3), constant
+folding, or backend scheduling of the already-evaluated dataflow — operate
+on argument *values* and never reorder or skip the evaluation of argument
+*expressions* whose effects or traps are observable. Surf operator
+expressions inherit this order through their desugaring, which preserves
+the authored operand order for every operator (`spec/02-surf-syntax.md`
+§2). Multi-value constructors follow the same written-order rule: tuple,
+list, record, and record-update children evaluate left to right (§6.2's
+`kv` ordering restates this for records).
+
+Within a single primitive, elementwise and reduction evaluation order is
+owned by `spec/04-type-system.md` [04-NUM-12] and [04-NUM-15]; this section
+orders the argument expressions that produce a primitive's operands.
 
 ---
 
@@ -510,7 +650,7 @@ Each element after the first must be a function (or lambda). Pipes with multi-ar
 
 ```scheme
 (pipe {} (var {} x)
-  (fn {} (params v) (app {} (var {} f) (var {} v) (var {} a)))
+  (fn {} (params {} v) (app {} (var {} f) (var {} v) (var {} a)))
   (var {} g))
 ```
 
@@ -532,22 +672,133 @@ Deep has exactly one textual representation per program.
 ### 6.2 Ordering
 - Module declarations: declaration order (not sorted).
 - Import names within an import: alphabetized.
-- Record `kv` pairs: alphabetized by key.
+- Record and record-update `kv` pairs: written order, which is left-to-right
+  evaluation order.
 - Match arms: declaration order (semantically meaningful).
 - Bind pairs in `let`: declaration order (sequential semantics).
 
 ### 6.3 Comments
 None in canonical Deep. Comments are Surf-only. Stripped during desugaring. Use the `doc` meta key for structured documentation.
 
+### 6.3.1 Canonical Surf resugaring
+
+Every structurally valid public Deep tag has a canonical Surf representation.
+Deep `pipe` resugars as a pipeline. A Deep `app` chain resugars as that same
+pipeline only when the typed proof from `spec/01-nomenclature.md` §3.6
+establishes a linear first-argument chain; otherwise it remains a flat
+parenthesized call. Later-position insertion retains an explicit lambda.
+Resolved ordinary calls to the fixed operator builtins use Surf infix/prefix
+notation, while the same builtin name remains a value or pipe stage. A finite
+`Cons`/`Nil` chain uses bracket-list syntax; an open-tail `Cons` remains an
+explicit call. Explicit `borrow` and `copy` nodes remain explicit.
+
+Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
+`base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
+same-named call-like forms. A matching `defsig` and `def` resugar as one inline
+typed Surf definition; a standalone `defsig` remains `sig`. A checked standalone
+`def` carrying semantic `type` metadata resugars as a typed Surf declaration;
+normalization materializes the equivalent `defsig` rather than erasing the type.
+All ordered pairs in one `bind` become ordered Surf block bindings. Empty
+`tuple` and `t-tuple` nodes normalize to the language's unit value and type;
+empty `pat-tuple` is written `()` directly. Every zero-argument `app`, including
+an application whose callee is an uppercase constructor, remains an explicit
+call such as `Ctor()` or `f()`. A bare uppercase `var` remains `Ctor`, and a
+zero-field `record` remains `Ctor {}`.
+
+The normal and debug emitters share this AST-backed resugarer and Surf printer.
+Debug output may append stable `-- deep-debug: ...` comments; it is not a
+second Surf dialect.
+
+Surf property declarations represent user-authored properties only. They have
+no syntax for the non-forgeable `bridge:c-earchin` producer identity or for a
+producer-local `property_source_id`. Resugaring a property with either form of
+provenance therefore fails explicitly; it must never emit an ordinary
+`@property` that would redesugar with `property_source_kind: "user"`.
+`property_quantifiers` must also be present and exactly match the property
+`fn` parameter list before resugaring; a mismatch fails rather than changing
+the bound names.
+
+### 6.3.2 Round-trip normalization
+
+`normalize_deep` may erase `span`, `loc`, macro `source` provenance after
+expansion, inferred `effects`, and `invariant_amenability` because those values
+are informational or deterministically recomputed. It may also erase
+matching `type` entries on a `def`, its `fn` value, and its function parameters
+when an adjacent matching `defsig` already carries the exact same types; a
+disagreement is never erased. For a standalone checked `def`, normalization may
+materialize that metadata as an adjacent `defsig` and then apply the same exact
+redundancy rule. Empty `tuple`/`t-tuple` normalize to `lit`/`t-unit`. No `app`
+normalizes to a `var`: `Ctor`, `Ctor()`, and `Ctor {}` retain their distinct
+`var`, `app`, and `record` structures. Because Surf negative
+numerals are unary minus rather than signed tokens, a negative Deep `lit`
+normalizes to the equivalent `neg` application. The full `int64` minimum uses
+Surf's directly representable signed-minimum literal; a narrower signed minimum
+uses `sub(neg(max), 1)` so its positive magnitude never overflows that literal
+width.
+An integer atom carrying a float primitive type normalizes to the equivalent
+float atom before that sign rule. A valid, correctly placed non-semantic
+`surf_literal_style` or `surf_binding_type` origin marker may be erased after it
+has selected the canonical Surf reconstruction; desugaring that Surf recreates
+the applicable marker. Normalization may likewise erase a `surf_path` equal to
+the deterministic default spelling of its lowered path child and a
+`surf_dim_group_size: 1` marker on the first member of its one-member group,
+because canonical desugaring deterministically recreates those defaults. A
+non-default, malformed, or misplaced marker is retained so the round-trip
+oracle cannot hide a resugaring error. Normalization may not erase or rewrite
+any other declared `type` or `eff` data, handler effects, `wrt`, `opaque`,
+`invariant`, property semantics, or validated `surf_*` values. Implementations
+compare macro-authored Surf after expansion. Any other metadata loss is a
+round-trip failure.
+
+A negative `pat-lit` is not normalized to an application because patterns do
+not contain expression nodes. It resugars as minus followed by the one
+unsuffixed canonical numeric pattern token, including `-0.0` and the full
+`int64` minimum.
+
 ### 6.4 Literal Normalization
 
 | Type | Canonical | Normalizations |
 |---|---|---|
 | Integer | Decimal, no leading zeros | `07` → `7` |
-| Float | `d.d` minimum | `1.` → `1.0`, `.5` → `0.5` |
-| Float (sci) | `d.dE±d` (uppercase E, explicit sign) | `1e3` → `1.0E+3` |
-| String | Double-quoted, standard escapes | |
+| Float | Finite, shortest round-trippable value spelling, with `.0` when otherwise integer-like | `1.` → `1.0`, `.5` → `0.5` |
+| Float (sci) | Lowercase `e`, only when selected by the shortest printer | equivalent longer spellings normalize to the printer result |
+| String | Double-quoted; named Surf escapes where available, otherwise minimal lowercase `\u{h}` for control scalars | Printable-character and named-escape Unicode aliases are not canonical |
 | Boolean | `true` / `false` | |
+
+Canonical Deep contains no non-finite float literal. Producers that construct
+Deep programmatically must reject NaN and infinity before serialization;
+Deep-to-Surf resugaring reports either as unrepresentable rather than emitting
+an invalid Surf token.
+
+Every valid Deep string atom has a Surf representation. Resugaring uses the
+single P11 spelling: printable Unicode remains literal, the six named escapes
+are preferred, and other C0/C1 controls use minimal lowercase `\u{h}`.
+
+When a `lit` node's `type` metadata resolves to a primitive, the value atom
+and primitive family have one closed canonical pairing:
+
+| Value atom | Permitted primitive family |
+|---|---|
+| integer | `int8`, `int16`, `int32`, `int64` |
+| float | `f16`, `bf16`, `f32`, `f64` |
+| boolean | `bool` |
+| string | `string` |
+
+Type metadata is not a cast. Every cross-family pairing is a type error, not
+a conversion or a request to reinterpret the atom. There is one explicit
+source-preserving form: an integer-spelled token bound directly at a float
+dtype carries its exact Int atom together with `literal_source: integer` in
+the `lit` metadata. This covers a suffix such as `7f32` and an integer element
+in a contextually `f32` tensor literal. The marker is valid exactly once, only
+with an Int atom and a float primitive; every other use is a type error. It
+keeps the exact integer available for the one target-width rounding required
+by [04-NUM-1] and [04-NUM-14], instead of first rounding through f64. An
+unmarked Int atom under a float primitive remains contradictory. An explicit
+`cast` is the only form that converts an already-typed literal value between
+primitive families. `literal_source` is producer-asserted provenance, not a
+lexer authenticity proof: hand-written Deep MAY author the canonical marker,
+and the checker validates its closed atom/primitive/uniqueness contract before
+any consumer may rely on it.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
 `int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an
@@ -597,33 +848,49 @@ Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) attach to either an
 integer or float literal token. Integer-typed suffixes (`i8`, `i16`,
 `i32`, `i64`) attach to integer literal tokens only.
 
-The suffix `f8e4m3` is reserved/deferred per `spec/04-type-system.md`
-§1.1.1 and is rejected at lex time. Unsigned suffixes (`u8`, `u16`,
-`u32`, `u64`) are out of scope per §1.1.2 and are rejected at lex time.
-Hex integer literals interact with float-typed suffixes per the
-hex-suffix rule in `spec/02-surf-syntax.md` §P10a; the same rule applies
-to Deep.
+No suffix exists for any reserved name of `spec/04-type-system.md` §1.1.1
+(`f8e4m3`, `f8e5m2`, the `uint*` family, `int4`/`uint4`,
+`complex64`/`complex128`, `decimal128`/`decimal256`); each is rejected at
+lex time with a diagnostic citing §1.1.1; none is a literal suffix in this
+grammar. The short unsigned spellings (`u8`, `u16`,
+`u32`, `u64`) are not reserved in any form - `uint8`/`uint16`/`uint32`/
+`uint64` are canonical per §1.1.2 - and are likewise rejected at lex time.
+Deep's producer-friendly lexer accepts hexadecimal integer input and
+canonical Deep printing rewrites the decoded value in decimal. Canonical Surf
+also accepts value-preserving hexadecimal and binary integer spellings as
+input; the shared Surf printer owns the same decimal rewrite.
 
 ### 6.5 Identifier Rules
 - Variables/functions: `[a-z_][a-z0-9_]*` (snake_case)
 - Types/variants: `[A-Z][a-zA-Z0-9]*` (PascalCase)
 - Module paths: dot-separated identifiers
 
+Deep's lexer admits a broader symbol alphabet for tag and producer use, but a
+public declaration, expression, pattern, type, field, or module name that is to
+be resugared MUST satisfy its corresponding Surf identifier rule and MUST NOT
+be a reserved Surf word. Deep-to-Surf resugaring rejects an invalid name rather
+than quoting it, rewriting it, or emitting text with changed meaning.
+
 ---
 
 ## 7. Grammar (PEG)
 
 ```peg
-Program     ← Spacing Node+ EOF
+Program     ← Spacing TopLevelForm+ EOF
+TopLevelForm ← &('(' Spacing TopLevelTag) Node        # §7.1
+TopLevelTag ← ('module' / 'import-all' / 'import' / 'export'
+            / 'defsig' / 'deftype' / 'defdim' / 'def'
+            / 'typealias') ![a-z0-9-]                 # longest-first; tag must end here
 Node        ← '(' Spacing Tag Spacing Meta Spacing Children ')' Spacing
 Tag         ← [a-z] [a-z0-9-]*                    # lowercase, hyphens allowed (pat-var, t-fn, etc.)
 Meta        ← '{' Spacing (MetaPair (',' Spacing MetaPair)*)? '}'
 MetaPair    ← MetaKey ':' Spacing MetaValue
-MetaKey     ← [a-z]+
-MetaValue   ← Node / Literal / Identifier / TypeName
+MetaKey     ← [A-Za-z_] [A-Za-z0-9_]*              # §1.1's declared charset
+MetaValue   ← Meta / Node / Literal / Identifier / TypeName
 Children    ← (Child Spacing)*
-Child       ← Node / BareName / Literal
-BareName    ← Identifier / TypeName                # bare names only in params, bind, field contexts
+Child       ← Node / BareList / Meta / BareName / Literal
+BareList    ← '(' Spacing (Child Spacing)* ')' Spacing
+BareName    ← Identifier / TypeName                # admissibility is per child role; see §7.2
 Identifier  ← [a-z_] [a-zA-Z0-9_]*
 TypeName    ← [A-Z] [a-zA-Z0-9]*
 Literal     ← FloatLit / IntLit / BoolLit / StringLit
@@ -634,14 +901,145 @@ IntLit      ← '-'? [0-9]+ (FloatSuffix / IntSuffix)?
 FloatSuffix ← 'f32' / 'f64' / 'bf16' / 'f16'
 IntSuffix   ← 'i8' / 'i16' / 'i32' / 'i64'
 # Suffix must immediately follow the digit sequence (no whitespace, no comment).
-# `f8e4m3`, `u8`, `u16`, `u32`, `u64` are reserved/deferred or out-of-scope per
-# spec/04-type-system.md §1.1.1 / §1.1.2 and are rejected at lex time.
+# No suffix exists for any reserved name of spec/04-type-system.md §1.1.1
+# (`f8e4m3`, `f8e5m2`, `uint*`, `int4`/`uint4`, `complex*`, `decimal*`); the
+# short unsigned spellings `u8`/`u16`/`u32`/`u64` are not reserved at all.
+# Every such sequence is rejected at lex time with a diagnostic citing §1.1.1.
 BoolLit     ← 'true' / 'false'
 StringLit   ← '"' (!'"' .)* '"'
 Spacing     ← ([ \t\n\r] / Comment)*
 Comment     ← ';' (![\n] .)*
 EOF         ← !.
 ```
+
+### 7.1 Top-Level Form
+
+A Deep program is a namespace, not an expression. Deep has no top-level
+evaluation position: a form at top level either introduces a name into the
+program's namespace or declares module structure, and there is no other
+position for it to occupy. A value produced at top level could not be named,
+given a signature, exported, selected as a root, lowered, or observed, so a
+program whose top level is an expression carries no content a consumer can
+act on.
+
+> **[03-PROG-1]** A Deep program SHALL consist of one or more top-level
+> forms. Each top-level form SHALL be a `module` node (§2.1) or a declaration
+> node whose tag is one of `def`, `defsig`, `deftype`, `typealias`, `defdim`,
+> `import`, `import-all`, or `export`. Every other top-level form SHALL be
+> rejected: an expression node, a pattern node, a type-expression or
+> dimension-expression node, a transform node, a helper node, a bare
+> identifier, a bare literal, an untagged list, and a node whose head is
+> outside the closed vocabulary (§2). `variant` and `field` are structural
+> children of `deftype` and `variant`; they bind nothing on their own and are
+> not top-level forms.
+
+The declarations a program contains are the children of its `module`
+wrappers together with its bare top-level declarations; a program MAY mix
+both spellings and MAY contain more than one `module` wrapper, subject to the
+one-wrapper-per-module-name rule in §2.1.
+
+Most of what [03-PROG-1] rejects is a list headed by a tag symbol, which the
+rejection can name. Some of it has no head at all: a bare identifier, a bare
+literal, an empty list, and a list whose first element is not a symbol are all
+[03-PROG-1] rejections with nothing to quote. Those forms are identified by
+syntactic class instead, from a closed set, so that a reader of the diagnostic
+always learns which form was rejected.
+
+> **[03-PROG-2]** A rejection under [03-PROG-1] SHALL identify the offending
+> form and SHALL carry that form's source location. A form headed by a symbol
+> SHALL be identified by that symbol. A form with no head SHALL be identified
+> by its syntactic class, which SHALL be exactly one of: a bare identifier, a
+> bare integer literal, a bare float literal, a bare string literal, a bare
+> boolean literal, an empty list, a list without a tag symbol, a metadata map,
+> or a metadata-annotated form. An implementation SHALL NOT substitute a
+> placeholder for either identification. The rejection SHALL be reported at
+> the ingress boundary that reads the program text, before name resolution,
+> type checking, evaluation, lowering, or resugaring observes the program. An
+> implementation SHALL NOT skip, ignore, or silently reinterpret a top-level
+> form that [03-PROG-1] rejects.
+
+[03-PROG-1] requires at least one top-level form, so text that yields none is
+rejected too. That rejection is the one case with no offending form to
+identify and no form location to carry, so the contract states its own shape
+rather than leaving an implementation to invent a placeholder.
+
+> **[03-PROG-3]** Program text that yields no top-level form SHALL be rejected
+> under [03-PROG-1]. Text yields no top-level form when it is empty, when it
+> is entirely whitespace, when it is entirely comments, or when it is any
+> combination of those. That rejection SHALL identify itself as an empty
+> program and SHALL carry the source position at which a top-level form was
+> required, which is the end of the input. It is otherwise subject to
+> [03-PROG-2]'s reporting rules.
+
+The class set is closed because it partitions what the grammar can produce in
+top-level position: `Child`'s five alternatives (`Node`, `BareList`, `Meta`,
+`BareName`, `Literal`) plus the metadata-annotated form a producer may emit. A
+bare identifier is the `BareName` production, admissible at the structural
+child positions §7.2 assigns and never at top level; the empty-list and
+list-without-a-tag-symbol classes are the `BareList` production's headless
+shapes; a metadata map is the `Meta` production; the four literal classes are
+`Literal`'s alternatives, with `IntLit` and `FloatLit` distinguished because a
+producer's mistake is usually specific to one.
+
+### 7.2 Child Roles
+
+A tagged node's children are not interchangeable. Each per-tag form in §2
+gives its children fixed meanings — `(def {} name body)` puts a declaration
+name at index 0 and a runtime expression at index 1 — and those meanings
+partition every child position into a small set of roles: an **expression**
+position carries runtime computation; a **structural** position carries a
+name, preserved syntax, or a field/axis/index selector; a **type** position
+carries type or dimension syntax; an **effect-handler** position carries the
+handler payload whose contract chapter 06 owns; and a few positions delegate
+to a per-tag expectation (a `match` child must be an `arm`, a `let` child
+must be a `bind`, a `module` child must be a declaration). The role is a
+property of the vocabulary, decided by the tag and the child index alone, so
+a reader never inspects a child's content to learn what kind of thing its
+position holds.
+
+> **[03-ROLE-1]** For every tag in the closed vocabulary (§2) and every
+> child index its form admits, an implementation SHALL classify the position
+> into exactly one role, per that tag's form in §2. The classification SHALL
+> be total over the vocabulary and SHALL depend only on the tag and the
+> child position, never on the child's content. A bare identifier at a
+> structural, type, or effect-handler position is a name, even when its
+> spelling coincides with a vocabulary tag or another reserved word.
+
+The identifier rule has a sharp edge at expression positions. A name is not
+an expression: Deep spells a variable reference `(var {} x)`, so a bare
+identifier where an expression is required is always a producer error, and
+accepting one would oblige every downstream consumer to invent a meaning
+for it.
+
+> **[03-ROLE-2]** A bare identifier at an expression position SHALL be
+> rejected at the ingress boundary that reads the program text, before name
+> resolution, type checking, evaluation, lowering, or resugaring observes
+> the program. The rejection SHALL identify the offending identifier and
+> SHALL carry its source location, under [03-PROG-2]'s reporting
+> discipline, and SHOULD name the `(var {} ...)` spelling that expresses a
+> variable reference.
+
+Lists at structural positions serve two purposes that share one byte shape.
+A vocabulary node may legitimately stand there — `(params {} w b x)` at a
+`fn`'s binder position — but so may a plain structural list: an import name
+list `(copy fill)` whose elements happen to spell vocabulary tags, or an
+annotated parameter `(x {type: (t-prim {} f32)})` whose second element is a
+metadata map. Neither the head alone nor the metadata map alone
+distinguishes the two. The disambiguator is their conjunction: every
+vocabulary node carries a metadata map at element 1 (§1), and a structural
+list whose head is not a vocabulary tag cannot be a node no matter what
+follows it.
+
+> **[03-ROLE-3]** A parenthesized list at a structural position SHALL be
+> read as a vocabulary node exactly when its first element is a tag of the
+> closed vocabulary (§2) AND its second element is a metadata map (§1.1);
+> otherwise it SHALL be read as a structural list whose elements are names,
+> literals, and nested forms under this section's rules. An implementation
+> SHALL NOT reinterpret a structural list by inspecting its head alone: an
+> import name list such as `(copy fill)` (a vocabulary-tag spelling at the
+> head, no metadata map) and an annotated parameter such as
+> `(x {type: (t-prim {} f32)})` (a metadata map at element 1, an ordinary
+> name at the head) both remain structural lists.
 
 ---
 
@@ -650,7 +1048,16 @@ EOF         ← !.
 ### 8.1 Structural Validation (Parser)
 - Every node is a 3-tuple: `(tag meta children...)`.
 - Tag is from the closed vocabulary (§2).
+- Every top-level form satisfies [03-PROG-1]; a violation is rejected per
+  [03-PROG-2].
 - Meta is a valid `{}` map (may be empty).
+- A colon-prefixed keyword token such as `:type` is metadata-key syntax, not
+  an expression atom or node child. Outside metadata-key position, the parser
+  MUST reject it before checker or evaluator processing — the same ingress
+  discipline [03-ROLE-2] (§7.2) applies to a bare identifier at an
+  expression position.
+- Child positions carry the roles §7.2 assigns; a list at a structural
+  position is read per [03-ROLE-3].
 
 ### 8.2 Arity Validation (Post-Parse)
 - `(if {} cond then else)` — exactly 3 children.
@@ -658,9 +1065,12 @@ EOF         ← !.
 - `(fn {} params body)` — exactly 2 children; first must be `(params ...)`.
 - `(let {} bindings body)` — exactly 2 children; first must be `(bind ...)`.
 - `(app {} func arg...)` — at least 1 child (the function).
+- Type/dimension nodes obey the recursive shapes and binder rules in
+  §2.5.1/§2.6. The type checker owns these semantic checks because nominal
+  headers and binder context are not available to the syntax parser.
 
 ### 8.3 Unknown Tags
-Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score.
+Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score. This distinction applies below the top level; an unknown tag in top-level position is a [03-PROG-1] rejection in every mode, because no unknown head is one of the top-level forms that rule enumerates.
 
 ---
 
@@ -678,7 +1088,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (app {} (var {} const) (lit {type: (t-prim {} f32)} 1.0) (d-lit {} 2) (d-lit {} 3))))
 
   (def {} main
-    (fn {} (params)
+    (fn {} (params {})
       (app {} (var {} println) (realize {} (var {} twos))))))
 ```
 
@@ -697,14 +1107,14 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (t-tensor {} (d-name {} samples) (t-prim {} f32))))
 
   (def {} predict
-    (fn {} (params w b x)
+    (fn {} (params {} w b x)
       (app {} (var {} add)
         (app {} (var {} matmul) (var {} x) (var {} w))
         (var {} b))))
 
   (def {} mse_loss
-    (fn {} (params y_pred y_true)
-      (let {} (bind
+    (fn {} (params {} y_pred y_true)
+      (let {} (bind {}
         diff (app {} (var {} sub) (var {} y_pred) (var {} y_true))
         sq   (app {} (var {} mul) (var {} diff) (var {} diff)))
         (app {} (var {} mean) (var {} sq))))))
@@ -724,7 +1134,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
     (variant {} Sigmoid))
 
   (def {} activate
-    (fn {} (params act x)
+    (fn {} (params {} act x)
       (match {} (var {} act)
         (arm {} (pat-ctor {} ReLU) ()
           (app {} (var {} relu) (var {} x)))
@@ -732,11 +1142,11 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
           (app {} (var {} sigmoid) (var {} x))))))
 
   (def {} forward
-    (fn {} (params w1 b1 w2 b2 act x)
+    (fn {} (params {} w1 b1 w2 b2 act x)
       (pipe {} (var {} x)
-        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
-        (fn {} (params v) (app {} (var {} activate) (var {} act) (var {} v)))
-        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
+        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
+        (fn {} (params {} v) (app {} (var {} activate) (var {} act) (var {} v)))
+        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
 ```
 
 ### 9.4 ADT with Record Variants
@@ -752,7 +1162,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (field {} height (t-prim {} f32))))
 
   (def {} area
-    (fn {} (params s)
+    (fn {} (params {} s)
       (match {} (var {} s)
         (arm {} (pat-ctor {} Circle (pat-var {} r)) ()
           (app {} (var {} mul)

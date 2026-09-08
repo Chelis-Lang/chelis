@@ -1,3 +1,28 @@
+# Pinned to an exact version, deliberately, not to the `stable` channel.
+#
+# CI installs Rust with `dtolnay/rust-toolchain@stable` in 23 places across
+# 10 workflows. That action runs `rustup toolchain install` + `rustup default`
+# and never sets RUSTUP_TOOLCHAIN, so rustup's directory-override precedence
+# makes THIS FILE authoritative for every cargo invocation in the workspace.
+# One line here therefore pins local and CI together; the workflows need no
+# edit, and no second copy of the version exists to drift.
+#
+# Why pin at all: Rust ships stable every 6 weeks (~8.7 releases/year), and
+# clippy ships inside the toolchain. On `channel = "stable"` a release reaches
+# every branch at once with no staging, so a tightened lint turns every open
+# PR red simultaneously under `-D warnings` and lands the debugging cost on
+# whoever opens the next PR. That happened with 1.98.0 (released 2026-08-20):
+# it broke `chelis-types`, `chelis-surf`, and `chelis-ir` on branches whose
+# own diffs contained no Rust at all.
+#
+# Bumping: this is a deliberate, scheduled change, not an ambient one. Raise
+# the version here in its own PR so the clippy churn is the expected content
+# of that diff instead of a surprise inside someone else's work.
+#
+# Note: while this pin lags `stable`, CI's `@stable` action step installs the
+# newer toolchain and rustup then fetches the pinned one on demand. That costs
+# one extra toolchain download per job until the pin catches up, which is the
+# price of the workflows having no version in them to keep in sync.
 [toolchain]
-channel = "stable"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]

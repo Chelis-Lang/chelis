@@ -30,8 +30,9 @@
 //!     bit patterns into an f64 buffer, producing garbage.
 //!   * `cbackend_cast_tensor_f64_to_f32` -- narrowing; requires rounding.
 //!     memcpy copies the low 4 bytes of each f64, also garbage.
-//!   * `cbackend_cast_tensor_f32_to_int32` -- truncating-toward-zero
-//!     conversion. memcpy reinterprets f32 bit patterns as int32s.
+//!   * `cbackend_cast_tensor_f32_to_int32` -- exactly integral float values
+//!     convert to integers. memcpy reinterprets f32 bit patterns as int32s;
+//!     fractional checked-cast behavior is separately red/ignored for Phase 3.
 //!   * `cbackend_cast_tensor_int32_to_f32` -- integer widening to float.
 //!     memcpy reinterprets int32 bit patterns as f32s.
 //!
@@ -91,7 +92,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     // exec-style tests in parallel; they all materialize the same
     // canonical path) do not race on a shared tmp filename and trip
     // ENOENT on rename when a peer renames it away first.
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),
@@ -184,9 +190,7 @@ const HARNESS_INCLUDES: &str = r#"
 #[test]
 fn cbackend_cast_tensor_f32_to_f64() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, f32]) -> tensor[3, f64] = {\n  \
-         cast(x, f64)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, f32]) -> tensor[3, f64] = cast(x, f64)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -199,20 +203,17 @@ extern chelis_tensor* cast_demo(chelis_tensor* x);
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_F32,
+                                                  in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    chelis_tensor* out = cast_demo(t);
+    chelis_read_view out_view = chelis_tensor_read_view(out);
+    if (out_view.dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
+    const double* d = (const double*)out_view.data;
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
+    chelis_tensor_release(out);
+    chelis_tensor_release(t);
     return 0;
 }}
 "#
@@ -234,9 +235,7 @@ int main(void) {{
 #[test]
 fn cbackend_cast_tensor_f64_to_f32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, f64]) -> tensor[3, f32] = {\n  \
-         cast(x, f32)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, f64]) -> tensor[3, f32] = cast(x, f32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -249,20 +248,17 @@ extern chelis_tensor* cast_demo(chelis_tensor* x);
 
 int main(void) {{
     double in_data[3] = {{1.5, 2.5, 3.5}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = (float*)in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F64;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_F64,
+                                                  in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(&t);
-    if (out->dtype != CHELIS_F32) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    float* d = (float*)out->data;
+    chelis_tensor* out = cast_demo(t);
+    chelis_read_view out_view = chelis_tensor_read_view(out);
+    if (out_view.dtype != CHELIS_DTYPE_F32) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
+    const float* d = (const float*)out_view.data;
     printf("%.9g %.9g %.9g\n", d[0], d[1], d[2]);
+    chelis_tensor_release(out);
+    chelis_tensor_release(t);
     return 0;
 }}
 "#
@@ -278,15 +274,13 @@ int main(void) {{
     );
 }
 
-/// f32 -> int32 truncation toward zero. Input `[1.5, 2.5, 3.5]`
-/// truncates to `[1, 2, 3]`. With the memcpy bug, the int32 buffer
-/// contains the raw f32 bit patterns (1.5f -> 0x3FC00000 -> 1069547520).
+/// f32 -> int32 exact integral conversion. Input `[1.0, 2.0, 3.0]`
+/// converts to `[1, 2, 3]`. With the memcpy bug, the int32 buffer
+/// contains the raw f32 bit patterns (1.0f -> 0x3F800000 -> 1065353216).
 #[test]
 fn cbackend_cast_tensor_f32_to_int32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, f32]) -> tensor[3, int32] = {\n  \
-         cast(x, int32)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, f32]) -> tensor[3, int32] = cast(x, int32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -298,21 +292,18 @@ fn cbackend_cast_tensor_f32_to_int32() {
 extern chelis_tensor* cast_demo(chelis_tensor* x);
 
 int main(void) {{
-    float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    float in_data[3] = {{1.0f, 2.0f, 3.0f}};
+    int64_t shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_F32,
+                                                  in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(&t);
-    if (out->dtype != CHELIS_I32) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    int32_t* d = (int32_t*)out->data;
+    chelis_tensor* out = cast_demo(t);
+    chelis_read_view out_view = chelis_tensor_read_view(out);
+    if (out_view.dtype != CHELIS_DTYPE_I32) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
+    const int32_t* d = (const int32_t*)out_view.data;
     printf("%d %d %d\n", d[0], d[1], d[2]);
+    chelis_tensor_release(out);
+    chelis_tensor_release(t);
     return 0;
 }}
 "#
@@ -324,7 +315,7 @@ int main(void) {{
     let trimmed = stdout.trim();
     assert_eq!(
         trimmed, "1 2 3",
-        "expected truncate-toward-zero f32->int32; got stdout={trimmed:?}"
+        "expected exact integral f32->int32 conversion; got stdout={trimmed:?}"
     );
 }
 
@@ -334,9 +325,7 @@ int main(void) {{
 #[test]
 fn cbackend_cast_tensor_int32_to_f32() {
     let build = chelis_build_c(
-        "def cast_demo(x: tensor[3, int32]) -> tensor[3, f32] = {\n  \
-         cast(x, f32)\n\
-         }\n",
+        "def cast_demo(x: tensor[3, int32]) -> tensor[3, f32] = cast(x, f32)\n",
         "cast_demo",
     );
     let kernel_c = build.path().join("cast_demo.c");
@@ -349,20 +338,17 @@ extern chelis_tensor* cast_demo(chelis_tensor* x);
 
 int main(void) {{
     int32_t in_data[3] = {{1, 2, 3}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = (float*)in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_I32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_I32,
+                                                  in_data, sizeof(in_data));
 
-    chelis_tensor* out = cast_demo(&t);
-    if (out->dtype != CHELIS_F32) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    float* d = (float*)out->data;
+    chelis_tensor* out = cast_demo(t);
+    chelis_read_view out_view = chelis_tensor_read_view(out);
+    if (out_view.dtype != CHELIS_DTYPE_F32) {{ printf("FAIL_DTYPE %d\n", out_view.dtype); return 1; }}
+    const float* d = (const float*)out_view.data;
     printf("%.9g %.9g %.9g\n", d[0], d[1], d[2]);
+    chelis_tensor_release(out);
+    chelis_tensor_release(t);
     return 0;
 }}
 "#

@@ -20,6 +20,12 @@
 //!   reject every match (no constructors found ⇒ "missing all"), so we
 //!   use clone-then-extend instead — the cloned registry already
 //!   contains the library's constructor sets.
+//! - **Type-resolution environment**: rebuilt for each check from the cloned
+//!   registry's validated ADT/alias definitions plus the new unit's
+//!   precollected declaration headers. The provisional environment is a
+//!   serde-skipped runtime field: it permits self/forward references during
+//!   one check but cannot serialize a rejected declaration into the library
+//!   snapshot.
 //! - **`VarGen`**: cloned per check call. Library type-variable IDs are
 //!   already taken; new variables come from numbers above the library's
 //!   high-water mark.
@@ -44,18 +50,57 @@
 //! Deep AST nodes. The library was already checked when the context was
 //! built; its errors (if any) are surfaced at build time, not silently
 //! re-emitted with library spans during a new-code check.
+//!
+//! ## Deserialization boundary
+//!
+//! `TypeEnv` derives serde because compiler-api caches successful checker
+//! snapshots. Deserialization restores validated definitions; the transient
+//! type-resolution environment is skipped and is reconstructed at the next
+//! check. Serde can structurally decode the private `ErrorWitness` carried by
+//! `Type::Error`, but successful context construction rejects all checker
+//! errors and the totality invariant forbids error types in emitted snapshots.
+//! Compiler API cache decoding verifies the envelope and build identity.
+//! It requires one opaque identity on both type products.
+//! It reruns effect and linearity checks before it creates a library proof.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::UnordSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::adt::AdtRegistry;
 use crate::builtins;
 use crate::env::Env;
 use crate::types::VarGen;
 use crate::unify::Subst;
+
+/// Opaque identity derived from an accepted checked library and its base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryProofId {
+    digest: [u8; 32],
+}
+
+impl LibraryProofId {
+    pub(crate) fn for_library(annotated_exprs: &[deep::Expr], context: Option<Self>) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"chelis-library-proof-v1");
+        if let Some(context) = context {
+            hasher.update([1]);
+            hasher.update(context.digest);
+        } else {
+            hasher.update([0]);
+        }
+        let canonical = chelis_deep::printer::print_canonical_flat(annotated_exprs);
+        hasher.update((canonical.len() as u64).to_le_bytes());
+        hasher.update(canonical.as_bytes());
+        Self {
+            digest: hasher.finalize().into(),
+        }
+    }
+}
 
 /// Outer-scope snapshot for stacked IR type checking.
 ///
@@ -65,6 +110,8 @@ use crate::unify::Subst;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeEnv {
     inner: Arc<TypeEnvInner>,
+    #[serde(default)]
+    library_proof_id: Option<LibraryProofId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,11 +131,11 @@ pub(crate) struct TypeEnvInner {
     /// IR declared-type lookup: library def name → declared type
     /// expression. Used by the validate pass (which checks shape
     /// invariants against declared types).
-    pub(crate) ir_types: HashMap<String, deep::Expr>,
+    pub(crate) ir_types: BTreeMap<String, deep::Expr>,
     /// Set of names declared by the library — used by the new-code
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
-    pub(crate) library_def_names: HashSet<String>,
+    pub(crate) library_def_names: UnordSet<String>,
     /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
     /// export sets, binding -> module attribution, and producer text,
     /// accumulated across the library and new-code phases. Defaults
@@ -115,10 +162,11 @@ impl TypeEnv {
                 var_gen,
                 subst: Subst::new(),
                 adt_reg,
-                ir_types: HashMap::new(),
-                library_def_names: HashSet::new(),
+                ir_types: BTreeMap::new(),
+                library_def_names: UnordSet::new(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
+            library_proof_id: None,
         }
     }
 
@@ -127,11 +175,29 @@ impl TypeEnv {
     pub(crate) fn from_inner(inner: TypeEnvInner) -> Self {
         Self {
             inner: Arc::new(inner),
+            library_proof_id: None,
         }
+    }
+
+    pub(crate) fn bind_library_proof(&mut self, proof_id: LibraryProofId) {
+        self.library_proof_id = Some(proof_id);
+    }
+
+    pub(crate) fn library_proof_id(&self) -> Option<LibraryProofId> {
+        self.library_proof_id
     }
 
     pub(crate) fn inner(&self) -> &TypeEnvInner {
         &self.inner
+    }
+
+    /// Clone this persisted checker snapshot for a new checking unit.
+    /// Variables imported from the snapshot are normalized to level zero
+    /// before any IDs for the new unit can be minted.
+    pub(crate) fn resume_for_new_check(&self) -> TypeEnvInner {
+        let mut inner = self.inner().clone();
+        inner.subst.resume_for_new_check(&inner.var_gen);
+        inner
     }
 
     /// Number of library defs in scope. Diagnostic helper.
@@ -143,5 +209,155 @@ impl TypeEnv {
     /// from. Diagnostic helper — does NOT walk builtins or prelude.
     pub fn has_library_def(&self, name: &str) -> bool {
         self.inner.library_def_names.contains(name)
+    }
+
+    /// Return the generalized checker scheme for a binding in this accepted
+    /// library context.
+    ///
+    /// Public package metadata uses this immutable view so quantified-domain
+    /// restrictions remain attached to function values at serialization
+    /// boundaries instead of being reconstructed from a printed type.
+    pub fn scheme(&self, name: &str) -> Option<&crate::types::Scheme> {
+        self.inner.env.lookup(name)
+    }
+
+    /// Confirm that this context and a checked program are one library product pair.
+    ///
+    /// The library builders derive one opaque identity from accepted checked source.
+    /// Cache parsing requires that identity and the declared-type map to match.
+    pub fn matches_checked_program(&self, program: &crate::CheckedProgram) -> bool {
+        self.library_proof_id.is_some()
+            && self.library_proof_id == program.library_proof_id()
+            && self.inner.ir_types.eq(program.type_env())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
+    use crate::unify::unify;
+
+    #[test]
+    fn serialized_level_state_resumes_old_ids_at_zero_and_compacts_history() {
+        let empty = TypeEnv::empty();
+        let mut inner = empty.inner().clone();
+        let older = inner.var_gen.fresh_tvar();
+        inner
+            .env
+            .bind("outer".to_string(), Scheme::mono(Type::Var(older)));
+
+        let level = inner.subst.enter_level(&inner.var_gen);
+        let lowered_tvar = inner.var_gen.fresh_tvar();
+        let lowered_dvar = inner.var_gen.fresh_dvar();
+        let lowered_rvar = inner.var_gen.fresh_rvar();
+        let child_tvar = inner.var_gen.fresh_tvar();
+        let composite = Type::Tuple(vec![
+            Type::Var(lowered_tvar),
+            Type::Tensor(
+                vec![Dim::Var(lowered_dvar), Dim::Rank(lowered_rvar)],
+                TensorPrec::Var(lowered_tvar),
+            ),
+        ]);
+        unify(&Type::Var(older), &composite, &mut inner.subst).expect("escape binding");
+        inner.subst.leave_level(level, &inner.var_gen);
+        inner
+            .env
+            .bind("child".to_string(), Scheme::mono(Type::Var(child_tvar)));
+
+        let context = TypeEnv::from_inner(inner);
+        let encoded = bincode::serialize(&context).expect("TypeEnv serializes level state");
+        let decoded: TypeEnv =
+            bincode::deserialize(&encoded).expect("TypeEnv deserializes level state");
+        assert_eq!(decoded.inner().subst.level_of_tvar(lowered_tvar), 0);
+        assert_eq!(decoded.inner().subst.level_of_dvar(lowered_dvar), 0);
+        assert_eq!(decoded.inner().subst.level_of_rvar(lowered_rvar), 0);
+        assert_eq!(decoded.inner().subst.level_of_tvar(child_tvar), 1);
+        assert_eq!(decoded.inner().subst.level_metadata_counts(), (2, 1, 1, 1));
+
+        let mut resumed = decoded.resume_for_new_check();
+        assert_eq!(resumed.subst.level_of_tvar(child_tvar), 0);
+        assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
+        let imported = resumed
+            .env
+            .generalize(&Type::Var(child_tvar), &resumed.subst);
+        assert!(imported.tvars.is_empty());
+
+        for cycle in 0..4 {
+            let level = resumed.subst.enter_level(&resumed.var_gen);
+            let fresh = resumed.var_gen.fresh_tvar();
+            resumed.subst.leave_level(level, &resumed.var_gen);
+            resumed
+                .env
+                .bind(format!("cycle_{cycle}"), Scheme::mono(Type::Var(fresh)));
+
+            let context = TypeEnv::from_inner(resumed);
+            let encoded = bincode::serialize(&context).expect("cycle serializes");
+            let decoded: TypeEnv = bincode::deserialize(&encoded).expect("cycle deserializes");
+            resumed = decoded.resume_for_new_check();
+            assert_eq!(resumed.subst.level_of_tvar(fresh), 0);
+            assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
+            let imported = resumed.env.generalize(&Type::Var(fresh), &resumed.subst);
+            assert!(imported.tvars.is_empty());
+        }
+    }
+
+    #[test]
+    fn type_variable_restrictions_survive_context_round_trips() {
+        let empty = TypeEnv::empty();
+        let mut inner = empty.inner().clone();
+        let live = inner.var_gen.fresh_tvar();
+        inner
+            .subst
+            .narrow_tvar_restriction(live, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        let context = TypeEnv::from_inner(inner);
+        let encoded = bincode::serialize(&context).expect("restricted TypeEnv serializes");
+        let decoded: TypeEnv =
+            bincode::deserialize(&encoded).expect("restricted TypeEnv deserializes");
+        assert_eq!(
+            decoded.inner().subst.tvar_restriction(live),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        let mut resumed = decoded.resume_for_new_check();
+        let scheme = resumed
+            .env
+            .lookup("test_assert_close_tensor")
+            .expect("builtin scheme survives round trip")
+            .clone();
+        assert_eq!(
+            scheme.tvar_restrictions,
+            vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
+        );
+        let instantiated = resumed
+            .env
+            .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst);
+        let Type::Fn(params, _) = instantiated else {
+            panic!("assert-close scheme must remain callable");
+        };
+        let Type::Var(precision) = params[2] else {
+            panic!("tolerance must use the quantified precision variable");
+        };
+        let mut integer_trial = resumed.subst.clone();
+        let error = unify(
+            &Type::Var(precision),
+            &Type::Prim(Prim::Int32),
+            &mut integer_trial,
+        )
+        .expect_err("round-tripped restriction must reject int32");
+        assert!(matches!(
+            error.kind,
+            crate::unify::TypeErrorKind::PrecisionMismatch
+        ));
+
+        let mut float_trial = resumed.subst.clone();
+        unify(
+            &Type::Var(precision),
+            &Type::Prim(Prim::F32),
+            &mut float_trial,
+        )
+        .expect("round-tripped restriction must accept f32");
     }
 }

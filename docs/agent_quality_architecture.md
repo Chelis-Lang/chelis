@@ -56,11 +56,21 @@ generated formatter ([#732]).
 ### 2. Repo-specific lint rules (gate tier)
 
 `chelis-lint` lints Rust source and runs in the gate (the §8.6 rule
-proves the pattern). **Every incident closes with a lint rule when one
-is expressible.** In flight: `rust-no-wildcard-dispatch` ([#730] Phase 2),
-the `spec-provenance` family ([#733] Phase 1). The closing-move checklist
-for any future incident: fix, test, THEN ask "what lint rule makes this
-unwritable?"
+proves the pattern). A repo-specific lint is appropriate only when its
+accepted language can cover the prohibited shape without laundering paths or
+false positives. The attempted `rust-no-wildcard-dispatch` rule did not meet
+that standard under execution; it was extracted from [#730] to [#815] for an
+independent keep-or-delete decision. [#730] is instead closed structurally by
+typed boundaries and exhaustive consumers. Repository-wide authority,
+freshness, and impact analysis use the pinned Buoy shell plus a one-way,
+versioned Chelis adapter ([#733] Phases 1-3), avoiding both a second
+provenance engine inside `chelis-lint` and any outward Chelis dependency
+from `buoy-core`.
+
+The closing-move question for an incident is therefore: "what is the lowest
+typed construction boundary that makes this state unrepresentable?" A lint is
+defense in depth when that boundary cannot express the policy faithfully; it
+is not presumed to be the proof.
 
 ### 3. Tripwires and the duplicate registry (test tier)
 
@@ -74,14 +84,15 @@ pattern to known-bad code shapes.
 
 ### 4. Context injection where agents actually look (checklist tier)
 
-- **Nested `CLAUDE.md` files per crate.** Claude Code loads a
-  directory's CLAUDE.md when working there - guidance delivered at edit
-  time, which root-level prose cannot do. Backlog: guardrail files for
-  `crates/chelis-backend-c/` (emitted helpers are generated, never
-  hand-write a dtype switch; the failure channel is Result-typed),
-  `crates/chelis-ir/` (lowering must raise, never placeholder;
-  fold rules), `crates/chelis-types/` (Type::Error discipline),
-  `crates/chelis-lint/` (rule-registration protocol).
+- **Nested canonical `AGENTS.md` plus `CLAUDE.md` symlinks per crate.**
+  Agent harnesses load their directory-local entry point when working there,
+  delivering guidance at edit time that root-level prose cannot. The
+  `crates/chelis-lint/` rule-registration and canonical-traversal protocol is
+  landed for both AGENTS-style and Claude-style harnesses. Remaining
+  backlog: guardrail files for `crates/chelis-backend-c/` (emitted helpers are
+  generated, never hand-write a dtype switch; the failure channel is
+  Result-typed), `crates/chelis-ir/` (lowering must raise, never placeholder;
+  fold rules), and `crates/chelis-types/` (Type::Error discipline).
 - **The mechanism index** (below): the canonical-helpers list an agent
   must consult before writing numeric/dispatch/gate code. The audit's
   best search heuristic, inverted into prevention.
@@ -101,12 +112,14 @@ cleared. Additions to the existing red-team protocol:
   must show the search for an existing equivalent and either use it or
   justify divergence in the PR body. The direct countermeasure to
   scattered implementation; checkable by a reviewer agent.
-- **Contract-first for multi-session features**: any feature spanning
-  sessions or branches lands its spec/design contract (phase-handoff
-  style: inherit / deliver / frozen-at-exit / not-yours / oracle) as a
-  docs-only PR FIRST. Parallel agents then implement against frozen
-  interfaces instead of colliding; every implementation PR names the
-  contract it implements (enforced by [#733] Phase 0's PR gate).
+- **Contract-first for multi-session features**: after [#733] Phase 0's
+  adoption oracle is green, any feature spanning sessions or branches first
+  creates or updates its OpenSpec proposal, requirement deltas, scenarios,
+  design, and phase-handoff contract (inherit / deliver / frozen-at-exit /
+  not-yours / oracle), then places them in the human review queue. Parallel
+  agents implement against those review-queued interfaces instead of
+  colliding; every implementation PR links the active OpenSpec change and
+  names the specific requirement or design section it implements.
 - Claim-before-work stays as the `issue-resolution` skill states
   (assignee set before branching).
 
@@ -124,10 +137,12 @@ Two rules that met in practice the day the probe corpus landed:
    are archived as TESTS, not as parallel fixture copies.
 2. **An artifact that is never edited again should cost the gate
    nothing**: the fixtures were also the lint stage's long pole
-   (`chelis lint --check .` re-walks the tree per checked file - the
-   known quadratic behavior). The dedup resolved this instance; the
-   general lint-side ignore mechanism for genuinely un-editable archive
-   directories stays on [#740]'s backlog for the next case.
+   (`chelis lint --check .` re-walked the tree per checked file before
+   [#603]). The dedup resolved this instance. The general mechanism now
+   composes `crates/chelis-lint/default_policy.toml` with the nearest
+   strict `chelis-lint.toml` ([#740], §12.2); use it only for genuinely
+   uneditable infrastructure, build, dependency, generated, or immutable
+   trees. `.gitignore` remains version-control policy, not lint policy.
 
 ### 6. Standing detection (because prevention leaks)
 
@@ -176,6 +191,7 @@ table are part of landing any new canonical mechanism.
 | HIP narrow-float rejection / Metal f64 rejection | `chelis-backend-hip` gate / `chelis-backend-metal` dtype | the calibration examples for unsupported diagnostics | silent `ElemKind` fallbacks ([#689]) |
 | eval/c lane drivers (verbatim strings) | `crates/chelis-cli/tests/precision_matrix.rs` + sweep files, `docs/investigations/probes/` | any cross-lane numeric assertion | comparing through f64/tolerance ([#687]) or trusting printed tensors for int64/f16 ([#723]/[#716]) until [#732] lands |
 | the conform MANIFEST tripwire | `chelis-conformance` | any doc<->machine-form lockstep | hand-mirroring a doc into code with no diff test |
+| `TraversalPolicy` + `chelis-lint.toml` | `chelis-lint/src/policy.rs`, shipped baseline, repository root | whole-tree lint exclusion for genuinely uneditable content, with class + spec cross-reference | inherit `.gitignore`/machine filters, hide editable violations, or start a rule-local walk ([#740], §12.2) |
 | spec atoms + status banners | spec/04 §9-§10, spec/05 §7-§8 | citing decided semantics; adding new normative text | writing MUST/SHALL prose outside atoms in atomized files ([#733]) |
 
 ## Relationship to the plan set
@@ -188,6 +204,7 @@ should land alongside Wave 1 of `spec/design/remediation_roadmap.md`
 create), and mechanism 6's ratchets are cheap enough to land with
 Wave 0.
 
+[#603]: https://github.com/Chelis-Lang/chelis/issues/603
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#687]: https://github.com/Chelis-Lang/chelis/issues/687
 [#689]: https://github.com/Chelis-Lang/chelis/issues/689
@@ -210,3 +227,4 @@ Wave 0.
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
 [#738]: https://github.com/Chelis-Lang/chelis/issues/738
 [#740]: https://github.com/Chelis-Lang/chelis/issues/740
+[#815]: https://github.com/Chelis-Lang/chelis/pull/815

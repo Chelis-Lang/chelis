@@ -1,30 +1,185 @@
 //! Tensor-aware evaluator for the Phase 0 RISC DAG.
+//!
+//! chelis#729 Phase 1: values are stored in the sealed per-dtype
+//! [`TensorStorage`] (`chelis_types::dtype_semantics`), and every compute
+//! op constructs its result through `finalize_tensor` at the node's output
+//! precision (the section C1 finalize-per-op contract). Movement ops that
+//! provably preserve elements move storage through the `reuse_*` family
+//! instead of re-finalizing. The raw f64 `binary_map`/`unary_map` paths
+//! this file used to run on are deleted, not deprecated.
+//!
+//! chelis#729 Phase 2: elementwise arithmetic dispatches once per buffer
+//! into the closed typed kernels. Integer operands never cross binary64,
+//! f32/f64 compute at their declared widths, and f16/bf16 compute through
+//! binary32 with one storage finalization. Reductions pass only ordered
+//! index groups into the same closed typed-kernel boundary; this module
+//! does not own numeric accumulation or comparison.
 
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+
+use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{
-    Dag, DagNode, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtDim,
-    SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
+    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType,
+    bind_symbolic_dims, symbolic_bindings,
+};
+use chelis_types::dtype_semantics::{
+    ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
+    FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, RawTensor,
+    ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
+    count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
+    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
+    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
+    tensor_from_scalars, uniform_sample,
 };
 use chelis_types::types::Prim;
 
-#[derive(Debug, Clone, PartialEq)]
+/// Public evaluator entry points that do not inherit an enclosing handler
+/// still evaluate a path-sensitive DAG from the beginning of its stream.
+const INITIAL_RANDOM_STREAM_ORDINAL: u64 = 0;
+
+#[derive(Debug, Clone)]
 pub struct TensorValue {
-    pub data: Vec<f64>,
+    storage: TensorStorage,
     pub shape: Vec<usize>,
+    raw_f64_ingress: bool,
 }
 
 impl TensorValue {
+    /// Rank-0 raw-f64 host ingress. The consuming Load freezes it at its
+    /// declared dtype; this constructor is not an already-tagged value.
     pub fn scalar(value: f64) -> Self {
         Self {
-            data: vec![value],
+            storage: finalize_tensor("scalar", Prim::F64, RawTensor::Float(vec![value]))
+                .expect("f64 finalize is total"),
             shape: vec![],
+            raw_f64_ingress: true,
         }
     }
 
+    /// Raw-f64 host ingress constructor (tests and legacy data loaders). The
+    /// consuming Load freezes the buffer once at its declared dtype. Typed
+    /// wire and runtime values use [`Self::from_storage`] instead, so their
+    /// tags can never be contextually substituted.
     pub fn from_vec(shape: Vec<usize>, data: Vec<f64>) -> Self {
         assert_eq!(numel(&shape), data.len());
-        Self { data, shape }
+        Self {
+            storage: finalize_tensor("from_vec", Prim::F64, RawTensor::Float(data))
+                .expect("f64 finalize is total"),
+            shape,
+            raw_f64_ingress: true,
+        }
+    }
+
+    /// Wrap finalized storage with its shape.
+    pub fn from_storage(shape: Vec<usize>, storage: TensorStorage) -> Self {
+        assert_eq!(numel(&shape), storage.len());
+        Self {
+            storage,
+            shape,
+            raw_f64_ingress: false,
+        }
+    }
+
+    /// The element dtype, from the storage variant itself.
+    pub fn prim(&self) -> Prim {
+        self.storage.prim()
+    }
+
+    pub fn storage(&self) -> &TensorStorage {
+        &self.storage
+    }
+
+    /// Element count (the shape's numel).
+    pub fn len(&self) -> usize {
+        self.storage.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
+    /// Widen every element to f64; exact except for int64 magnitudes
+    /// above 2^53 (the named-lossy read of section C3).
+    pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
+        self.storage.to_f64_lossy_vec()
+    }
+
+    /// One element widened to f64 (same loss profile).
+    pub fn element_f64_lossy(&self, index: usize) -> f64 {
+        self.storage.element_f64_lossy(index)
+    }
+
+    /// First element widened to f64, or 0.0 for an empty buffer (the
+    /// scalar-read convention `eval_scalar` always had).
+    pub fn first_f64_lossy_or_zero(&self) -> f64 {
+        if self.storage.is_empty() {
+            0.0
+        } else {
+            self.storage.element_f64_lossy(0)
+        }
+    }
+
+    /// Public compute-op constructor for the host runtime lane: finalize a
+    /// wide f64 buffer at `prim` (the same path this evaluator's own ops
+    /// take, including the chelis#680 integer saturate adapter).
+    pub fn finalize_from_wide(
+        op: &'static str,
+        prim: Prim,
+        shape: Vec<usize>,
+        wide: Vec<f64>,
+    ) -> Result<Self, String> {
+        finalize_wide(op, prim, shape, wide)
+    }
+
+    /// Public exact-integer constructor for paths that computed in i64.
+    pub fn finalize_from_wide_int(
+        op: &'static str,
+        prim: Prim,
+        shape: Vec<usize>,
+        wide: Vec<i64>,
+    ) -> Result<Self, String> {
+        finalize_wide_int(op, prim, shape, wide)
+    }
+}
+
+/// Public tensor `cast` for the host runtime lane; same per-direction
+/// ladder as this evaluator's `RiscOp::Cast` arm (see [`cast_value`]).
+pub fn cast_tensor(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, String> {
+    cast_value(input, src, dst)
+}
+
+/// Value equality for tests and fixtures: shapes equal and element values
+/// equal, compared exactly per family. Cross-family (an int-family stored
+/// result against a float-storage fixture) compares by value only where
+/// that fixture's actual dtype carries the integer exactly. This is a
+/// significand test, not a magnitude cutoff: powers of two such as
+/// `i64::MIN` are exactly representable in f64, while `i64::MAX` is not.
+/// NaN keeps `!=` semantics, as the old `Vec<f64>` derive had.
+impl PartialEq for TensorValue {
+    fn eq(&self, other: &Self) -> bool {
+        if self.shape != other.shape {
+            return false;
+        }
+        let self_prim = self.prim();
+        let other_prim = other.prim();
+        match (self.storage.to_raw(), other.storage.to_raw()) {
+            (RawTensor::Int(a), RawTensor::Int(b)) => a == b,
+            (RawTensor::Float(a), RawTensor::Float(b)) => a == b,
+            (RawTensor::Int(ints), RawTensor::Float(floats)) => {
+                ints.len() == floats.len()
+                    && ints.iter().zip(&floats).all(|(&i, &f)| {
+                        integer_is_exactly_representable(i, other_prim) && (i as f64) == f
+                    })
+            }
+            (RawTensor::Float(floats), RawTensor::Int(ints)) => {
+                ints.len() == floats.len()
+                    && ints.iter().zip(&floats).all(|(&i, &f)| {
+                        integer_is_exactly_representable(i, self_prim) && (i as f64) == f
+                    })
+            }
+        }
     }
 }
 
@@ -32,10 +187,17 @@ fn numel(shape: &[usize]) -> usize {
     if shape.is_empty() {
         // Scalar: no dimensions means a single element.
         1
-    } else {
-        // Non-scalar: honor every dimension, including zero. A tensor[0, f32]
+    } else if shape.contains(&0) {
+        // Non-scalar with a zero extent: honor it. A tensor[0, f32]
         // legitimately holds zero elements; inflating to 1 drops data integrity
         // and panics the from_vec length assertion.
+        //
+        // Short-circuit rather than fold, because the answer does not depend on
+        // the other extents and folding them can overflow a product that is
+        // defined to be zero: `[2^32, 2^32, 0]` reaches `2^64` before it ever
+        // reaches the zero.
+        0
+    } else {
         shape.iter().product()
     }
 }
@@ -58,7 +220,7 @@ fn concrete_shape(ty: &TensorType) -> Result<Vec<usize>, String> {
 /// runtime extents (node-valued movement / reshape output dims).
 fn concrete_shape_with(
     ty: &TensorType,
-    runtime_dims: &HashMap<String, usize>,
+    runtime_dims: &UnordMap<String, usize>,
 ) -> Result<Vec<usize>, String> {
     ty.dims
         .iter()
@@ -73,79 +235,1332 @@ fn concrete_shape_with(
         .collect()
 }
 
+/// Zero-filled tensor at the type's declared dtype (missing non-strict
+/// Load inputs). Zero is a member of every active dtype, so this cannot
+/// trap.
 fn default_value(ty: &TensorType) -> TensorValue {
     let shape = concrete_shape(ty).unwrap_or_default();
-    TensorValue {
-        data: vec![0.0; numel(&shape)],
-        shape,
+    let n = numel(&shape);
+    let storage = if ty.precision.is_float() {
+        finalize_tensor("load", ty.precision, RawTensor::Float(vec![0.0; n]))
+    } else {
+        finalize_tensor("load", ty.precision, RawTensor::Int(vec![0; n]))
+    }
+    .expect("zero is a member of every active dtype");
+    TensorValue::from_storage(shape, storage)
+}
+
+/// Freeze a raw-f64 host input once at the Load's declared dtype, or accept
+/// an already-tagged value only when its storage dtype matches the Load
+/// declaration. A tagged mismatch is not an implicit cast: [04-NUM-11]
+/// requires the carrier to preserve its declared dtype exactly.
+fn ingress_to_declared(
+    name: &str,
+    declared: Prim,
+    value: &TensorValue,
+) -> Result<TensorValue, String> {
+    if value.raw_f64_ingress {
+        let storage = finalize_tensor("load", declared, value.storage().to_raw())
+            .map_err(|trap| format!("input `{name}`: {trap}"))?;
+        return Ok(TensorValue::from_storage(value.shape.clone(), storage));
+    }
+    if value.prim() == declared {
+        return Ok(value.clone());
+    }
+    Err(format!(
+        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)",
+        value.prim().name(),
+        declared.name()
+    ))
+}
+
+/// Legacy wide-buffer adapter for non-elementwise paths that still produce
+/// integral f64 images before finalization. Elementwise arithmetic and static
+/// condition folding never enter this adapter: their closed kernels preserve
+/// the exact integer storage width.
+fn wide_i64_saturating(x: f64) -> i64 {
+    x as i64
+}
+
+/// Finalize a computed wide buffer at the node's output dtype. THE
+/// construction path for every compute op in this evaluator (section C1:
+/// kernels compute wide, finalize once per op).
+fn finalize_wide(
+    op: &'static str,
+    prim: Prim,
+    shape: Vec<usize>,
+    wide: Vec<f64>,
+) -> Result<TensorValue, String> {
+    let raw = if prim.is_float() {
+        RawTensor::Float(wide)
+    } else if wide.iter().all(|x| x.is_finite() && x.fract() == 0.0) {
+        RawTensor::Int(wide.into_iter().map(wide_i64_saturating).collect())
+    } else {
+        // A fractional/non-finite element at an integer or bool dtype
+        // must Domain-trap through finalize, never truncate.
+        RawTensor::Float(wide)
+    };
+    let storage = finalize_tensor(op, prim, raw).map_err(|trap| trap.to_string())?;
+    Ok(TensorValue::from_storage(shape, storage))
+}
+
+/// Exact integer finalize for paths that already computed in i64
+/// (reductions, casts, one_hot index writes).
+fn finalize_wide_int(
+    op: &'static str,
+    prim: Prim,
+    shape: Vec<usize>,
+    wide: Vec<i64>,
+) -> Result<TensorValue, String> {
+    let storage =
+        finalize_tensor(op, prim, RawTensor::Int(wide)).map_err(|trap| trap.to_string())?;
+    Ok(TensorValue::from_storage(shape, storage))
+}
+
+/// Tensor `cast`: consume the shared source/target plan once, apply it to
+/// sealed elements, and reduce every trap candidate by row-major flat index.
+/// There is no whole-buffer domain pre-pass and no second finalization pass.
+fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, String> {
+    if input.prim() != src {
+        return Err(format!(
+            "checked cast source contract mismatch: declared {}, stored {}",
+            src.name(),
+            input.prim().name()
+        ));
+    }
+    let plan = CheckedCastPlan::new(src, dst).map_err(|error| error.to_string())?;
+    if plan.kind() == chelis_types::CheckedCastKind::Identity {
+        return Ok(input.clone());
+    }
+
+    let mut cast_values = Vec::with_capacity(input.storage().len());
+    let mut selected_trap: Option<IndexedTrapCandidate> = None;
+    for flat_index in 0..input.storage().len() {
+        match plan.cast_scalar("cast", input.storage().scalar_at(flat_index)) {
+            Ok(value) => cast_values.push(value),
+            Err(trap) => {
+                let candidate = IndexedTrapCandidate { flat_index, trap };
+                selected_trap = Some(match selected_trap {
+                    Some(selected) => selected.earlier(candidate),
+                    None => candidate,
+                });
+            }
+        }
+    }
+    if let Some(candidate) = selected_trap {
+        return Err(candidate.trap.to_string());
+    }
+    let storage = tensor_from_scalars(dst, &cast_values);
+    Ok(TensorValue::from_storage(input.shape.clone(), storage))
+}
+
+/// Public entry point for the [05-OP-6] tensor rung, mirroring
+/// [`cast_tensor`] so the host runtime and the DAG evaluator share one
+/// kernel.
+pub fn cast_trunc_tensor(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
+    cast_trunc_value(input, dst)
+}
+
+/// Tensor `cast_trunc` ([05-OP-6]): truncate every float element toward
+/// zero, then finalize at the integer target. The source is float and the
+/// target an integer width by the checker's contract, so the sealed
+/// kernel is reached with exactly the shape it accepts.
+fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
+    let storage = chelis_types::cast_trunc_tensor("cast_trunc", input.storage().to_raw(), dst)
+        .map_err(|trap| trap.to_string())?;
+    Ok(TensorValue::from_storage(input.shape.clone(), storage))
+}
+
+fn dropout(input: &TensorValue, rate: f64, seed: u64, prim: Prim) -> Result<TensorValue, String> {
+    let keep_scale = if rate >= 1.0 {
+        0.0
+    } else {
+        1.0 / (1.0 - rate.max(0.0))
+    };
+    let data = input
+        .to_f64_lossy_vec()
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let sample = dropout_sample(seed, index as u64);
+            if sample < rate {
+                0.0
+            } else {
+                value * keep_scale
+            }
+        })
+        .collect();
+    finalize_wide("dropout", prim, input.shape.clone(), data)
+}
+
+fn dropout_sample(seed: u64, index: u64) -> f64 {
+    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+fn uniform_like(
+    shape: &[usize],
+    low: f64,
+    high: f64,
+    seed: u64,
+    prim: Prim,
+) -> Result<TensorValue, String> {
+    let low_f = low as f32;
+    let high_f = high as f32;
+    let values = (0..numel(shape))
+        .map(|index| uniform_sample(prim, low_f, high_f, seed, index as u64))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(
+        shape.to_vec(),
+        tensor_from_scalars(prim, &values),
+    ))
+}
+
+/// Closed elementwise binary vocabulary for the IR evaluator. The enum is
+/// translated to the per-family public kernel only after the finalized
+/// operand storage has selected the family; no raw closure or string can
+/// become an arithmetic entry point.
+#[derive(Debug, Clone, Copy)]
+enum ElementwiseBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    FloorDiv,
+    TruncDiv,
+    Max,
+    Min,
+}
+
+impl ElementwiseBinOp {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::Div => "div",
+            Self::FloorDiv => "floor_div",
+            Self::TruncDiv => "trunc_div",
+            Self::Max => "max_elem",
+            Self::Min => "min_elem",
+        }
+    }
+
+    const fn int_op(self) -> Option<IntBinOp> {
+        match self {
+            Self::Add => Some(IntBinOp::Add),
+            Self::Sub => Some(IntBinOp::Sub),
+            Self::Mul => Some(IntBinOp::Mul),
+            Self::FloorDiv => Some(IntBinOp::FloorDiv),
+            Self::TruncDiv => Some(IntBinOp::TruncDiv),
+            Self::Max => Some(IntBinOp::Max),
+            Self::Min => Some(IntBinOp::Min),
+            Self::Div => None,
+        }
+    }
+
+    const fn float_op(self) -> Option<FloatBinOp> {
+        match self {
+            Self::Add => Some(FloatBinOp::Add),
+            Self::Sub => Some(FloatBinOp::Sub),
+            Self::Mul => Some(FloatBinOp::Mul),
+            Self::Div => Some(FloatBinOp::Div),
+            Self::FloorDiv => Some(FloatBinOp::FloorDiv),
+            Self::Max => Some(FloatBinOp::Max),
+            Self::Min => Some(FloatBinOp::Min),
+            Self::TruncDiv => None,
+        }
     }
 }
 
-/// Element-wise `cast` conversion for the DAG evaluator (#380), returning the
-/// converted value in this evaluator's `f64` storage. Mirrors
-/// `chelis-compiler-api`'s `runtime::host_ops::convert_scalar_data` and the C
-/// backend's element-wise C cast so all three lanes agree:
-/// float->int truncates toward zero, float->f32 drops precision through f32,
-/// int->float preserves the value, and bool encodes as 0.0 / 1.0 (decoded via
-/// `!= 0.0`). `chelis-ir` sits below `chelis-compiler-api`, so the logic is
-/// duplicated here rather than shared (no upward dependency).
-///
-/// `pub(crate)` so lowering's static `if`-condition fold (chelis#620) applies
-/// the exact same cast semantics as this evaluator; a fold/eval divergence
-/// there would silently select the wrong branch.
-pub(crate) fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> f64 {
-    if src == dst {
-        return x;
-    }
-    // Project the source storage into a normalized representation: ints route
-    // through i64, bools through 0/1, floats stay floats.
-    let as_int: Option<i64> = match src {
-        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(x as i64),
-        Prim::Bool => Some(if x != 0.0 { 1 } else { 0 }),
-        _ => None,
+/// chelis#664 on the eval lane: an elementwise op indexes every operand
+/// through the output's shape, so operands that disagree at run time are a
+/// typed error, never an assertion. The routing of host-lane def applications
+/// through this evaluator (chelis#1277 B2h) made a runtime disagreement user
+/// input; the phrase is the one the host interpreter reports.
+fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
+    let render = |shape: &[usize]| {
+        let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
+        format!("[{}]", extents.join(", "))
     };
-    // Emit in the target precision's storage convention.
-    match dst {
-        Prim::F64 => match as_int {
-            Some(i) => i as f64,
-            None => x,
-        },
-        Prim::F32 => match as_int {
-            Some(i) => (i as f32) as f64,
-            None => (x as f32) as f64,
-        },
-        Prim::Int8 => match as_int {
-            Some(i) => (i as i8) as f64,
-            None => (x as i8) as f64,
-        },
-        Prim::Int16 => match as_int {
-            Some(i) => (i as i16) as f64,
-            None => (x as i16) as f64,
-        },
-        Prim::Int32 => match as_int {
-            Some(i) => (i as i32) as f64,
-            None => (x as i32) as f64,
-        },
-        Prim::Int64 => match as_int {
-            Some(i) => i as f64,
-            None => (x as i64) as f64,
-        },
-        Prim::Bool => {
-            let nonzero = match as_int {
-                Some(i) => i != 0,
-                None => x != 0.0,
-            };
-            if nonzero { 1.0 } else { 0.0 }
-        }
-        // Reduced floats (bf16/f16) route through f32 storage in this f64
-        // evaluator; string is not a tensor element type. Fall back to the
-        // f32 narrowing for reduced floats and pass other targets through.
-        Prim::Bf16 | Prim::F16 => match as_int {
-            Some(i) => (i as f32) as f64,
-            None => (x as f32) as f64,
-        },
-        _ => x,
+    format!(
+        "tensor shapes must match for elementwise op, got {} vs {}",
+        render(&lhs.shape),
+        render(&rhs.shape)
+    )
+}
+
+/// Lane preservation for the one operand disagreement that is not an error.
+/// The lowerer gives a comparison's scalar operand a rank-0 `Const`
+/// (`lower_builtin_app`'s `cmplt`/`lt` arm in `lower.rs`), and the C kernel
+/// it emits indexes that operand at 0 for every output element: `emit_binary`
+/// in `crates/chelis-backend-c/src/emit.rs` falls through to its strided loop
+/// when the operand sizes differ, and `chelis_indices_to_flat(indices,
+/// t->strides, t->rank)` is 0 at rank 0. `spec/05-risc-primitives.md`
+/// section 2.4.1, lines 778-781 (the runtime-guard prose that [05-MOV-1]'s
+/// "Eval, C, HIP, and Metal execute the same runtime values and traps"
+/// governs), names that idiom and exempts it from the elementwise
+/// operand-agreement guard: "rank-0 scalar operands are the backend's
+/// broadcast idiom and are exempt" (chelis#664). Before host-lane def
+/// applications were routed through this evaluator (chelis#1277 B2h) no DAG
+/// carrying a rank-0 operand reached it; now `gt(to_tensor([..]), 1.5)`,
+/// which `check` admits at score 1 and the compiled C runs, does. This
+/// broadcast makes the two lanes agree on today's answer and takes no
+/// position on whether the form should be admitted at all: chelis#1506
+/// records that [05-OP-36] admits two scalars or two same-dimension tensors
+/// and calls the mixed form a type error. If chelis#1506 resolves by
+/// rejecting, this is the site to remove. The bound is rank 0 in either
+/// position and nothing wider; every other disagreement is the typed error.
+fn broadcast_rank0_operands<'a>(
+    lhs: &'a TensorValue,
+    rhs: &'a TensorValue,
+) -> Result<(Cow<'a, TensorValue>, Cow<'a, TensorValue>), String> {
+    if lhs.shape == rhs.shape {
+        return Ok((Cow::Borrowed(lhs), Cow::Borrowed(rhs)));
     }
+    if lhs.shape.is_empty() {
+        return Ok((Cow::Owned(splat_rank0(lhs, &rhs.shape)), Cow::Borrowed(rhs)));
+    }
+    if rhs.shape.is_empty() {
+        return Ok((Cow::Borrowed(lhs), Cow::Owned(splat_rank0(rhs, &lhs.shape))));
+    }
+    Err(shape_disagreement(lhs, rhs))
+}
+
+/// The rank-0 element repeated over `shape`, at the operand's own dtype.
+/// `reuse_gather` is the element-preserving gather the movement ops use
+/// (section C3); a rank-0 broadcast is `expand` of one element, so it
+/// qualifies: every output element is `value[0]`, never re-finalized.
+fn splat_rank0(value: &TensorValue, shape: &[usize]) -> TensorValue {
+    TensorValue {
+        storage: value.storage.reuse_gather(&vec![0; numel(shape)]),
+        shape: shape.to_vec(),
+        raw_f64_ingress: value.raw_f64_ingress,
+    }
+}
+
+fn binary_elementwise(
+    op: ElementwiseBinOp,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<TensorValue, String> {
+    let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
+    let (lhs, rhs) = (&*lhs, &*rhs);
+    let storage = if lhs.prim() == Prim::Bool && rhs.prim() == Prim::Bool {
+        let lhs_values = lhs
+            .storage()
+            .to_i64_exact_vec()
+            .expect("sealed bool storage has an exact integer view");
+        let rhs_values = rhs
+            .storage()
+            .to_i64_exact_vec()
+            .expect("sealed bool storage has an exact integer view");
+        let values = match op {
+            // Tier-2 lowers `and` and `or` to these two RISC operations.
+            // They remain logical operations over sealed bool storage; no
+            // numeric-family kernel or raw closure is involved.
+            ElementwiseBinOp::Mul => lhs_values
+                .into_iter()
+                .zip(rhs_values)
+                .map(|(lhs, rhs)| i64::from(lhs != 0 && rhs != 0))
+                .collect(),
+            ElementwiseBinOp::Max => lhs_values
+                .into_iter()
+                .zip(rhs_values)
+                .map(|(lhs, rhs)| i64::from(lhs != 0 || rhs != 0))
+                .collect(),
+            _ => {
+                return Err(format!(
+                    "{}: bool storage cannot enter a numeric IR kernel",
+                    op.name()
+                ));
+            }
+        };
+        return finalize_wide_int(op.name(), Prim::Bool, lhs.shape.clone(), values);
+    } else if lhs.prim().is_integer() {
+        let kernel = op.int_op().ok_or_else(|| {
+            format!(
+                "{}: integer operands cannot enter a float-only IR kernel",
+                op.name()
+            )
+        })?;
+        int_tensor_binop(kernel, lhs.storage(), rhs.storage())
+    } else if lhs.prim().is_float() {
+        let kernel = op.float_op().ok_or_else(|| {
+            format!(
+                "{}: float operands cannot enter an integer-only IR kernel",
+                op.name()
+            )
+        })?;
+        float_tensor_binop(kernel, lhs.storage(), rhs.storage())
+    } else {
+        return Err(format!(
+            "{}: dtype `{}` has no numeric IR kernel",
+            op.name(),
+            lhs.prim().name()
+        ));
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
+}
+
+/// Closed unary twin of [`ElementwiseBinOp`].
+#[derive(Debug, Clone, Copy)]
+enum ElementwiseUnOp {
+    Neg,
+    Recip,
+    Exp,
+    Log,
+    Sin,
+    Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+}
+
+impl ElementwiseUnOp {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Neg => "neg",
+            Self::Recip => "recip",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Sin => "sin",
+            Self::Sqrt => "sqrt",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Atan => "atan",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+        }
+    }
+
+    const fn int_op(self) -> Option<IntUnOp> {
+        match self {
+            Self::Neg => Some(IntUnOp::Neg),
+            Self::Abs => Some(IntUnOp::Abs),
+            Self::Floor => Some(IntUnOp::Floor),
+            Self::Ceil => Some(IntUnOp::Ceil),
+            Self::Round => Some(IntUnOp::Round),
+            Self::Recip
+            | Self::Exp
+            | Self::Log
+            | Self::Sin
+            | Self::Sqrt
+            | Self::Cos
+            | Self::Tan
+            | Self::Atan => None,
+        }
+    }
+
+    const fn float_op(self) -> FloatUnOp {
+        match self {
+            Self::Neg => FloatUnOp::Neg,
+            Self::Recip => FloatUnOp::Recip,
+            Self::Exp => FloatUnOp::Exp,
+            Self::Log => FloatUnOp::Log,
+            Self::Sin => FloatUnOp::Sin,
+            Self::Sqrt => FloatUnOp::Sqrt,
+            Self::Cos => FloatUnOp::Cos,
+            Self::Tan => FloatUnOp::Tan,
+            Self::Atan => FloatUnOp::Atan,
+            Self::Abs => FloatUnOp::Abs,
+            Self::Floor => FloatUnOp::Floor,
+            Self::Ceil => FloatUnOp::Ceil,
+            Self::Round => FloatUnOp::Round,
+        }
+    }
+}
+
+fn unary_elementwise(op: ElementwiseUnOp, input: &TensorValue) -> Result<TensorValue, String> {
+    let storage = if input.prim().is_integer() {
+        let kernel = op.int_op().ok_or_else(|| {
+            format!(
+                "{}: integer operands cannot enter a float-only IR kernel",
+                op.name()
+            )
+        })?;
+        int_tensor_unop(kernel, input.storage())
+    } else if input.prim().is_float() {
+        float_tensor_unop(op.float_op(), input.storage())
+    } else {
+        return Err(format!(
+            "{}: dtype `{}` has no numeric IR kernel",
+            op.name(),
+            input.prim().name()
+        ));
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(input.shape.clone(), storage))
+}
+
+fn compare_elementwise(
+    op: CompareOp,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<TensorValue, String> {
+    let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
+    let (lhs, rhs) = (&*lhs, &*rhs);
+    let storage =
+        compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
+}
+
+fn matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<TensorValue, String> {
+    assert_eq!(lhs.shape.len(), 2);
+    assert_eq!(rhs.shape.len(), 2);
+    let m = lhs.shape[0];
+    let k = lhs.shape[1];
+    assert_eq!(rhs.shape[0], k);
+    let n = rhs.shape[1];
+    let a = lhs.to_f64_lossy_vec();
+    let b = rhs.to_f64_lossy_vec();
+    let mut data = vec![0.0; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0;
+            for kk in 0..k {
+                acc += a[i * k + kk] * b[kk * n + j];
+            }
+            data[i * n + j] = acc;
+        }
+    }
+    finalize_wide("matmul", prim, vec![m, n], data)
+}
+
+fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<TensorValue, String> {
+    assert!(lhs.shape.len() >= 2);
+    assert!(rhs.shape.len() >= 2);
+    assert_eq!(lhs.shape.len(), rhs.shape.len());
+    let rank = lhs.shape.len();
+    let batch = &lhs.shape[..rank - 2];
+    assert_eq!(batch, &rhs.shape[..rank - 2]);
+    let m = lhs.shape[rank - 2];
+    let k = lhs.shape[rank - 1];
+    assert_eq!(rhs.shape[rank - 2], k);
+    let n = rhs.shape[rank - 1];
+    let batch_count = batch.iter().product::<usize>();
+    let mut out_shape = batch.to_vec();
+    out_shape.extend([m, n]);
+    let a = lhs.to_f64_lossy_vec();
+    let b = rhs.to_f64_lossy_vec();
+    let mut data = vec![0.0; batch_count * m * n];
+    for batch_idx in 0..batch_count {
+        let lhs_base = batch_idx * m * k;
+        let rhs_base = batch_idx * k * n;
+        let out_base = batch_idx * m * n;
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0;
+                for kk in 0..k {
+                    acc += a[lhs_base + i * k + kk] * b[rhs_base + kk * n + j];
+                }
+                data[out_base + i * n + j] = acc;
+            }
+        }
+    }
+    finalize_wide("matmul", prim, out_shape, data)
+}
+
+/// Read one gather/scatter index tensor element: exact for the integer
+/// family, the pre-refactor f64 truncation for float storage (index
+/// tensors are int64-typed after ingress, so the float arm is legacy
+/// tolerance for f64-storage fixtures driving untyped index inputs).
+fn index_at(indices: &TensorValue, linear: usize) -> isize {
+    match indices.storage().to_raw() {
+        RawTensor::Int(v) => v[linear] as isize,
+        RawTensor::Float(v) => v[linear] as isize,
+    }
+}
+
+fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorValue {
+    assert!(axis < values.shape.len());
+    let index_rank = indices.shape.len();
+    let mut out_shape = Vec::with_capacity(values.shape.len() - 1 + index_rank);
+    out_shape.extend_from_slice(&values.shape[..axis]);
+    out_shape.extend_from_slice(&indices.shape);
+    out_shape.extend_from_slice(&values.shape[axis + 1..]);
+    let mut picks = Vec::with_capacity(numel(&out_shape));
+    for out_linear in 0..numel(&out_shape) {
+        let out_index = linear_to_index(out_linear, &out_shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(out_index[axis + pos]);
+        }
+        let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
+        assert!(
+            gathered >= 0 && (gathered as usize) < values.shape[axis],
+            "gather index {gathered} out of bounds for axis {axis}"
+        );
+        let mut value_index = Vec::with_capacity(values.shape.len());
+        value_index.extend_from_slice(&out_index[..axis]);
+        value_index.push(gathered as usize);
+        value_index.extend_from_slice(&out_index[axis + index_rank..]);
+        picks.push(index_to_linear(&value_index, &values.shape));
+    }
+    // reuse_* contract: gather is element-preserving (section C3).
+    TensorValue::from_storage(out_shape.clone(), values.storage().reuse_gather(&picks))
+}
+
+fn scatter_add(
+    target: &TensorValue,
+    indices: &TensorValue,
+    updates: &TensorValue,
+    axis: usize,
+    prim: Prim,
+) -> Result<TensorValue, String> {
+    assert!(axis < target.shape.len());
+    let index_rank = indices.shape.len();
+    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
+    expected_updates.extend_from_slice(&target.shape[..axis]);
+    expected_updates.extend_from_slice(&indices.shape);
+    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
+    assert_eq!(updates.shape, expected_updates);
+
+    let mut out = target.to_f64_lossy_vec();
+    let upd = updates.to_f64_lossy_vec();
+    for (update_linear, update) in upd.iter().enumerate() {
+        let update_index = linear_to_index(update_linear, &updates.shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(update_index[axis + pos]);
+        }
+        let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
+        assert!(
+            gathered >= 0 && (gathered as usize) < target.shape[axis],
+            "scatter_add index {gathered} out of bounds for axis {axis}"
+        );
+        let mut target_index = Vec::with_capacity(target.shape.len());
+        target_index.extend_from_slice(&update_index[..axis]);
+        target_index.push(gathered as usize);
+        target_index.extend_from_slice(&update_index[axis + index_rank..]);
+        let target_linear = index_to_linear(&target_index, &target.shape);
+        out[target_linear] += update;
+    }
+    finalize_wide("scatter_add", prim, target.shape.clone(), out)
+}
+
+/// Replace-scatter (last-write-wins) over duplicate target indices.
+///
+/// Per `spec/05-risc-primitives.md` §3.5, the deterministic-order
+/// rule is **updates-tensor row-major (C order) flat iteration**:
+/// updates are written into the target in ascending flat-index order
+/// over `updates.shape`. When two updates target the same cell, the
+/// write with the larger flat index in `updates` is the final value.
+/// This is intentionally distinct from `scatter_add` (whose
+/// duplicate-index semantics are commutative accumulation) and is
+/// the reason replace-scatter has no well-defined AD adjoint.
+fn scatter_replace(
+    target: &TensorValue,
+    indices: &TensorValue,
+    updates: &TensorValue,
+    axis: usize,
+) -> TensorValue {
+    assert!(axis < target.shape.len());
+    let index_rank = indices.shape.len();
+    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
+    expected_updates.extend_from_slice(&target.shape[..axis]);
+    expected_updates.extend_from_slice(&indices.shape);
+    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
+    assert_eq!(updates.shape, expected_updates);
+
+    let mut writes = Vec::with_capacity(updates.len());
+    for update_linear in 0..updates.len() {
+        let update_index = linear_to_index(update_linear, &updates.shape);
+        let mut idx_index = Vec::with_capacity(index_rank);
+        for pos in 0..index_rank {
+            idx_index.push(update_index[axis + pos]);
+        }
+        let gathered = index_at(indices, index_to_linear(&idx_index, &indices.shape));
+        assert!(
+            gathered >= 0 && (gathered as usize) < target.shape[axis],
+            "scatter_replace index {gathered} out of bounds for axis {axis}"
+        );
+        let mut target_index = Vec::with_capacity(target.shape.len());
+        target_index.extend_from_slice(&update_index[..axis]);
+        target_index.push(gathered as usize);
+        target_index.extend_from_slice(&update_index[axis + index_rank..]);
+        // Last-write-wins: deterministic-order overwrite.
+        writes.push((index_to_linear(&target_index, &target.shape), update_linear));
+    }
+    // reuse_* contract: replace-scatter moves existing elements only
+    // (section C3, element-preserving).
+    TensorValue::from_storage(
+        target.shape.clone(),
+        target.storage().reuse_overwrite(updates.storage(), writes),
+    )
+}
+
+/// Element-wise replace-scatter with ONNX `ScatterElements` semantics
+/// (`spec/05-risc-primitives.md` §3.5.1).
+///
+/// Distinct from `scatter_replace` (hyperplane semantics): here
+/// `data`/`indices`/`updates` share a rank, `indices.shape ==
+/// updates.shape`, and `output.shape == data.shape`. For each
+/// coordinate `c` over `indices`, the value `updates[c]` is written to
+/// `output` at the coordinate `c` with its `axis` component replaced by
+/// `indices[c]`. Duplicate writes resolve last-write-wins in
+/// updates-tensor row-major (C order) flat-iteration order, matching
+/// `scatter_replace`'s determinism rule; AD is fail-closed for the same
+/// reason.
+fn scatter_elements(
+    data: &TensorValue,
+    indices: &TensorValue,
+    updates: &TensorValue,
+    axis: usize,
+) -> TensorValue {
+    assert!(axis < data.shape.len());
+    assert_eq!(
+        indices.shape, updates.shape,
+        "scatter_elements requires indices.shape == updates.shape"
+    );
+    assert_eq!(
+        indices.shape.len(),
+        data.shape.len(),
+        "scatter_elements requires data, indices, and updates to share a rank"
+    );
+
+    let mut writes = Vec::with_capacity(updates.len());
+    for update_linear in 0..updates.len() {
+        let coord = linear_to_index(update_linear, &updates.shape);
+        let gathered = index_at(indices, update_linear);
+        assert!(
+            gathered >= 0 && (gathered as usize) < data.shape[axis],
+            "scatter_elements index {gathered} out of bounds for axis {axis}"
+        );
+        let mut target_index = coord.clone();
+        target_index[axis] = gathered as usize;
+        // Last-write-wins: deterministic-order overwrite.
+        writes.push((index_to_linear(&target_index, &data.shape), update_linear));
+    }
+    // reuse_* contract: element-preserving overwrite (section C3).
+    TensorValue::from_storage(
+        data.shape.clone(),
+        data.storage().reuse_overwrite(updates.storage(), writes),
+    )
+}
+
+/// Strided windowed reduction over the trailing `window_shape.len()` axes.
+///
+/// Per `spec/05-risc-primitives.md` §2.3.1 (Valid padding):
+/// - Leading `rank - n` axes pass through unchanged.
+/// - Each windowed output axis has extent
+///   `floor((input_dim - window_shape[i]) / strides[i]) + 1`.
+/// - `Mean` is windowed `Sum` divided by the window volume.
+///
+/// Panics if the input rank is smaller than `window_shape.len()`, if any
+/// window/stride entry is zero, or if any windowed dim has `window > input_dim`.
+/// The IR verifier and type checker reject those statically before the
+/// evaluator runs.
+fn reduce_window(
+    input: &TensorValue,
+    reducer: ReduceWindowKind,
+    window_shape: &[usize],
+    strides: &[usize],
+    prim: Prim,
+) -> Result<TensorValue, String> {
+    assert_eq!(
+        window_shape.len(),
+        strides.len(),
+        "window_shape and strides must have equal length"
+    );
+    let rank = input.shape.len();
+    let n = window_shape.len();
+    assert!(
+        rank >= n,
+        "reduce_window: input rank {rank} smaller than window arity {n}"
+    );
+    let leading = rank - n;
+
+    let mut out_shape = input.shape[..leading].to_vec();
+    for i in 0..n {
+        let in_dim = input.shape[leading + i];
+        let w = window_shape[i];
+        let s = strides[i];
+        assert!(w >= 1, "reduce_window: window axis {i} must be >= 1");
+        assert!(s >= 1, "reduce_window: stride axis {i} must be >= 1");
+        assert!(
+            in_dim >= w,
+            "reduce_window: axis {i} input dim {in_dim} < window {w}"
+        );
+        out_shape.push((in_dim - w) / s + 1);
+    }
+
+    let out_len = numel(&out_shape);
+    let mut groups = Vec::with_capacity(out_len);
+    for out_flat in 0..out_len {
+        let out_idx = linear_to_index(out_flat, &out_shape);
+        let mut group = Vec::with_capacity(window_shape.iter().product());
+        for_each_window_pos(window_shape, n, |window_pos| {
+            let mut src_idx = vec![0usize; rank];
+            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
+            for i in 0..n {
+                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
+            }
+            group.push(index_to_linear(&src_idx, &input.shape));
+        });
+        groups.push(group);
+    }
+    let op = match reducer {
+        ReduceWindowKind::Max => TensorReduceOp::ReduceWindowMax,
+        ReduceWindowKind::Min => TensorReduceOp::ReduceWindowMin,
+        ReduceWindowKind::Sum => TensorReduceOp::ReduceWindowSum,
+        ReduceWindowKind::Mean => TensorReduceOp::ReduceWindowMean,
+    };
+    let storage =
+        reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    if storage.prim() != prim {
+        return Err(format!(
+            "{} produced {} storage for {} IR output",
+            op.name(),
+            storage.prim().name(),
+            prim.name()
+        ));
+    }
+    Ok(TensorValue::from_storage(out_shape, storage))
+}
+
+/// Reverse-mode adjoint of [`reduce_window`] (see `RiscOp::ReduceWindowGrad`).
+///
+/// `x` is the original windowed input (shape `S_in`); `g` is the upstream
+/// cotangent (shape `S_out`, the forward output). Returns `din` with shape
+/// `S_in`, accumulating contributions over every (overlapping) window:
+/// - `Sum`:  each window-source position receives the owning window's `g`.
+/// - `Mean`: as `Sum`, scaled by `1 / window_volume`.
+/// - `Max` / `Min`: the window's `g` is routed to every position equal to
+///   that window's max / min (ties distribute, matching the `max_reduce` /
+///   `min_reduce` subgradient convention).
+///
+/// Panics on the same structural violations as [`reduce_window`]; the IR
+/// verifier and type checker reject those before the evaluator runs.
+fn reduce_window_grad(
+    x: &TensorValue,
+    g: &TensorValue,
+    reducer: ReduceWindowKind,
+    window_shape: &[usize],
+    strides: &[usize],
+    prim: Prim,
+) -> Result<TensorValue, String> {
+    assert_eq!(
+        window_shape.len(),
+        strides.len(),
+        "window_shape and strides must have equal length"
+    );
+    let rank = x.shape.len();
+    let n = window_shape.len();
+    assert!(
+        rank >= n,
+        "reduce_window_grad: input rank {rank} smaller than window arity {n}"
+    );
+    let leading = rank - n;
+    // Output dim per windowed axis: floor((in - w) / s) + 1 (Valid padding),
+    // matching the forward. The cotangent `g` is indexed by this shape.
+    let mut out_shape = x.shape[..leading].to_vec();
+    for i in 0..n {
+        let in_dim = x.shape[leading + i];
+        let w = window_shape[i];
+        let s = strides[i];
+        assert!(w >= 1, "reduce_window_grad: window axis {i} must be >= 1");
+        assert!(s >= 1, "reduce_window_grad: stride axis {i} must be >= 1");
+        assert!(
+            in_dim >= w,
+            "reduce_window_grad: axis {i} input dim {in_dim} < window {w}"
+        );
+        out_shape.push((in_dim - w) / s + 1);
+    }
+    assert_eq!(
+        g.shape, out_shape,
+        "reduce_window_grad: cotangent shape {:?} != forward output shape {out_shape:?}",
+        g.shape
+    );
+
+    let mut groups = Vec::with_capacity(g.len());
+    for out_flat in 0..g.len() {
+        let out_idx = linear_to_index(out_flat, &out_shape);
+        let mut group = Vec::with_capacity(window_shape.iter().product());
+        for_each_window_pos(window_shape, n, |window_pos| {
+            let mut src_idx = vec![0usize; rank];
+            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
+            for i in 0..n {
+                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
+            }
+            group.push(index_to_linear(&src_idx, &x.shape));
+        });
+        groups.push(group);
+    }
+    let op = match reducer {
+        ReduceWindowKind::Sum => ReduceWindowGradOp::Sum,
+        ReduceWindowKind::Mean => ReduceWindowGradOp::Mean,
+        ReduceWindowKind::Max => ReduceWindowGradOp::Max,
+        ReduceWindowKind::Min => ReduceWindowGradOp::Min,
+    };
+    let storage = reduce_window_grad_tensor_groups(op, x.storage(), g.storage(), &groups)
+        .map_err(|err| err.to_string())?;
+    if storage.prim() != prim {
+        return Err(format!(
+            "{} produced {} storage for {} IR output",
+            op.name(),
+            storage.prim().name(),
+            prim.name()
+        ));
+    }
+    Ok(TensorValue::from_storage(x.shape.clone(), storage))
+}
+
+/// Invoke `f` once per multi-index inside an `n`-dimensional window of
+/// extent `window_shape` (row-major / mixed-radix order). For `n == 0`
+/// (no windowed axes) `f` is invoked once with an empty index.
+fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usize])) {
+    let mut window_pos = vec![0usize; n];
+    loop {
+        f(&window_pos);
+        if n == 0 {
+            break;
+        }
+        let mut carry = n;
+        for i in (0..n).rev() {
+            window_pos[i] += 1;
+            if window_pos[i] < window_shape[i] {
+                carry = i;
+                break;
+            }
+            window_pos[i] = 0;
+        }
+        if carry == n {
+            break;
+        }
+    }
+}
+
+/// Build the exact, ordered source-index group for every output element of
+/// an axis reduction. Shape planning remains local; arithmetic does not.
+fn axis_reduction_groups(input_shape: &[usize], axis: usize) -> (Vec<usize>, Vec<Vec<usize>>) {
+    assert!(axis < input_shape.len());
+    let mut out_shape = input_shape.to_vec();
+    let axis_len = out_shape.remove(axis);
+    let out_len = numel(&out_shape);
+    let mut groups = Vec::with_capacity(out_len);
+    for out_flat in 0..out_len {
+        let out_index = linear_to_index(out_flat, &out_shape);
+        let mut group = Vec::with_capacity(axis_len);
+        for axis_index in 0..axis_len {
+            let mut input_index = Vec::with_capacity(input_shape.len());
+            let mut output_axis = 0;
+            for input_axis in 0..input_shape.len() {
+                if input_axis == axis {
+                    input_index.push(axis_index);
+                } else {
+                    input_index.push(out_index[output_axis]);
+                    output_axis += 1;
+                }
+            }
+            group.push(index_to_linear(&input_index, input_shape));
+        }
+        groups.push(group);
+    }
+    (out_shape, groups)
+}
+
+/// Axis reduction through the closed Phase 2 typed kernel.
+fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let storage =
+        reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
+}
+
+/// Reduce along `axis`, tracking the index of the element that wins under
+/// `better(current_best, candidate)`. Used for Argmax / Argmin.
+///
+/// Ties are broken by the smallest index (first-seen wins), matching numpy's
+/// default argmax/argmin semantics. The output holds exact int64 indices
+/// (the `RiscOp::Argmax` spec invariant; per-dtype storage ended the
+/// f64-image detour of chelis#233).
+fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let storage =
+        arg_reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
+}
+
+/// [05-OP-29] multi-axis bool count. Source elements are partitioned into
+/// result groups by removing the selected coordinates. Each group is filled
+/// by scanning the input in its original row-major order. Arithmetic and the
+/// canonical adjacent-pair checked-int64 tree live only in the typed kernel.
+pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
+    if axes.is_empty()
+        || axes.iter().any(|&axis| axis >= input.shape.len())
+        || axes.windows(2).any(|pair| pair[0] <= pair[1])
+    {
+        return Err(format!(
+            "count axes must be non-empty, unique, in range, and strictly descending; got {axes:?}"
+        ));
+    }
+
+    let selected: UnordSet<usize> = axes.iter().copied().collect();
+    let out_shape: Vec<usize> = input
+        .shape
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, &extent)| (!selected.contains(&axis)).then_some(extent))
+        .collect();
+    let mut groups = vec![Vec::<usize>::new(); numel(&out_shape)];
+    for flat in 0..input.len() {
+        let input_coord = linear_to_index(flat, &input.shape);
+        let output_coord: Vec<usize> = input_coord
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, &coord)| (!selected.contains(&axis)).then_some(coord))
+            .collect();
+        let group = index_to_linear(&output_coord, &out_shape);
+        groups[group].push(flat);
+    }
+    let storage =
+        count_tensor_groups(input.storage(), &groups).map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
+}
+
+fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
+    assert_eq!(input.len(), numel(&shape));
+    // reuse_* contract: reshape is element-preserving (section C3); the
+    // buffer moves unchanged under a new shape.
+    TensorValue::from_storage(shape, input.storage().clone())
+}
+
+fn permute(input: &TensorValue, axes: &[usize]) -> TensorValue {
+    assert_eq!(axes.len(), input.shape.len());
+    let out_shape: Vec<usize> = axes.iter().map(|&axis| input.shape[axis]).collect();
+    let out_len = numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_len);
+    for flat_idx in 0..out_len {
+        let out_index = linear_to_index(flat_idx, &out_shape);
+        let mut in_index = vec![0; input.shape.len()];
+        for (out_axis, &in_axis) in axes.iter().enumerate() {
+            in_index[in_axis] = out_index[out_axis];
+        }
+        picks.push(index_to_linear(&in_index, &input.shape));
+    }
+    // reuse_* contract: permute is element-preserving (section C3).
+    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+}
+
+fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>) -> TensorValue {
+    assert!(axis <= input.shape.len());
+    let out_len = numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_len);
+    for flat_idx in 0..out_len {
+        let out_index = linear_to_index(flat_idx, &out_shape);
+        let in_index = if out_shape.len() == input.shape.len() {
+            let mut idx = out_index;
+            idx[axis] = 0;
+            idx
+        } else {
+            let mut idx = out_index;
+            idx.remove(axis);
+            idx
+        };
+        picks.push(index_to_linear(&in_index, &input.shape));
+    }
+    // reuse_* contract: expand is element-preserving (section C3).
+    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+}
+
+fn one_hot(indices: &TensorValue, vocab: usize, prim: Prim) -> Result<TensorValue, String> {
+    let mut out_shape = indices.shape.clone();
+    out_shape.push(vocab);
+    let mut out = vec![0i64; numel(&out_shape)];
+    for index_linear in 0..indices.len() {
+        let class = index_at(indices, index_linear);
+        assert!(
+            class >= 0 && (class as usize) < vocab,
+            "one_hot index {class} out of bounds for vocab {vocab}"
+        );
+        let mut out_index = linear_to_index(index_linear, &indices.shape);
+        out_index.push(class as usize);
+        out[index_to_linear(&out_index, &out_shape)] = 1;
+    }
+    finalize_wide_int("one_hot", prim, out_shape, out)
+}
+
+/// chelis#616: resolve a movement [`RtDim`] to a concrete extent at eval time.
+/// `Lit` is itself; `ToEnd` is the axis's input extent; `Node(i)` reads the
+/// rank-0 integer value at `node.inputs[i]`; and `InputAxis` reads an explicit
+/// tensor input's shape metadata.
+fn resolve_eval_bound(
+    bound: &RtDim,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    input_extent: usize,
+) -> Result<usize, String> {
+    match bound {
+        RtDim::Lit(n) => Ok(*n),
+        RtDim::ToEnd => Ok(input_extent),
+        RtDim::Node(i) => {
+            let src = values.get(&node.inputs[*i]).ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: missing value for bound-source input slot {i}",
+                    node.id.0
+                )
+            })?;
+            if src.is_empty() {
+                return Err(format!(
+                    "movement bound at node {}: bound-source input slot {i} is empty",
+                    node.id.0
+                ));
+            }
+            let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: bound-source input slot {i} must be int64",
+                    node.id.0
+                )
+            })?;
+            if raw < 0 {
+                return Err(format!(
+                    "movement bound at node {}: bound-source (slot {i}) must be a non-negative \
+                     integer, got {raw}",
+                    node.id.0
+                ));
+            }
+            usize::try_from(raw).map_err(|_| {
+                format!(
+                    "movement bound at node {}: bound-source (slot {i}) exceeds host extent capacity: {raw}",
+                    node.id.0
+                )
+            })
+        }
+        RtDim::InputAxis {
+            tensor,
+            axis: crate::dag::RtAxis::Lit(axis),
+        } => {
+            let source_id = node.inputs.get(*tensor).ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: missing InputAxis tensor slot {tensor}",
+                    node.id.0
+                )
+            })?;
+            let source = values.get(source_id).ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: missing value for InputAxis tensor slot {tensor}",
+                    node.id.0
+                )
+            })?;
+            let axis = usize::try_from(*axis).map_err(|_| {
+                format!(
+                    "movement bound at node {}: InputAxis axis {axis} was not normalized",
+                    node.id.0
+                )
+            })?;
+            source.shape.get(axis).copied().ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: InputAxis axis {axis} out of bounds for rank {} tensor in slot {tensor}",
+                    node.id.0,
+                    source.shape.len()
+                )
+            })
+        }
+        // `Sym` is legal only in a `Reshape` target and is rewritten to
+        // `Lit` by `bind_symbolic_dims` before evaluation; a movement bound
+        // never carries it (verify rejects it there).
+        RtDim::Sym(name) => Err(format!(
+            "movement bound at node {}: unbound symbolic dim `{name}` reached the evaluator",
+            node.id.0
+        )),
+    }
+}
+
+/// chelis#616: resolve a `(start, end)` bound-pair list against the input shape
+/// (used for `Pad` / `Shrink`).
+fn resolve_eval_pairs(
+    bounds: &[(RtDim, RtDim)],
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    input_shape: &[usize],
+) -> Result<Vec<(usize, usize)>, String> {
+    bounds
+        .iter()
+        .enumerate()
+        .map(|(axis, (s, e))| {
+            let extent = input_shape.get(axis).copied().unwrap_or(0);
+            Ok((
+                resolve_eval_bound(s, node, values, extent)?,
+                resolve_eval_bound(e, node, values, extent)?,
+            ))
+        })
+        .collect()
+}
+
+/// chelis#616: resolve a `Stride` step list against the input shape.
+fn resolve_eval_strides(
+    strides: &[RtDim],
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    input_shape: &[usize],
+) -> Result<Vec<usize>, String> {
+    strides
+        .iter()
+        .enumerate()
+        .map(|(axis, b)| {
+            let extent = input_shape.get(axis).copied().unwrap_or(0);
+            resolve_eval_bound(b, node, values, extent)
+        })
+        .collect()
+}
+
+fn pad(
+    input: &TensorValue,
+    padding: &[(usize, usize)],
+    fill: chelis_types::ScalarValue,
+) -> Result<TensorValue, String> {
+    assert_eq!(padding.len(), input.shape.len());
+    let out_shape: Vec<usize> = input
+        .shape
+        .iter()
+        .zip(padding.iter())
+        .map(|(dim, (before, after))| dim + before + after)
+        .collect();
+    let mut map: Vec<Option<usize>> = vec![None; numel(&out_shape)];
+    for flat_idx in 0..input.len() {
+        let in_index = linear_to_index(flat_idx, &input.shape);
+        let out_index: Vec<usize> = in_index
+            .iter()
+            .zip(padding.iter())
+            .map(|(idx, (before, _))| idx + before)
+            .collect();
+        map[index_to_linear(&out_index, &out_shape)] = Some(flat_idx);
+    }
+    if fill.prim() != input.prim() {
+        return Err(format!(
+            "pad fill dtype {} does not match input dtype {}",
+            fill.prim().name(),
+            input.prim().name()
+        ));
+    }
+    // reuse_* contract: pad moves existing elements and places a
+    // finalized fill (section C3, element-preserving).
+    Ok(TensorValue::from_storage(
+        out_shape,
+        input.storage().reuse_fill_gather(&fill, &map),
+    ))
+}
+
+fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
+    assert_eq!(bounds.len(), input.shape.len());
+    // chelis#368: defensive backstop for the `SHRINK_TO_END` full-axis
+    // sentinel (the Pad adjoint of the differentiable `concat` over an
+    // unpadded axis). `bind_symbolic_dims` normally resolves the sentinel to
+    // the axis's bound extent before eval (and the `needs_symbolic_binding`
+    // gate now routes every sentinel-bearing DAG through it), so this branch
+    // should not fire in the normal flow. If a sentinel ever does survive,
+    // resolve it here to the axis's runtime extent — `SHRINK_TO_END` means
+    // "to the end of this axis", which is exactly `input.shape[axis]` — rather
+    // than letting `end - start = usize::MAX` overflow `numel`.
+    // chelis#523: loud bounds clamp. `verify`'s C10 shrink check runs BEFORE
+    // `bind_symbolic_dims` and skips symbolic axes, so a shrink whose `end`
+    // exceeds the (now concrete) input extent, or whose `start > end`, could
+    // reach here and either underflow `end - start` (usize) or read
+    // out-of-bounds in the copy loop below (a silent wrong gradient on higher
+    // rank, where the flat index can alias a valid slot). This is not an active
+    // wrong-result today (a type-checker symbol-identity invariant keeps it
+    // unreachable), but a future pass that rewrites a Stride/Shrink's input vs
+    // output symbols independently would break that invariant. Fail loud here
+    // rather than silently corrupt — do NOT clamp to a valid range (that would
+    // hide the producing-pass bug).
+    let out_shape: Vec<usize> = input
+        .shape
+        .iter()
+        .zip(bounds.iter())
+        .enumerate()
+        .map(|(axis, (extent, (start, end)))| {
+            let end = if *end == SHRINK_TO_END { *extent } else { *end };
+            assert!(
+                *start <= end,
+                "eval::shrink: axis {axis} bound start {start} exceeds end {end} \
+                 (input extent {extent}); the producing IR pass emitted an inverted \
+                 shrink (chelis#523)"
+            );
+            assert!(
+                end <= *extent,
+                "eval::shrink: axis {axis} bound end {end} exceeds input extent {extent}; \
+                 out-of-bounds shrink (chelis#523)"
+            );
+            end - start
+        })
+        .collect();
+    let out_len = numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_len);
+    for flat_idx in 0..out_len {
+        let out_index = linear_to_index(flat_idx, &out_shape);
+        let in_index: Vec<usize> = out_index
+            .iter()
+            .zip(bounds.iter())
+            .map(|(idx, (start, _))| idx + start)
+            .collect();
+        picks.push(index_to_linear(&in_index, &input.shape));
+    }
+    // reuse_* contract: shrink is element-preserving (section C3).
+    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+}
+
+fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
+    assert_eq!(strides.len(), input.shape.len());
+    let out_shape: Vec<usize> = input
+        .shape
+        .iter()
+        .zip(strides.iter())
+        .map(|(dim, step)| {
+            if *step == 0 {
+                *dim
+            } else {
+                (*dim).div_ceil(*step)
+            }
+        })
+        .collect();
+    let out_len = numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_len);
+    for flat_idx in 0..out_len {
+        let out_index = linear_to_index(flat_idx, &out_shape);
+        let in_index: Vec<usize> = out_index
+            .iter()
+            .zip(strides.iter())
+            .map(|(idx, step)| idx * step.max(&1))
+            .collect();
+        picks.push(index_to_linear(&in_index, &input.shape));
+    }
+    // reuse_* contract: stride is element-preserving (section C3).
+    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+}
+
+fn linear_to_index(mut linear: usize, shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        return vec![];
+    }
+    let mut index = vec![0; shape.len()];
+    for axis in (0..shape.len()).rev() {
+        index[axis] = linear % shape[axis];
+        linear /= shape[axis];
+    }
+    index
+}
+
+fn index_to_linear(index: &[usize], shape: &[usize]) -> usize {
+    let mut linear = 0usize;
+    for (axis, &value) in index.iter().enumerate() {
+        linear *= shape[axis];
+        linear += value;
+    }
+    linear
 }
 
 fn validate_shape_against_type(
@@ -258,10 +1673,12 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
 
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
-) -> Result<HashMap<String, usize>, String> {
-    let mut bindings = HashMap::new();
-    let mut load_types = HashMap::<String, TensorType>::new();
+    inputs: &UnordMap<String, TensorValue>,
+    required_symbols: &UnordSet<String>,
+    live: Option<&[bool]>,
+) -> Result<UnordMap<String, usize>, String> {
+    let mut bindings = UnordMap::new();
+    let mut load_types = UnordMap::<String, TensorType>::new();
 
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
@@ -271,20 +1688,85 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
-    for (name, ty) in &load_types {
+    for (name, ty) in load_types.to_sorted() {
         if let Some(value) = inputs.get(name) {
             validate_shape_against_type(name, value, ty)?;
         }
     }
 
-    for binding in symbolic_bindings(dag) {
-        // chelis#616: an op-declared dim (node-valued movement output
-        // extent) has no input to infer from; the evaluator resolves it
-        // from actual values when the owning op evaluates.
-        let SymbolicDimSource::Load {
-            input_label: canonical_label,
-            axis: canonical_axis,
-        } = &binding.canonical.source
+    let live_loads = dag
+        .nodes()
+        .iter()
+        .filter(|node| live.is_none_or(|mask| mask[node.id.0]))
+        .filter_map(|node| match &node.op {
+            RiscOp::Load { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<UnordSet<_>>();
+
+    for binding in symbolic_bindings(dag)
+        .into_iter()
+        .filter(|binding| required_symbols.contains(&binding.name))
+    {
+        let mut occurrences = std::iter::once(&binding.canonical)
+            .chain(binding.others.iter())
+            .collect::<Vec<_>>();
+        let has_live_op_declaration = occurrences.iter().any(|occurrence| {
+            matches!(
+                occurrence.source,
+                SymbolicDimSource::OpDeclared { node, .. }
+                    if live.is_none_or(|mask| mask[node.0])
+            )
+        });
+        let live_load_occurrences = occurrences
+            .iter()
+            .copied()
+            .filter(|occurrence| {
+                matches!(
+                    &occurrence.source,
+                    SymbolicDimSource::Load { input_label, .. }
+                        if live_loads.contains(input_label.as_str())
+                )
+            })
+            .collect::<Vec<_>>();
+        if !live_load_occurrences.is_empty() {
+            occurrences = live_load_occurrences;
+        } else if has_live_op_declaration {
+            // chelis#616: a live op-declared dim has no external input;
+            // the evaluator resolves it from the owning op's actual values.
+            continue;
+        } else {
+            // chelis#351: a shape-only dependency Load can be outside the
+            // value-live mask. With exactly one declaration its shape is the
+            // required source. Two dead declarations reusing the same symbol
+            // are indistinguishable after lowering; accepting whichever input
+            // happens to be supplied lets an unrelated declaration satisfy a
+            // live shape obligation (chelis#991). Fail closed on that
+            // ambiguity instead of guessing from caller inputs.
+            let mut dead_loads = occurrences
+                .iter()
+                .filter_map(|occurrence| match &occurrence.source {
+                    SymbolicDimSource::Load { input_label, .. } => Some(input_label.as_str()),
+                    SymbolicDimSource::OpDeclared { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            dead_loads.sort_unstable();
+            dead_loads.dedup();
+            if dead_loads.len() > 1 {
+                return Err(format!(
+                    "ambiguous dead-load sources {:?} for live symbolic dimension `{}`",
+                    dead_loads, binding.name
+                ));
+            }
+        }
+
+        let Some((canonical_label, canonical_axis)) =
+            occurrences
+                .iter()
+                .find_map(|occurrence| match &occurrence.source {
+                    SymbolicDimSource::Load { input_label, axis } => Some((input_label, axis)),
+                    SymbolicDimSource::OpDeclared { .. } => None,
+                })
         else {
             continue;
         };
@@ -303,7 +1785,7 @@ fn infer_symbolic_bindings_from_inputs(
         })?;
         bindings.insert(binding.name.clone(), value);
 
-        for occurrence in &binding.others {
+        for occurrence in occurrences.into_iter().skip(1) {
             // Op-declared guard sites are checked at run time by the C
             // backend and from actual values by the evaluator, not here.
             let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
@@ -333,17 +1815,76 @@ fn infer_symbolic_bindings_from_inputs(
     Ok(bindings)
 }
 
+fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut UnordSet<String>) {
+    match expr {
+        DimExpr::Concrete(_) => {}
+        DimExpr::Sym(name) => {
+            symbols.insert(name.clone());
+        }
+        DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
+            collect_dim_expr_symbols(lhs, symbols);
+            collect_dim_expr_symbols(rhs, symbols);
+        }
+    }
+}
+
+/// Symbolic dimensions that can affect the selected roots. Root-scoped eval
+/// deliberately ignores generic declarations from unrelated dependency
+/// modules (chelis#991), while `live_mask_for_roots` has already retained any
+/// shape dependencies a live node genuinely needs (chelis#351/#616).
+fn required_symbolic_dims(dag: &Dag, live: Option<&[bool]>) -> UnordSet<String> {
+    let mut symbols = UnordSet::new();
+    for node in dag.nodes() {
+        if live.is_some_and(|mask| !mask[node.id.0]) {
+            continue;
+        }
+        for dim in &node.output_type.dims {
+            if let DimInfo::Named(name, None) = dim
+                && !name.is_empty()
+                && name != "*"
+            {
+                symbols.insert(name.clone());
+            }
+        }
+        match &node.op {
+            RiscOp::Reshape { new_shape } => {
+                for dim in new_shape {
+                    if let RtDim::Sym(name) = dim {
+                        symbols.insert(name.clone());
+                    }
+                }
+            }
+            RiscOp::BlasMatmul {
+                batch_dims,
+                m,
+                n,
+                k,
+                ..
+            } => {
+                for dim in batch_dims {
+                    collect_dim_expr_symbols(dim, &mut symbols);
+                }
+                collect_dim_expr_symbols(m, &mut symbols);
+                collect_dim_expr_symbols(n, &mut symbols);
+                collect_dim_expr_symbols(k, &mut symbols);
+            }
+            _ => {}
+        }
+    }
+    symbols
+}
+
 fn resolve_load_inputs<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
-    symbolic_dim_load_inputs: &HashSet<&str>,
+    symbolic_dim_load_inputs: &UnordSet<&str>,
     mut load_input: F,
-) -> Result<HashMap<String, TensorValue>, String>
+) -> Result<UnordMap<String, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
             continue;
@@ -372,926 +1913,6 @@ where
     Ok(inputs)
 }
 
-fn linear_to_index(mut linear: usize, shape: &[usize]) -> Vec<usize> {
-    if shape.is_empty() {
-        return vec![];
-    }
-    let mut index = vec![0; shape.len()];
-    for axis in (0..shape.len()).rev() {
-        index[axis] = linear % shape[axis];
-        linear /= shape[axis];
-    }
-    index
-}
-
-fn index_to_linear(index: &[usize], shape: &[usize]) -> usize {
-    let mut linear = 0usize;
-    for (axis, &value) in index.iter().enumerate() {
-        linear *= shape[axis];
-        linear += value;
-    }
-    linear
-}
-
-fn unary_map(input: &TensorValue, f: impl Fn(f64) -> f64) -> TensorValue {
-    TensorValue {
-        data: input.data.iter().copied().map(f).collect(),
-        shape: input.shape.clone(),
-    }
-}
-
-fn dropout(input: &TensorValue, rate: f64, seed: u64) -> TensorValue {
-    let keep_scale = if rate >= 1.0 {
-        0.0
-    } else {
-        1.0 / (1.0 - rate.max(0.0))
-    };
-    let data = input
-        .data
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let sample = dropout_sample(seed, index as u64);
-            if sample < rate {
-                0.0
-            } else {
-                value * keep_scale
-            }
-        })
-        .collect();
-    TensorValue {
-        data,
-        shape: input.shape.clone(),
-    }
-}
-
-fn dropout_sample(seed: u64, index: u64) -> f64 {
-    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    ((x >> 11) as f64) / ((1u64 << 53) as f64)
-}
-
-fn uniform_like(shape: &[usize], low: f64, high: f64, seed: u64) -> TensorValue {
-    // chelis#770: conform to the C f32 sampler affine
-    // (chelis-backend-c/src/emit.rs: `low + (high - low) * (float)unit` with
-    // f32 `low`/`high`). The default toolchain contracts C's `low + span *
-    // unit` into a single-rounding fused multiply-add, so
-    // `span_f.mul_add(unit_f, low_f)` (also one rounding) matches it
-    // bit-for-bit; a two-rounding `low_f + span_f * unit_f` drifts 1 ULP on
-    // some elements. `dropout_sample` stays f64; the f32 casts are local.
-    let low_f = low as f32;
-    let high_f = high as f32;
-    let span_f = high_f - low_f;
-    let data = (0..numel(shape))
-        .map(|index| span_f.mul_add(dropout_sample(seed, index as u64) as f32, low_f) as f64)
-        .collect();
-    TensorValue {
-        data,
-        shape: shape.to_vec(),
-    }
-}
-
-fn binary_map(lhs: &TensorValue, rhs: &TensorValue, f: impl Fn(f64, f64) -> f64) -> TensorValue {
-    assert_eq!(lhs.shape, rhs.shape);
-    TensorValue {
-        data: lhs
-            .data
-            .iter()
-            .copied()
-            .zip(rhs.data.iter().copied())
-            .map(|(a, b)| f(a, b))
-            .collect(),
-        shape: lhs.shape.clone(),
-    }
-}
-
-/// The exact diagnostic the integer zero-divisor trap emits, shared with the
-/// host evaluator (`chelis-compiler-api` `host_ops::INT_DIV_ZERO_MSG`), the C
-/// runtime guard (`chelis_int_div_guard`), and `spec/05-risc-primitives.md`
-/// §2.1, so the three lanes are byte-identical.
-const INT_DIV_ZERO_MSG: &str = "integer division or remainder by zero";
-
-/// Like [`binary_map`] but the element closure may fail, surfacing the first
-/// error. Used by the integer `floor_div` / `trunc_div` zero-divisor trap
-/// (chelis#550) so this reference evaluator fails closed on an integer divide
-/// by zero instead of computing `floor(x/0) == ±inf` and propagating garbage.
-fn try_binary_map(
-    lhs: &TensorValue,
-    rhs: &TensorValue,
-    f: impl Fn(f64, f64) -> Result<f64, String>,
-) -> Result<TensorValue, String> {
-    assert_eq!(lhs.shape, rhs.shape);
-    let data = lhs
-        .data
-        .iter()
-        .copied()
-        .zip(rhs.data.iter().copied())
-        .map(|(a, b)| f(a, b))
-        .collect::<Result<Vec<f64>, String>>()?;
-    Ok(TensorValue {
-        data,
-        shape: lhs.shape.clone(),
-    })
-}
-
-fn matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
-    assert_eq!(lhs.shape.len(), 2);
-    assert_eq!(rhs.shape.len(), 2);
-    let m = lhs.shape[0];
-    let k = lhs.shape[1];
-    assert_eq!(rhs.shape[0], k);
-    let n = rhs.shape[1];
-    let mut data = vec![0.0; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0;
-            for kk in 0..k {
-                acc += lhs.data[i * k + kk] * rhs.data[kk * n + j];
-            }
-            data[i * n + j] = acc;
-        }
-    }
-    TensorValue {
-        data,
-        shape: vec![m, n],
-    }
-}
-
-fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue) -> TensorValue {
-    assert!(lhs.shape.len() >= 2);
-    assert!(rhs.shape.len() >= 2);
-    assert_eq!(lhs.shape.len(), rhs.shape.len());
-    let rank = lhs.shape.len();
-    let batch = &lhs.shape[..rank - 2];
-    assert_eq!(batch, &rhs.shape[..rank - 2]);
-    let m = lhs.shape[rank - 2];
-    let k = lhs.shape[rank - 1];
-    assert_eq!(rhs.shape[rank - 2], k);
-    let n = rhs.shape[rank - 1];
-    let batch_count = batch.iter().product::<usize>();
-    let mut out_shape = batch.to_vec();
-    out_shape.extend([m, n]);
-    let mut data = vec![0.0; batch_count * m * n];
-    for batch_idx in 0..batch_count {
-        let lhs_base = batch_idx * m * k;
-        let rhs_base = batch_idx * k * n;
-        let out_base = batch_idx * m * n;
-        for i in 0..m {
-            for j in 0..n {
-                let mut acc = 0.0;
-                for kk in 0..k {
-                    acc += lhs.data[lhs_base + i * k + kk] * rhs.data[rhs_base + kk * n + j];
-                }
-                data[out_base + i * n + j] = acc;
-            }
-        }
-    }
-    TensorValue {
-        data,
-        shape: out_shape,
-    }
-}
-
-fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorValue {
-    assert!(axis < values.shape.len());
-    let index_rank = indices.shape.len();
-    let mut out_shape = Vec::with_capacity(values.shape.len() - 1 + index_rank);
-    out_shape.extend_from_slice(&values.shape[..axis]);
-    out_shape.extend_from_slice(&indices.shape);
-    out_shape.extend_from_slice(&values.shape[axis + 1..]);
-    let mut data = vec![0.0; numel(&out_shape)];
-    for (out_linear, out_slot) in data.iter_mut().enumerate() {
-        let out_index = linear_to_index(out_linear, &out_shape);
-        let mut idx_index = Vec::with_capacity(index_rank);
-        for pos in 0..index_rank {
-            idx_index.push(out_index[axis + pos]);
-        }
-        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
-        assert!(
-            gathered >= 0 && (gathered as usize) < values.shape[axis],
-            "gather index {gathered} out of bounds for axis {axis}"
-        );
-        let mut value_index = Vec::with_capacity(values.shape.len());
-        value_index.extend_from_slice(&out_index[..axis]);
-        value_index.push(gathered as usize);
-        value_index.extend_from_slice(&out_index[axis + index_rank..]);
-        *out_slot = values.data[index_to_linear(&value_index, &values.shape)];
-    }
-    TensorValue {
-        data,
-        shape: out_shape,
-    }
-}
-
-fn scatter_add(
-    target: &TensorValue,
-    indices: &TensorValue,
-    updates: &TensorValue,
-    axis: usize,
-) -> TensorValue {
-    assert!(axis < target.shape.len());
-    let index_rank = indices.shape.len();
-    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
-    expected_updates.extend_from_slice(&target.shape[..axis]);
-    expected_updates.extend_from_slice(&indices.shape);
-    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
-    assert_eq!(updates.shape, expected_updates);
-
-    let mut out = target.clone();
-    for update_linear in 0..updates.data.len() {
-        let update_index = linear_to_index(update_linear, &updates.shape);
-        let mut idx_index = Vec::with_capacity(index_rank);
-        for pos in 0..index_rank {
-            idx_index.push(update_index[axis + pos]);
-        }
-        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
-        assert!(
-            gathered >= 0 && (gathered as usize) < target.shape[axis],
-            "scatter_add index {gathered} out of bounds for axis {axis}"
-        );
-        let mut target_index = Vec::with_capacity(target.shape.len());
-        target_index.extend_from_slice(&update_index[..axis]);
-        target_index.push(gathered as usize);
-        target_index.extend_from_slice(&update_index[axis + index_rank..]);
-        let target_linear = index_to_linear(&target_index, &target.shape);
-        out.data[target_linear] += updates.data[update_linear];
-    }
-    out
-}
-
-/// Replace-scatter (last-write-wins) over duplicate target indices.
-///
-/// Per `spec/05-risc-primitives.md` §3.5, the deterministic-order
-/// rule is **updates-tensor row-major (C order) flat iteration**:
-/// updates are written into the target in ascending flat-index order
-/// over `updates.shape`. When two updates target the same cell, the
-/// write with the larger flat index in `updates` is the final value.
-/// This is intentionally distinct from `scatter_add` (whose
-/// duplicate-index semantics are commutative accumulation) and is
-/// the reason replace-scatter has no well-defined AD adjoint.
-fn scatter_replace(
-    target: &TensorValue,
-    indices: &TensorValue,
-    updates: &TensorValue,
-    axis: usize,
-) -> TensorValue {
-    assert!(axis < target.shape.len());
-    let index_rank = indices.shape.len();
-    let mut expected_updates = Vec::with_capacity(target.shape.len() - 1 + index_rank);
-    expected_updates.extend_from_slice(&target.shape[..axis]);
-    expected_updates.extend_from_slice(&indices.shape);
-    expected_updates.extend_from_slice(&target.shape[axis + 1..]);
-    assert_eq!(updates.shape, expected_updates);
-
-    let mut out = target.clone();
-    for update_linear in 0..updates.data.len() {
-        let update_index = linear_to_index(update_linear, &updates.shape);
-        let mut idx_index = Vec::with_capacity(index_rank);
-        for pos in 0..index_rank {
-            idx_index.push(update_index[axis + pos]);
-        }
-        let gathered = indices.data[index_to_linear(&idx_index, &indices.shape)] as isize;
-        assert!(
-            gathered >= 0 && (gathered as usize) < target.shape[axis],
-            "scatter_replace index {gathered} out of bounds for axis {axis}"
-        );
-        let mut target_index = Vec::with_capacity(target.shape.len());
-        target_index.extend_from_slice(&update_index[..axis]);
-        target_index.push(gathered as usize);
-        target_index.extend_from_slice(&update_index[axis + index_rank..]);
-        let target_linear = index_to_linear(&target_index, &target.shape);
-        // Last-write-wins: deterministic-order overwrite.
-        out.data[target_linear] = updates.data[update_linear];
-    }
-    out
-}
-
-/// Element-wise replace-scatter with ONNX `ScatterElements` semantics
-/// (`spec/05-risc-primitives.md` §3.5.1).
-///
-/// Distinct from `scatter_replace` (hyperplane semantics): here
-/// `data`/`indices`/`updates` share a rank, `indices.shape ==
-/// updates.shape`, and `output.shape == data.shape`. For each
-/// coordinate `c` over `indices`, the value `updates[c]` is written to
-/// `output` at the coordinate `c` with its `axis` component replaced by
-/// `indices[c]`. Duplicate writes resolve last-write-wins in
-/// updates-tensor row-major (C order) flat-iteration order, matching
-/// `scatter_replace`'s determinism rule; AD is fail-closed for the same
-/// reason.
-fn scatter_elements(
-    data: &TensorValue,
-    indices: &TensorValue,
-    updates: &TensorValue,
-    axis: usize,
-) -> TensorValue {
-    assert!(axis < data.shape.len());
-    assert_eq!(
-        indices.shape, updates.shape,
-        "scatter_elements requires indices.shape == updates.shape"
-    );
-    assert_eq!(
-        indices.shape.len(),
-        data.shape.len(),
-        "scatter_elements requires data, indices, and updates to share a rank"
-    );
-
-    let mut out = data.clone();
-    for update_linear in 0..updates.data.len() {
-        let coord = linear_to_index(update_linear, &updates.shape);
-        let gathered = indices.data[update_linear] as isize;
-        assert!(
-            gathered >= 0 && (gathered as usize) < data.shape[axis],
-            "scatter_elements index {gathered} out of bounds for axis {axis}"
-        );
-        let mut target_index = coord.clone();
-        target_index[axis] = gathered as usize;
-        let target_linear = index_to_linear(&target_index, &data.shape);
-        // Last-write-wins: deterministic-order overwrite.
-        out.data[target_linear] = updates.data[update_linear];
-    }
-    out
-}
-
-/// Strided windowed reduction over the trailing `window_shape.len()` axes.
-///
-/// Per `spec/05-risc-primitives.md` §2.3.1 (Valid padding):
-/// - Leading `rank - n` axes pass through unchanged.
-/// - Each windowed output axis has extent
-///   `floor((input_dim - window_shape[i]) / strides[i]) + 1`.
-/// - `Mean` is windowed `Sum` divided by the window volume.
-///
-/// Panics if the input rank is smaller than `window_shape.len()`, if any
-/// window/stride entry is zero, or if any windowed dim has `window > input_dim`.
-/// The IR verifier and type checker reject those statically before the
-/// evaluator runs.
-fn reduce_window(
-    input: &TensorValue,
-    reducer: ReduceWindowKind,
-    window_shape: &[usize],
-    strides: &[usize],
-) -> TensorValue {
-    assert_eq!(
-        window_shape.len(),
-        strides.len(),
-        "window_shape and strides must have equal length"
-    );
-    let rank = input.shape.len();
-    let n = window_shape.len();
-    assert!(
-        rank >= n,
-        "reduce_window: input rank {rank} smaller than window arity {n}"
-    );
-    let leading = rank - n;
-
-    let mut out_shape = input.shape[..leading].to_vec();
-    for i in 0..n {
-        let in_dim = input.shape[leading + i];
-        let w = window_shape[i];
-        let s = strides[i];
-        assert!(w >= 1, "reduce_window: window axis {i} must be >= 1");
-        assert!(s >= 1, "reduce_window: stride axis {i} must be >= 1");
-        assert!(
-            in_dim >= w,
-            "reduce_window: axis {i} input dim {in_dim} < window {w}"
-        );
-        out_shape.push((in_dim - w) / s + 1);
-    }
-
-    let window_volume: usize = window_shape.iter().product();
-    let out_len = numel(&out_shape);
-    let mut out = vec![0.0_f64; out_len];
-
-    let init_acc = |r: ReduceWindowKind| -> f64 {
-        match r {
-            ReduceWindowKind::Max => f64::NEG_INFINITY,
-            ReduceWindowKind::Min => f64::INFINITY,
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => 0.0,
-        }
-    };
-    let combine = |r: ReduceWindowKind, acc: f64, x: f64| -> f64 {
-        match r {
-            ReduceWindowKind::Max => acc.max(x),
-            ReduceWindowKind::Min => acc.min(x),
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => acc + x,
-        }
-    };
-
-    for (out_flat, slot) in out.iter_mut().enumerate() {
-        let out_idx = linear_to_index(out_flat, &out_shape);
-
-        // Walk the window: iterate over all positions inside the
-        // window_shape multi-index. The source index per dimension is
-        // `out_idx[axis] * stride + window_pos` for windowed axes,
-        // matching the leading-axis passthrough rule above.
-        let mut acc = init_acc(reducer);
-        let mut window_pos = vec![0usize; n];
-        loop {
-            let mut src_idx = vec![0usize; rank];
-            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
-            for i in 0..n {
-                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
-            }
-            let src_flat = index_to_linear(&src_idx, &input.shape);
-            acc = combine(reducer, acc, input.data[src_flat]);
-
-            // Increment window_pos (mixed-radix carry).
-            if n == 0 {
-                break;
-            }
-            let mut carry = n;
-            for i in (0..n).rev() {
-                window_pos[i] += 1;
-                if window_pos[i] < window_shape[i] {
-                    carry = i;
-                    break;
-                }
-                window_pos[i] = 0;
-            }
-            if carry == n {
-                break;
-            }
-        }
-        if matches!(reducer, ReduceWindowKind::Mean) {
-            acc /= window_volume as f64;
-        }
-        *slot = acc;
-    }
-
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
-/// Reverse-mode adjoint of [`reduce_window`] (see `RiscOp::ReduceWindowGrad`).
-///
-/// `x` is the original windowed input (shape `S_in`); `g` is the upstream
-/// cotangent (shape `S_out`, the forward output). Returns `din` with shape
-/// `S_in`, accumulating contributions over every (overlapping) window:
-/// - `Sum`:  each window-source position receives the owning window's `g`.
-/// - `Mean`: as `Sum`, scaled by `1 / window_volume`.
-/// - `Max` / `Min`: the window's `g` is routed to every position equal to
-///   that window's max / min (ties distribute, matching the `max_reduce` /
-///   `min_reduce` subgradient convention).
-///
-/// Panics on the same structural violations as [`reduce_window`]; the IR
-/// verifier and type checker reject those before the evaluator runs.
-fn reduce_window_grad(
-    x: &TensorValue,
-    g: &TensorValue,
-    reducer: ReduceWindowKind,
-    window_shape: &[usize],
-    strides: &[usize],
-) -> TensorValue {
-    assert_eq!(
-        window_shape.len(),
-        strides.len(),
-        "window_shape and strides must have equal length"
-    );
-    let rank = x.shape.len();
-    let n = window_shape.len();
-    assert!(
-        rank >= n,
-        "reduce_window_grad: input rank {rank} smaller than window arity {n}"
-    );
-    let leading = rank - n;
-    let window_volume: f64 = window_shape.iter().product::<usize>() as f64;
-
-    // Output dim per windowed axis: floor((in - w) / s) + 1 (Valid padding),
-    // matching the forward. The cotangent `g` is indexed by this shape.
-    let mut out_shape = x.shape[..leading].to_vec();
-    for i in 0..n {
-        let in_dim = x.shape[leading + i];
-        let w = window_shape[i];
-        let s = strides[i];
-        assert!(w >= 1, "reduce_window_grad: window axis {i} must be >= 1");
-        assert!(s >= 1, "reduce_window_grad: stride axis {i} must be >= 1");
-        assert!(
-            in_dim >= w,
-            "reduce_window_grad: axis {i} input dim {in_dim} < window {w}"
-        );
-        out_shape.push((in_dim - w) / s + 1);
-    }
-    assert_eq!(
-        g.shape, out_shape,
-        "reduce_window_grad: cotangent shape {:?} != forward output shape {out_shape:?}",
-        g.shape
-    );
-
-    let mut din = vec![0.0_f64; x.data.len()];
-
-    // Walk each output position `o` (one upstream gradient value `g[o]`),
-    // then walk that window's source positions. `Max`/`Min` need the
-    // window extreme first; `Sum`/`Mean` scatter unconditionally.
-    for (out_flat, &g_val) in g.data.iter().enumerate() {
-        let out_idx = linear_to_index(out_flat, &out_shape);
-
-        let src_flat_at = |window_pos: &[usize]| -> usize {
-            let mut src_idx = vec![0usize; rank];
-            src_idx[..leading].copy_from_slice(&out_idx[..leading]);
-            for i in 0..n {
-                src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
-            }
-            index_to_linear(&src_idx, &x.shape)
-        };
-
-        // First pass (Max/Min only): find the window extreme.
-        let extreme = match reducer {
-            ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                let mut acc = match reducer {
-                    ReduceWindowKind::Max => f64::NEG_INFINITY,
-                    _ => f64::INFINITY,
-                };
-                for_each_window_pos(window_shape, n, |window_pos| {
-                    let v = x.data[src_flat_at(window_pos)];
-                    acc = match reducer {
-                        ReduceWindowKind::Max => acc.max(v),
-                        _ => acc.min(v),
-                    };
-                });
-                Some(acc)
-            }
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => None,
-        };
-
-        // Second pass: scatter the contribution into `din`.
-        for_each_window_pos(window_shape, n, |window_pos| {
-            let src = src_flat_at(window_pos);
-            match reducer {
-                ReduceWindowKind::Sum => din[src] += g_val,
-                ReduceWindowKind::Mean => din[src] += g_val / window_volume,
-                ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                    // Distribute to every position equal to the window
-                    // extreme (ties get the full gradient, mirroring the
-                    // `max_reduce` `eq`-mask adjoint).
-                    if x.data[src] == extreme.expect("extreme computed for Max/Min") {
-                        din[src] += g_val;
-                    }
-                }
-            }
-        });
-    }
-
-    TensorValue {
-        data: din,
-        shape: x.shape.clone(),
-    }
-}
-
-/// Invoke `f` once per multi-index inside an `n`-dimensional window of
-/// extent `window_shape` (row-major / mixed-radix order). For `n == 0`
-/// (no windowed axes) `f` is invoked once with an empty index.
-fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usize])) {
-    let mut window_pos = vec![0usize; n];
-    loop {
-        f(&window_pos);
-        if n == 0 {
-            break;
-        }
-        let mut carry = n;
-        for i in (0..n).rev() {
-            window_pos[i] += 1;
-            if window_pos[i] < window_shape[i] {
-                carry = i;
-                break;
-            }
-            window_pos[i] = 0;
-        }
-        if carry == n {
-            break;
-        }
-    }
-}
-
-fn reduce(input: &TensorValue, axis: usize, init: f64, f: impl Fn(f64, f64) -> f64) -> TensorValue {
-    assert!(axis < input.shape.len());
-    let mut out_shape = input.shape.clone();
-    out_shape.remove(axis);
-    let out_len = numel(&out_shape);
-    let mut out = vec![init; out_len];
-    for (flat_idx, &value) in input.data.iter().enumerate() {
-        let mut idx = linear_to_index(flat_idx, &input.shape);
-        idx.remove(axis);
-        let out_idx = index_to_linear(&idx, &out_shape);
-        out[out_idx] = f(out[out_idx], value);
-    }
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
-/// Reduce along `axis`, tracking the index of the element that wins under
-/// `better(current_best, candidate)`. Used for Argmax / Argmin.
-///
-/// Ties are broken by the smallest index (first-seen wins), matching numpy's
-/// default argmax/argmin semantics. The output stores integer indices as f64
-/// in the same precision-erased TensorValue layout other reductions use; the
-/// host-runtime adapter (`tensor_reduce_host`) is responsible for attaching
-/// the `Prim::Int64` precision tag on the produced `RuntimeTensorValue` per
-/// chelis#233. See `RiscOp::Argmax` for the spec-level invariants.
-fn reduce_argcmp(
-    input: &TensorValue,
-    axis: usize,
-    init: f64,
-    better: impl Fn(f64, f64) -> bool,
-) -> TensorValue {
-    assert!(axis < input.shape.len());
-    let mut out_shape = input.shape.clone();
-    out_shape.remove(axis);
-    let out_len = numel(&out_shape);
-    let mut best_val = vec![init; out_len];
-    let mut best_idx = vec![-1i64; out_len];
-    for (flat_idx, &value) in input.data.iter().enumerate() {
-        let full = linear_to_index(flat_idx, &input.shape);
-        let axis_pos = full[axis] as i64;
-        let mut reduced = full.clone();
-        reduced.remove(axis);
-        let out_idx = index_to_linear(&reduced, &out_shape);
-        if best_idx[out_idx] < 0 || better(best_val[out_idx], value) {
-            best_val[out_idx] = value;
-            best_idx[out_idx] = axis_pos;
-        }
-    }
-    TensorValue {
-        data: best_idx.into_iter().map(|i| i as f64).collect(),
-        shape: out_shape,
-    }
-}
-
-fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
-    assert_eq!(input.data.len(), numel(&shape));
-    TensorValue {
-        data: input.data.clone(),
-        shape,
-    }
-}
-
-fn permute(input: &TensorValue, axes: &[usize]) -> TensorValue {
-    assert_eq!(axes.len(), input.shape.len());
-    let out_shape: Vec<usize> = axes.iter().map(|&axis| input.shape[axis]).collect();
-    let out_len = numel(&out_shape);
-    let mut out = vec![0.0; out_len];
-    for (flat_idx, slot) in out.iter_mut().enumerate() {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let mut in_index = vec![0; input.shape.len()];
-        for (out_axis, &in_axis) in axes.iter().enumerate() {
-            in_index[in_axis] = out_index[out_axis];
-        }
-        *slot = input.data[index_to_linear(&in_index, &input.shape)];
-    }
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
-fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>) -> TensorValue {
-    assert!(axis <= input.shape.len());
-    let out_len = numel(&out_shape);
-    let mut out = vec![0.0; out_len];
-    for (flat_idx, slot) in out.iter_mut().enumerate() {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let in_index = if out_shape.len() == input.shape.len() {
-            let mut idx = out_index;
-            idx[axis] = 0;
-            idx
-        } else {
-            let mut idx = out_index;
-            idx.remove(axis);
-            idx
-        };
-        *slot = input.data[index_to_linear(&in_index, &input.shape)];
-    }
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
-fn one_hot(indices: &TensorValue, vocab: usize) -> TensorValue {
-    let mut out_shape = indices.shape.clone();
-    out_shape.push(vocab);
-    let mut out = vec![0.0; numel(&out_shape)];
-    for (index_linear, &raw_index) in indices.data.iter().enumerate() {
-        let class = raw_index as isize;
-        assert!(
-            class >= 0 && (class as usize) < vocab,
-            "one_hot index {class} out of bounds for vocab {vocab}"
-        );
-        let mut out_index = linear_to_index(index_linear, &indices.shape);
-        out_index.push(class as usize);
-        out[index_to_linear(&out_index, &out_shape)] = 1.0;
-    }
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
-/// chelis#616: resolve a movement [`RtDim`] to a concrete extent at eval time.
-/// `Lit` is itself; `ToEnd` is the axis's input extent; `Node(i)` reads the
-/// rank-0 integer value at `node.inputs[i]` (loud on a missing / non-integral /
-/// negative source).
-fn resolve_eval_bound(
-    bound: &RtDim,
-    node: &DagNode,
-    values: &HashMap<NodeId, TensorValue>,
-    input_extent: usize,
-) -> Result<usize, String> {
-    match bound {
-        RtDim::Lit(n) => Ok(*n),
-        RtDim::ToEnd => Ok(input_extent),
-        RtDim::Node(i) => {
-            let src = values.get(&node.inputs[*i]).ok_or_else(|| {
-                format!(
-                    "movement bound at node {}: missing value for bound-source input slot {i}",
-                    node.id.0
-                )
-            })?;
-            let raw = src.data.first().copied().ok_or_else(|| {
-                format!(
-                    "movement bound at node {}: bound-source input slot {i} is empty",
-                    node.id.0
-                )
-            })?;
-            if raw < 0.0 || raw.fract() != 0.0 || raw > usize::MAX as f64 {
-                return Err(format!(
-                    "movement bound at node {}: bound-source (slot {i}) must be a non-negative \
-                     integer, got {raw}",
-                    node.id.0
-                ));
-            }
-            Ok(raw as usize)
-        }
-        // `Sym` is legal only in a `Reshape` target and is rewritten to
-        // `Lit` by `bind_symbolic_dims` before evaluation; a movement bound
-        // never carries it (verify rejects it there).
-        RtDim::Sym(name) => Err(format!(
-            "movement bound at node {}: unbound symbolic dim `{name}` reached the evaluator",
-            node.id.0
-        )),
-    }
-}
-
-/// chelis#616: resolve a `(start, end)` bound-pair list against the input shape
-/// (used for `Pad` / `Shrink`).
-fn resolve_eval_pairs(
-    bounds: &[(RtDim, RtDim)],
-    node: &DagNode,
-    values: &HashMap<NodeId, TensorValue>,
-    input_shape: &[usize],
-) -> Result<Vec<(usize, usize)>, String> {
-    bounds
-        .iter()
-        .enumerate()
-        .map(|(axis, (s, e))| {
-            let extent = input_shape.get(axis).copied().unwrap_or(0);
-            Ok((
-                resolve_eval_bound(s, node, values, extent)?,
-                resolve_eval_bound(e, node, values, extent)?,
-            ))
-        })
-        .collect()
-}
-
-/// chelis#616: resolve a `Stride` step list against the input shape.
-fn resolve_eval_strides(
-    strides: &[RtDim],
-    node: &DagNode,
-    values: &HashMap<NodeId, TensorValue>,
-    input_shape: &[usize],
-) -> Result<Vec<usize>, String> {
-    strides
-        .iter()
-        .enumerate()
-        .map(|(axis, b)| {
-            let extent = input_shape.get(axis).copied().unwrap_or(0);
-            resolve_eval_bound(b, node, values, extent)
-        })
-        .collect()
-}
-
-fn pad(input: &TensorValue, padding: &[(usize, usize)], fill: f64) -> TensorValue {
-    assert_eq!(padding.len(), input.shape.len());
-    let out_shape: Vec<usize> = input
-        .shape
-        .iter()
-        .zip(padding.iter())
-        .map(|(dim, (before, after))| dim + before + after)
-        .collect();
-    let mut out = vec![fill; numel(&out_shape)];
-    for (flat_idx, &value) in input.data.iter().enumerate() {
-        let in_index = linear_to_index(flat_idx, &input.shape);
-        let out_index: Vec<usize> = in_index
-            .iter()
-            .zip(padding.iter())
-            .map(|(idx, (before, _))| idx + before)
-            .collect();
-        let out_flat = index_to_linear(&out_index, &out_shape);
-        out[out_flat] = value;
-    }
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
-fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
-    assert_eq!(bounds.len(), input.shape.len());
-    // chelis#368: defensive backstop for the `SHRINK_TO_END` full-axis
-    // sentinel (the Pad adjoint of the differentiable `concat` over an
-    // unpadded axis). `bind_symbolic_dims` normally resolves the sentinel to
-    // the axis's bound extent before eval (and the `needs_symbolic_binding`
-    // gate now routes every sentinel-bearing DAG through it), so this branch
-    // should not fire in the normal flow. If a sentinel ever does survive,
-    // resolve it here to the axis's runtime extent — `SHRINK_TO_END` means
-    // "to the end of this axis", which is exactly `input.shape[axis]` — rather
-    // than letting `end - start = usize::MAX` overflow `numel`.
-    // chelis#523: loud bounds clamp. `verify`'s C10 shrink check runs BEFORE
-    // `bind_symbolic_dims` and skips symbolic axes, so a shrink whose `end`
-    // exceeds the (now concrete) input extent, or whose `start > end`, could
-    // reach here and either underflow `end - start` (usize) or read
-    // out-of-bounds in the copy loop below (a silent wrong gradient on higher
-    // rank, where the flat index can alias a valid slot). This is not an active
-    // wrong-result today (a type-checker symbol-identity invariant keeps it
-    // unreachable), but a future pass that rewrites a Stride/Shrink's input vs
-    // output symbols independently would break that invariant. Fail loud here
-    // rather than silently corrupt — do NOT clamp to a valid range (that would
-    // hide the producing-pass bug).
-    let out_shape: Vec<usize> = input
-        .shape
-        .iter()
-        .zip(bounds.iter())
-        .enumerate()
-        .map(|(axis, (extent, (start, end)))| {
-            let end = if *end == SHRINK_TO_END { *extent } else { *end };
-            assert!(
-                *start <= end,
-                "eval::shrink: axis {axis} bound start {start} exceeds end {end} \
-                 (input extent {extent}); the producing IR pass emitted an inverted \
-                 shrink (chelis#523)"
-            );
-            assert!(
-                end <= *extent,
-                "eval::shrink: axis {axis} bound end {end} exceeds input extent {extent}; \
-                 out-of-bounds shrink (chelis#523)"
-            );
-            end - start
-        })
-        .collect();
-    let out_len = numel(&out_shape);
-    let mut out = vec![0.0; out_len];
-    for (flat_idx, slot) in out.iter_mut().enumerate() {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let in_index: Vec<usize> = out_index
-            .iter()
-            .zip(bounds.iter())
-            .map(|(idx, (start, _))| idx + start)
-            .collect();
-        *slot = input.data[index_to_linear(&in_index, &input.shape)];
-    }
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
-fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
-    assert_eq!(strides.len(), input.shape.len());
-    let out_shape: Vec<usize> = input
-        .shape
-        .iter()
-        .zip(strides.iter())
-        .map(|(dim, step)| {
-            if *step == 0 {
-                *dim
-            } else {
-                (*dim).div_ceil(*step)
-            }
-        })
-        .collect();
-    let out_len = numel(&out_shape);
-    let mut out = vec![0.0; out_len];
-    for (flat_idx, slot) in out.iter_mut().enumerate() {
-        let out_index = linear_to_index(flat_idx, &out_shape);
-        let in_index: Vec<usize> = out_index
-            .iter()
-            .zip(strides.iter())
-            .map(|(idx, step)| idx * step.max(&1))
-            .collect();
-        *slot = input.data[index_to_linear(&in_index, &input.shape)];
-    }
-    TensorValue {
-        data: out,
-        shape: out_shape,
-    }
-}
-
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     let mut live = vec![false; dag.len()];
     let mut stack: Vec<NodeId> = roots.to_vec();
@@ -1311,31 +1932,94 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     live
 }
 
+/// The eval lane's entry guards: for each `Entry`-placed class, the claim
+/// name and the two input-tensor axes a guard compares, named by input label
+/// so the caller's own bindings answer them.
+///
+/// One derivation, three lanes (C2.7): this reads the same
+/// `derive_runtime_dim_classes` and the same `member_load_axis` the C and HIP
+/// emitters read, so a claim cannot be identified one way for a compiled
+/// program and another way for an evaluated one.
+type EntryDimGuard = (String, (String, usize), (String, usize));
+
+/// The unit-extent claims this graph checks at entry, as
+/// `(input label, axis)` pairs to read.
+///
+/// The claimed value is the literal 1, so unlike [`EntryDimGuard`] there is no
+/// canonical witness to carry: the guard compares one read against a constant.
+/// Everything else is shared with the class path, `derive_unit_extent_claims`
+/// and `member_load_axis` included, so a claim cannot be identified one way
+/// for a compiled program and another way for an evaluated one.
+fn entry_unit_extent_guards(dag: &Dag) -> Vec<(String, usize)> {
+    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
+        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
+        _ => None,
+    };
+    let mut guards = Vec::new();
+    for claim in crate::axis_sources::derive_unit_extent_claims(dag) {
+        if claim.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
+            continue;
+        }
+        let Some((load, axis)) = crate::axis_sources::member_load_axis(dag, &claim.member()) else {
+            continue;
+        };
+        let Some(name) = label(load) else {
+            continue;
+        };
+        guards.push((name, axis));
+    }
+    guards
+}
+
+fn entry_dim_guards(dag: &Dag) -> Vec<EntryDimGuard> {
+    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
+        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
+        _ => None,
+    };
+    let mut guards = Vec::new();
+    for class in crate::axis_sources::derive_runtime_dim_classes(dag) {
+        if class.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
+            continue;
+        }
+        let crate::axis_sources::DimClaim::Name(name) = &class.claim else {
+            continue;
+        };
+        let mut witnesses = class.members.iter().filter_map(|member| {
+            let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+            Some((label(load)?, axis))
+        });
+        let Some(canonical) = witnesses.next() else {
+            continue;
+        };
+        for witness in witnesses {
+            if witness != canonical {
+                guards.push((name.clone(), canonical.clone(), witness));
+            }
+        }
+    }
+    guards
+}
+
 fn eval_tensor_internal<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
+    random_counter: u64,
     mut load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    let needs_symbolic_binding = dag
-        .nodes()
-        .iter()
-        .any(|node| matches!(&node.op, RiscOp::Expand { size, .. } if !size.is_concrete()))
-        || dag.nodes().iter().any(|node| {
-            node.output_type
-                .dims
-                .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(_, None)))
-        })
-        || dag.nodes().iter().any(|node| match &node.op {
-            RiscOp::Reshape { new_shape } => new_shape
-                .iter()
-                .any(|dim| matches!(dim, RtDim::Sym(_))),
-            _ => false,
-        })
+    // chelis#1277 C4.1: eval is a production path, so the source check runs
+    // here too, before `bind_symbolic_dims` resolves any extent.
+    if let Err(unsupported) =
+        crate::axis_sources::check_axis_sources(dag, chelis_types::unsupported::Stage::Runtime)
+    {
+        return Err(unsupported.to_string());
+    }
+    let mut path_random_counter = random_counter;
+    let required_symbols = required_symbolic_dims(dag, live);
+    let needs_symbolic_binding = !required_symbols.is_empty()
         // chelis#368: a `Shrink` carrying the `SHRINK_TO_END` full-axis
         // sentinel (the Pad adjoint of the differentiable `concat` over an
         // unpadded axis) must route through `bind_symbolic_dims` so the
@@ -1350,7 +2034,8 @@ where
         // identity for concrete dims and resolves the sentinel from the bound
         // output type.
         || dag.nodes().iter().any(|node| {
-            matches!(&node.op, RiscOp::Shrink { bounds }
+            live.is_none_or(|mask| mask[node.id.0])
+                && matches!(&node.op, RiscOp::Shrink { bounds }
                 if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)))
         });
     // chelis#351: symbolic-dim inference reads shapes from the Loads
@@ -1366,24 +2051,24 @@ where
     // `infer_symbolic_bindings_from_inputs` reports the targeted
     // "missing required input ... for symbolic dimension" error
     // instead of the strict-load one.
-    let symbolic_dim_load_inputs: HashSet<&str> = if needs_symbolic_binding && live.is_some() {
+    let symbolic_dim_load_inputs: UnordSet<&str> = if needs_symbolic_binding && live.is_some() {
         dag.nodes()
             .iter()
-            .filter_map(|node| match &node.op {
+            .filter_map(|node| {
+                match &node.op {
                 RiscOp::Load { name }
-                    if node
-                        .output_type
-                        .dims
-                        .iter()
-                        .any(|dim| matches!(dim, DimInfo::Named(_, _))) =>
+                    if node.output_type.dims.iter().any(|dim| {
+                        matches!(dim, DimInfo::Named(name, _) if required_symbols.contains(name))
+                    }) =>
                 {
                     Some(name.as_str())
                 }
                 _ => None,
+            }
             })
             .collect()
     } else {
-        HashSet::new()
+        UnordSet::new()
     };
     let resolved_inputs = resolve_load_inputs(
         dag,
@@ -1392,9 +2077,159 @@ where
         &symbolic_dim_load_inputs,
         &mut load_input,
     )?;
-    let mut prebound_dims: HashMap<String, usize> = HashMap::new();
+    // chelis#1277 B2h: both entry guards run BEFORE symbolic-binding
+    // inference. `infer_symbolic_bindings_from_inputs` rejects two `Load`s
+    // that disagree on one binder with its own wording, so with the guards
+    // after it a `Load`/`Load` class on one binder never reached [04-NUM-9]'s
+    // line on eval while the C kernel's prologue rendered it (C2.7). The
+    // inference check remains the backstop for a binder no class covers.
+    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
+    // grouping the C and HIP lanes read. Both derivations call
+    // `axis_sources::split_by_scope`: the prologues read
+    // `derive_dim_witnesses`, the guard sites and this lane read
+    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
+    // the scoping in the first alone, which is two derivations that can
+    // disagree. `spec/04-type-system.md` section 4.7 evaluates
+    // a class whose operands are all interface values "at function entry, in
+    // declared signature order, before any other operation of the function",
+    // so they run here, once every input is resolved and before the first
+    // node evaluates.
+    //
+    // The classes come from `dag`, not `bound_dag`: binding substitutes each
+    // resolved symbol into the types, so on the bound graph the claims are
+    // literals and no `Name` class survives to guard. The EXTENTS come from
+    // `resolved_inputs`, which is the point - a claim is checked against what
+    // the caller actually passed, and reading the inputs rather than the
+    // evaluated `values` keeps the guard independent of the live mask. A
+    // witness the caller did not supply is skipped: chelis#991 makes a dead
+    // generic declaration's input not a requirement of the selected root, and
+    // an absent witness cannot disagree with anything.
+    // chelis#1277 B2h: a declared LITERAL input extent is checked here too,
+    // in declared signature order, before any class guard and before the
+    // first node evaluates. The C lane checks it in the kernel's ABI
+    // preamble (`emit.rs`, the `known_dim_size` arm), which
+    // `spec/design/runtime_extents.md` Slice B narrows to exactly this
+    // complement: an axis whose literal came from a genuine declaration and
+    // that no class covers, because `is_member` keeps an external `Load`
+    // axis out of a `Literal` claim rather than mint a class per
+    // literal-shaped input. A literal result claim propagates onto the input
+    // it reads through inference (chelis#1377's `f(b, x: tensor[n]) ->
+    // tensor[4]` lowers `x` as `[4]`), so on both lanes the disagreement
+    // between the claim and the caller's tensor is visible only here. Before
+    // host-lane def applications were routed through this evaluator no
+    // caller could reach a literal-declared `Load` with a disagreeing
+    // extent; now `chelis eval` does, and without this check it printed the
+    // caller's extent where C traps. The rendering is C's: section 4.7's
+    // context line, then [04-NUM-9]'s complete line with `<op>` = `load`.
+    // The rank check mirrors the same preamble's `expected rank` abort for a
+    // declaration that names every axis; an empty `dims` is skipped because
+    // it is also the lowerer's untyped placeholder (`default_type()`), which
+    // an API binding of any rank legitimately fills.
+    for node in dag.nodes() {
+        let RiscOp::Load { name } = &node.op else {
+            continue;
+        };
+        let Some(value) = resolved_inputs.get(name.as_str()) else {
+            continue;
+        };
+        let dims = &node.output_type.dims;
+        let fully_ranked = !dims.is_empty()
+            && dims
+                .iter()
+                .all(|dim| matches!(dim, DimInfo::Lit(_) | DimInfo::Named(_, _)));
+        if fully_ranked && value.shape.len() != dims.len() {
+            return Err(format!(
+                "input `{name}` expected rank {}, got {}",
+                dims.len(),
+                value.shape.len()
+            ));
+        }
+        for (axis, dim) in dims.iter().enumerate() {
+            let DimInfo::Lit(declared) = dim else {
+                continue;
+            };
+            let Some(observed) = value.shape.get(axis).copied() else {
+                continue;
+            };
+            if observed != *declared {
+                return Err(format!(
+                    "extent `{declared}`: claimed = {declared}, {name} axis {axis} = {observed}\n\
+                     numeric trap: domain in load at int64"
+                ));
+            }
+        }
+    }
+
+    for (name, canonical, member) in entry_dim_guards(dag) {
+        let extent = |witness: (&str, usize)| {
+            resolved_inputs
+                .get(witness.0)
+                .and_then(|value| value.shape.get(witness.1).copied())
+        };
+        let (Some(left), Some(right)) = (
+            extent((canonical.0.as_str(), canonical.1)),
+            extent((member.0.as_str(), member.1)),
+        ) else {
+            continue;
+        };
+        if left == right {
+            continue;
+        }
+        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
+        // `load` because section 4.7 fixes it for a guard whose operands are
+        // all interface values: "the `load` primitive of the later witness in
+        // signature order". The context is its own line, as the same
+        // paragraph requires, and carries the disagreeing names, the axis and
+        // each observed value.
+        return Err(format!(
+            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
+             numeric trap: domain in load at int64",
+            canonical.0, canonical.1, member.0, member.1,
+        ));
+    }
+
+    // The same-rank `expand`'s unit-extent claim, at the same point and by the
+    // same reading of the inputs as the class guard above.
+    // `spec/05-risc-primitives.md` section 2.4.1 makes the operation "a claim
+    // that the operand's extent at `axis` is 1" and sends a symbolic or
+    // runtime extent other than 1 to this guard.
+    //
+    // Order matters and B2h fixed it: the literal-extent check, then the class
+    // guard, then this, and only then `infer_symbolic_bindings_from_inputs`.
+    // The inference is a backstop that reports a targeted error for a symbol
+    // it cannot bind; running a claim guard after it would report the
+    // inference's message for a program whose real fault is a refuted claim.
+    for (label, axis) in entry_unit_extent_guards(dag) {
+        let Some(observed) = resolved_inputs
+            .get(&label)
+            .and_then(|value| value.shape.get(axis).copied())
+        else {
+            continue;
+        };
+        if observed == 1 {
+            continue;
+        }
+        return Err(format!(
+            "extent `1`: claimed = 1, {label} axis {axis} = {observed}\n\
+             numeric trap: domain in load at int64",
+        ));
+    }
+
+    let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
-        let bindings = infer_symbolic_bindings_from_inputs(dag, &resolved_inputs)?;
+        let mut bindings =
+            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
+        // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
+        // Dead named dimensions therefore need a harmless placeholder even
+        // though their nodes cannot execute under this root mask. Live names
+        // are never defaulted: they were inferred above or failed loudly.
+        if live.is_some() {
+            for binding in symbolic_bindings(dag) {
+                if !required_symbols.contains(&binding.name) {
+                    bindings.entry(binding.name).or_insert(1);
+                }
+            }
+        }
         prebound_dims = bindings.clone();
         let bound = bind_symbolic_dims(dag, &bindings)?;
         // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
@@ -1416,7 +2251,7 @@ where
         dag.clone()
     };
 
-    let mut values: HashMap<NodeId, TensorValue> = HashMap::new();
+    let mut values: UnordMap<NodeId, TensorValue> = UnordMap::new();
 
     // chelis#616: op-declared runtime dims (node-valued movement / reshape
     // output extents) have no pre-eval binding; each binds to its actual
@@ -1424,15 +2259,80 @@ where
     // dims so a declared-vs-computed disagreement errs loudly (the eval
     // mirror of the C backend's runtime equality-abort guard).
     let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
+    // chelis#1277 C1.3: the eval lane's LOCAL guards, from the same
+    // `local_dim_guard_sites` the C emitter reads (C2.7). Derived from `dag`
+    // and not from `bound_dag` for the same reason the entry guards are:
+    // binding rewrites a resolved `Named(n, None)` to `Named(n, Some(4))`, and
+    // the derivation reads a member's own dim to decide whether the checker
+    // already proved its extent, so on the bound graph every local member
+    // looks statically proved and every site disappears. Node ids survive
+    // `bind_symbolic_dims`, which rebuilds the graph to preserve them, so a
+    // site derived here addresses the node the loop below evaluates.
+    let mut local_guard_sites: UnordMap<
+        NodeId,
+        Vec<(usize, crate::axis_sources::LocalGuardClaim)>,
+    > = UnordMap::new();
+    for ((node, axis), claim) in crate::axis_sources::local_dim_guard_sites(dag) {
+        local_guard_sites
+            .entry(NodeId(node))
+            .or_default()
+            .push((axis, claim));
+    }
     let mut runtime_dims = prebound_dims;
 
+    // chelis#914: cooperative cancellation. `eval_compiled` runs two lanes —
+    // this tensor-DAG lane and the host runtime's `EvalContext::eval_expr` —
+    // so guarding only the host lane would leave a tensor-heavy program
+    // uninterruptible. Captured once here; the per-node cost is one relaxed
+    // load behind an `Option` test.
+    let cancel = chelis_types::current_cancel_token();
+
     for node in bound_dag.nodes() {
+        if let Some(cancel) = &cancel
+            && cancel.is_cancelled()
+        {
+            return Err(chelis_types::EVAL_CANCELLED_MSG.to_string());
+        }
         if let Some(mask) = live
             && !mask[node.id.0]
         {
             continue;
         }
 
+        // `spec/04-type-system.md` section 4.7: a guard comparing a locally
+        // computed value "takes the source position of the operation that
+        // introduces the guarded extent", so it runs BEFORE that operation,
+        // where the C lane emits it. Placing it after the value existed would
+        // let the operation's own failure - a `reshape` numel mismatch that
+        // the disagreeing extent caused - be reported instead of the claim
+        // that is actually wrong, which is the C lane's behaviour before the
+        // guard site existed.
+        // One consumer for every local site the derivation yields, whatever
+        // kind of claim it is. Which extent to read, and therefore when it can
+        // be read, is the site's own `LocalGuardObservation`; this loop takes
+        // the ones readable BEFORE the node runs and the loop at the foot of
+        // the body takes the ones readable only after.
+        //
+        // `spec/04-type-system.md` section 4.7: a guard comparing a locally
+        // computed value "takes the source position of the operation that
+        // introduces the guarded extent", so it runs BEFORE that operation,
+        // where the C lane emits it. Placing it after the value existed would
+        // let the operation's own failure - a `reshape` numel mismatch that the
+        // disagreeing extent caused - be reported instead of the claim that is
+        // actually wrong, which is the C lane's behaviour before the guard site
+        // existed.
+        if let Some(sites) = local_guard_sites.get(&node.id) {
+            for (axis, claim) in sites {
+                let crate::axis_sources::LocalGuardObservation::Carrier(carrier) = &claim.observed
+                else {
+                    continue;
+                };
+                let observed = resolve_eval_bound(carrier, node, &values, 0)?;
+                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+            }
+        }
+
+        let out_prim = node.output_type.precision;
         let value = match &node.op {
             RiscOp::Const { value } => {
                 // chelis#616: a Const whose symbolic dims resolve neither
@@ -1448,17 +2348,26 @@ where
                             .find_map(|dep| values.get(dep).map(|v| v.shape.clone()))
                     })
                     .unwrap_or_default();
-                TensorValue {
-                    data: vec![*value; numel(&shape)],
-                    shape,
+                let n = numel(&shape);
+                // The SEALED payload materializes exactly (chelis#856):
+                // integer/bool payloads splat through the exact i64
+                // lane (no f64 laundering above 2^53), float payloads
+                // through their exact f64 images. A payload whose value
+                // does not survive the node's dtype traps loudly.
+                match value.as_i64_exact() {
+                    Some(i) => finalize_wide_int("const", out_prim, shape, vec![i; n])?,
+                    None => finalize_wide("const", out_prim, shape, vec![value.as_f64_lossy(); n])?,
                 }
             }
             RiscOp::ConstTensor { data } => {
                 let shape =
                     concrete_shape_with(&node.output_type, &runtime_dims).unwrap_or_default();
-                TensorValue {
-                    data: data.clone(),
-                    shape,
+                // Sealed per-dtype storage: exact integer lane for
+                // integer/bool payloads, exact f64 images otherwise
+                // (chelis#856).
+                match data.to_i64_exact_vec() {
+                    Some(ints) => finalize_wide_int("const", out_prim, shape, ints)?,
+                    None => finalize_wide("const", out_prim, shape, data.to_f64_lossy_vec())?,
                 }
             }
             RiscOp::Shape { axis } => {
@@ -1473,38 +2382,40 @@ where
                         input.shape.len()
                     )
                 })?;
-                TensorValue {
-                    data: vec![extent as f64],
-                    shape: vec![],
-                }
+                finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
             }
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
-                Some(value) => value.clone(),
+                Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
                 None => default_value(&node.output_type),
             },
             RiscOp::Store { .. } | RiscOp::Copy | RiscOp::Drop | RiscOp::Realize => {
                 values[&node.inputs[0]].clone()
             }
-            RiscOp::Add => binary_map(
+            RiscOp::Add => binary_elementwise(
+                ElementwiseBinOp::Add,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| a + b,
-            ),
-            RiscOp::Mul => binary_map(
+            )?,
+            RiscOp::Sub => binary_elementwise(
+                ElementwiseBinOp::Sub,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| a * b,
-            ),
-            RiscOp::Div => binary_map(
+            )?,
+            RiscOp::Mul => binary_elementwise(
+                ElementwiseBinOp::Mul,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| a / b,
-            ),
+            )?,
+            RiscOp::Div => binary_elementwise(
+                ElementwiseBinOp::Div,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+            )?,
             // chelis#178: floor division rounds the quotient toward -inf.
-            // Tensor values are stored as f64; for integer-valued operands
-            // `(a / b).floor()` yields the integer floored quotient, and
-            // for float operands it is `floor(a / b)` directly.
+            // For integer-valued operands `(a / b).floor()` yields the
+            // integer floored quotient, and for float operands it is
+            // `floor(a / b)` directly.
             //
             // chelis#550: integer operands trap on a zero divisor with the
             // shared diagnostic, mirroring the host evaluator (`host_ops`,
@@ -1517,21 +2428,11 @@ where
             RiscOp::FloorDiv => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
-                if node.output_type.precision.is_integer() {
-                    try_binary_map(lhs, rhs, |a, b| {
-                        if b == 0.0 {
-                            Err(INT_DIV_ZERO_MSG.to_string())
-                        } else {
-                            Ok((a / b).floor())
-                        }
-                    })?
-                } else {
-                    binary_map(lhs, rhs, |a, b| (a / b).floor())
-                }
+                binary_elementwise(ElementwiseBinOp::FloorDiv, lhs, rhs)?
             }
             // chelis#178: truncating (round-toward-zero) integer division.
             // `(a / b).trunc()` matches C/Rust integer `/` for the
-            // integer-valued f64 operands this op is restricted to.
+            // integer-valued operands this op is restricted to.
             //
             // chelis#550: `trunc_div` is integer-only (the checker rejects
             // float operands), so a zero divisor always traps with the shared
@@ -1540,61 +2441,135 @@ where
             RiscOp::TruncDiv => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
-                try_binary_map(lhs, rhs, |a, b| {
-                    if b == 0.0 {
-                        Err(INT_DIV_ZERO_MSG.to_string())
-                    } else {
-                        Ok((a / b).trunc())
-                    }
-                })?
+                binary_elementwise(ElementwiseBinOp::TruncDiv, lhs, rhs)?
             }
-            RiscOp::Neg => unary_map(&values[&node.inputs[0]], |x| -x),
-            RiscOp::Recip => unary_map(&values[&node.inputs[0]], |x| 1.0 / x),
-            RiscOp::Exp => unary_map(&values[&node.inputs[0]], f64::exp),
-            RiscOp::Log => unary_map(&values[&node.inputs[0]], f64::ln),
-            RiscOp::Sin => unary_map(&values[&node.inputs[0]], f64::sin),
-            RiscOp::Sqrt => unary_map(&values[&node.inputs[0]], f64::sqrt),
-            RiscOp::Cos => unary_map(&values[&node.inputs[0]], f64::cos),
-            RiscOp::Tan => unary_map(&values[&node.inputs[0]], f64::tan),
-            RiscOp::Atan => unary_map(&values[&node.inputs[0]], f64::atan),
-            RiscOp::Abs => unary_map(&values[&node.inputs[0]], f64::abs),
-            RiscOp::Floor => unary_map(&values[&node.inputs[0]], f64::floor),
-            RiscOp::Ceil => unary_map(&values[&node.inputs[0]], f64::ceil),
+            RiscOp::Neg => unary_elementwise(ElementwiseUnOp::Neg, &values[&node.inputs[0]])?,
+            RiscOp::Recip => unary_elementwise(ElementwiseUnOp::Recip, &values[&node.inputs[0]])?,
+            RiscOp::Exp => unary_elementwise(ElementwiseUnOp::Exp, &values[&node.inputs[0]])?,
+            RiscOp::Log => unary_elementwise(ElementwiseUnOp::Log, &values[&node.inputs[0]])?,
+            RiscOp::Sin => unary_elementwise(ElementwiseUnOp::Sin, &values[&node.inputs[0]])?,
+            RiscOp::Sqrt => unary_elementwise(ElementwiseUnOp::Sqrt, &values[&node.inputs[0]])?,
+            RiscOp::Cos => unary_elementwise(ElementwiseUnOp::Cos, &values[&node.inputs[0]])?,
+            RiscOp::Tan => unary_elementwise(ElementwiseUnOp::Tan, &values[&node.inputs[0]])?,
+            RiscOp::Atan => unary_elementwise(ElementwiseUnOp::Atan, &values[&node.inputs[0]])?,
+            RiscOp::Abs => unary_elementwise(ElementwiseUnOp::Abs, &values[&node.inputs[0]])?,
+            RiscOp::Floor => unary_elementwise(ElementwiseUnOp::Floor, &values[&node.inputs[0]])?,
+            RiscOp::Ceil => unary_elementwise(ElementwiseUnOp::Ceil, &values[&node.inputs[0]])?,
             // Round-half-to-even (banker's rounding), matching the C
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
-            RiscOp::Round => unary_map(&values[&node.inputs[0]], f64::round_ties_even),
+            RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
             RiscOp::UniformLike { low, high, seed } => {
-                uniform_like(&values[&node.inputs[0]].shape, *low, *high, *seed)
+                let effective_seed = if let Some(activation) = node.inputs.get(1) {
+                    let active = match values[activation].storage().to_raw() {
+                        RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
+                        _ => {
+                            return Err(format!(
+                                "uniform_like path activation at node {} is not a scalar Bool",
+                                node.id.0
+                            ));
+                        }
+                    };
+                    if active {
+                        let effective =
+                            *seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        path_random_counter = path_random_counter.saturating_add(1);
+                        effective
+                    } else {
+                        *seed
+                    }
+                } else {
+                    *seed
+                };
+                uniform_like(
+                    &values[&node.inputs[0]].shape.clone(),
+                    *low,
+                    *high,
+                    effective_seed,
+                    out_prim,
+                )?
             }
-            RiscOp::Dropout { rate, seed } => dropout(&values[&node.inputs[0]], *rate, *seed),
-            RiscOp::MaxElem => {
-                binary_map(&values[&node.inputs[0]], &values[&node.inputs[1]], f64::max)
+            RiscOp::Dropout { rate, seed } => {
+                dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?
             }
-            RiscOp::CmpLt => binary_map(
+            RiscOp::MaxElem => binary_elementwise(
+                ElementwiseBinOp::Max,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| {
-                    if a < b { 1.0 } else { 0.0 }
-                },
-            ),
-            RiscOp::Sum { axis, .. } => {
-                reduce(&values[&node.inputs[0]], *axis, 0.0, |acc, x| acc + x)
+            )?,
+            RiscOp::MinElem => binary_elementwise(
+                ElementwiseBinOp::Min,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+            )?,
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                let cotangent = &values[&node.inputs[2]];
+                let kind = match kind {
+                    ExtremaKind::Max => FloatExtremaOp::Max,
+                    ExtremaKind::Min => FloatExtremaOp::Min,
+                };
+                let operand = match operand {
+                    ExtremaOperand::Left => KernelExtremaOperand::Left,
+                    ExtremaOperand::Right => KernelExtremaOperand::Right,
+                };
+                let storage = float_extrema_adjoint(
+                    kind,
+                    operand,
+                    lhs.storage(),
+                    rhs.storage(),
+                    cotangent.storage(),
+                )
+                .map_err(|error| error.to_string())?;
+                TensorValue::from_storage(lhs.shape.clone(), storage)
             }
+            RiscOp::Relu => {
+                let input = &values[&node.inputs[0]];
+                let storage = float_relu(input.storage()).map_err(|error| error.to_string())?;
+                TensorValue::from_storage(input.shape.clone(), storage)
+            }
+            RiscOp::ReluAdjoint => {
+                let input = &values[&node.inputs[0]];
+                let cotangent = &values[&node.inputs[1]];
+                let storage = float_relu_adjoint(input.storage(), cotangent.storage())
+                    .map_err(|error| error.to_string())?;
+                TensorValue::from_storage(input.shape.clone(), storage)
+            }
+            RiscOp::CmpLt => compare_elementwise(
+                CompareOp::Lt,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+            )?,
+            RiscOp::Sum { axis, accumulator } => reduce(
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::Sum {
+                    accumulator: *accumulator,
+                    result: out_prim,
+                },
+            )?,
+            RiscOp::Count { axes } => count_tensor(&values[&node.inputs[0]], axes)?,
             RiscOp::MaxReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, f64::NEG_INFINITY, f64::max)
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MaxReduce)?
             }
             RiscOp::MinReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, f64::INFINITY, f64::min)
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MinReduce)?
             }
             RiscOp::ProdReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, 1.0, |acc, x| acc * x)
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::ProdReduce)?
             }
             RiscOp::ReduceWindow {
                 reducer,
                 window_shape,
                 strides,
-            } => reduce_window(&values[&node.inputs[0]], *reducer, window_shape, strides),
+            } => reduce_window(
+                &values[&node.inputs[0]],
+                *reducer,
+                window_shape,
+                strides,
+                out_prim,
+            )?,
             RiscOp::ReduceWindowGrad {
                 reducer,
                 window_shape,
@@ -1605,15 +2580,13 @@ where
                 *reducer,
                 window_shape,
                 strides,
-            ),
-            RiscOp::Argmax { axis } => reduce_argcmp(
-                &values[&node.inputs[0]],
-                *axis,
-                f64::NEG_INFINITY,
-                |a, b| b > a,
-            ),
+                out_prim,
+            )?,
+            RiscOp::Argmax { axis } => {
+                reduce_argcmp(&values[&node.inputs[0]], *axis, ArgReduceOp::Argmax)?
+            }
             RiscOp::Argmin { axis } => {
-                reduce_argcmp(&values[&node.inputs[0]], *axis, f64::INFINITY, |a, b| b < a)
+                reduce_argcmp(&values[&node.inputs[0]], *axis, ArgReduceOp::Argmin)?
             }
             RiscOp::Reshape { new_shape } => {
                 let shape: Vec<usize> = new_shape
@@ -1623,6 +2596,7 @@ where
                         // chelis#616: a runtime target extent reads its rank-0
                         // integer scalar exactly like a movement bound.
                         RtDim::Node(_) => resolve_eval_bound(dim, node, &values, 0),
+                        RtDim::InputAxis { .. } => resolve_eval_bound(dim, node, &values, 0),
                         // chelis#616: an op-declared symbol resolves from the
                         // mid-evaluation bindings.
                         RtDim::Sym(name) => runtime_dims.get(name).copied().ok_or_else(|| {
@@ -1638,61 +2612,73 @@ where
                 // the C backend's runtime numel abort), never a panic.
                 let input = &values[&node.inputs[0]];
                 let expected: usize = shape.iter().product();
-                if expected != input.data.len() {
+                // The phrase is the interpreter's and the C runtime's
+                // (`host_emit.rs`), so every lane reports the mismatch alike.
+                if expected != input.len() {
                     return Err(format!(
-                        "reshape at node {}: target shape {:?} has {} elements but the \
-                         input has {}",
-                        node.id.0,
-                        shape,
+                        "reshape expects {} elements but tensor has {}",
                         expected,
-                        input.data.len()
+                        input.len()
                     ));
                 }
                 reshape(input, shape)
             }
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
             RiscOp::Expand { axis, size } => {
-                // chelis#616: a symbolic size surviving `bind_symbolic_dims`
-                // is an op-declared runtime dim (resolved from the
-                // mid-evaluation bindings) or a wildcard whose extent comes
-                // from the node's shape-dep value (the `lower_if` mask
-                // expansion over a wildcard-typed branch). Loud when neither
-                // resolves.
-                let dep_shape = node
-                    .shape_deps
-                    .iter()
-                    .find_map(|dep| values.get(dep).map(|v| v.shape.clone()));
-                let size_value = match size.evaluate(&runtime_dims) {
-                    Ok(value) => value,
-                    Err(e) => dep_shape
-                        .as_ref()
-                        .and_then(|shape| shape.get(*axis).copied())
-                        .ok_or_else(|| format!("expand at node {}: {e}", node.id.0))?,
-                };
-                let out_shape = match concrete_shape_with(&node.output_type, &runtime_dims) {
-                    Ok(shape) => shape,
-                    // The mask chain expands one axis at a time, so an
-                    // intermediate step's shape is a PREFIX of the branch
-                    // value's shape.
-                    Err(e) => {
-                        let out_rank = node.output_type.dims.len();
-                        dep_shape
-                            .filter(|shape| shape.len() >= out_rank)
-                            .map(|shape| shape[..out_rank].to_vec())
-                            .ok_or_else(|| format!("expand at node {}: {e}", node.id.0))?
+                let input = &values[&node.inputs[0]];
+                let size_value = resolve_eval_bound(size, node, &values, 0)?;
+                let mut out_shape = input.shape.clone();
+                if node.output_type.dims.len() == input.shape.len() + 1 {
+                    if *axis > out_shape.len() {
+                        return Err(format!(
+                            "expand at node {}: axis {} out of bounds for rank {} tensor",
+                            node.id.0,
+                            axis,
+                            input.shape.len()
+                        ));
                     }
-                };
-                expand(&values[&node.inputs[0]], *axis, size_value, out_shape)
+                    out_shape.insert(*axis, size_value);
+                } else if node.output_type.dims.len() == input.shape.len() {
+                    let target = out_shape.get_mut(*axis).ok_or_else(|| {
+                        format!(
+                            "expand at node {}: axis {} out of bounds for rank {} tensor",
+                            node.id.0,
+                            axis,
+                            input.shape.len()
+                        )
+                    })?;
+                    *target = size_value;
+                } else {
+                    return Err(format!(
+                        "expand at node {}: output rank {} must equal input rank {} or {}",
+                        node.id.0,
+                        node.output_type.dims.len(),
+                        input.shape.len(),
+                        input.shape.len() + 1
+                    ));
+                }
+                expand(input, *axis, size_value, out_shape)
             }
-            RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab),
+            RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab, out_prim)?,
             RiscOp::Pad { padding, fill } => {
                 let input = &values[&node.inputs[0]];
                 let resolved = resolve_eval_pairs(padding, node, &values, &input.shape)?;
-                pad(input, &resolved, *fill)
+                pad(input, &resolved, *fill)?
             }
             RiscOp::Shrink { bounds } => {
                 let input = &values[&node.inputs[0]];
                 let resolved = resolve_eval_pairs(bounds, node, &values, &input.shape)?;
+                // chelis#616 on the eval lane: a runtime bound that selects
+                // nothing is rejected as the interpreter rejects it and as
+                // the C runtime aborts it, never returned as an empty tensor.
+                for (axis, (start, end)) in resolved.iter().enumerate() {
+                    if start >= end {
+                        return Err(format!(
+                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted \
+                             (start >= end)"
+                        ));
+                    }
+                }
                 shrink(input, &resolved)
             }
             RiscOp::Stride { strides } => {
@@ -1705,19 +2691,10 @@ where
                 let externals: Vec<&TensorValue> =
                     node.inputs.iter().map(|id| &values[id]).collect();
 
-                // chelis#550: gate the integer `floor_div` zero-divisor trap on
-                // the fused node's output precision. A pure integer-division
-                // chain carries an integer output precision, so the trap fires
-                // for its `floor_div` steps; a float chain keeps IEEE semantics
-                // (`floor(+inf)`), never trapping. `trunc_div` is integer-only
-                // and traps unconditionally. Per-step operand precision is not
-                // recorded on `FusedStep`, so a `floor_div` buried in a chain
-                // whose tail changes the output precision (e.g. a trailing
-                // `cmplt` -> bool) is the one residual the output-precision
-                // gate cannot see; the authoritative integer trap there rests
-                // on `host_ops` (the user `chelis eval` lane) and the C backend
-                // guard, both of which trap per primitive.
-                let fused_is_integer = node.output_type.precision.is_integer();
+                // chelis#729 Phase 2: every step dispatches from its actual
+                // finalized operand storage. That preserves per-op rounding,
+                // exact integer width, and division traps even when a trailing
+                // comparison changes the fused node output dtype to bool.
 
                 // Walk the fused steps sequentially, building up intermediate results.
                 let mut intermediates: Vec<TensorValue> = Vec::with_capacity(ops.len());
@@ -1732,124 +2709,152 @@ where
 
                     let result = match step.op {
                         // Binary ops
-                        FusedStepOp::Add => binary_map(
+                        FusedStepOp::Add => binary_elementwise(
+                            ElementwiseBinOp::Add,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| a + b,
-                        ),
-                        FusedStepOp::Mul => binary_map(
+                        )?,
+                        FusedStepOp::Sub => binary_elementwise(
+                            ElementwiseBinOp::Sub,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| a * b,
-                        ),
-                        FusedStepOp::Div => binary_map(
+                        )?,
+                        FusedStepOp::Mul => binary_elementwise(
+                            ElementwiseBinOp::Mul,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| a / b,
-                        ),
-                        // chelis#178: floor / truncating integer division
-                        // fused steps. See the standalone `RiscOp` arms.
-                        // chelis#550: integer divisors trap on zero (gated on
-                        // the fused output precision; see `fused_is_integer`).
+                        )?,
+                        FusedStepOp::Div => binary_elementwise(
+                            ElementwiseBinOp::Div,
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                        )?,
+                        // chelis#178/#550: floor/truncating division shares
+                        // the standalone typed-kernel path, including exact
+                        // per-dtype integer zero-divisor and overflow traps.
                         FusedStepOp::FloorDiv => {
                             let lhs = resolve(&step.input_indices[0]);
                             let rhs = resolve(&step.input_indices[1]);
-                            if fused_is_integer {
-                                try_binary_map(lhs, rhs, |a, b| {
-                                    if b == 0.0 {
-                                        Err(INT_DIV_ZERO_MSG.to_string())
-                                    } else {
-                                        Ok((a / b).floor())
-                                    }
-                                })?
-                            } else {
-                                binary_map(lhs, rhs, |a, b| (a / b).floor())
-                            }
+                            binary_elementwise(ElementwiseBinOp::FloorDiv, lhs, rhs)?
                         }
                         FusedStepOp::TruncDiv => {
                             let lhs = resolve(&step.input_indices[0]);
                             let rhs = resolve(&step.input_indices[1]);
-                            // `trunc_div` is integer-only; a zero divisor
-                            // always traps.
-                            try_binary_map(lhs, rhs, |a, b| {
-                                if b == 0.0 {
-                                    Err(INT_DIV_ZERO_MSG.to_string())
-                                } else {
-                                    Ok((a / b).trunc())
-                                }
-                            })?
+                            binary_elementwise(ElementwiseBinOp::TruncDiv, lhs, rhs)?
                         }
-                        FusedStepOp::MaxElem => binary_map(
+                        FusedStepOp::MaxElem => binary_elementwise(
+                            ElementwiseBinOp::Max,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            f64::max,
-                        ),
-                        FusedStepOp::CmpLt => binary_map(
+                        )?,
+                        FusedStepOp::MinElem => binary_elementwise(
+                            ElementwiseBinOp::Min,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| if a < b { 1.0 } else { 0.0 },
-                        ),
+                        )?,
+                        FusedStepOp::CmpLt => compare_elementwise(
+                            CompareOp::Lt,
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                        )?,
                         // Unary ops
-                        FusedStepOp::Neg => unary_map(resolve(&step.input_indices[0]), |x| -x),
-                        FusedStepOp::Recip => {
-                            unary_map(resolve(&step.input_indices[0]), |x| 1.0 / x)
-                        }
-                        FusedStepOp::Exp => unary_map(resolve(&step.input_indices[0]), f64::exp),
-                        FusedStepOp::Log => unary_map(resolve(&step.input_indices[0]), f64::ln),
-                        FusedStepOp::Sin => unary_map(resolve(&step.input_indices[0]), f64::sin),
-                        FusedStepOp::Sqrt => unary_map(resolve(&step.input_indices[0]), f64::sqrt),
-                        FusedStepOp::Cos => unary_map(resolve(&step.input_indices[0]), f64::cos),
-                        FusedStepOp::Tan => unary_map(resolve(&step.input_indices[0]), f64::tan),
-                        FusedStepOp::Atan => unary_map(resolve(&step.input_indices[0]), f64::atan),
-                        FusedStepOp::Abs => unary_map(resolve(&step.input_indices[0]), f64::abs),
-                        FusedStepOp::Floor => {
-                            unary_map(resolve(&step.input_indices[0]), f64::floor)
-                        }
-                        FusedStepOp::Ceil => unary_map(resolve(&step.input_indices[0]), f64::ceil),
-                        FusedStepOp::Round => {
-                            unary_map(resolve(&step.input_indices[0]), f64::round_ties_even)
-                        }
+                        FusedStepOp::Neg => unary_elementwise(
+                            ElementwiseUnOp::Neg,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Recip => unary_elementwise(
+                            ElementwiseUnOp::Recip,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Exp => unary_elementwise(
+                            ElementwiseUnOp::Exp,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Log => unary_elementwise(
+                            ElementwiseUnOp::Log,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Sin => unary_elementwise(
+                            ElementwiseUnOp::Sin,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Sqrt => unary_elementwise(
+                            ElementwiseUnOp::Sqrt,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Cos => unary_elementwise(
+                            ElementwiseUnOp::Cos,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Tan => unary_elementwise(
+                            ElementwiseUnOp::Tan,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Atan => unary_elementwise(
+                            ElementwiseUnOp::Atan,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Abs => unary_elementwise(
+                            ElementwiseUnOp::Abs,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Floor => unary_elementwise(
+                            ElementwiseUnOp::Floor,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Ceil => unary_elementwise(
+                            ElementwiseUnOp::Ceil,
+                            resolve(&step.input_indices[0]),
+                        )?,
+                        FusedStepOp::Round => unary_elementwise(
+                            ElementwiseUnOp::Round,
+                            resolve(&step.input_indices[0]),
+                        )?,
                     };
                     intermediates.push(result);
                 }
 
-                // The last step's output is the node's result.
-                intermediates
+                // Every typed step already finalizes at its own dtype. The
+                // final conversion is therefore only a defensive checker-
+                // invariant guard; a comparison tail already carries bool.
+                let last = intermediates
                     .pop()
-                    .expect("FusedElem must have at least one step")
+                    .expect("FusedElem must have at least one step");
+                if last.prim() == out_prim {
+                    last
+                } else {
+                    let storage = finalize_tensor("fused", out_prim, last.storage().to_raw())
+                        .map_err(|trap| trap.to_string())?;
+                    TensorValue::from_storage(last.shape.clone(), storage)
+                }
+            }
+            RiscOp::CastTrunc { new_precision } => {
+                let input = &values[&node.inputs[0]];
+                cast_trunc_value(input, *new_precision)?
             }
             RiscOp::Cast { new_precision } => {
                 // #380: a `cast` must apply the dtype conversion, not pass the
-                // f64-backed value through unchanged. Float->int truncates
-                // toward zero, float->f32 drops precision through f32, int->
-                // float preserves the value, and bool encodes as 0.0/1.0 — the
-                // same conversion `chelis-compiler-api`'s `convert_scalar_data`
-                // (and the C backend's element-wise C cast) apply. The source
-                // precision comes from the input node's output type; the target
-                // is the cast's `new_precision`. Pre-fix the DAG-evaluator lane
-                // (grad / e2e-train) read `cast(3.7, int32)` as `3.7`.
+                // stored value through unchanged. The per-direction rules live
+                // in `cast_wide_element` (chelis#729 Phase 1: float targets
+                // genuinely finalize at width, so f16/bf16 casts round; the
+                // out-of-range integer rules keep their pre-refactor behavior
+                // until chelis#759 authors them). The source precision comes
+                // from the input node's output type; the target is the cast's
+                // `new_precision`.
                 let input = &values[&node.inputs[0]];
                 let src_prec = bound_dag
                     .get(node.inputs[0])
                     .map(|n| n.output_type.precision)
                     .unwrap_or(*new_precision);
-                let converted = input
-                    .data
-                    .iter()
-                    .map(|&x| convert_cast_data(x, src_prec, *new_precision))
-                    .collect();
-                TensorValue {
-                    data: converted,
-                    shape: input.shape.clone(),
-                }
+                cast_value(input, src_prec, *new_precision)?
             }
             RiscOp::BlasMatmul { .. } => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
                 if lhs.shape.len() == 2 && rhs.shape.len() == 2 {
-                    matmul(lhs, rhs)
+                    matmul(lhs, rhs, out_prim)?
                 } else {
-                    batched_matmul(lhs, rhs)
+                    batched_matmul(lhs, rhs, out_prim)?
                 }
             }
             RiscOp::Gather { axis } => {
@@ -1860,7 +2865,8 @@ where
                 &values[&node.inputs[1]],
                 &values[&node.inputs[2]],
                 *axis,
-            ),
+                out_prim,
+            )?,
             RiscOp::Scatter { axis } => scatter_replace(
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
@@ -1902,59 +2908,178 @@ where
                 }
             }
         }
+        // The same consumer, for the sites whose extent only exists once this
+        // node has produced it. Section 4.7 places these "after its producers
+        // and before the first allocation or element access whose shape
+        // depends on the guarded extent": this node IS the producer, and the
+        // allocation that depends on the extent belongs to its consumer, which
+        // has not run. A unit-extent claim is the case, and the site is keyed
+        // on the operand rather than on the `expand` that makes the claim,
+        // because that is where the C emitter renders the extent.
+        if let Some(sites) = local_guard_sites.get(&node.id) {
+            for (axis, claim) in sites {
+                if !matches!(
+                    claim.observed,
+                    crate::axis_sources::LocalGuardObservation::RealizedExtent
+                ) {
+                    continue;
+                }
+                let Some(&observed) = value.shape.get(*axis) else {
+                    continue;
+                };
+                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+            }
+        }
         values.insert(node.id, value);
     }
 
-    Ok(values)
+    Ok((values, path_random_counter))
 }
 
-pub fn eval_tensor_with<F>(dag: &Dag, load_input: F) -> Result<HashMap<NodeId, TensorValue>, String>
+/// One local extent guard, compared and reported.
+///
+/// Both consumers below call this and nothing else formats a local guard on
+/// this lane, so the two kinds of site cannot drift into two diagnostics. The
+/// text is [04-NUM-9]'s complete line with no prefix and no suffix, and
+/// section 4.7's context on its own preceding line, in the C lane's wording:
+/// the two lanes report one guard.
+///
+/// A binder this lane has not bound supplies no value, so the site is skipped
+/// rather than compared against an invented number.
+///
+/// The C lane does NOT match that skip, and saying so is the point. Once
+/// control reaches `emit_runtime_dim_site`'s GUARD branch it consults no
+/// binding table and emits its comparison against the binder unconditionally,
+/// so where this lane skips, C would emit an identifier its prologue may never
+/// declare. What keeps that from being a live divergence is not the absence of
+/// such a class - one is easy to build, with a `Load` whose only axis is a
+/// literal and two op-declared members - but the branch above it.
+/// `runtime_dim_sites` (`chelis-backend-c/src/emit.rs`) makes the FIRST
+/// op-declared occurrence of a symbol no `Load` declares a DECLARE site, so
+/// `emit_runtime_dim_site` returns before the guard branch for exactly the
+/// symbols this lane has not bound; a later site for that symbol compares
+/// against a variable by then declared. The eval mirror is the `runtime_dims`
+/// insert in the same loop, which binds the same symbol when the same node
+/// evaluates. The lanes line up case by case.
+///
+/// The residual window is a derivation site that the legacy
+/// `symbolic_occurrences` walk records nowhere, for a symbol nothing declares.
+/// Neither this author nor a reviewer could construct one. It stays a latent
+/// asymmetry in one derivation's two consumers, recorded rather than papered
+/// over, and closing it means giving the derivation the answer rather than
+/// adding a second test in either lane.
+fn local_guard_verdict(
+    node_id: usize,
+    axis: usize,
+    claim: &crate::axis_sources::LocalGuardClaim,
+    observed: usize,
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<(), String> {
+    let claimed = match &claim.canonical {
+        crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
+        crate::axis_sources::CanonicalExtent::Binder(name) => match runtime_dims.get(name) {
+            Some(value) => *value,
+            None => return Ok(()),
+        },
+    };
+    if observed != claimed {
+        return Err(format!(
+            "extent `{}`: claimed = {claimed}, node {node_id} axis {axis} = {observed}\n\
+             numeric trap: domain in {} at int64",
+            claim.claim, claim.op,
+        ));
+    }
+    Ok(())
+}
+
+pub fn eval_tensor_with<F>(
+    dag: &Dag,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, false, load_input)
+    eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+        .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_with_strict<F>(
     dag: &Dag,
     load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, load_input)
+    eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+        .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_roots_with<F>(
     dag: &Dag,
     roots: &[NodeId],
     load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, false, load_input);
+        return eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+            .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), false, load_input)
+    eval_tensor_internal(
+        dag,
+        Some(&live),
+        false,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_roots_with_strict<F>(
     dag: &Dag,
     roots: &[NodeId],
     load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, load_input);
+        return eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+            .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, load_input)
+    eval_tensor_internal(
+        dag,
+        Some(&live),
+        true,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        load_input,
+    )
+    .map(|(values, _)| values)
+}
+
+/// Evaluate roots while threading the executed Random path's next ordinal.
+/// Only `UniformLike` nodes carrying a scalar Bool activation participate;
+/// ordinary baked-seed DAGs retain their historical behavior.
+pub fn eval_tensor_roots_with_strict_random_progress<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    random_counter: u64,
+    load_input: F,
+) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    if roots.is_empty() {
+        return eval_tensor_internal(dag, None, true, random_counter, load_input);
+    }
+    reject_drop_roots(dag, roots)?;
+    let live = live_mask_for_roots(dag, roots);
+    eval_tensor_internal(dag, Some(&live), true, random_counter, load_input)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
@@ -1973,21 +3098,23 @@ fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
 
 pub fn eval_tensor(
     dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
-) -> Result<HashMap<NodeId, TensorValue>, String> {
+    inputs: &UnordMap<String, TensorValue>,
+) -> Result<UnordMap<NodeId, TensorValue>, String> {
     eval_tensor_with(dag, |name| inputs.get(name).cloned())
 }
 
 /// Evaluate a DAG on scalar inputs. Each node produces a single f64.
-pub fn eval_scalar(dag: &Dag, inputs: &HashMap<String, f64>) -> HashMap<NodeId, f64> {
-    let tensor_inputs: HashMap<String, TensorValue> = inputs
-        .iter()
+pub fn eval_scalar(dag: &Dag, inputs: &UnordMap<String, f64>) -> UnordMap<NodeId, f64> {
+    let tensor_inputs: UnordMap<String, TensorValue> = inputs
+        .to_sorted()
+        .into_iter()
         .map(|(name, value)| (name.clone(), TensorValue::scalar(*value)))
         .collect();
     eval_tensor(dag, &tensor_inputs)
         .expect("scalar evaluation should not fail")
+        .into_sorted()
         .into_iter()
-        .map(|(id, value)| (id, *value.data.first().unwrap_or(&0.0)))
+        .map(|(id, value)| (id, value.first_f64_lossy_or_zero()))
         .collect()
 }
 
@@ -2017,6 +3144,108 @@ mod tests {
         }
     }
 
+    #[test]
+    fn path_sensitive_uniform_like_advances_only_active_nodes() {
+        let mut dag = Dag::new();
+        let ty = tensor_ty(&[2], Prim::F32);
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let inactive = dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 0.0),
+            vec![],
+            tensor_ty(&[], Prim::Bool),
+            None,
+        );
+        let active = dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            tensor_ty(&[], Prim::Bool),
+            None,
+        );
+        let skipped = dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 17,
+            },
+            vec![template, inactive],
+            ty.clone(),
+            None,
+        );
+        let executed = dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 17,
+            },
+            vec![template, active],
+            ty,
+            None,
+        );
+        dag.add_root(skipped);
+        dag.add_root(executed);
+
+        let roots = dag.roots().to_vec();
+        let (values, next) =
+            eval_tensor_roots_with_strict_random_progress(&dag, &roots, 7, |name| {
+                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
+            })
+            .expect("path-sensitive Random DAG evaluates");
+        assert_eq!(next, 8, "only the active draw consumes an ordinal");
+        let expected_seed = 17 ^ 7_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
+        assert_eq!(values[&executed], expected);
+        let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
+        assert_eq!(values[&skipped], skipped_expected);
+    }
+
+    #[test]
+    fn load_ingress_rejects_an_already_tagged_dtype_substitution() {
+        let f16 = finalize_tensor("test", Prim::F16, RawTensor::Float(vec![1.5])).unwrap();
+        let input = TensorValue::from_storage(vec![1], f16);
+        let err = ingress_to_declared("x", Prim::F32, &input)
+            .expect_err("a tagged f16 input must not be contextually cast to f32");
+        assert!(err.contains("f16"), "source dtype must be named: {err}");
+        assert!(err.contains("f32"), "declared dtype must be named: {err}");
+
+        let int8 = finalize_tensor("test", Prim::Int8, RawTensor::Int(vec![7])).unwrap();
+        let input = TensorValue::from_storage(vec![1], int8);
+        let err = ingress_to_declared("x", Prim::Int64, &input)
+            .expect_err("a tagged int8 input must not be contextually cast to int64");
+        assert!(err.contains("int8"), "source dtype must be named: {err}");
+        assert!(err.contains("int64"), "declared dtype must be named: {err}");
+    }
+
+    #[test]
+    fn load_ingress_preserves_an_exact_dtype_match() {
+        let f32 = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![1.5])).unwrap();
+        let input = TensorValue::from_storage(vec![1], f32);
+        assert_eq!(ingress_to_declared("x", Prim::F32, &input).unwrap(), input);
+    }
+
+    #[test]
+    fn load_ingress_freezes_raw_host_values_at_the_declared_dtype() {
+        let raw = TensorValue::from_vec(vec![1], vec![0.1]);
+        let frozen = ingress_to_declared("x", Prim::F32, &raw)
+            .expect("raw host ingress is finalized once at the declared dtype");
+        assert_eq!(frozen.prim(), Prim::F32);
+        assert_eq!(frozen.element_f64_lossy(0), 0.1_f32 as f64);
+
+        let err = ingress_to_declared(
+            "count",
+            Prim::Int8,
+            &TensorValue::from_vec(vec![1], vec![300.0]),
+        )
+        .expect_err("raw ingress still domain-checks at the declared dtype");
+        assert!(err.contains("numeric trap: overflow"), "{err}");
+    }
+
     /// chelis#368: the `shrink` evaluator must not overflow when a
     /// `SHRINK_TO_END` (`usize::MAX`) full-axis sentinel survives into eval.
     /// `bind_symbolic_dims` normally resolves the sentinel first (and the
@@ -2029,13 +3258,10 @@ mod tests {
     fn shrink_clamps_shrink_to_end_sentinel_without_overflow() {
         // 2x3 input [[1,2,3],[4,5,6]]; axis 0 sliced [1,2] (concrete row 1),
         // axis 1 a full-axis identity via the sentinel.
-        let input = TensorValue {
-            data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            shape: vec![2, 3],
-        };
+        let input = TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let out = shrink(&input, &[(1, 2), (0, SHRINK_TO_END)]);
         assert_eq!(out.shape, vec![1, 3]);
-        assert_eq!(out.data, vec![4.0, 5.0, 6.0]);
+        assert_eq!(out.to_f64_lossy_vec(), vec![4.0, 5.0, 6.0]);
     }
 
     /// chelis#523: `eval::shrink` loud-clamp — a genuine (non-sentinel) `end`
@@ -2045,10 +3271,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "end 5 exceeds input extent 3")]
     fn shrink_asserts_on_end_beyond_extent() {
-        let input = TensorValue {
-            data: vec![1.0, 2.0, 3.0],
-            shape: vec![3],
-        };
+        let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
         let _ = shrink(&input, &[(0, 5)]);
     }
 
@@ -2057,10 +3280,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "start 3 exceeds end 1")]
     fn shrink_asserts_on_inverted_bounds() {
-        let input = TensorValue {
-            data: vec![1.0, 2.0, 3.0],
-            shape: vec![3],
-        };
+        let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
         let _ = shrink(&input, &[(3, 1)]);
     }
 
@@ -2138,18 +3358,24 @@ mod tests {
     /// oracle: its cotangent w.r.t. every forward output is exactly 1, so
     /// the analytic input gradient is `reduce_window_grad(x, ones)`.
     fn rw_loss(x: &TensorValue, r: ReduceWindowKind, w: &[usize], s: &[usize]) -> f64 {
-        reduce_window(x, r, w, s).data.iter().sum()
+        reduce_window(x, r, w, s, Prim::F64)
+            .unwrap()
+            .to_f64_lossy_vec()
+            .iter()
+            .sum()
     }
 
     /// Central finite-difference gradient of `rw_loss` w.r.t. each element.
     fn rw_fd_grad(x: &TensorValue, r: ReduceWindowKind, w: &[usize], s: &[usize]) -> Vec<f64> {
         let eps = 1e-4;
-        (0..x.data.len())
+        (0..x.len())
             .map(|i| {
-                let mut xp = x.clone();
-                let mut xm = x.clone();
-                xp.data[i] += eps;
-                xm.data[i] -= eps;
+                let mut plus = x.to_f64_lossy_vec();
+                let mut minus = x.to_f64_lossy_vec();
+                plus[i] += eps;
+                minus[i] -= eps;
+                let xp = TensorValue::from_vec(x.shape.clone(), plus);
+                let xm = TensorValue::from_vec(x.shape.clone(), minus);
                 (rw_loss(&xp, r, w, s) - rw_loss(&xm, r, w, s)) / (2.0 * eps)
             })
             .collect()
@@ -2169,12 +3395,12 @@ mod tests {
     fn reduce_window_grad_matches_finite_difference_all_reducers() {
         // Distinct values (no ties) so Max/Min gradients are unique and
         // both the analytic adjoint and the central difference agree.
-        let x = TensorValue {
-            data: vec![
+        let x = TensorValue::from_vec(
+            vec![4, 4],
+            vec![
                 3.0, 1.0, 4.0, 1.5, 5.0, 9.0, 2.0, 6.0, 5.0, 3.5, 8.0, 9.5, 7.0, 0.5, 2.5, 6.5,
             ],
-            shape: vec![4, 4],
-        };
+        );
         // Overlapping (stride < window) and a non-unit stride exercise the
         // overlap-add / select-and-scatter accumulation across windows.
         for (w, s) in [
@@ -2189,16 +3415,13 @@ mod tests {
                 ReduceWindowKind::Max,
                 ReduceWindowKind::Min,
             ] {
-                let out = reduce_window(&x, r, &w, &s);
-                let ones = TensorValue {
-                    data: vec![1.0; out.data.len()],
-                    shape: out.shape.clone(),
-                };
-                let analytic = reduce_window_grad(&x, &ones, r, &w, &s);
+                let out = reduce_window(&x, r, &w, &s, Prim::F64).unwrap();
+                let ones = TensorValue::from_vec(out.shape.clone(), vec![1.0; out.len()]);
+                let analytic = reduce_window_grad(&x, &ones, r, &w, &s, Prim::F64).unwrap();
                 assert_eq!(analytic.shape, x.shape);
                 let fd = rw_fd_grad(&x, r, &w, &s);
                 assert_close(
-                    &analytic.data,
+                    &analytic.to_f64_lossy_vec(),
                     &fd,
                     1e-3,
                     &format!("reducer={r:?} window={w:?} stride={s:?}"),
@@ -2213,21 +3436,47 @@ mod tests {
         // of windows covering i. For a [4] input, window=2, stride=1 the
         // windows are [0,1],[1,2],[2,3]; interior positions are covered
         // twice, the two ends once.
-        let x = TensorValue {
-            data: vec![10.0, 20.0, 30.0, 40.0],
-            shape: vec![4],
-        };
-        let out = reduce_window(&x, ReduceWindowKind::Sum, &[2], &[1]);
-        let ones = TensorValue {
-            data: vec![1.0; out.data.len()],
-            shape: out.shape.clone(),
-        };
-        let din = reduce_window_grad(&x, &ones, ReduceWindowKind::Sum, &[2], &[1]);
-        assert_eq!(din.data, vec![1.0, 2.0, 2.0, 1.0]);
+        let x = TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]);
+        let out = reduce_window(&x, ReduceWindowKind::Sum, &[2], &[1], Prim::F64).unwrap();
+        let ones = TensorValue::from_vec(out.shape.clone(), vec![1.0; out.len()]);
+        let din =
+            reduce_window_grad(&x, &ones, ReduceWindowKind::Sum, &[2], &[1], Prim::F64).unwrap();
+        assert_eq!(din.to_f64_lossy_vec(), vec![1.0, 2.0, 2.0, 1.0]);
 
         // Mean is Sum scaled by 1 / window_volume (= 2 here).
-        let din_mean = reduce_window_grad(&x, &ones, ReduceWindowKind::Mean, &[2], &[1]);
-        assert_eq!(din_mean.data, vec![0.5, 1.0, 1.0, 0.5]);
+        let din_mean =
+            reduce_window_grad(&x, &ones, ReduceWindowKind::Mean, &[2], &[1], Prim::F64).unwrap();
+        assert_eq!(din_mean.to_f64_lossy_vec(), vec![0.5, 1.0, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn phase2_reduce_window_grad_accumulates_overlaps_at_declared_width() {
+        let f32_tensor = |shape, values| {
+            TensorValue::from_storage(
+                shape,
+                finalize_tensor("test", Prim::F32, RawTensor::Float(values)).unwrap(),
+            )
+        };
+        let x = f32_tensor(vec![5], vec![0.0; 5]);
+        let witness = f32_tensor(vec![3], vec![16_777_216.0, 1.0, -16_777_216.0]);
+        let actual =
+            reduce_window_grad(&x, &witness, ReduceWindowKind::Sum, &[3], &[1], Prim::F32).unwrap();
+        assert_eq!(
+            actual.to_f64_lossy_vec(),
+            vec![
+                16_777_216.0,
+                16_777_216.0,
+                0.0,
+                -16_777_215.0,
+                -16_777_216.0
+            ],
+            "the center receives all three cotangents and must round after each f32 add"
+        );
+
+        let control = f32_tensor(vec![3], vec![4.0, 1.0, -4.0]);
+        let actual =
+            reduce_window_grad(&x, &control, ReduceWindowKind::Sum, &[3], &[1], Prim::F32).unwrap();
+        assert_eq!(actual.to_f64_lossy_vec(), vec![4.0, 5.0, 1.0, -3.0, -4.0]);
     }
 
     #[test]
@@ -2236,21 +3485,16 @@ mod tests {
         // [0,1]->max@1, [1,2]->max@2, [2,3]->max@3. With distinct upstream
         // gradients, position 0 gets nothing, 1 gets g[0], 2 gets g[1],
         // 3 gets g[2].
-        let x = TensorValue {
-            data: vec![1.0, 2.0, 3.0, 4.0],
-            shape: vec![4],
-        };
-        let g = TensorValue {
-            data: vec![5.0, 7.0, 11.0],
-            shape: vec![3],
-        };
-        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1]);
-        assert_eq!(din.data, vec![0.0, 5.0, 7.0, 11.0]);
+        let x = TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]);
+        let g = TensorValue::from_vec(vec![3], vec![5.0, 7.0, 11.0]);
+        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1], Prim::F64).unwrap();
+        assert_eq!(din.to_f64_lossy_vec(), vec![0.0, 5.0, 7.0, 11.0]);
 
         // Min over the same increasing input routes to the window minimum:
         // windows pick positions 0,1,2; position 3 gets nothing.
-        let din_min = reduce_window_grad(&x, &g, ReduceWindowKind::Min, &[2], &[1]);
-        assert_eq!(din_min.data, vec![5.0, 7.0, 11.0, 0.0]);
+        let din_min =
+            reduce_window_grad(&x, &g, ReduceWindowKind::Min, &[2], &[1], Prim::F64).unwrap();
+        assert_eq!(din_min.to_f64_lossy_vec(), vec![5.0, 7.0, 11.0, 0.0]);
     }
 
     #[test]
@@ -2258,26 +3502,30 @@ mod tests {
         // A flat window: every position equals the max, so each tied
         // position receives the full upstream gradient (the max_reduce
         // mask convention), not a 1/k share.
-        let x = TensorValue {
-            data: vec![2.0, 2.0, 2.0],
-            shape: vec![3],
-        };
-        let g = TensorValue {
-            data: vec![4.0, 4.0],
-            shape: vec![2],
-        };
-        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1]);
+        let x = TensorValue::from_vec(vec![3], vec![2.0, 2.0, 2.0]);
+        let g = TensorValue::from_vec(vec![2], vec![4.0, 4.0]);
+        let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1], Prim::F64).unwrap();
         // windows [0,1] and [1,2]: pos0 += 4 (win0), pos1 += 4+4, pos2 += 4.
-        assert_eq!(din.data, vec![4.0, 8.0, 4.0]);
+        assert_eq!(din.to_f64_lossy_vec(), vec![4.0, 8.0, 4.0]);
     }
 
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let vals = eval_scalar(&dag, &HashMap::new());
+        let vals = eval_scalar(&dag, &UnordMap::new());
         assert!((vals[&c] - 3.0).abs() < 1e-10);
     }
 
@@ -2287,7 +3535,7 @@ mod tests {
         let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec3_f32(), None);
         let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec3_f32(), None);
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec3_f32(), None);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -2300,6 +3548,137 @@ mod tests {
         assert_eq!(
             vals[&c],
             TensorValue::from_vec(vec![3], vec![5.0, 7.0, 9.0])
+        );
+    }
+
+    /// [04-NUM-8]/dtype-semantics C5: the IR reference evaluator must call
+    /// the exact-width integer kernel, never project int64 operands through
+    /// binary64 before arithmetic.
+    #[test]
+    fn int64_elementwise_add_is_exact_above_binary64_mantissa() {
+        let dag = int_div_dag(RiscOp::Add, Prim::Int64);
+        let mut inputs = UnordMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![2],
+                vec![(1_i64 << 53) + 1, (1_i64 << 53) + 2],
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "b".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![2], vec![1, -1]).unwrap(),
+        );
+        let values = eval_tensor(&dag, &inputs).expect("exact int64 add");
+        assert_eq!(
+            values[&dag.roots()[0]].storage().to_i64_exact_vec(),
+            Some(vec![(1_i64 << 53) + 2, (1_i64 << 53) + 1])
+        );
+    }
+
+    /// Negative twin for the exact integer kernel: overflow traps at the
+    /// declared width and names both the operation and dtype.
+    #[test]
+    fn int8_elementwise_add_overflow_uses_branded_trap() {
+        let dag = int_div_dag(RiscOp::Add, Prim::Int8);
+        let mut inputs = UnordMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![127, 1]).unwrap(),
+        );
+        inputs.insert(
+            "b".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![1, 1]).unwrap(),
+        );
+        assert_eq!(
+            eval_tensor(&dag, &inputs).expect_err("int8 overflow must trap"),
+            "numeric trap: overflow in add at int8"
+        );
+    }
+
+    /// Comparison reads the finalized operand storage, not the result dtype
+    /// and not a lossy float projection.
+    #[test]
+    fn int64_comparison_is_exact_above_binary64_mantissa() {
+        let mut dag = Dag::new();
+        let ty = tensor_ty(&[2], Prim::Int64);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
+        let out = dag.add_node(RiscOp::CmpLt, vec![a, b], tensor_ty(&[2], Prim::Bool), None);
+        dag.add_root(out);
+
+        let mut inputs = UnordMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![2],
+                vec![1_i64 << 53, (1_i64 << 53) + 2],
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "b".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![2],
+                vec![(1_i64 << 53) + 1, (1_i64 << 53) + 1],
+            )
+            .unwrap(),
+        );
+        let values = eval_tensor(&dag, &inputs).expect("exact int64 comparison");
+        assert_eq!(values[&out].storage().to_i64_exact_vec(), Some(vec![1, 0]));
+    }
+
+    /// Fused elementwise execution owes the same exact-width contract as
+    /// standalone nodes; fusion cannot reopen the f64 closure seam.
+    #[test]
+    fn fused_int64_arithmetic_is_exact_above_binary64_mantissa() {
+        let mut dag = Dag::new();
+        let ty = tensor_ty(&[1], Prim::Int64);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let one = dag.add_node(
+            RiscOp::Load { name: "one".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let add = dag.add_node(RiscOp::Add, vec![a, one], ty.clone(), None);
+        let mul = dag.add_node(RiscOp::Mul, vec![add, one], ty, None);
+        dag.add_root(mul);
+        let fused = crate::fuse::fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::FusedElem { .. }))
+        );
+
+        let mut inputs = UnordMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![1],
+                vec![(1_i64 << 53) + 1],
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "one".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![1], vec![1]).unwrap(),
+        );
+        let values = eval_tensor(&fused, &inputs).expect("exact fused int64 arithmetic");
+        let root = fused.roots()[0];
+        assert_eq!(
+            values[&root].storage().to_i64_exact_vec(),
+            Some(vec![(1_i64 << 53) + 2])
         );
     }
 
@@ -2330,7 +3709,7 @@ mod tests {
         );
         dag.add_root(out);
 
-        let inputs = HashMap::from([
+        let inputs = UnordMap::from([
             (
                 "values".to_string(),
                 TensorValue::from_vec(vec![2, 4, 2], (0..16).map(|x| x as f64).collect()),
@@ -2387,7 +3766,7 @@ mod tests {
         );
         dag.add_root(out);
 
-        let inputs = HashMap::from([
+        let inputs = UnordMap::from([
             (
                 "target".to_string(),
                 TensorValue::from_vec(vec![2, 3, 2], vec![0.0; 12]),
@@ -2434,13 +3813,13 @@ mod tests {
         let y = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             out_ty,
             None,
         );
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![1], vec![2.5]));
         let vals = eval_tensor(&dag, &inputs).unwrap();
         assert_eq!(
@@ -2505,33 +3884,81 @@ mod tests {
         );
     }
 
-    /// chelis#351: a Load can be DEAD under the roots' live mask while a
-    /// live node still needs a symbolic dim that only that Load
-    /// declares (`vmap(grad(f))` where the gradient is constant in the
-    /// input: the backward DAG never consumes `x`, but its
-    /// `Expand { size: Sym(n) }` must bind `n` from `x`'s shape).
-    /// The occurrence input is resolved despite the mask, and the dim
-    /// binds from its shape.
+    /// chelis#991: a dependency package may contribute generic declarations
+    /// outside the selected eval root. Their symbolic inputs are dead and
+    /// must not become invented top-level requirements for the live result.
     #[test]
-    fn eval_root_scoped_strict_resolves_dead_load_for_symbolic_dim() {
+    fn eval_root_scoped_ignores_unrelated_dead_symbolic_input() {
+        let mut dag = Dag::new();
+        let dead_ty = TensorType {
+            dims: vec![DimInfo::Named("k".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _dead = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], dead_ty, None);
+        let live = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 7.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+
+        let values = eval_tensor_roots_with_strict(&dag, &[live], |_| None)
+            .expect("dead generic dependency input must not escape into root-scoped eval");
+        assert_eq!(values[&live], TensorValue::scalar(7.0));
+    }
+
+    #[test]
+    fn eval_root_scoped_ignores_dead_canonical_source_with_live_same_named_dim() {
+        let mut dag = Dag::new();
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("k".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _dead = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            symbolic.clone(),
+            None,
+        );
+        let live = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+
+        let values = eval_tensor_roots_with_strict(&dag, &[live], |name| {
+            (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
+        })
+        .expect("dead same-named symbolic source must not override the live input");
+        assert_eq!(values[&live].to_f64_lossy_vec(), vec![3.0, 4.0]);
+    }
+
+    /// A shape-only `InputAxis` edge is an ordinary live dependency even
+    /// when the tensor's elements are otherwise unused.
+    #[test]
+    fn eval_root_scoped_strict_resolves_shape_only_input_axis() {
         let mut dag = Dag::new();
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let _x = dag.add_node(
+        let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
-        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let one = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Sym("n".to_string()),
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(0),
+                },
             },
-            vec![one],
+            vec![one, x],
             sym_ty,
             None,
         );
@@ -2544,43 +3971,143 @@ mod tests {
         assert_eq!(
             vals[&ones],
             TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]),
-            "`n` must bind to 3 from the dead `x` Load's runtime shape"
+            "InputAxis must read 3 from the explicit `x` shape-only input"
         );
     }
 
-    /// Negative parity for the dead-load resolution above: when the
-    /// declaring occurrence input is genuinely unavailable, the failure
-    /// is the dim-targeted inference error — never a silent default
-    /// shape and never the bare strict-load error (the Load is dead, so
-    /// strict mode has no claim on it).
+    /// Negative parity: an unavailable structural witness is a missing live
+    /// input, never a guessed extent.
     #[test]
-    fn eval_root_scoped_strict_missing_dead_symbolic_load_is_dim_error() {
+    fn eval_root_scoped_strict_missing_input_axis_witness_is_input_error() {
         let mut dag = Dag::new();
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let _x = dag.add_node(
+        let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
-        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let one = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Sym("n".to_string()),
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(0),
+                },
             },
-            vec![one],
+            vec![one, x],
             sym_ty,
             None,
         );
 
         let err = eval_tensor_roots_with_strict(&dag, &[ones], |_| None).unwrap_err();
         assert!(
-            err.contains("missing required input `x` for symbolic dimension `n`"),
-            "expected the dim-targeted inference error, got: {err}"
+            err.contains("missing required input `x`"),
+            "expected the structural input error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn eval_root_scoped_input_axis_selects_one_exact_shape_source() {
+        let mut dag = Dag::new();
+        let sym_ty = TensorType {
+            dims: vec![DimInfo::Named("k".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let _unrelated = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let required = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty.clone(),
+            None,
+        );
+        let one = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(0),
+                },
+            },
+            vec![one, required],
+            sym_ty,
+            None,
+        );
+
+        let values = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
+            (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
+        })
+        .expect("the exact x witness must resolve without consulting same-named a");
+        assert_eq!(values[&ones].shape, vec![2]);
+
+        let err = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
+            (name == "a").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
+        })
+        .unwrap_err();
+        assert!(err.contains("missing required input `x`"), "{err}");
+    }
+
+    #[test]
+    fn eval_root_scoped_accepts_repeated_symbol_axes_from_one_dead_source() {
+        let mut dag = Dag::new();
+        let square_ty = TensorType {
+            dims: vec![
+                DimInfo::Named("n".to_string(), None),
+                DimInfo::Named("n".to_string(), None),
+            ],
+            precision: Prim::F32,
+        };
+        let shape_source = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], square_ty, None);
+        let one = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let vector_ty = TensorType {
+            dims: vec![DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let ones = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(1),
+                },
+            },
+            vec![one, shape_source],
+            vector_ty,
+            None,
+        );
+
+        let values = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
+            (name == "x").then(|| TensorValue::from_vec(vec![2, 2], vec![0.0; 4]))
+        })
+        .expect("one explicit source may expose the same extent on multiple axes");
+        assert_eq!(
+            values[&ones],
+            TensorValue::from_vec(vec![2], vec![1.0, 1.0])
         );
     }
 
@@ -2602,7 +4129,7 @@ mod tests {
             (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} (var {} relu) (var {} x)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![3], vec![-2.0, 0.5, 4.0]),
@@ -2613,11 +4140,11 @@ mod tests {
     }
 
     /// #380: the DAG evaluator must apply the dtype conversion for `cast`,
-    /// not pass the f64-backed value through unchanged. Float->int truncates
-    /// toward zero. Pre-fix `cast([2.7, -2.7, 3.0], int32)` evaluated to
-    /// `[2.7, -2.7, 3.0]`; it must be `[2.0, -2.0, 3.0]`.
+    /// not pass the f64-backed value through unchanged. The checked default
+    /// rejects fractional float->int values rather than choosing a rounding
+    /// policy implicitly.
     #[test]
-    fn lowered_cast_float_to_int_truncates_toward_zero() {
+    fn lowered_cast_fractional_float_to_int_traps_domain() {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y
@@ -2626,24 +4153,22 @@ mod tests {
                     (t-prim {} int32)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![3], vec![2.7, -2.7, 3.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        let err = eval_tensor(&dag, &inputs).unwrap_err();
         assert_eq!(
-            *last,
-            TensorValue::from_vec(vec![3], vec![2.0, -2.0, 3.0]),
-            "cast to int32 must truncate toward zero in the DAG evaluator (#380)",
+            err, "numeric trap: domain in cast at int32",
+            "fractional cast to int32 must trap in the DAG evaluator (#380)",
         );
     }
 
     /// #380 negative / direction guard: int->float preserves the value
     /// exactly (no spurious truncation on the int->float direction), and
-    /// float->f32 narrows. Pins that `convert_cast_data` only truncates on
-    /// the float->int direction, not blindly.
+    /// float->f32 narrows. Pins that the sealed cast ladder preserves the
+    /// int->float direction rather than applying the checked int-target rule.
     #[test]
     fn lowered_cast_int_to_float_preserves_value() {
         // int32 input carries integral f64 storage; cast to f64 must keep it.
@@ -2655,7 +4180,7 @@ mod tests {
                     (t-prim {} f64)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![7.0, -3.0]));
         let vals = eval_tensor(&dag, &inputs).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
@@ -2676,7 +4201,7 @@ mod tests {
                    (var {} matmul) (var {} a) (var {} b)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
@@ -2702,7 +4227,7 @@ mod tests {
                    (var {} softmax) (var {} x) (lit {} 0)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -2710,7 +4235,7 @@ mod tests {
         let vals = eval_tensor(&dag, &inputs).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         let expected = [0.09003057, 0.24472847, 0.66524096];
-        for (actual, target) in last.data.iter().zip(expected.iter()) {
+        for (actual, target) in last.to_f64_lossy_vec().iter().zip(expected.iter()) {
             assert!((actual - target).abs() < 1e-5);
         }
     }
@@ -2726,7 +4251,7 @@ mod tests {
                    (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 5.0]),
@@ -2742,7 +4267,7 @@ mod tests {
         let vals = eval_tensor(&dag, &inputs).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
         let expected = [-0.49998, 0.99997, -0.499995, 0.99998875];
-        for (actual, target) in last.data.iter().zip(expected.iter()) {
+        for (actual, target) in last.to_f64_lossy_vec().iter().zip(expected.iter()) {
             assert!((actual - target).abs() < 2e-4, "{actual} vs {target}");
         }
     }
@@ -2757,7 +4282,7 @@ mod tests {
                    (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 2.0, 3.0, 4.0]),
@@ -2784,7 +4309,7 @@ mod tests {
                    (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(
@@ -2814,13 +4339,13 @@ mod tests {
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag = lower(src);
-        let vals_a = eval_tensor(&dag, &HashMap::new()).unwrap();
-        let vals_b = eval_tensor(&dag, &HashMap::new()).unwrap();
+        let vals_a = eval_tensor(&dag, &UnordMap::new()).unwrap();
+        let vals_b = eval_tensor(&dag, &UnordMap::new()).unwrap();
         let out_a = vals_a.get(dag.roots().last().expect("DAG root")).unwrap();
         let out_b = vals_b.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(out_a, out_b);
-        assert!(out_a.data.contains(&0.0));
-        assert!(out_a.data.iter().any(|value| *value > 0.0));
+        assert!(out_a.to_f64_lossy_vec().contains(&0.0));
+        assert!(out_a.to_f64_lossy_vec().iter().any(|value| *value > 0.0));
     }
 
     #[test]
@@ -2841,11 +4366,11 @@ mod tests {
         "#;
         let dag_a = lower(src_a);
         let dag_b = lower(src_b);
-        let out_a = eval_tensor(&dag_a, &HashMap::new())
+        let out_a = eval_tensor(&dag_a, &UnordMap::new())
             .unwrap()
             .remove(&NodeId(dag_a.len() - 1))
             .unwrap();
-        let out_b = eval_tensor(&dag_b, &HashMap::new())
+        let out_b = eval_tensor(&dag_b, &UnordMap::new())
             .unwrap()
             .remove(&NodeId(dag_b.len() - 1))
             .unwrap();
@@ -2853,23 +4378,23 @@ mod tests {
     }
 
     #[test]
-    fn uniform_like_affine_mirrors_c_f32_sampler() {
+    fn uniform_like_f32_affine_mirrors_c_f32_sampler() {
         // chelis#770: the affine is a single correctly-rounded FMA
         // (`span_f.mul_add(unit_f, low_f)`), conforming to the compiled C
         // sampler `chelis_uniform_sample_f32` (which the default toolchain
         // contracts to the same FMA). seed=42, shape=[8], [2,5).
-        let out = uniform_like(&[8], 2.0, 5.0, 42);
+        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F32).unwrap();
         // elem[4]: where the OLD f64 affine diverged from the C f32 sampler by
         // 1 ULP (the #735 sweep: eval 0x404215a9 vs C 0x404215aa).
         assert_eq!(
-            out.data[4].to_bits(),
+            out.to_f64_lossy_vec()[4].to_bits(),
             (f32::from_bits(0x404215aa) as f64).to_bits(),
             "elem[4] must be the C f32 sampler value (0x404215aa)",
         );
         let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
         assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
         assert_ne!(
-            (out.data[4] as f32).to_bits(),
+            (out.to_f64_lossy_vec()[4] as f32).to_bits(),
             (old_f64_affine as f32).to_bits()
         );
         // elem[6]/[7]: where a single-rounding FMA and a plain two-rounding
@@ -2878,30 +4403,101 @@ mod tests {
         // exact bit the compiled C lane flips between `-ffp-contract=fast`
         // (FMA, 0x408f5273) and `-ffp-contract=off` (two roundings, 0x408f5274).
         assert_eq!(
-            out.data[6].to_bits(),
+            out.to_f64_lossy_vec()[6].to_bits(),
             (f32::from_bits(0x408f5273) as f64).to_bits(),
             "elem[6] must be the single-rounding FMA value (0x408f5273)",
         );
         assert_eq!(
-            out.data[7].to_bits(),
+            out.to_f64_lossy_vec()[7].to_bits(),
             (f32::from_bits(0x403ec1e7) as f64).to_bits(),
             "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
         );
         let unit6 = dropout_sample(42, 6) as f32;
         let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
         assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
-        assert_ne!((out.data[6] as f32).to_bits(), two_rounding_6.to_bits());
+        assert_ne!(
+            (out.to_f64_lossy_vec()[6] as f32).to_bits(),
+            two_rounding_6.to_bits()
+        );
     }
 
     #[test]
-    fn uniform_like_affine_negative_range_is_f32() {
+    fn uniform_like_f32_affine_negative_range_is_f32() {
         // chelis#770: negative range at unit level (the C cross-lane path
         // can't be driven with a bare negative literal — a separate lowering
         // gap). seed=42, index=3, low=-3.0, high=-1.0 → 0xc010167a.
-        let out = uniform_like(&[8], -3.0, -1.0, 42);
+        let out = uniform_like(&[8], -3.0, -1.0, 42, Prim::F32).unwrap();
         assert_eq!(
-            out.data[3].to_bits(),
+            out.to_f64_lossy_vec()[3].to_bits(),
             (f32::from_bits(0xc010167a) as f64).to_bits(),
+        );
+    }
+
+    #[test]
+    fn uniform_like_f64_uses_the_f64_affine() {
+        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F64).unwrap();
+        let expected = (5.0f64 - 2.0).mul_add(dropout_sample(42, 4), 2.0);
+        assert_eq!(out.to_f64_lossy_vec()[4].to_bits(), expected.to_bits());
+        assert_ne!(
+            out.to_f64_lossy_vec()[4].to_bits(),
+            (f32::from_bits(0x404215aa) as f64).to_bits(),
+        );
+    }
+
+    #[test]
+    fn cross_family_equality_handles_signed_min_and_actual_float_width() {
+        let int_min = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![i64::MIN])).unwrap(),
+        );
+        let float_min = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::F64, RawTensor::Float(vec![i64::MIN as f64])).unwrap(),
+        );
+        assert_eq!(int_min, float_min, "i64::MIN is an exact power of two");
+
+        let int_max = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![i64::MAX])).unwrap(),
+        );
+        let rounded_float_max = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::F64, RawTensor::Float(vec![i64::MAX as f64])).unwrap(),
+        );
+        assert_ne!(
+            int_max, rounded_float_max,
+            "a lossy float fixture must not mask i64::MAX"
+        );
+
+        let exact_f32 = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![1 << 24])).unwrap(),
+        );
+        let float_f32 = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![(1 << 24) as f64])).unwrap(),
+        );
+        assert_eq!(exact_f32, float_f32);
+
+        let inexact_f32 = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![(1 << 24) + 1])).unwrap(),
+        );
+        assert_ne!(inexact_f32, float_f32);
+    }
+
+    #[test]
+    fn issue_878_pad_fill_preserves_exact_int64_above_f64_boundary() {
+        let exact = 9_007_199_254_740_993i64;
+        let input = TensorValue::from_storage(
+            vec![1],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![7])).unwrap(),
+        );
+        let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, exact).unwrap();
+        let out = pad(&input, &[(1, 1)], fill).unwrap();
+        assert_eq!(
+            out.storage().to_i64_exact_vec(),
+            Some(vec![exact, 7, exact])
         );
     }
 
@@ -2949,8 +4545,8 @@ mod tests {
         (dag, y)
     }
 
-    fn inputs_2x3() -> HashMap<String, TensorValue> {
-        let mut inputs = HashMap::new();
+    fn inputs_2x3() -> UnordMap<String, TensorValue> {
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 4.0, -2.0, 3.0, -1.0, 5.0]),
@@ -3042,7 +4638,7 @@ mod tests {
         let (dag, y) = build_2x3_with(RiscOp::Argmax { axis: 1 });
         let vals = eval_tensor(&dag, &inputs_2x3()).unwrap();
         let v = &vals[&y];
-        for x in &v.data {
+        for x in &v.to_f64_lossy_vec() {
             assert!(
                 x.fract() == 0.0,
                 "argmax output {x} should be integer-valued"
@@ -3062,7 +4658,12 @@ mod tests {
             RiscOp::Argmin { axis: 7 },
         ] {
             let mut dag = Dag::new();
-            let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], row_f32(3), None);
+            let x = dag.add_node(
+                RiscOp::synth_const(row_f32(3).precision, 1.0),
+                vec![],
+                row_f32(3),
+                None,
+            );
             dag.add_node(op, vec![x], scalar_f32(), None);
             let errs = verify(&dag);
             assert!(
@@ -3102,8 +4703,8 @@ mod tests {
         dag
     }
 
-    fn divisor_inputs(b: Vec<f64>) -> HashMap<String, TensorValue> {
-        let mut inputs = HashMap::new();
+    fn divisor_inputs(b: Vec<f64>) -> UnordMap<String, TensorValue> {
+        let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], b));
         inputs
@@ -3115,7 +4716,7 @@ mod tests {
         let err = eval_tensor(&dag, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("integer floor_div by zero must trap");
         assert_eq!(
-            err, INT_DIV_ZERO_MSG,
+            err, "numeric trap: division by zero in floor_div at int32",
             "trap diagnostic must match the shared message exactly"
         );
     }
@@ -3125,7 +4726,7 @@ mod tests {
         let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int64);
         let err = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
             .expect_err("integer trunc_div by zero must trap");
-        assert_eq!(err, INT_DIV_ZERO_MSG);
+        assert_eq!(err, "numeric trap: division by zero in trunc_div at int64");
     }
 
     #[test]
@@ -3133,12 +4734,12 @@ mod tests {
         // floor_div rounds toward -inf: floor_div(10, 4) == 2,
         // floor_div(7, -2) == -4 (7 / -2 == -3.5 -> floor -4).
         let dag = int_div_dag(RiscOp::FloorDiv, Prim::Int32);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
         let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");
         let root = dag.roots()[0];
-        assert_eq!(vals[&root].data, vec![2.0, -4.0]);
+        assert_eq!(vals[&root].to_f64_lossy_vec(), vec![2.0, -4.0]);
     }
 
     #[test]
@@ -3146,12 +4747,12 @@ mod tests {
         // trunc_div rounds toward zero: trunc_div(10, 4) == 2,
         // trunc_div(7, -2) == -3 (7 / -2 == -3.5 -> trunc -3).
         let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int32);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
         let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");
         let root = dag.roots()[0];
-        assert_eq!(vals[&root].data, vec![2.0, -3.0]);
+        assert_eq!(vals[&root].to_f64_lossy_vec(), vec![2.0, -3.0]);
     }
 
     #[test]
@@ -3164,11 +4765,16 @@ mod tests {
             .expect("float floor_div by zero must NOT trap");
         let root = dag.roots()[0];
         assert!(
-            vals[&root].data[0].is_infinite() && vals[&root].data[0] > 0.0,
+            vals[&root].to_f64_lossy_vec()[0].is_infinite()
+                && vals[&root].to_f64_lossy_vec()[0] > 0.0,
             "float floor_div(10.0, 0.0) must be +inf, got {}",
-            vals[&root].data[0]
+            vals[&root].to_f64_lossy_vec()[0]
         );
-        assert_eq!(vals[&root].data[1], 3.0, "floor(7.0 / 2.0) == 3.0");
+        assert_eq!(
+            vals[&root].to_f64_lossy_vec()[1],
+            3.0,
+            "floor(7.0 / 2.0) == 3.0"
+        );
     }
 
     #[test]
@@ -3207,6 +4813,116 @@ mod tests {
         );
         let err = eval_tensor(&fused, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("fused integer floor_div by zero must trap");
-        assert_eq!(err, INT_DIV_ZERO_MSG);
+        assert_eq!(err, "numeric trap: division by zero in floor_div at int32");
+    }
+
+    fn exact_tensor(prim: Prim, values: RawTensor) -> TensorValue {
+        let len = match &values {
+            RawTensor::Int(values) => values.len(),
+            RawTensor::Float(values) => values.len(),
+        };
+        let storage = finalize_tensor("phase2-reduction-test", prim, values)
+            .expect("test values are in range");
+        TensorValue::from_storage(vec![len], storage)
+    }
+
+    #[test]
+    fn checked_cast_selects_the_lowest_flat_index_across_trap_kinds() {
+        let overflow_first = exact_tensor(Prim::F32, RawTensor::Float(vec![300.0, f64::NAN]));
+        assert_eq!(
+            cast_tensor(&overflow_first, Prim::F32, Prim::Int8).unwrap_err(),
+            "numeric trap: overflow in cast at int8"
+        );
+
+        let domain_first = exact_tensor(Prim::F32, RawTensor::Float(vec![f64::NAN, 300.0]));
+        assert_eq!(
+            cast_tensor(&domain_first, Prim::F32, Prim::Int8).unwrap_err(),
+            "numeric trap: domain in cast at int8"
+        );
+    }
+
+    #[test]
+    fn phase2_window_reduction_uses_declared_width_and_exact_storage() {
+        let f32_input = exact_tensor(
+            Prim::F32,
+            RawTensor::Float(vec![16_777_216.0, 1.0, -16_777_216.0]),
+        );
+        let f32_out = reduce_window(&f32_input, ReduceWindowKind::Sum, &[3], &[1], Prim::F32)
+            .expect("in-range f32 reduction");
+        assert_eq!(f32_out.to_f64_lossy_vec(), vec![0.0]);
+
+        let i64_input = exact_tensor(Prim::Int64, RawTensor::Int(vec![9_007_199_254_740_992, 1]));
+        let i64_out = reduce_window(&i64_input, ReduceWindowKind::Sum, &[2], &[1], Prim::Int64)
+            .expect("exact int64 reduction");
+        assert_eq!(
+            i64_out.storage().to_i64_exact_vec(),
+            Some(vec![9_007_199_254_740_993])
+        );
+    }
+
+    #[test]
+    fn phase2_window_reduction_traps_intermediate_overflow_at_operand_width() {
+        let input = exact_tensor(Prim::Int8, RawTensor::Int(vec![100, 100, -100]));
+        let err = reduce_window(&input, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
+            .expect_err("100i8 + 100i8 must trap before the later -100");
+        assert_eq!(err, "numeric trap: overflow in reduce_window_sum at int8");
+
+        let control = exact_tensor(Prim::Int8, RawTensor::Int(vec![40, 40, -40]));
+        let output = reduce_window(&control, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
+            .expect("in-range int8 control");
+        assert_eq!(output.storage().to_i64_exact_vec(), Some(vec![40]));
+    }
+
+    #[test]
+    fn phase2_axis_sum_traps_in_the_stride4_combine() {
+        let input = exact_tensor(
+            Prim::Int32,
+            RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
+        );
+        let err = reduce(
+            &input,
+            0,
+            TensorReduceOp::Sum {
+                accumulator: Prim::Int32,
+                result: Prim::Int32,
+            },
+        )
+        .expect_err("lane0 + lane1 overflows the int32 accumulator");
+        assert_eq!(err, "numeric trap: overflow in sum at int32");
+
+        let control = exact_tensor(
+            Prim::Int32,
+            RawTensor::Int(vec![i64::from(i32::MAX) - 1, 1, -1]),
+        );
+        let output = reduce(
+            &control,
+            0,
+            TensorReduceOp::Sum {
+                accumulator: Prim::Int32,
+                result: Prim::Int32,
+            },
+        )
+        .expect("below-overflow control");
+        assert_eq!(
+            output.storage().to_i64_exact_vec(),
+            Some(vec![i64::from(i32::MAX) - 1])
+        );
+    }
+
+    #[test]
+    fn phase2_arg_reductions_compare_int64_without_binary64() {
+        let max_input = exact_tensor(
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_992, 9_007_199_254_740_993]),
+        );
+        let max_out = reduce_argcmp(&max_input, 0, ArgReduceOp::Argmax).expect("argmax");
+        assert_eq!(max_out.storage().to_i64_exact_vec(), Some(vec![1]));
+
+        let min_input = exact_tensor(
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_993, 9_007_199_254_740_992]),
+        );
+        let min_out = reduce_argcmp(&min_input, 0, ArgReduceOp::Argmin).expect("argmin");
+        assert_eq!(min_out.storage().to_i64_exact_vec(), Some(vec![1]));
     }
 }

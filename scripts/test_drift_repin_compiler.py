@@ -136,6 +136,67 @@ class DirTreeTests(unittest.TestCase):
                 self.assertIn('compiler = "=0.7.27"', text, rel)
                 self.assertNotIn("0.7.26", text, rel)
 
+    def test_repins_all_workflow_compiler_env_pins(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "reef.toml", 'compiler = "=0.17.1"\n')
+            ci = shell / ".github" / "workflows" / "ci.yml"
+            release = shell / ".github" / "workflows" / "release.yml"
+            self._write(
+                ci,
+                "env:\n"
+                "  CHELIS_TAG: v0.17.1\n"
+                "  CHELIS_VERSION: 0.17.1\n"
+                "  SHOALS_VERSION: 0.24.1\n"
+                "jobs:\n"
+                "  nested:\n"
+                "    env:\n"
+                '      CHELIS_TAG: "v0.17.1"\n'
+                "      CHELIS_VERSION: '0.17.1'\n",
+            )
+            self._write(
+                release,
+                "env:\n"
+                "  CHELIS_TAG : 'v0.17.1' # release compiler\n"
+                '  CHELIS_VERSION : "0.17.1" # release compiler\n',
+            )
+
+            rc = drc.main(["drift_repin_compiler.py", str(shell), "0.17.4"])
+
+            self.assertEqual(rc, 0)
+            for workflow in (ci, release):
+                text = workflow.read_text(encoding="utf-8")
+                self.assertNotIn("0.17.1", text)
+                self.assertIn("0.17.4", text)
+            ci_text = ci.read_text(encoding="utf-8")
+            self.assertEqual(ci_text.count("CHELIS_TAG"), 2)
+            self.assertEqual(ci_text.count("v0.17.4"), 2)
+            self.assertEqual(ci_text.count("CHELIS_VERSION"), 2)
+            self.assertIn("SHOALS_VERSION: 0.24.1", ci_text)
+
+    def test_workflow_repin_is_idempotent_and_ignores_other_yaml(self):
+        with tempfile.TemporaryDirectory() as d:
+            shell = Path(d)
+            self._write(shell / "reef.toml", 'compiler = "=0.17.4"\n')
+            workflow = shell / ".github" / "workflows" / "ci.yaml"
+            unrelated = shell / "config.yml"
+            source = (
+                "env:\n"
+                "  CHELIS_TAG: v0.17.4\n"
+                "  CHELIS_VERSION: 0.17.4\n"
+            )
+            self._write(workflow, source)
+            self._write(
+                unrelated,
+                "CHELIS_TAG: v0.17.1\nCHELIS_VERSION: 0.17.1\n",
+            )
+
+            self.assertEqual(
+                drc.main(["drift_repin_compiler.py", str(shell), "0.17.4"]), 0
+            )
+            self.assertEqual(workflow.read_text(encoding="utf-8"), source)
+            self.assertIn("0.17.1", unrelated.read_text(encoding="utf-8"))
+
     def test_skips_pinless_manifest_but_repins_the_rest(self):
         with tempfile.TemporaryDirectory() as d:
             shell = Path(d)

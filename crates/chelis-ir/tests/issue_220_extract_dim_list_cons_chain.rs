@@ -1,6 +1,6 @@
 //! Issue Chelis-Lang/chelis#220: `extract_dim_list` in
 //! `crates/chelis-ir/src/lower.rs` walked `list.elements` directly and
-//! matched any `Atom::Symbol` as a dim name. Surface syntax like
+//! matched any `Atom::Name` as a dim name. Surface syntax like
 //! `[cast(2, int64), cast(3, int64)]` desugars to a Cons-chain
 //! `(app (var Cons) (cast ...) (app (var Cons) (cast ...) (var Nil)))`.
 //! Element 0 of that outer `(app ...)` is the literal tag symbol
@@ -32,10 +32,10 @@
 //!
 //! Both assertions fail on `main` before the fix and pass after.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
-use chelis_ir::dag::{DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::lower::lower_subexpr_program;
 use chelis_types::types::Prim;
 
@@ -66,7 +66,7 @@ fn cons_chain_reshape_expr() -> Expr {
 }
 
 fn lower_with_x_bound() -> chelis_ir::dag::Dag {
-    let mut scoped = HashMap::new();
+    let mut scoped = UnordMap::new();
     scoped.insert(
         "x".to_string(),
         TensorType {
@@ -77,8 +77,8 @@ fn lower_with_x_bound() -> chelis_ir::dag::Dag {
     lower_subexpr_program(
         &cons_chain_reshape_expr(),
         scoped,
-        HashMap::new(),
-        HashMap::new(),
+        UnordMap::new(),
+        UnordMap::new(),
     )
 }
 
@@ -133,7 +133,7 @@ fn reshape_cons_chain_extracts_integer_dim_list() {
     };
     assert_eq!(
         new_shape,
-        &vec![RtDim::Lit(2), RtDim::Lit(3)],
+        &vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
         "reshape new_shape did not match the integer Cons-chain head \
          literals; got {new_shape:?}",
     );

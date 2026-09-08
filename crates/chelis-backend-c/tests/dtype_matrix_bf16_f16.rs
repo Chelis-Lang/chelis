@@ -16,15 +16,18 @@
 //!
 //! Acceptance oracle: `cargo test -p chelis-backend-c --test dtype_matrix_bf16_f16`.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
+
+mod common;
 
 const BF16_TOL: f64 = 1e-2;
 const F16_TOL: f64 = 1e-3;
@@ -74,7 +77,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     // race is harmless. Without the PID, two processes that interleave
     // `fs::copy` and `fs::rename` produce an ENOENT on the second
     // rename because the first rename moved the shared tmp away.
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     // The rename can still race with another process renaming its own
     // unique tmp into the same canonical path. On POSIX, rename onto an
@@ -144,11 +152,11 @@ fn cblas_available() -> bool {
     // If the OS does not ship libcblas the matmul tests early-return
     // gracefully (the agreement tests still cover this via the e2e
     // suite under a unified cblas guard).
-    let dir = std::env::temp_dir().join("chelis_bf16_cblas_probe");
-    let _ = fs::create_dir_all(&dir);
-    let probe = dir.join("probe.c");
+    let probe = common::probe_dir("bf16_cblas_probe");
+    let dir = probe.path().to_path_buf();
+    let probe_source = dir.join("probe.c");
     fs::write(
-        &probe,
+        &probe_source,
         r#"
 extern void cblas_sgemm();
 int main(void) { (void)cblas_sgemm; return 0; }
@@ -158,7 +166,7 @@ int main(void) { (void)cblas_sgemm; return 0; }
     let out = dir.join("probe_bin");
     Command::new("gcc")
         .args([
-            probe.to_str().unwrap(),
+            probe_source.to_str().unwrap(),
             "-lcblas",
             "-o",
             out.to_str().unwrap(),
@@ -176,14 +184,15 @@ fn compile_and_run_kernel(
     main_c: &str,
     needs_cblas: bool,
 ) -> String {
-    let dir = std::env::temp_dir().join(format!("chelis_bf16_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("bf16_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",
@@ -240,35 +249,51 @@ const HARNESS: &str = r#"
 #include "chelis_runtime.h"
 
 static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
-    int shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
-    uint16_t *p = (uint16_t*)t->data;
+    int64_t shape[1] = {n};
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_bf16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
-    int shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
-    uint16_t *p = (uint16_t*)t->data;
+    int64_t shape[1] = {n};
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_f16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *bf16_matrix_from_f32(const float *src, int rows, int cols) {
-    int shape[2] = {rows, cols};
-    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_BF16);
-    uint16_t *p = (uint16_t*)t->data;
+    int64_t shape[2] = {rows, cols};
+    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_DTYPE_BF16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < rows * cols; i++) p[i] = chelis_f32_to_bf16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f16_matrix_from_f32(const float *src, int rows, int cols) {
-    int shape[2] = {rows, cols};
-    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_F16);
-    uint16_t *p = (uint16_t*)t->data;
+    int64_t shape[2] = {rows, cols};
+    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_DTYPE_F16);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < rows * cols; i++) p[i] = chelis_f32_to_f16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
+}
+
+static const uint16_t *tensor_u16_data(const chelis_tensor *t) {
+    return (const uint16_t*)chelis_tensor_read_view(t).data;
+}
+
+static const float *tensor_f32_data(const chelis_tensor *t) {
+    return (const float*)chelis_tensor_read_view(t).data;
 }
 "#;
 
@@ -315,9 +340,7 @@ fn bf16_const_fill_produces_exact_bit_pattern() {
         let mut dag = Dag::new();
         let n = 4;
         dag.add_node(
-            RiscOp::Const {
-                value: value as f64,
-            },
+            RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, value as f64),
             vec![],
             vec_ty(n, Prim::Bf16),
             None,
@@ -329,9 +352,9 @@ extern void bf16_const_bits(chelis_tensor **inputs, int n_in, chelis_tensor **ou
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     bf16_const_bits(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < {n}; i++) printf("0x%04X\n", (unsigned)p[i]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -368,9 +391,7 @@ fn f16_const_fill_produces_exact_bit_pattern() {
         let mut dag = Dag::new();
         let n = 4;
         dag.add_node(
-            RiscOp::Const {
-                value: value as f64,
-            },
+            RiscOp::synth_const(vec_ty(n, Prim::F16).precision, value as f64),
             vec![],
             vec_ty(n, Prim::F16),
             None,
@@ -382,9 +403,9 @@ extern void f16_const_bits(chelis_tensor **inputs, int n_in, chelis_tensor **out
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     f16_const_bits(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < {n}; i++) printf("0x%04X\n", (unsigned)p[i]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -413,10 +434,10 @@ int main(void) {{
 /// trailing node has a scalar `data` slot, which holds true for the
 /// reduction-rooted tests below).
 fn eval_scalar(dag: &Dag) -> f64 {
-    let inputs = HashMap::new();
+    let inputs = UnordMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = chelis_ir::dag::NodeId(dag.len() - 1);
-    vals[&last_id].data[0]
+    vals[&last_id].element_f64_lossy(0)
 }
 
 #[test]
@@ -427,13 +448,13 @@ fn bf16_add_agrees_with_evaluator() {
     }
     let mut dag = Dag::new();
     let a = dag.add_node(
-        RiscOp::Const { value: 1.5 },
+        RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
-        RiscOp::Const { value: 2.5 },
+        RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
@@ -446,9 +467,9 @@ extern void bf16_add(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, 
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     bf16_add(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("%.8f\n", chelis_bf16_to_f32(p[0]));
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -471,13 +492,13 @@ fn f16_add_agrees_with_evaluator() {
     }
     let mut dag = Dag::new();
     let a = dag.add_node(
-        RiscOp::Const { value: 1.5 },
+        RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
-        RiscOp::Const { value: 2.5 },
+        RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
@@ -490,9 +511,9 @@ extern void f16_add(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, i
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     f16_add(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("%.8f\n", chelis_f16_to_f32(p[0]));
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -515,13 +536,13 @@ fn bf16_mul_agrees_with_evaluator() {
     }
     let mut dag = Dag::new();
     let a = dag.add_node(
-        RiscOp::Const { value: 3.0 },
+        RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 3.0),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
-        RiscOp::Const { value: 2.0 },
+        RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.0),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
@@ -534,9 +555,9 @@ extern void bf16_mul(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, 
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     bf16_mul(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("%.8f\n", chelis_bf16_to_f32(p[0]));
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -558,13 +579,13 @@ fn f16_mul_agrees_with_evaluator() {
     }
     let mut dag = Dag::new();
     let a = dag.add_node(
-        RiscOp::Const { value: 3.0 },
+        RiscOp::synth_const(scalar_ty(Prim::F16).precision, 3.0),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
-        RiscOp::Const { value: 2.0 },
+        RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.0),
         vec![],
         scalar_ty(Prim::F16),
         None,
@@ -577,9 +598,9 @@ extern void f16_mul(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, i
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     f16_mul(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("%.8f\n", chelis_f16_to_f32(p[0]));
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -629,7 +650,7 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_sum_1024(inputs, 1, outputs, 1);
-    float result = ((float*)outputs[0]->data)[0];
+    float result = tensor_f32_data(outputs[0])[0];
     printf("%.6f\n", result);
     // Hand-rolled naive bf16-direct accumulator: round to bf16 after
     // every add. This is the silent-corruption baseline; if the
@@ -641,8 +662,8 @@ int main(void) {{
         acc_bits = chelis_f32_to_bf16(a);
     }}
     printf("%.6f\n", chelis_bf16_to_f32(acc_bits));
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -690,15 +711,15 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     f16_sum_1024(inputs, 1, outputs, 1);
-    printf("%.6f\n", ((float*)outputs[0]->data)[0]);
+    printf("%.6f\n", tensor_f32_data(outputs[0])[0]);
     uint16_t acc_bits = 0x0000;
     for (int i = 0; i < {n}; i++) {{
         float a = chelis_f16_to_f32(acc_bits) + 0.01f;
         acc_bits = chelis_f32_to_f16(a);
     }}
     printf("%.6f\n", chelis_f16_to_f32(acc_bits));
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -753,10 +774,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_max(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("%.6f\n", chelis_bf16_to_f32(p[0]));
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -800,10 +821,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     f16_max(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("%.6f\n", chelis_f16_to_f32(p[0]));
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -874,7 +895,7 @@ fn build_f16_matmul_dag() -> Dag {
 }
 
 /// Structural test: the emitted C for a bf16 matmul contains both
-/// `chelis_bf16_buffer_to_f32` (the operand-side conversion call) and
+/// `chelis_bf16_to_f32` (the operand-side conversion call) and
 /// `cblas_sgemm` (the BLAS dispatch). Runs unconditionally; does not
 /// need gcc, libcblas, or any runtime. This is the lock for the
 /// convert-then-sgemm routing decision.
@@ -884,7 +905,7 @@ fn bf16_matmul_routes_through_convert_then_sgemm() {
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "bf16_matmul_routing").unwrap();
     assert!(
-        result.c_source.contains("chelis_bf16_buffer_to_f32"),
+        result.c_source.contains("chelis_bf16_to_f32"),
         "emitted C must convert bf16 operands to f32: {}",
         result.c_source
     );
@@ -894,7 +915,7 @@ fn bf16_matmul_routes_through_convert_then_sgemm() {
         result.c_source
     );
     assert!(
-        result.c_source.contains("chelis_f32_buffer_to_bf16"),
+        result.c_source.contains("chelis_f32_to_bf16"),
         "emitted C must downcast f32 accumulator back to bf16 for the destination: {}",
         result.c_source
     );
@@ -906,7 +927,7 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "f16_matmul_routing").unwrap();
     assert!(
-        result.c_source.contains("chelis_f16_buffer_to_f32"),
+        result.c_source.contains("chelis_f16_to_f32"),
         "emitted C must convert f16 operands to f32: {}",
         result.c_source
     );
@@ -916,7 +937,7 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
         result.c_source
     );
     assert!(
-        result.c_source.contains("chelis_f32_buffer_to_f16"),
+        result.c_source.contains("chelis_f32_to_f16"),
         "emitted C must downcast f32 accumulator back to f16 for the destination: {}",
         result.c_source
     );
@@ -950,15 +971,15 @@ int main(void) {{
     chelis_tensor *inputs[2] = {{a, b}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_matmul_exec(inputs, 2, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < 8; i++) {{
         if (i > 0) printf(" ");
         printf("%.4f", chelis_bf16_to_f32(p[i]));
     }}
     printf("\n");
-    chelis_free(a);
-    chelis_free(b);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1018,15 +1039,15 @@ int main(void) {{
     chelis_tensor *inputs[2] = {{a, b}};
     chelis_tensor *outputs[1] = {{0}};
     f16_matmul_exec(inputs, 2, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < 8; i++) {{
         if (i > 0) printf(" ");
         printf("%.4f", chelis_f16_to_f32(p[i]));
     }}
     printf("\n");
-    chelis_free(a);
-    chelis_free(b);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#

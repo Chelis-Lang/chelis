@@ -77,7 +77,7 @@ def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {\n\
 }\n\
 def prices[n](spots: tensor[n, f32], k: f32) -> tensor[n, f32] = {\n\
   kc = const_col(spots, cast(k, f64))\n\
-  p64 = vmap(fn (ka: tensor[1, f64]) -> tensor_to_scalar(sum(ka, 0)), axis=0)(kc)\n\
+  p64 = vmap(fn (ka: tensor[1, f64]) -> tensor_to_scalar(sum(ka, 0)))(kc)\n\
   cast(p64, f32)\n\
 }\n";
 

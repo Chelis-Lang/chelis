@@ -3,10 +3,10 @@
 //! These verify the fusion pass produces correct DAGs and that fused evaluation
 //! matches unfused evaluation via the IR evaluator.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,7 +31,12 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
 }
 
 fn const_vec(dag: &mut Dag, value: f64, n: usize) -> NodeId {
-    dag.add_node(RiscOp::Const { value }, vec![], vec_f32(n), None)
+    dag.add_node(
+        RiscOp::synth_const(Prim::F32, value),
+        vec![],
+        vec_f32(n),
+        None,
+    )
 }
 
 fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
@@ -39,7 +44,7 @@ fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
 }
 
 /// Evaluate a DAG with given inputs and return root outputs.
-fn eval_dag(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+fn eval_dag(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let vals = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
         .expect("evaluation should succeed");
@@ -52,7 +57,12 @@ fn assert_outputs_close(a: &[TensorValue], b: &[TensorValue], tol: f64, context:
     assert_eq!(a.len(), b.len(), "{context}: different number of outputs");
     for (i, (va, vb)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(va.shape, vb.shape, "{context} output {i}: shapes differ");
-        for (j, (xa, xb)) in va.data.iter().zip(vb.data.iter()).enumerate() {
+        for (j, (xa, xb)) in va
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(vb.to_f64_lossy_vec().iter())
+            .enumerate()
+        {
             assert!(
                 (xa - xb).abs() < tol,
                 "{context} output {i} element {j}: {xa} vs {xb} (diff {})",
@@ -95,7 +105,7 @@ fn f1_add_neg_fuses() {
 }
 
 // ===========================================================================
-// F2: add→relu→mul 3-way fuses
+// F2: add→max_elem→mul 3-way fuses
 // ===========================================================================
 
 #[test]
@@ -104,8 +114,14 @@ fn f2_three_way_chain_fuses() {
     let a = const_vec(&mut dag, 1.0, 4);
     let b = const_vec(&mut dag, 2.0, 4);
     let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-    // relu = max_elem(x, 0)
-    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4), None);
+    // A direct max-element chain remains fusible; dedicated ReLU is tested
+    // separately because [05-OP-43] requires its identity to survive.
+    let zero = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let relu = dag.add_node(RiscOp::MaxElem, vec![c, zero], vec_f32(4), None);
     let d = const_vec(&mut dag, 3.0, 4);
     let e = dag.add_node(RiscOp::Mul, vec![relu, d], vec_f32(4), None);
@@ -137,7 +153,7 @@ fn f3_fused_matches_unfused_evaluator() {
 
     let fused = chelis_ir::fuse::fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -171,8 +187,8 @@ fn f4_multi_consumer_not_fused() {
     // `shared` has 2 consumers → must NOT be fused into either chain
     // Verify by evaluating: if fusion duplicated computation, output would still
     // be correct, but the invariant is violated. Check node count instead.
-    let unfused_out = eval_dag(&dag, &HashMap::new());
-    let fused_out = eval_dag(&fused, &HashMap::new());
+    let unfused_out = eval_dag(&dag, &UnordMap::new());
+    let fused_out = eval_dag(&fused, &UnordMap::new());
     assert_outputs_close(&unfused_out, &fused_out, 1e-6, "F4: multi-consumer");
 
     // The `shared` add node should still exist as a materialized node (not absorbed)
@@ -203,7 +219,12 @@ fn f5_elementwise_into_reduction_fuses() {
     // that the emitter can detect). But more importantly: correctness.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let summed = dag.add_node(
         RiscOp::Sum {
@@ -219,7 +240,7 @@ fn f5_elementwise_into_reduction_fuses() {
     let fused = chelis_ir::fuse::fuse(&dag);
 
     // Verify correctness: fused matches unfused
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -251,7 +272,7 @@ fn f5_neg_reduction_into_elementwise_does_not_fuse() {
 
     // Reduction→elementwise should NOT fuse (iteration space changed)
     // The sum and neg should remain separate
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -273,13 +294,18 @@ fn f6_movement_ops_pass_through() {
     let x = load(&mut dag, "x", vec_f32(6));
     let reshaped = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
         },
         vec![x],
         mat_f32(2, 3),
         None,
     );
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![reshaped, c], mat_f32(2, 3), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(2, 3), None);
     dag.add_root(negated);
@@ -287,7 +313,7 @@ fn f6_movement_ops_pass_through() {
     let fused = chelis_ir::fuse::fuse(&dag);
 
     // add→neg should still fuse (reshape is metadata-only, doesn't break chain)
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
     )]
@@ -337,7 +363,12 @@ fn f7_mnist_fusion_reduces_nodes() {
 #[test]
 fn f8_trivial_dag_unchanged() {
     let mut dag = Dag::new();
-    let c = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32(), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 42.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     dag.add_root(c);
 
     let fused = chelis_ir::fuse::fuse(&dag);
@@ -392,7 +423,7 @@ fn f10_multi_consumer_downstream_chain_fuses() {
     );
 
     // Verify correctness
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -448,7 +479,7 @@ fn f11_double_multi_consumer_no_fusion() {
     );
 
     // Verify correctness
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -504,7 +535,7 @@ fn f12_multi_consumer_at_chain_tail() {
     }
 
     // Verify correctness — both outputs must match
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -554,7 +585,7 @@ fn f13_multi_consumer_as_external_input() {
     );
 
     // Verify correctness
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -586,7 +617,7 @@ fn f9_fan_in_two_inputs() {
 
     let fused = chelis_ir::fuse::fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -612,7 +643,12 @@ fn f9_fan_in_two_inputs() {
 fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let summed = dag.add_node(
         RiscOp::Sum {
@@ -645,7 +681,7 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
         );
     }
     // Either way, correctness holds:
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -660,7 +696,12 @@ fn fr1_reduction_inlined_identifies_fused_elem_into_sum() {
 fn fr2_multi_consumer_fused_elem_not_inlined() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     // Two consumers of negated: root + sum
@@ -691,7 +732,12 @@ fn fr3_chain_into_sum_correctness() {
     // add→neg→sum: the add→neg chain fuses into FusedElem, which then feeds sum.
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", mat_f32(3, 4));
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
     let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let summed = dag.add_node(
@@ -714,7 +760,7 @@ fn fr3_chain_into_sum_correctness() {
         "FusedElem(add→neg) feeding Sum should be reduction-inlined"
     );
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".to_string(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|i| i as f64).collect()),
     )]
@@ -745,7 +791,7 @@ fn fr4_realize_is_fusion_barrier() {
         "realize() must block fusion across the materialization boundary"
     );
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),

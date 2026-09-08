@@ -77,7 +77,13 @@ fn eval_result_value(source: &str) -> ExecutionValue {
 fn execution_values_identical(a: &ExecutionValue, b: &ExecutionValue) -> bool {
     use ExecutionValue::*;
     match (a, b) {
+        (Int8 { value: x }, Int8 { value: y }) => x == y,
+        (Int16 { value: x }, Int16 { value: y }) => x == y,
+        (Int32 { value: x }, Int32 { value: y }) => x == y,
         (Int64 { value: x }, Int64 { value: y }) => x == y,
+        (Float16 { value: x }, Float16 { value: y })
+        | (Bfloat16 { value: x }, Bfloat16 { value: y }) => x.to_bits() == y.to_bits(),
+        (Float32 { value: x }, Float32 { value: y }) => x.to_bits() == y.to_bits(),
         // Bit-identical float compare: `to_bits` so a NaN payload would
         // compare equal to itself, and -0.0 is distinguished from 0.0.
         (Float64 { value: x }, Float64 { value: y }) => x.to_bits() == y.to_bits(),
@@ -88,8 +94,9 @@ fn execution_values_identical(a: &ExecutionValue, b: &ExecutionValue) -> bool {
             x.shape == y.shape
                 && x.data.len() == y.data.len()
                 && x.data
+                    .to_f64_lossy_vec()
                     .iter()
-                    .zip(y.data.iter())
+                    .zip(y.data.to_f64_lossy_vec())
                     .all(|(l, r)| l.to_bits() == r.to_bits())
         }
         (List { value: x }, List { value: y }) | (Tuple { value: x }, Tuple { value: y }) => {
@@ -268,7 +275,7 @@ fn wrong_constructor_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "NotAProbability".to_string(),
-        fields: vec![ExecutionValue::Float64 { value: 0.3 }],
+        fields: vec![ExecutionValue::Float32 { value: 0.3 }],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("unknown ctor rejected");
     assert!(
@@ -294,8 +301,8 @@ fn extra_field_is_structural_not_invariant() {
     let payload = ExecutionValue::Adt {
         ctor: "Probability".to_string(),
         fields: vec![
-            ExecutionValue::Float64 { value: 0.3 },
-            ExecutionValue::Float64 { value: 0.4 },
+            ExecutionValue::Float32 { value: 0.3 },
+            ExecutionValue::Float32 { value: 0.4 },
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("extra field rejected");
@@ -375,9 +382,9 @@ fn nested_inner_violating_rejected_naming_inner_type() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float64 { value: 1.5 }],
+                fields: vec![ExecutionValue::Float32 { value: 1.5 }],
             },
-            ExecutionValue::Float64 { value: 2.0 },
+            ExecutionValue::Float32 { value: 2.0 },
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload)
@@ -403,9 +410,9 @@ fn nested_inner_nan_rejected_fail_closed() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float64 { value: f64::NAN }],
+                fields: vec![ExecutionValue::Float32 { value: f32::NAN }],
             },
-            ExecutionValue::Float64 { value: 2.0 },
+            ExecutionValue::Float32 { value: 2.0 },
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("inner NaN rejected");
@@ -437,7 +444,7 @@ fn rejected_decode_yields_no_value() {
         },
         ExecutionValue::Adt {
             ctor: "Nope".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.3 }],
+            fields: vec![ExecutionValue::Float32 { value: 0.3 }],
         },
     ];
     for payload in &rejecting {
@@ -452,7 +459,9 @@ fn rejected_decode_yields_no_value() {
 fn prob_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![ExecutionValue::Float64 { value }],
+        fields: vec![ExecutionValue::Float32 {
+            value: value as f32,
+        }],
     }
 }
 
@@ -481,7 +490,9 @@ def make(x: f32) -> Tol = Tol { value: x }
 fn tol_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Tol".to_string(),
-        fields: vec![ExecutionValue::Float64 { value }],
+        fields: vec![ExecutionValue::Float32 {
+            value: value as f32,
+        }],
     }
 }
 
@@ -802,4 +813,128 @@ fn non_constant_value_binding_does_not_break_genuine_constant_decode() {
     let err = try_decode_adt_value(&exprs, &tol_payload(1.5))
         .expect_err("1.5 is outside the eps band and must be rejected");
     assert!(matches!(err, DecodeError::Invariant(_)), "got {err:?}");
+}
+
+// ── chelis#1305: unreadable deftype name must fail closed ─────────────────
+
+/// An invariant-declaring `deftype` whose type-name child is NOT a readable
+/// symbol (a `lit` node stands where the name belongs). The invariant
+/// metadata itself is the well-formed `[0, 1]` predicate — the unreadable
+/// declarer, not the predicate shape, is what must force the rejection.
+const DEEP_UNREADABLE_TYPE_NAME_WITH_INVARIANT: &str = r#"
+(module {}
+  stats.prob
+  (deftype {opaque: true,
+            invariant: (fn {}
+                          (params {} p)
+                          (app {}
+                            (var {} and)
+                            (app {}
+                              (var {} gte)
+                              (access {} (var {} p) value)
+                              (lit {type: (t-prim {} f32)} 0.0))
+                            (app {}
+                              (var {} lte)
+                              (access {} (var {} p) value)
+                              (lit {type: (t-prim {} f32)} 1.0))))}
+    (lit {type: (t-prim {} f32)} 1.0)
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32)))))
+"#;
+
+/// Negative control: the same unreadable type-name child WITHOUT an
+/// `invariant` metadata entry. No invariant is declared, so there is
+/// nothing to fail closed over and the payload decodes cleanly.
+const DEEP_UNREADABLE_TYPE_NAME_NO_INVARIANT: &str = r#"
+(module {}
+  stats.prob
+  (deftype {opaque: true}
+    (lit {type: (t-prim {} f32)} 1.0)
+    ()
+    (variant {} Probability (field {} value (t-prim {} f32)))))
+"#;
+
+/// A readable, invariant-declaring `deftype` whose VARIANT ctor-name child
+/// is unreadable (a `lit` node stands where the ctor name belongs). The
+/// invariant table cannot key that variant; the backstop is `decode_adt`'s
+/// unknown-constructor guard.
+const DEEP_UNREADABLE_CTOR_NAME: &str = r#"
+(module {}
+  stats.prob
+  (deftype {opaque: true,
+            invariant: (fn {}
+                          (params {} p)
+                          (app {}
+                            (var {} gte)
+                            (access {} (var {} p) value)
+                            (lit {type: (t-prim {} f32)} 0.0)))}
+    Probability
+    ()
+    (variant {} (lit {type: (t-prim {} f32)} 1.0) (field {} value (t-prim {} f32)))))
+"#;
+
+#[test]
+fn invariant_declaring_deftype_with_unreadable_name_fails_closed() {
+    // chelis#1305 (red test): before the fix, the unreadable name child
+    // made `collect_type_invariants` skip the WHOLE deftype, so the
+    // constructor looked invariant-free and this structurally-valid payload
+    // decoded with zero invariant check — the same fail-open the
+    // malformed-metadata door already closed, through a different door.
+    let exprs = program_exprs_deep(DEEP_UNREADABLE_TYPE_NAME_WITH_INVARIANT);
+    let err = try_decode_adt_value(&exprs, &prob_payload(0.3)).expect_err(
+        "an invariant-declaring deftype with an unreadable name child must \
+         fail closed: the declaration cannot be attributed, so no payload of \
+         its constructors can be safely materialized",
+    );
+    match err {
+        DecodeError::Invariant(msg) => {
+            assert!(
+                msg.contains("malformed"),
+                "names the malformed-declaration rejection: {msg}"
+            );
+            assert!(
+                msg.contains("unreadable deftype name"),
+                "carries the placeholder for the unreadable declarer: {msg}"
+            );
+        }
+        other => panic!(
+            "the unreadable-name fail-closed is an invariant-class decode \
+             failure, not a structural one, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn unreadable_name_without_invariant_still_decodes() {
+    // chelis#1305 negative control: with no `invariant` entry declared there
+    // is nothing to fail closed over. The unreadable name alone must not
+    // reject a structurally-valid payload.
+    let exprs = program_exprs_deep(DEEP_UNREADABLE_TYPE_NAME_NO_INVARIANT);
+    let decoded = decode_adt_value(&exprs, &prob_payload(0.3))
+        .expect("no declared invariant: the payload decodes on structure alone");
+    assert_eq!(decoded.as_adt().expect("ADT").0, "Probability");
+}
+
+#[test]
+fn skipped_variant_ctor_rejects_at_structural_decode() {
+    // chelis#1305: a variant whose ctor-name child is unreadable cannot be
+    // keyed by the invariant table (there is no key to insert under). That
+    // skip is not a fail-open only because the same unreadable name is also
+    // absent from the field-type table, so the unknown-constructor guard in
+    // `decode_adt` rejects every payload at the STRUCTURAL layer. This test
+    // pins the backstop the in-code comment cites.
+    let exprs = program_exprs_deep(DEEP_UNREADABLE_CTOR_NAME);
+    let err = try_decode_adt_value(&exprs, &prob_payload(0.3))
+        .expect_err("no readable constructor is declared, so no payload resolves");
+    match err {
+        DecodeError::Structural(msg) => {
+            assert!(
+                msg.contains("unknown constructor"),
+                "the unknown-constructor guard is the backstop: {msg}"
+            );
+        }
+        other => {
+            panic!("an unresolvable constructor is a structural decode failure, got {other:?}")
+        }
+    }
 }

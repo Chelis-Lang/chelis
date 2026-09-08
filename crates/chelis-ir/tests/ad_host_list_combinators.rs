@@ -1,13 +1,10 @@
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::lower::lower_subexpr_program;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<chelis_deep::DeepTag> {
+    list.tag()
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -44,12 +41,12 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("def") {
+    if get_tag(list) != Some(chelis_deep::DeepTag::Def) {
         return None;
     }
     let kids = children(list);
     let name = match kids.first()? {
-        Expr::Atom(Atom::Symbol(name), _) => name.clone(),
+        Expr::Atom(Atom::Name(name), _) => name.clone(),
         _ => return None,
     };
     Some((name, kids.get(1)?.clone()))
@@ -57,7 +54,7 @@ fn def_name_and_body(expr: &Expr) -> Option<(String, Expr)> {
 
 fn eval_out(src: &str) -> TensorValue {
     let checked = checked_surf(src);
-    let mut defs = HashMap::new();
+    let mut defs = UnordMap::new();
     let mut out_expr = None;
     for expr in checked.exprs() {
         if let Some((name, body)) = def_name_and_body(expr) {
@@ -68,7 +65,12 @@ fn eval_out(src: &str) -> TensorValue {
         }
     }
     let out_expr = out_expr.expect("source must define out");
-    let dag = lower_subexpr_program(&out_expr, HashMap::new(), checked.type_env().clone(), defs);
+    let type_env = checked
+        .type_env()
+        .iter()
+        .map(|(name, ty)| (name.clone(), ty.clone()))
+        .collect();
+    let dag = lower_subexpr_program(&out_expr, UnordMap::new(), type_env, defs);
     let roots = dag.roots().to_vec();
     assert_eq!(roots.len(), 1, "out subexpression should have one root");
     let values = eval_tensor_roots_with_strict(&dag, &roots, |_| None).expect("subexpression eval");
@@ -157,7 +159,7 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![3]);
-    assert_close(&out.data, &[1.0, 1.0, 1.0], 1e-6, "boundary");
+    assert_close(&out.to_f64_lossy_vec(), &[1.0, 1.0, 1.0], 1e-6, "boundary");
 }
 
 #[test]
@@ -173,7 +175,7 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![3]);
-    assert_close(&out.data, &[2.0, 4.0, 6.0], 1e-5, "map");
+    assert_close(&out.to_f64_lossy_vec(), &[2.0, 4.0, 6.0], 1e-5, "map");
 }
 
 #[test]
@@ -191,7 +193,7 @@ out = grad(first_derivative_sum)(to_tensor([cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![1]);
-    assert_close(&out.data, &[18.0], 1e-5, "nested grad");
+    assert_close(&out.to_f64_lossy_vec(), &[18.0], 1e-5, "nested grad");
 }
 
 #[test]
@@ -202,7 +204,7 @@ out = grad(bs_total, wrt=spots)(
   to_tensor([cast(90.0, f64), cast(100.0, f64), cast(110.0, f64)]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -212,7 +214,12 @@ out = grad(bs_total, wrt=spots)(
         .into_iter()
         .map(|spot| cdf_identity_black_scholes_delta(spot, 100.0, 0.05, 0.30, 1.25))
         .collect::<Vec<_>>();
-    assert_close(&out.data, &expected, 1e-10, "Black-Scholes f64 delta");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &expected,
+        1e-10,
+        "Black-Scholes f64 delta",
+    );
 }
 
 #[test]
@@ -223,7 +230,7 @@ out = grad(bs_total_one_delta, wrt=spots)(
   to_tensor([cast(100.0, f64)]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -232,7 +239,12 @@ out = grad(bs_total_one_delta, wrt=spots)(
     let expected = [cdf_identity_black_scholes_gamma(
         100.0, 100.0, 0.05, 0.30, 1.25,
     )];
-    assert_close(&out.data, &expected, 1e-10, "Black-Scholes f64 gamma");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &expected,
+        1e-10,
+        "Black-Scholes f64 gamma",
+    );
 }
 
 #[test]
@@ -245,7 +257,7 @@ out = vmap(grad(bs_total_one_batched, wrt=spots))(
   to_tensor([[cast(90.0, f64)], [cast(100.0, f64)], [cast(110.0, f64)]]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -255,7 +267,12 @@ out = vmap(grad(bs_total_one_batched, wrt=spots))(
         .into_iter()
         .map(|spot| cdf_identity_black_scholes_delta(spot, 100.0, 0.05, 0.30, 1.25))
         .collect::<Vec<_>>();
-    assert_close(&out.data, &expected, 1e-10, "vmap Black-Scholes f64 delta");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &expected,
+        1e-10,
+        "vmap Black-Scholes f64 delta",
+    );
 }
 
 #[test]
@@ -272,7 +289,7 @@ out = vmap(grad(loss))(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32
     );
     assert_eq!(out.shape, vec![2, 3]);
     assert_close(
-        &out.data,
+        &out.to_f64_lossy_vec(),
         &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
         1e-5,
         "vmap grad map",
@@ -292,7 +309,12 @@ out = grad(loss)(to_tensor([cast(-2.0, f32), cast(3.0, f32), cast(0.5, f32), cas
 ",
     );
     assert_eq!(out.shape, vec![4]);
-    assert_close(&out.data, &[0.0, 6.0, 1.0, 0.0], 1e-5, "filter");
+    assert_close(
+        &out.to_f64_lossy_vec(),
+        &[0.0, 6.0, 1.0, 0.0],
+        1e-5,
+        "filter",
+    );
 }
 
 #[test]
@@ -305,5 +327,5 @@ out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
 ",
     );
     assert_eq!(out.shape, vec![3]);
-    assert_close(&out.data, &[0.5, 2.0, 6.0], 1e-5, "fold");
+    assert_close(&out.to_f64_lossy_vec(), &[0.5, 2.0, 6.0], 1e-5, "fold");
 }

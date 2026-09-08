@@ -8,7 +8,7 @@ first. The full surface is in the [Type System Reference](type-reference.md).
 ## Primitive ideas
 
 - No implicit precision promotion. Mixed precision is an error; change it with `cast`.
-- No implicit broadcasting. Shapes must match; change rank with `expand`, `reshape`, or
+- No implicit broadcasting. Shapes must match; change rank with `insert`, `reshape`, or
   `permute`.
 - Named tensor dimensions are nominal. `batch` and `seq` match only by name, not by size.
 - Integer literals default to `int32`, float literals to `f32`.
@@ -60,6 +60,13 @@ binds them by unification, so one definition serves every concrete shape.
 
 ```chelis-surf
 def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)
+```
+
+A binder can also carry a dtype-family bound - `Float`, `Int`, or `Numeric` - which limits
+the dtypes it may be instantiated at:
+
+```chelis-surf
+def double_ints[p: Int](x: p) -> p = add(x, x)
 ```
 
 ## Where to go next

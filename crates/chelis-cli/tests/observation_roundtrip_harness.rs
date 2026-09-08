@@ -34,23 +34,37 @@
 //!
 //! ## Known-red cells (`#[ignore]`, §B2.3: red-to-green only by un-ignoring)
 //!
-//! | cell | issue |
-//! |---|---|
-//! | C print of f16/bf16 tensors (reads 2-byte buffers as f32) | chelis#716 |
-//! | C `to_list` of f16/bf16 tensors (runtime abort) | chelis#716 |
-//! | C print of int64 tensors above 2^53 (renders through double) | chelis#723 |
-//! | bool tensor `print` (1.0/0.0) vs `to_list` (true/false), C lane | chelis#726 observation half (eval half went green at #732 Phase 1) |
-//! | C print format selection (`%.1f` collapses tiny values, `%.16g` starves 17-digit f64) | chelis#748 (§B2.5 discovery) |
-//! | C nested-in-list tensor renderer (int64 via f64, 10-element silent truncation) | chelis#749 (§B2.5 discovery) |
-//! | eval int64 SCALAR ROOT above 2^53 (rank-0 f64 realization collapses the value before the renderer) | chelis#684 ([#729] value layer; PR #792 red-team F1) |
+//! None. The chelis#865 boxed-f32 cell became an ordinary regression row when
+//! chelis#729 Phase 3 routed non-f64 boxed scalars through the tagged rank-0
+//! tensor carrier. The chelis#1110 suffixed-literal cell followed when host
+//! lowering began finalizing each literal at its checker-stamped width before
+//! any enclosing cast.
+//!
+//! The six C-side cells went green at chelis#732 Phase 2 (un-ignored per
+//! §B2.3, each on its original assertion): #716 print + to_list, #723,
+//! #726's C half, #748, #749. The compiled lane now renders through the
+//! generated print helper and `chelis_format_shortest`, and §C2.3
+//! cross-lane byte equality is locked below for agreeing bits
+//! (`cross_lane_stdout_is_byte_identical_where_bits_agree`).
+//!
+//! No value cell is skipped silently. The phase's authoritative
+//! oracle (`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`)
+//! holds the empty known-red ledger and requires this file's `#[ignore]`
+//! inventory to EQUAL it (an undeclared ignore is a silently
+//! narrowed corpus; a stale ledger row is a false statement about
+//! coverage), re-runs each cell, and FAILS if one is red for an
+//! undeclared reason OR has gone green. The green case is the [#729]
+//! handoff: when its value/capacity repair lands, the oracle goes red
+//! until the cell is un-ignored on its original assertion and the ledger
+//! row deleted in that change set. Phase 3 also retired the final chelis#751
+//! corpus exclusions: exact-bit C literal emission lets every frozen float
+//! row execute in the compiled lane. The §C2.3 cross-lane byte-identity
+//! corpus may grow but never shrink.
 //!
 //! Everything else is green by contract; a new red here is a new
 //! faithful-observation bug (file it, per §B2.5).
 //!
-//! Excluded by ownership (§I1): f16/bf16 SCALARS in the compiled lane never
-//! reach the print helper honestly (chelis#714 stores them in int64_t - an
-//! ingress/value bug), so their C cells are absent rather than red. The
-//! wire's capacity limits (JSON cannot carry NaN/inf as numbers; int64
+//! The wire's capacity limits (JSON cannot carry NaN/inf as numbers; int64
 //! above 2^53 in `Vec<f64>` tensor data) are [#729]/[#686] storage decisions
 //! recorded at the schema (§C2.4), so the wire rows here cover the
 //! in-capacity set only.
@@ -147,9 +161,10 @@ fn c_stdout(program: &str, name: &str) -> Result<String, String> {
 /// rendered it (chelis#750), so this harness inlined the body as a
 /// workaround. chelis#750 is fixed (the host lane now re-attaches a
 /// def-call-valued display root to `emit_main`), so `troot` calls `mk()`
-/// directly and the render-count assertions below pin BOTH lanes to
-/// exactly two tensor / two list renders — this harness is the regression
-/// lock for chelis#750.
+/// directly. [05-OBS-7] also makes the pure nullary `mk` declaration an
+/// owed root, so the render-count assertions below pin BOTH lanes to the
+/// transcript, `mk`, and the explicit value root for each exit — this
+/// harness is the regression lock for both contracts.
 fn exits_program(ret: &str, body: &str) -> String {
     format!(
         "module M.Main\n\
@@ -161,8 +176,8 @@ fn exits_program(ret: &str, body: &str) -> String {
     )
 }
 
-/// Lines rendering the tensor itself: the `print` transcript line plus the
-/// `troot = ...` labeled root. Exactly two per lane.
+/// Lines rendering the tensor itself: the `print` transcript line, the
+/// automatic `mk = ...` root, and the `troot = ...` labeled root.
 fn tensor_lines(stdout: &str) -> Vec<&str> {
     stdout
         .lines()
@@ -268,10 +283,12 @@ fn text_int_lenient(text: &str) -> Result<i64, String> {
 
 // ---------------------------------------------------------------------------
 // The frozen value tables. `elem` is the Chelis element expression; `value`
-// is the constructed value's exact f64 image. `c_print_safe` marks rows the
-// emitted C print helper's CURRENT `%.1f`/`%.16g` selection can round-trip;
-// unsafe rows are asserted (red) in the Phase B-filed discovery test below
-// and stay out of the green C print assertions until Phase 2 fixes them.
+// is the constructed value's exact f64 image. `c_print_safe` marks the rows
+// the PRE-Phase-2 `%.1f`/`%.16g` selection could round-trip; since
+// chelis#732 Phase 2 every compilable row prints faithfully, and the split
+// only partitions which test asserts the row (the historical green set
+// below, the once-red set in the un-ignored chelis#748 test) - together
+// they cover every row.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -427,7 +444,7 @@ const F16_ROWS: &[FRow] = &[
     },
     FRow {
         label: "f16-min-subnormal",
-        elem: "0.000000059604644775390625",
+        elem: "5.960464477539063e-8",
         value: 5.960464477539063e-8,
         c_print_safe: true,
     },
@@ -640,9 +657,9 @@ const INT_ROWS: &[(&str, &[IRow])] = &[
 // Shared assertions
 // ---------------------------------------------------------------------------
 
-/// Tier 2 over a float dtype: all four exit renders decode to the table's
-/// bits at `w`. `print_filter` limits which rows the two print lines are
-/// held to and `list_filter` the two to_list lines (eval passes `all_rows`
+/// Tier 2 over a float dtype: every exit render decodes to the table's bits
+/// at `w`. `print_filter` limits which rows the three tensor lines are held
+/// to and `list_filter` the two to_list lines (eval passes `all_rows`
 /// for both; the C tests carve out the C-lane exclusions and the
 /// print-format discovery cells).
 fn assert_float_exits(
@@ -653,18 +670,17 @@ fn assert_float_exits(
     list_filter: fn(&FRow) -> bool,
     ctx: &str,
 ) {
-    // Full four-exit programs (`exits_program`) render the print transcript
-    // AND the `troot` value root: exactly two tensor renders.
-    assert_float_print_exits(stdout, w, rows, print_filter, 2, ctx);
+    // Full exit programs render the transcript, [05-OBS-7]'s automatic
+    // pure-nullary `mk` root, and the explicit `troot` value root.
+    assert_float_print_exits(stdout, w, rows, print_filter, 3, ctx);
     let llines = list_lines(stdout);
-    // chelis#750: exactly two — the `print(to_list(mk()))` transcript line
-    // and the `lroot = [...]` labeled root. Both lanes render both now that
-    // the def-call root drop is fixed; a count other than two is a
-    // regression (a dropped or duplicated root render).
+    // The automatic `mk` root renders the tensor value itself; it does not
+    // invent a second to_list conversion. This exit therefore remains the
+    // transcript and explicit `lroot` only.
     assert_eq!(
         llines.len(),
         2,
-        "[{ctx}] expected the transcript and root to_list renders, got:\n{stdout}"
+        "[{ctx}] expected transcript and explicit-root to_list renders, got:\n{stdout}"
     );
     for line in llines {
         let elems = list_payload_elems(line);
@@ -690,11 +706,10 @@ fn assert_float_exits(
 /// and each red cell must fail on ITS OWN exit).
 ///
 /// `expected_tensor_renders` pins the exact tensor-render count: a full
-/// `exits_program` passes 2 (the `print(mk())` transcript plus the
-/// `troot = tensor(...)` value root — chelis#750 now emits both in both
-/// lanes), while a print-only program (no value root, e.g. the chelis#716
-/// f16/bf16 cells) passes 1. An off-by-one here is a dropped or duplicated
-/// root render.
+/// `exits_program` passes 3 (the `print(mk())` transcript, [05-OBS-7]'s
+/// automatic `mk = tensor(...)` root, and `troot = tensor(...)`). A
+/// print-only program with the same pure nullary def passes 2. An off-by-one
+/// here is a dropped or duplicated root render.
 fn assert_float_print_exits(
     stdout: &str,
     w: Width,
@@ -728,21 +743,19 @@ fn assert_float_print_exits(
     }
 }
 
-/// Tier 2 over an integer dtype (both exits, both renders).
+/// Tier 2 over an integer dtype (three tensor renders and two list renders).
 fn assert_int_exits(stdout: &str, rows: &[IRow], ctx: &str) {
-    // chelis#750: exactly two per exit — the `print(...)` transcript line
-    // and the labeled root (`troot`/`lroot`). The def-call root drop is
-    // fixed, so both lanes render both; a count other than two is a
-    // regression (a dropped or duplicated root render).
+    // Tensor rendering observes the transcript, automatic `mk` root, and
+    // explicit `troot`; to_list observes its transcript and explicit `lroot`.
     assert_eq!(
         tensor_lines(stdout).len(),
-        2,
-        "[{ctx}] expected the transcript and root tensor renders, got:\n{stdout}"
+        3,
+        "[{ctx}] expected transcript, automatic, and explicit-root tensor renders, got:\n{stdout}"
     );
     assert_eq!(
         list_lines(stdout).len(),
         2,
-        "[{ctx}] expected the transcript and root to_list renders, got:\n{stdout}"
+        "[{ctx}] expected transcript and explicit-root to_list renders, got:\n{stdout}"
     );
     for line in tensor_lines(stdout) {
         let elems = tensor_elems(line);
@@ -776,72 +789,21 @@ fn all_rows(_r: &FRow) -> bool {
     true
 }
 
-/// Rows excluded from the compiled-lane PROGRAMS (not just assertions), by
-/// table label - all for one ingress defect, verified by execution:
-/// `host_emit.rs`'s Float arm renders constants into the C source with Rust
-/// `{}` Display, which has no e-notation, so any integral-valued float
-/// constant >= 2^64 becomes a raw C integer literal clang REJECTS
-/// ("integer literal is too large"): f64::MAX, 9.999999980506448e19, and
-/// f32::MAX produce programs that do not compile. The same Display path
-/// spells -0.0 as `-0`, an integer literal whose double conversion drops
-/// the sign; probed 2026-07-17: the C scalar and cast-element (f64 tensor)
-/// routes LOSE the sign, while the direct f32 literal tensor route
-/// preserves it, so only the f64 row stays excluded. All faces are one
-/// INGRESS value defect, chelis#751 ([#729] territory per §I1, probe
-/// outcomes recorded on [#729]), so the affected cells are unconstructible
-/// in the C lane today rather than red rendering cells; labels leave this
-/// list when chelis#751 lands.
-const C_LANE_EXCLUDED: &[&str] = &["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"];
-
-fn c_lane_rows(r: &FRow) -> bool {
-    !C_LANE_EXCLUDED.contains(&r.label)
-}
-
-/// Rows excluded from the EVAL to_list assertions: the eval tensor lane
-/// pins its runtime precision tag at F32 even for checker-typed f64
-/// tensors (chelis#717's per-op-chaos family, verified here by execution:
-/// print shows the stored f64 while to_list narrows every element through
-/// the F32 tag - f64::MAX reads back as `inf`, 0.1 as its f32 image). A
-/// VALUE/metadata bug, [#729]'s per §I1, so these are exclusions with a
-/// probe comment on [#729], not red rendering cells. Only f32-exact f64
-/// values survive the tag; the print exit is asserted on EVERY row.
-///
-/// `f64-2p53` joined the list at chelis#732 Phase 1: 2^53 IS f32-exact, so
-/// the narrowed VALUE survives the tag, but the Phase 1 own-width scalar
-/// renderer now prints the to_list element AT ITS (narrowed) F32 width -
-/// and the shortest f32 string for 2^53 does not parse back to the same
-/// f64. The row's earlier green was rendering-accidental: the pre-contract
-/// f64-width renderer masked the chelis#717 narrowing for exactly this
-/// value class. Faithful rendering makes the value bug visible instead of
-/// laundered (faithful_observation.md, non-goals) - the cell returns when
-/// [#729] repairs the to_list value path.
-const EVAL_F64_LIST_EXCLUDED: &[&str] = &[
-    "f64-max",
-    "f64-min-subnormal",
-    "f64-min-normal",
-    "f64-tenth",
-    "f64-17-digit",
-    "f64-2p53",
-    "f64-2p53-plus-2",
-    "f64-audit-e19",
-];
-
-fn eval_f64_list_rows(r: &FRow) -> bool {
-    !EVAL_F64_LIST_EXCLUDED.contains(&r.label)
-}
-
-/// The compiled-lane subset of a table: the rows whose constants the C
-/// backend can render into compilable source (see `C_LANE_EXCLUDED`).
+/// chelis#751 regression: Phase 3 emits every floating literal from its exact
+/// bit pattern, so the compiled lane has no constant-ingress exclusions.
+/// Keeping this helper as an identity makes every existing call site execute
+/// the complete frozen table and prevents a future source-format shortcut
+/// from silently reintroducing a filtered subset.
 fn c_rows(rows: &[FRow]) -> Vec<FRow> {
-    rows.iter().filter(|r| c_lane_rows(r)).cloned().collect()
+    rows.to_vec()
 }
 
 fn c_print_safe_rows(r: &FRow) -> bool {
-    c_lane_rows(r) && r.c_print_safe
+    r.c_print_safe
 }
 
 fn c_print_red_rows(r: &FRow) -> bool {
-    c_lane_rows(r) && !r.c_print_safe
+    !r.c_print_safe
 }
 
 fn float_table_program(dt: &str, rows: &[FRow], via_cast: bool) -> String {
@@ -871,14 +833,7 @@ fn int_table_program(dt: &str, rows: &[IRow]) -> String {
 #[test]
 fn eval_f64_tensor_exits_round_trip() {
     let out = eval_stdout(&float_table_program("f64", F64_ROWS, false)).expect("eval");
-    assert_float_exits(
-        &out,
-        Width::F64,
-        F64_ROWS,
-        all_rows,
-        eval_f64_list_rows,
-        "eval/f64",
-    );
+    assert_float_exits(&out, Width::F64, F64_ROWS, all_rows, all_rows, "eval/f64");
 
     let (ret, body) = float_specials_body("f64");
     let out = eval_stdout(&exits_program(&ret, &body)).expect("eval specials");
@@ -939,11 +894,14 @@ fn eval_int_tensor_exits_round_trip() {
     }
 }
 
-/// int64 ABOVE 2^53: tier 1 only. Eval's tensor storage is f64-backed
-/// (chelis#684, a [#729] value bug), so the constructed 2^53+1 is already
-/// collapsed BEFORE any exit renders it; faithful observation here means
-/// both exits agree on the stored (wrong) value. The C lane's tier-2
-/// version of this row is the chelis#723 ignored test below.
+/// int64 ABOVE 2^53: tier 1 only. Pre-chelis#729 the f64-backed storage
+/// collapsed 2^53+1 before ANY exit rendered it (green by uniform
+/// wrongness); chelis#729 Phase 1 made the host-lane exits exact with
+/// the tensor-lane labeled root still collapsing through the f64 DAG
+/// literal payload (green-to-ignored against chelis#856); the chelis#729
+/// rework sealed the DAG literal payload, so ALL FOUR exits are exact
+/// and the row is green again for the right reason. The C lane's
+/// tier-2 version of this row is the chelis#723 ignored test below.
 #[test]
 fn eval_int64_above_2p53_exits_agree_within_lane() {
     let program = exits_program(
@@ -958,7 +916,7 @@ fn eval_int64_above_2p53_exits_agree_within_lane() {
     for line in list_lines(&out) {
         decoded.push(text_int_lenient(&list_payload_elems(line)[0]).expect("to_list exit"));
     }
-    assert_eq!(decoded.len(), 4, "four exit renders expected:\n{out}");
+    assert_eq!(decoded.len(), 5, "five exit renders expected:\n{out}");
     assert!(
         decoded.windows(2).all(|w| w[0] == w[1]),
         "eval exits disagree on one stored int64 tensor: {decoded:?}\n{out}"
@@ -1000,7 +958,7 @@ fn eval_scalar_exits_round_trip() {
     ];
     for (expr, w, value) in float_rows {
         let out = eval_stdout(&format!("module M.Main\nshown = print({expr})\n")).expect("eval");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 1) {
             let got = text_bits_at(&line, *w)
                 .unwrap_or_else(|e| panic!("[eval scalar {expr}] {e}\n{out}"));
             assert_eq!(
@@ -1018,56 +976,51 @@ fn eval_scalar_exits_round_trip() {
     ];
     for (expr, value) in int_rows {
         let out = eval_stdout(&format!("module M.Main\nshown = print({expr})\n")).expect("eval");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 1) {
             let got =
                 text_int_lenient(&line).unwrap_or_else(|e| panic!("[eval scalar {expr}] {e}"));
             assert_eq!(got, *value, "[eval scalar {expr}] text `{line}`");
         }
     }
     let out = eval_stdout("module M.Main\nshown = print(true)\n").expect("eval");
-    for line in scalar_render_lines(&out) {
+    for line in scalar_render_lines(&out, 1) {
         assert_eq!(line, "true", "bool scalar exit");
     }
 }
 
-/// The scalar print-transcript render of a single `shown = print(expr)`
-/// program. The print root itself renders as `()` (print returns unit) and
-/// is dropped. Scalar VALUE roots - deliberately undriven at Phase 0 while
-/// the canonical scalar-root rendering was undecided (chelis#775) - are
-/// driven since chelis#732 Phase 1 by `eval_scalar_value_roots_render_bare`
-/// below: [05-OBS-4] makes the bare scalar canonical at every exit, so the
-/// eval-internal rank-0 realization no longer leaks into root renders.
-fn scalar_render_lines(stdout: &str) -> Vec<String> {
+/// Scalar payloads from a program's transcript and value roots. Unit-valued
+/// print roots are excluded, and a labeled root is reduced to its payload so
+/// every observed exit can be compared through the same dtype decoder.
+/// [05-OBS-4] makes that bare scalar payload canonical at every exit, so the
+/// eval-internal rank-0 realization never leaks into the comparison.
+fn scalar_render_lines(stdout: &str, expected_renders: usize) -> Vec<String> {
     let lines: Vec<String> = stdout
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.ends_with("()"))
-        .map(str::to_string)
+        .map(|line| {
+            line.split_once(" = ")
+                .map_or_else(|| line.to_string(), |(_, payload)| payload.to_string())
+        })
         .collect();
     assert_eq!(
         lines.len(),
-        1,
-        "expected exactly the scalar print transcript, got:\n{stdout}"
+        expected_renders,
+        "expected exactly {expected_renders} scalar render(s), got:\n{stdout}"
     );
     lines
 }
 
-/// RED (chelis#684, [#729] value layer; surfaced by PR #792's red team,
-/// F1): an int64 SCALAR ROOT above 2^53 loses exactness at the labeled
-/// root while print and to_string of the same def render it exactly -
-/// the interpreter's rank-0 f64 realization collapses the value BEFORE
-/// the renderer sees it, so this is a stored-value defect upstream of the
-/// [05-OBS] rendering contract, not a formatter bug. The exception is
-/// annexed in spec/05 §8's [05-OBS-1]/[05-OBS-4] status text; the cell
-/// goes green (by un-ignoring, §B2.3) when [#729] repairs scalar-root
-/// storage. Rendering must NOT paper over it: the root faithfully shows
-/// the collapsed stored value.
+/// GREEN regression (chelis#684, [#729] value layer; surfaced by PR
+/// #792's red team, F1): an int64 SCALAR ROOT above 2^53 stays exact at
+/// the labeled root, agreeing with print and to_string of the same def.
+/// The interpreter's rank-0 f64 realization used to collapse the value
+/// BEFORE the renderer saw it, which made this a stored-value defect
+/// upstream of the [05-OBS] rendering contract rather than a formatter
+/// bug. chelis#729's per-dtype storage carries the exact i64 through the
+/// scalar-root path, so the original red assertion stays as the
+/// [05-OBS-1] regression lock (un-ignored per §B2.3, chelis#1078).
 #[test]
-#[ignore = "chelis#684 ([#729] value layer): the rank-0 f64 realization collapses int64 \
-            scalar roots above 2^53 before the renderer sees them; print/to_string are \
-            exact, the labeled root is not. Un-ignore when [#729] repairs scalar-root \
-            storage. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn eval_int64_scalar_root_above_2p53_renders_exact() {
     let program = "module M.Main\n\
          def run() -> int64 = cast(9007199254740993, int64)\n\
@@ -1081,8 +1034,8 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
         .find(|l| !l.is_empty() && !l.ends_with("()") && !l.starts_with("sroot = "))
         .unwrap_or_else(|| panic!("no print transcript in:\n{out}"));
     assert_eq!(transcript, "9007199254740993", "print exit must stay exact");
-    // Red half: the labeled root must carry the same exact value. Today it
-    // renders the f64-collapsed 9007199254740992 (chelis#684).
+    // The labeled root must carry the same exact value. Before chelis#684
+    // it rendered the f64-collapsed 9007199254740992.
     let root = out
         .lines()
         .find(|l| l.starts_with("sroot = "))
@@ -1092,6 +1045,154 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
         "the labeled root must carry the exact stored int64; [05-OBS-1] \
          intra-lane exit agreement is broken by the rank-0 realization"
     );
+}
+
+/// GREEN regression (chelis#864; PR #863 red-team F1): eval's transcript
+/// and labeled-root exits agree for a cast-constructed f64 tensor. The
+/// post-Phase-3 diagnosis established that the root tag was already F64;
+/// the static `to_tensor` DAG shortcut had retained lexical f64 decimals
+/// in its F32 source node, so widening produced different stored values
+/// from the host path. Finalizing that shortcut's f32 ingress before the
+/// cast repairs the value, and this original red assertion stays as the
+/// [05-OBS-1] regression lock.
+#[test]
+fn eval_f64_cast_tensor_root_renders_stored_width() {
+    let cases = [
+        (
+            "f32 tensor widened as a tensor",
+            "cast(to_tensor([0.1, 0.3]), f64)",
+        ),
+        (
+            "f32-suffixed leaves widened as scalars",
+            "to_tensor([cast(0.1f32, f64), cast(0.3f32, f64)])",
+        ),
+        (
+            "explicit inner f32 casts widened as scalars",
+            "to_tensor([cast(cast(0.1, f32), f64), cast(cast(0.3, f32), f64)])",
+        ),
+    ];
+    for (case, expression) in cases {
+        let program = format!(
+            "module M.Main\ndef mk() -> tensor[2, f64] = {expression}\n\
+             shown = print(mk())\ntroot = mk()\n"
+        );
+        let out = eval_stdout(&program).expect("eval");
+        let tlines = tensor_lines(&out);
+        assert_eq!(
+            tlines.len(),
+            3,
+            "{case}: transcript, automatic, and explicit-root renders:\n{out}"
+        );
+        // Green half (control): the transcript renders the STORED bits (the
+        // f64 images of the f32-constructed elements) at the stored width.
+        assert_eq!(
+            tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
+            "{case}: the print transcript must keep rendering the stored bits"
+        );
+        assert_eq!(
+            tlines[1],
+            format!("mk = {}", tlines[0]),
+            "{case}: the automatic nullary root must render the same stored bits as print"
+        );
+        // The labeled root must agree with the transcript ([05-OBS-1]
+        // intra-lane exit agreement). Before chelis#864 the static DAG
+        // shortcut could widen unfinalized lexical decimals instead of the
+        // host path's stored f32 values.
+        assert_eq!(
+            tlines[2],
+            format!("troot = {}", tlines[0]),
+            "{case}: the labeled root must render the same stored bits as print"
+        );
+    }
+}
+
+/// chelis#865 regression: boxed f32 values retain their width through the
+/// tagged rank-0 tensor carrier, so list rendering uses the [05-OBS-2]
+/// shortest-at-own-width form rather than f64-image digits.
+#[test]
+fn c_boxed_f32_renders_at_own_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = "module M.Main\nout = print(to_list(to_tensor([0.1, 0.3])))\n";
+    let out = c_stdout(program, "obs_boxed_f32").expect("C lane");
+    let lline = list_lines(&out)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no to_list render in:\n{out}"))
+        .to_string();
+    assert_eq!(
+        list_payload_elems(&lline),
+        ["0.1", "0.3"],
+        "boxed f32 elements must render shortest at their own width ([05-OBS-2]): {lline}"
+    );
+}
+
+/// chelis#1110 regression: a float literal is finalized at its checked width
+/// before an enclosing cast widens it for the compiled lane. The narrow rows
+/// lock all three affected dtypes; the f64 row is their negative-parity guard
+/// against manufacturing an f32 rounding step for an explicitly f64 leaf.
+#[test]
+fn c_suffixed_f32_literal_widens_from_its_stored_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let cases = [
+        (
+            "f16",
+            "0.1f16",
+            "0.3f16",
+            "tensor(shape=[2], data=[0.0999755859375, 0.300048828125])",
+        ),
+        (
+            "bf16",
+            "0.1bf16",
+            "0.3bf16",
+            "tensor(shape=[2], data=[0.10009765625, 0.30078125])",
+        ),
+        (
+            "f32",
+            "0.1f32",
+            "0.3f32",
+            "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
+        ),
+        (
+            "f64",
+            "0.1f64",
+            "0.3f64",
+            "tensor(shape=[2], data=[0.1, 0.3])",
+        ),
+    ];
+    for (dtype, lhs, rhs, expected) in cases {
+        let program = format!(
+            "module M.Main\n\
+             def mk() -> tensor[2, f64] = to_tensor([cast({lhs}, f64), cast({rhs}, f64)])\n\
+             shown = print(mk())\n"
+        );
+        let out = c_stdout(&program, &format!("obs_suffixed_{dtype}"))
+            .unwrap_or_else(|error| panic!("{dtype} C lane: {error}"));
+        let tline = tensor_lines(&out)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("{dtype}: no tensor render in:\n{out}"))
+            .to_string();
+        let eval_out =
+            eval_stdout(&program).unwrap_or_else(|error| panic!("{dtype} eval: {error}"));
+        let eval_tline = tensor_lines(&eval_out)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("{dtype}: no eval tensor render in:\n{eval_out}"))
+            .to_string();
+        assert_eq!(
+            eval_tline, expected,
+            "{dtype}: control lane must finalize the suffixed leaf at its declared width"
+        );
+        assert_eq!(
+            tline, eval_tline,
+            "{dtype}: the compiled lane must widen the suffixed literal's stored value, \
+             agreeing with eval ([05-OBS-1] cross-lane exit agreement): {tline}"
+        );
+    }
 }
 
 /// [05-OBS-4] (the chelis#775 decision, eval half): a scalar-typed
@@ -1145,6 +1246,83 @@ fn eval_scalar_value_roots_render_bare() {
             transcript, *expected,
             "[eval scalar root {expr}] print transcript and root payload \
              must agree within the lane"
+        );
+    }
+}
+
+/// GREEN regression (chelis#862, closed by [05-OBS-6] under chelis#912): a
+/// program whose ONLY display root is a unit-valued PRINT root renders that
+/// root WITH its `name = ` label.
+///
+/// Eval used to drop the prefix for exactly this shape - a lone bare `()`
+/// where the compiled lane printed `out = ()`. Adding any second root made
+/// eval label the unit root normally, so the divergence class was precisely
+/// "programs whose only display root is print-valued", which is why the
+/// multi-root rows elsewhere in this file never caught it. [05-OBS-6] removed
+/// the bare-when-single form in both lanes; this cell is the regression lock.
+///
+/// Two deliberate choices, both load-bearing:
+///
+/// * The assertion is on the ROOT RENDER LINE, never the print transcript.
+///   `c_suffixed_f32_literal_widens_from_its_stored_width` above builds the
+///   same single-print-root shape but asserts on `tensor_lines().first()`, so
+///   an assertion copied from there would pass vacuously for a second,
+///   independent reason.
+/// * No `c_toolchain_available()` guard, because none is needed: the
+///   divergence was eval-internal (the C lane was already correct), so this
+///   cell must not inherit the silent skip that
+///   `cross_lane_stdout_is_byte_identical_where_bits_agree` opens with.
+///   Joining the single-print-root shape to that cross-lane corpus is a
+///   separate follow-up, not this regression.
+#[test]
+fn eval_unit_valued_sole_print_root_keeps_its_name_issue_862() {
+    // (label, program, expected sole root line). Each program's only root is
+    // the unit-valued print binding; the binding name varies so the label is
+    // proven to come from the binding, not from a constant.
+    let rows: &[(&str, String, &str)] = &[
+        (
+            "tensor-reduction-root",
+            "module M.Main\n\
+             def f(x: tensor[4, f32]) -> tensor[f32] = sum(x, 0)\n\
+             out = print(f(to_tensor([1.5, 4.5, 2.5, 0.5])))\n"
+                .to_string(),
+            "out = ()",
+        ),
+        (
+            "f64-scalar-root",
+            "module M.Main\n\
+             def run() -> f64 = cast(0.1, f64)\n\
+             shown = print(run())\n"
+                .to_string(),
+            "shown = ()",
+        ),
+        (
+            "int32-scalar-root-distinct-name",
+            "module M.Main\n\
+             def run() -> int32 = 7\n\
+             whatever = print(run())\n"
+                .to_string(),
+            "whatever = ()",
+        ),
+    ];
+
+    for (label, program, expected_root) in rows {
+        let out = eval_stdout(program).unwrap_or_else(|error| panic!("[{label}] eval: {error}"));
+        let unit_lines: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with("()"))
+            .collect();
+        assert_eq!(
+            unit_lines,
+            vec![*expected_root],
+            "[{label}] [05-OBS-6]: the sole unit-valued print root is labelled, \
+             and the bare-when-single form is gone. Full output:\n{out}"
+        );
+        assert!(
+            !out.lines().any(|line| line.trim() == "()"),
+            "[{label}] [05-OBS-6]: no exit may render a root as a bare `()`. \
+             Full output:\n{out}"
         );
     }
 }
@@ -1229,12 +1407,17 @@ fn eval_tensor_renders_truncate_at_32_with_marker() {
     let tlines = tensor_lines(&out);
     assert_eq!(
         tlines.len(),
-        2,
-        "expected the transcript and root renders:\n{out}"
+        3,
+        "expected transcript, automatic, and explicit-root renders:\n{out}"
     );
     assert_eq!(tlines[0], expected, "transcript truncation form");
     assert_eq!(
         tlines[1],
+        format!("mk = {expected}"),
+        "automatic-root truncation form"
+    );
+    assert_eq!(
+        tlines[2],
         format!("troot = {expected}"),
         "labeled-root truncation form"
     );
@@ -1384,11 +1567,17 @@ fn c_scalar_exits_round_trip() {
         eprintln!("skipping: no host C toolchain");
         return;
     }
-    // f16/bf16 scalar rows are deliberately ABSENT: the compiled lane stores
-    // them in int64_t (chelis#714, ingress/value - [#729]'s side of §I1), so
-    // there is no faithfully-stored value for this harness to read yet.
     let float_rows: &[(&str, &str, Width, f64)] = &[
+        ("f16", "cast(0.1, f16)", Width::F16, 0.0999755859375),
+        ("bf16", "cast(0.1, bf16)", Width::Bf16, 0.10009765625),
         ("f64", "cast(0.1, f64)", Width::F64, 0.1),
+        ("f64", "cast(-0.0, f64)", Width::F64, -0.0),
+        (
+            "f64",
+            "cast(1.7976931348623157e308, f64)",
+            Width::F64,
+            f64::MAX,
+        ),
         (
             "f64",
             "cast(9007199254740992.0, f64)",
@@ -1409,14 +1598,18 @@ fn c_scalar_exits_round_trip() {
             f64::NAN,
         ),
         ("f32", "0.1", Width::F32, 0.10000000149011612),
-        // f32::MAX is absent: the emitted constant is an integer literal
-        // clang rejects (the C_LANE_EXCLUDED ingress defect, [#729]).
+        (
+            "f32",
+            "3.4028234663852886e38",
+            Width::F32,
+            3.4028234663852886e38,
+        ),
         ("f32", "1e-45", Width::F32, 1.401298464324817e-45),
     ];
     for (i, (ret, expr, w, value)) in float_rows.iter().enumerate() {
         let program = format!("module M.Main\ndef run() -> {ret} = {expr}\nshown = print(run())\n");
         let out = c_stdout(&program, &format!("obs_sc_f{i}")).expect("C lane");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 2) {
             let got = text_bits_at(&line, *w).unwrap_or_else(|e| panic!("[c scalar {expr}] {e}"));
             assert_eq!(
                 got,
@@ -1432,7 +1625,7 @@ fn c_scalar_exits_round_trip() {
     for (i, (expr, value)) in int_rows.iter().enumerate() {
         let program = format!("module M.Main\ndef run() -> int64 = {expr}\nshown = print(run())\n");
         let out = c_stdout(&program, &format!("obs_sc_i{i}")).expect("C lane");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 2) {
             assert_eq!(
                 text_int_lenient(&line).expect("int scalar"),
                 *value,
@@ -1445,7 +1638,7 @@ fn c_scalar_exits_round_trip() {
         "obs_sc_b",
     )
     .expect("C lane");
-    for line in scalar_render_lines(&out) {
+    for line in scalar_render_lines(&out, 2) {
         assert_eq!(line, "true", "bool scalar exit");
     }
 }
@@ -1462,13 +1655,11 @@ fn c_scalar_exits_round_trip() {
 
 /// chelis#750 (tensor): the issue's exact int8 repro. The def-call value
 /// root `troot = mk()` was silently dropped by the compiled lane; it is
-/// now emitted with the exact stored values (127 / -127 / 0). Each lane's
-/// exact line is pinned: eval renders integers as integers per [05-OBS-2]
-/// (chelis#732 Phase 1's §B2.1 migration moved this expectation), while
-/// the compiled lane still prints the pre-contract `127.0` form until its
-/// Phase 2 migration - so this lock asserts VALUE-level cross-lane
-/// agreement plus line-count parity, and the byte-identical assertion
-/// returns with the Phase 2 generated printer (§C2.3).
+/// now emitted with the exact stored values (127 / -127 / 0). Since
+/// chelis#732 Phase 2 BOTH lanes render integers as integers ([05-OBS-2]),
+/// so the lock is the full §C2.3 byte-identical assertion (the Phase 1
+/// interim compared values only, while the compiled lane still printed
+/// `127.0`).
 #[test]
 fn c_def_call_tensor_root_matches_eval_issue_750() {
     if !c_toolchain_available() {
@@ -1483,43 +1674,18 @@ fn c_def_call_tensor_root_matches_eval_issue_750() {
     let eval_out = eval_stdout(program).expect("eval");
     let c_out = c_stdout(program, "issue750_tensor").expect("C lane");
 
-    let expected_c = "troot = tensor(shape=[3], data=[127.0, -127.0, 0.0])";
-    assert!(
-        c_out.lines().any(|l| l == expected_c),
-        "chelis#750: the compiled lane must emit the def-call tensor root \
-         `{expected_c}`, got:\n{c_out}"
-    );
-    let expected_eval = "troot = tensor(shape=[3], data=[127, -127, 0])";
-    assert!(
-        eval_out.lines().any(|l| l == expected_eval),
-        "chelis#750/[05-OBS-2]: eval must emit the def-call tensor root \
-         `{expected_eval}`, got:\n{eval_out}"
-    );
-    // Cross-lane agreement at the value level (byte equality is Phase 2's
-    // exit): both troot renders decode to the same stored integers.
-    let eval_troot = eval_out
-        .lines()
-        .find(|l| l.starts_with("troot = "))
-        .expect("eval troot line");
-    let c_troot = c_out
-        .lines()
-        .find(|l| l.starts_with("troot = "))
-        .expect("c troot line");
-    let decode = |line: &str| -> Vec<i64> {
-        tensor_elems(line)
-            .iter()
-            .map(|text| text_int_lenient(text).expect("troot element"))
-            .collect()
-    };
+    let expected = "troot = tensor(shape=[3], data=[127, -127, 0])";
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
+        assert!(
+            out.lines().any(|l| l == expected),
+            "chelis#750/[05-OBS-2] [{lane}]: the def-call tensor root must \
+             render `{expected}`, got:\n{out}"
+        );
+    }
+    // §C2.3: identical stored bits, byte-identical stdout.
     assert_eq!(
-        decode(eval_troot),
-        decode(c_troot),
-        "chelis#750: the troot values diverge between lanes:\n eval: {eval_troot}\n c:    {c_troot}"
-    );
-    assert_eq!(
-        eval_out.lines().count(),
-        c_out.lines().count(),
-        "chelis#750: line-count parity broken:\n--- eval ---\n{eval_out}\n--- c ---\n{c_out}"
+        eval_out, c_out,
+        "chelis#750/§C2.3: the lanes' stdout must be byte-identical:\n--- eval ---\n{eval_out}\n--- c ---\n{c_out}"
     );
 }
 
@@ -1687,14 +1853,14 @@ fn wire_execution_value_rendering_round_trips() {
     let tensor = ExecutionValue::Tensor {
         value: TensorValue {
             shape: vec![finite.len()],
-            data: finite.clone(),
+            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(finite.clone()),
         },
     };
     let json = serde_json::to_string(&tensor).expect("serialize");
     let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
     match back {
         ExecutionValue::Tensor { value } => {
-            for (a, b) in value.data.iter().zip(&finite) {
+            for (a, b) in value.data.to_f64_lossy_vec().iter().zip(&finite) {
                 assert_eq!(a.to_bits(), b.to_bits(), "wire tensor element drifted");
             }
         }
@@ -1742,7 +1908,9 @@ def make(x: f32) -> Probability = Probability { value: x }
     for violating in [2.5_f64, -0.5_f64] {
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: violating }],
+            fields: vec![ExecutionValue::Float32 {
+                value: violating as f32,
+            }],
         };
         let err = try_decode_adt_value(&exprs, &payload)
             .expect_err("out-of-band probability must be rejected");
@@ -1785,7 +1953,11 @@ fn eval_bool_tensor_print_matches_to_list_exit() {
 
     let out = eval_stdout(&program).expect("eval");
     let tlines = tensor_lines(&out);
-    assert_eq!(tlines.len(), 2, "transcript and root renders:\n{out}");
+    assert_eq!(
+        tlines.len(),
+        3,
+        "transcript, automatic, and explicit-root renders:\n{out}"
+    );
     for line in tlines {
         assert_eq!(
             tensor_elems(line),
@@ -1797,21 +1969,17 @@ fn eval_bool_tensor_print_matches_to_list_exit() {
     assert_eq!(
         llines.len(),
         2,
-        "transcript and root to_list renders:\n{out}"
+        "transcript and explicit-root to_list renders:\n{out}"
     );
     for line in llines {
         assert_eq!(list_payload_elems(line), expected, "eval to_list: {line}");
     }
 }
 
-/// The C half of the same split stays red: the emitted print helper still
-/// renders bool tensor elements as `1.0`/`0.0` while to_list says
-/// `true`/`false` (chelis#726's observation half, fixed by chelis#732
-/// Phase 2's generated print helper).
+/// The C half of the same split, green since chelis#732 Phase 2
+/// (un-ignored per §B2.3): the generated print helper renders bool tensor
+/// elements `true`/`false`, agreeing with to_list (chelis#726 closed).
 #[test]
-#[ignore = "chelis#726 (observation half, C lane; fixed by chelis#732 Phase 2): the emitted \
-            bool tensor print says 1.0/0.0 while to_list says true/false. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn c_bool_tensor_print_matches_to_list_exit() {
     let program = exits_program("tensor[2, bool]", "to_tensor([true, false])");
     let expected = ["true", "false"];
@@ -1832,13 +2000,12 @@ fn c_bool_tensor_print_matches_to_list_exit() {
     }
 }
 
-/// chelis#716: the emitted print helper's `default:` arm reads f16/bf16
-/// buffers as f32. Value-level assertion (not exact strings) so this test
-/// survives the §B2.1 grammar migration and goes green at Phase 2 untouched.
+/// chelis#716's print half, green since chelis#732 Phase 2 (un-ignored per
+/// §B2.3, assertions untouched): the generated helper decodes f16/bf16
+/// storage through the WS-1 conversion helpers and formats at the value's
+/// own width. (The pre-fix helper read the 2-byte buffers as f32; the
+/// chelis#730 interim then aborted loudly instead.)
 #[test]
-#[ignore = "chelis#716: the emitted C print helper reads f16/bf16 tensor buffers as f32 and \
-            prints garbage over CORRECT kernel results. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn c_f16_bf16_tensor_print_is_dtype_faithful() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -1860,19 +2027,21 @@ fn c_f16_bf16_tensor_print_is_dtype_faithful() {
         );
         let out = c_stdout(&program, &format!("obs_{dt}_print"))
             .unwrap_or_else(|e| panic!("chelis#716: the {dt} program must run: {e}"));
-        // Print-only program (no value root): exactly one tensor render, the
-        // `print(mk())` transcript. This cell fails on the VALUE assertion
-        // below (chelis#716 reads f16/bf16 as f32), not on the render count.
-        assert_float_print_exits(&out, w, rows, all_rows, 1, &format!("c/{dt}"));
+        // Print-only still owes two renders: the transcript and the pure
+        // nullary `mk` root required by [05-OBS-7].
+        assert_float_print_exits(&out, w, rows, all_rows, 2, &format!("c/{dt}"));
     }
 }
 
-/// chelis#716: to_list of an f16/bf16 tensor aborts at runtime in the
-/// compiled lane (`to_list expects numeric or bool tensor input`).
+/// chelis#716's to_list half, green since chelis#732 Phase 2 (un-ignored
+/// per §B2.3): `chelis_list_from_tensor` gained F16/BF16 arms reading the
+/// 2-byte storage exactly (the pre-fix runtime aborted; after PR #799 the
+/// build itself rejected `list[f16]` until the boxed-element ABI carve-out
+/// in `host_abi.rs` named that state). The list box carries each element's
+/// exact f64 image, so the value-level round-trip at the half width holds;
+/// BYTE equality with eval's own-width to_list digits for non-dyadic
+/// values waits on the chelis#729 width repair (the section 8.1 boundary).
 #[test]
-#[ignore = "chelis#716: to_list of f16/bf16 tensors aborts at runtime in the compiled lane. \
-            Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn c_f16_bf16_to_list_completes_per_dtype() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -1903,14 +2072,10 @@ fn c_f16_bf16_to_list_completes_per_dtype() {
     }
 }
 
-/// chelis#723: the emitted print helper renders int64 through double, so
-/// print of a stored 2^53+1 reads back as 2^53 while to_list (green control
-/// above) carries it exactly.
+/// chelis#723, green since chelis#732 Phase 2 (un-ignored per §B2.3): the
+/// generated helper prints int64 elements through `long long` printf, all
+/// digits exact, never through double.
 #[test]
-#[ignore = "chelis#723: the emitted C print helper renders int64 tensor elements through \
-            double; 9007199254740993 prints as a value that decodes to 9007199254740992. \
-            Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn c_int64_tensor_print_round_trips_above_2p53() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -1944,18 +2109,16 @@ fn c_int64_tensor_print_round_trips_above_2p53() {
 ///   0.30000000000000004 reads back as 0.3, and f64::MAX reads back as INF
 ///   (host_emit.rs:518 tensor path, :4275/:4366 scalar paths).
 ///
-/// Both are Phase 2 casualties (chelis_format_shortest replaces the split).
+/// Both went green at chelis#732 Phase 2 (un-ignored per §B2.3):
+/// `chelis_format_shortest` replaced the near-integer/`%g` split at every
+/// compiled print exit, so the once-collapsed rows now round-trip.
 #[test]
-#[ignore = "chelis#748 (B2.5 discovery): \
-            the emitted %.1f arm collapses |x|<1e-9 to 0.0 and %.16g starves 17-digit f64 \
-            values. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn c_print_format_selection_preserves_small_and_17_digit_values() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    // The compilable f64/f32 table rows excluded from the green print
-    // assertions (the C_LANE_EXCLUDED cells never reach a renderer at all).
+    // Every frozen f64/f32 row now reaches the compiled renderer. The
+    // predicate selects the historical formatting-red subset only.
     let rows = c_rows(F64_ROWS);
     let out = c_stdout(&float_table_program("f64", &rows, false), "obs_f64_red").expect("C lane");
     assert_float_exits(
@@ -1978,17 +2141,18 @@ fn c_print_format_selection_preserves_small_and_17_digit_values() {
         "c/f32-red",
     );
 
-    // The scalar %.16g path starves the same 17-digit f64 values. (f64::MAX
-    // would starve too - %.16g parses back as inf - but its C cell is
-    // unconstructible today: the emitted constant is an integer literal
-    // clang rejects, the C_LANE_EXCLUDED ingress defect.)
-    for (i, (expr, value)) in [("cast(0.30000000000000004, f64)", 0.30000000000000004)]
-        .iter()
-        .enumerate()
+    // The scalar %.16g path starved the same 17-digit f64 values. Both an
+    // ordinary 17-digit value and f64::MAX now execute end to end.
+    for (i, (expr, value)) in [
+        ("cast(0.30000000000000004, f64)", 0.30000000000000004),
+        ("cast(1.7976931348623157e308, f64)", f64::MAX),
+    ]
+    .iter()
+    .enumerate()
     {
         let program = format!("module M.Main\ndef run() -> f64 = {expr}\nshown = print(run())\n");
         let out = c_stdout(&program, &format!("obs_sc_red{i}")).expect("C lane");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 2) {
             let got =
                 text_bits_at(&line, Width::F64).unwrap_or_else(|e| panic!("[c scalar {expr}] {e}"));
             assert_eq!(
@@ -2005,12 +2169,12 @@ fn c_print_format_selection_preserves_small_and_17_digit_values() {
 /// lib.rs:3730), a SECOND hand-written dtype funnel: int64 read `as f64`
 /// (chelis#723's shape at a different site), f16/bf16 through the `_ =>`
 /// f32 fallback (chelis#716's shape), and a 10-element truncation with NO
-/// marker. This row pins the int64 case at the value level.
+/// marker. This row pins the int64 case at the value level. Green since
+/// chelis#732 Phase 2 (un-ignored per §B2.3): `tensor_to_string` renders
+/// per dtype through the shared runtime formatter, and its truncation is
+/// the [05-OBS-5] 32-with-marker rule
+/// (`c_nested_tensor_truncates_at_32_with_marker` below locks that half).
 #[test]
-#[ignore = "chelis#749 (B2.5 discovery): \
-            the runtime nested-value tensor renderer reads int64 elements as f64 and \
-            silently truncates at 10 elements. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn c_nested_tensor_in_list_renders_int64_faithfully() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -2028,4 +2192,252 @@ fn c_nested_tensor_in_list_renders_int64_faithfully() {
         got, 9007199254740993,
         "the nested tensor render must carry the exact stored int64: {line}"
     );
+}
+
+/// The int32 face of the same nested-in-list exit (census row C4). The
+/// runtime's element decoder read NATIVE int32 storage through the f32
+/// view, so this exit rendered `5i32` as `7.006492321624085e-45`,
+/// `i32::MAX` (`0x7FFFFFFF`, a NaN pattern) as `NaN`, and `i32::MIN`
+/// (`0x80000000`, `-0.0`) as a plausible-looking `0` - while `to_list`
+/// and the generated print helper, which both decode natively, returned
+/// the right integers from the SAME tensor. That is §C2.2 (intra-lane
+/// exit agreement) and §C2.3 (cross-lane byte identity, since eval was
+/// correct) failing together.
+///
+/// The cell hid because the harness's int32 rows are driven by
+/// `c_int_tensor_exits_round_trip`, which exercises the GENERATED print
+/// helper; `tensor_to_string` is a different exit, reached only through
+/// the nested-value renderer (int64-only coverage until now) and through
+/// the now-removed zero-emitter `chelis_print_f32`. A Phase 0 census gap
+/// against its own deliverable, not a misread oracle - and the shape the
+/// known-red ledger cannot catch, because the ledger polices DECLARED
+/// skips, never exits nobody censused.
+///
+/// `i32::MIN` is the row that matters most: NaN screams, `0` does not.
+#[test]
+fn c_nested_int32_tensor_in_list_decodes_natively() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[3, int32] = to_tensor([cast(5, int32), \
+         cast(2147483647, int32), cast(-2147483648, int32)])\n\
+         nested = print([mk()])\n\
+         listed = print(to_list(mk()))\n";
+    let out = c_stdout(program, "obs_i32_nested").expect("C lane");
+    let nested = out
+        .lines()
+        .find(|l| l.contains("tensor(shape="))
+        .unwrap_or_else(|| panic!("no nested tensor render in:\n{out}"));
+    assert_eq!(
+        tensor_elems(nested),
+        ["5", "2147483647", "-2147483648"],
+        "the nested int32 render must decode native two's-complement \
+         storage ([05-OBS-2]); an f32 view yields 7.006492321624085e-45 / \
+         NaN / 0: {nested}"
+    );
+    // §C2.2: the sibling exit on the same stored bits must agree. Both
+    // renders are list lines, so select the `to_list` one by the absence
+    // of the nested tensor wrapper.
+    let listed = list_lines(&out)
+        .into_iter()
+        .find(|l| !l.contains("tensor(shape="))
+        .unwrap_or_else(|| panic!("no to_list render in:\n{out}"))
+        .to_string();
+    assert_eq!(
+        list_payload_elems(&listed),
+        ["5", "2147483647", "-2147483648"],
+        "to_list must agree with the nested render: {listed}"
+    );
+    // §C2.3: eval holds identical bits and must emit identical bytes.
+    let eval_out = eval_stdout(
+        "module M.Main\n\
+         def mk() -> tensor[3, int32] = to_tensor([cast(5, int32), \
+         cast(2147483647, int32), cast(-2147483648, int32)])\n\
+         nested = print([mk()])\n\
+         listed = print(to_list(mk()))\n",
+    )
+    .expect("eval");
+    assert_eq!(
+        eval_out, out,
+        "§C2.3: the nested int32 exit must be byte-identical across lanes:\n\
+         --- eval ---\n{eval_out}\n--- c ---\n{out}"
+    );
+}
+
+/// chelis#749's truncation half ([05-OBS-5]): a tensor nested inside a
+/// list truncates at 32 elements WITH the `, ...` marker (the pre-fix
+/// runtime renderer cut at 10 with no marker - a 33-element tensor was
+/// indistinguishable from a 10-element one).
+#[test]
+fn c_nested_tensor_truncates_at_32_with_marker() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let elems: Vec<String> = (1..=33).map(|i| format!("{i}.0")).collect();
+    let program = format!(
+        "module M.Main\n\
+         def mk() -> tensor[33, f32] = to_tensor([{}])\n\
+         out = print([mk()])\n",
+        elems.join(", ")
+    );
+    let out = c_stdout(&program, "obs_nested_trunc").expect("C lane");
+    let visible: Vec<String> = (1..=32).map(|i| format!("{i}.0")).collect();
+    let expected = format!("[tensor(shape=[33], data=[{}, ...])]", visible.join(", "));
+    assert!(
+        out.lines().any(|l| l.trim() == expected),
+        "the nested render must truncate at 32 with the marker, got:\n{out}"
+    );
+}
+
+/// The compiled-lane scalar `to_string` trio (PR #863 round-1 F1;
+/// census row C7, appended per §B2.5): for every stringifiable scalar
+/// dtype, `print(to_string(x))` and `print(x)` must agree byte-for-byte
+/// within the compiled lane (§C2.2 intra-lane exit agreement) AND the
+/// full stdout must be byte-identical to eval's (§C2.3). The f32 row is
+/// the fixed funnel: the pre-fix emission promoted f32 through
+/// `chelis_string_from_f64`, so `to_string(cast(0.1, f32))` printed the
+/// f64-image digits while `print` of the same stored value printed
+/// `0.1`. The other rows lock the widths that were already correct.
+/// (f16/bf16 scalars have no C-host ABI cell and cannot reach
+/// `to_string`; their absence is chelis#714's, not this row's.)
+#[test]
+fn c_scalar_to_string_matches_print_exit_across_dtypes() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let rows: &[(&str, &str, &str)] = &[
+        ("f32", "cast(0.1, f32)", "0.1"),
+        ("f32-dyadic", "cast(0.75, f32)", "0.75"),
+        (
+            "f64",
+            "cast(0.30000000000000004, f64)",
+            "0.30000000000000004",
+        ),
+        ("f64-integral", "cast(6.0, f64)", "6.0"),
+        ("int64", "cast(9007199254740993, int64)", "9007199254740993"),
+        ("int32", "cast(2147483647, int32)", "2147483647"),
+        ("bool", "and(true, true)", "true"),
+    ];
+    for (label, expr, expected) in rows {
+        let program = format!(
+            "module M.Main\n\
+             def run() -> string = to_string({expr})\n\
+             shown = print(run())\n\
+             also = print({expr})\n"
+        );
+        let name = format!("obs_tostr_{}", label.replace('-', "_"));
+        let c_out = c_stdout(&program, &name).unwrap_or_else(|e| panic!("[{label}] C lane: {e}"));
+        let eval_out = eval_stdout(&program).unwrap_or_else(|e| panic!("[{label}] eval: {e}"));
+        let c_lines: Vec<&str> = c_out.lines().collect();
+        assert!(
+            c_lines.len() >= 2 && c_lines[0] == *expected && c_lines[1] == *expected,
+            "[{label}] the to_string and print exits must both render `{expected}` \
+             within the compiled lane, got:\n{c_out}"
+        );
+        assert_eq!(
+            eval_out, c_out,
+            "[{label}] §C2.3: the scalar to_string trio must be byte-identical \
+             across lanes:\n--- eval ---\n{eval_out}\n--- c ---\n{c_out}"
+        );
+    }
+}
+
+// ===========================================================================
+// GREEN - chelis#732 Phase 2: §C2.3 cross-lane byte equality (frozen at
+// this phase's exit for identical stored bits)
+// ===========================================================================
+
+/// Eval and compiled C emit BYTE-IDENTICAL stdout for identical stored
+/// bits (§C2.3, [05-OBS-2]'s cross-lane grammar identity). The corpus is
+/// deliberately restricted to cells where the lanes hold identical bits
+/// AND render at the same width today:
+///
+/// * integer and bool tensors (exact in both storage strategies within
+///   2^53);
+/// * f64 SCALAR exits (both lanes store and render f64);
+/// * float tensors whose elements are dyadic short decimals (exactly
+///   representable at every width in play, so eval's deliberate
+///   stored-f64-width tensor rendering - the spec/05 section 8.1 width
+///   note - produces the same digits as the C lane's own-width
+///   rendering).
+///
+/// NOT here, by the section 8.1 boundary (chelis#729's subject matter,
+/// deliberately visible until its width repair): non-dyadic narrow-float
+/// tensor cells, where eval renders the stored f64 image's digits while
+/// the C lane renders own-width digits (e.g. an f32 tensor holding 0.1:
+/// eval `0.10000000149011612`, C `0.1` - same bits, different declared
+/// widths); and eval to_list of f64 tensors, whose values narrow through
+/// the chelis#717 F32 tag before rendering (different stored bits). Rows
+/// for those cells belong to the chelis#729 exit criteria, not this lock.
+#[test]
+fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let programs: &[(&str, String)] = &[
+        ("int8-exits", int_table_program("int8", INT_ROWS[0].1)),
+        ("int64-exits", int_table_program("int64", INT_ROWS[3].1)),
+        (
+            "bool-exits",
+            exits_program("tensor[2, bool]", "to_tensor([true, false])"),
+        ),
+        (
+            "f32-dyadic-exits",
+            exits_program("tensor[4, f32]", "to_tensor([1.5, -0.25, 2048.0, 0.75])"),
+        ),
+        (
+            "f16-dyadic-print",
+            "module M.Main\n\
+             def mk() -> tensor[3, f16] = cast(to_tensor([0.75, 2048.0, -1.5]), f16)\n\
+             shown = print(mk())\n\
+             listed = print(to_list(mk()))\n"
+                .to_string(),
+        ),
+        (
+            "f64-scalar-17-digit",
+            "module M.Main\n\
+             def run() -> f64 = cast(0.30000000000000004, f64)\n\
+             shown = print(run())\n\
+             root = run()\n"
+                .to_string(),
+        ),
+        (
+            "f64-scalar-specials",
+            "module M.Main\n\
+             def run() -> f64 = div(cast(1.0, f64), cast(0.0, f64))\n\
+             shown = print(run())\n\
+             root = run()\n"
+                .to_string(),
+        ),
+        // The program carries a VALUE root beside the print. That shape was
+        // originally chosen to avoid the chelis#862 unit-root naming
+        // divergence (eval rendered a LONE unit root bare while the compiled
+        // lane named it); [05-OBS-6] closed that, and
+        // `eval_unit_valued_sole_print_root_keeps_its_name_issue_862` above
+        // locks it. The multi-root shape is kept here because moving this
+        // cell to the single-print-root form would widen the §C2.3 corpus,
+        // which is a separate change - the corpus may grow but never shrink.
+        (
+            "rank0-reduction-root",
+            "module M.Main\n\
+             def f(x: tensor[4, f32]) -> tensor[f32] = sum(x, 0)\n\
+             shown = print(f(to_tensor([1.5, 4.5, 2.5, 0.5])))\n\
+             root = f(to_tensor([1.5, 4.5, 2.5, 0.5]))\n"
+                .to_string(),
+        ),
+    ];
+    for (label, program) in programs {
+        let eval_out = eval_stdout(program).unwrap_or_else(|e| panic!("[{label}] eval: {e}"));
+        let c_out = c_stdout(program, &format!("obs_xlane_{label}").replace('-', "_"))
+            .unwrap_or_else(|e| panic!("[{label}] C lane: {e}"));
+        assert_eq!(
+            eval_out, c_out,
+            "[{label}] §C2.3: identical stored bits must render byte-identically:\n\
+             --- eval ---\n{eval_out}\n--- c ---\n{c_out}"
+        );
+    }
 }

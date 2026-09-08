@@ -20,27 +20,70 @@
 //! declared in `chelis_runtime.h`, symmetric with PR #243's
 //! `chelis_fill_f32_bits` mechanism.
 
-use chelis_backend_c::emit::CEmitter;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::emit_dag;
 
-fn f32_tensor(size: usize) -> TensorType {
+mod common;
+
+fn tensor(precision: Prim, size: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(size)],
-        precision: Prim::F32,
+        precision,
     }
 }
 
 fn build_uniform_like_dag(low: f64, high: f64, seed: u64) -> Dag {
+    build_uniform_like_dag_for(Prim::F32, low, high, seed)
+}
+
+fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -> Dag {
     let mut dag = Dag::new();
-    let template = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], f32_tensor(4), None);
+    let template = dag.add_node(
+        RiscOp::synth_const(precision, 0.0),
+        vec![],
+        tensor(precision, 4),
+        None,
+    );
     dag.add_node(
         RiscOp::UniformLike { low, high, seed },
         vec![template],
-        f32_tensor(4),
+        tensor(precision, 4),
         None,
     );
     dag
+}
+
+#[test]
+fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
+    let f64_src = emit_dag(
+        &build_uniform_like_dag_for(Prim::F64, 0.1, 0.9, 17),
+        "uniform_f64",
+    )
+    .unwrap();
+    assert!(f64_src.contains("static inline double chelis_uniform_sample_f64("));
+    assert!(f64_src.contains("((double*)t1_data)[i] = chelis_uniform_sample_f64("));
+    assert!(f64_src.contains("chelis_f64_from_bits("));
+    assert!(
+        !f64_src
+            .lines()
+            .any(|line| line.contains("t1_data)[i]") && line.contains("sample_f32")),
+        "f64 output must never widen an f32 sample:\n{f64_src}"
+    );
+
+    for (precision, conversion) in [
+        (Prim::F16, "chelis_f32_to_f16"),
+        (Prim::Bf16, "chelis_f32_to_bf16"),
+    ] {
+        let src = emit_dag(
+            &build_uniform_like_dag_for(precision, 0.1, 0.9, 17),
+            "uniform_reduced",
+        )
+        .unwrap();
+        assert!(src.contains("chelis_uniform_sample_f32("));
+        assert!(src.contains(&format!("((uint16_t*)t1_data)[i] = {conversion}(")));
+    }
 }
 
 /// Bit-pattern reproducer: the sub-normal-range `1e-40` reproducer
@@ -52,7 +95,7 @@ fn issue_248_uniform_like_low_arg_emits_exact_bit_pattern() {
     let low: f64 = 1.0e-40;
     let high: f64 = 0.5;
     let dag = build_uniform_like_dag(low, high, 42);
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
 
     let low_bits = (low as f32).to_bits();
     let high_bits = (high as f32).to_bits();
@@ -84,7 +127,7 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
     ];
     for &(low, high) in cases {
         let dag = build_uniform_like_dag(low, high, 7);
-        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let src = emit_dag(&dag, "test_fn").unwrap();
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
         assert!(
@@ -124,8 +167,6 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
 // ---------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-use chelis_backend_c::codegen;
-#[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
@@ -133,6 +174,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
+use support::codegen;
 
 #[cfg(target_os = "linux")]
 fn runtime_include_dir() -> PathBuf {
@@ -196,7 +239,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
                 .ok_or_else(|| std::io::Error::other("no libchelis_runtime-*.a after rebuild"))?
         }
     };
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),
@@ -226,13 +274,14 @@ fn runtime_lib_path() -> PathBuf {
 
 #[cfg(target_os = "linux")]
 fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join(format!("chelis_issue248_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("issue248_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",
@@ -301,11 +350,13 @@ extern void test_uniform_like(chelis_tensor** inputs, int n_in, chelis_tensor** 
 int main(void) {
     chelis_tensor* outputs[1] = { NULL };
     test_uniform_like(NULL, 0, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
     float v;
-    memcpy(&v, outputs[0]->data, sizeof(float));
+    memcpy(&v, view.data, sizeof(float));
     uint32_t bits;
     memcpy(&bits, &v, sizeof(uint32_t));
     printf("0x%08x\n", bits);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -318,4 +369,54 @@ int main(void) {
         "uniform_like low byte-identical mismatch: expected `{expected}`, got `{}`. Source:\n{src}",
         output.trim()
     );
+}
+
+/// chelis#937: f64 output executes the affine at f64 width. This Linux
+/// compile-run lock reads the emitted buffer as f64 and compares raw bits
+/// with the shared [05-OP-8] sampler, so widening f32 output cannot pass.
+#[cfg(target_os = "linux")]
+#[test]
+fn issue_937_uniform_like_f64_matches_shared_sampler_under_gcc() {
+    let dag = build_uniform_like_dag_for(Prim::F64, 2.0, 5.0, 42);
+    let result = codegen(&dag, "test_uniform_like_f64").unwrap();
+    let src = &result.c_source;
+    let harness = r#"
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include "chelis_runtime.h"
+
+extern void test_uniform_like_f64(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main(void) {
+    chelis_tensor* outputs[1] = { NULL };
+    test_uniform_like_f64(NULL, 0, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    const double *data = (const double *)view.data;
+    for (int64_t i = 0; i < view.count; i++) {
+        uint64_t bits;
+        memcpy(&bits, &data[i], sizeof(bits));
+        printf(i == 0 ? "%016llx" : " %016llx", (unsigned long long)bits);
+    }
+    printf("\n");
+    chelis_tensor_release(outputs[0]);
+    return 0;
+}
+"#;
+    let Some(output) = compile_and_run("uniform_like_f64", src, harness) else {
+        panic!("emitted f64 C did not compile/run");
+    };
+    let expected = (0..4)
+        .map(|index| {
+            format!(
+                "{:016x}",
+                chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, 42, index)
+                    .unwrap()
+                    .as_f64_lossy()
+                    .to_bits()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(output.trim(), expected, "emitted source:\n{src}");
 }

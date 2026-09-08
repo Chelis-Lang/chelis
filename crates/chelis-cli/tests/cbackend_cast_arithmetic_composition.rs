@@ -74,10 +74,53 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
-    let tmp = canonical.with_extension("a.tmp");
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     fs::rename(&tmp, canonical)?;
     Ok(())
+}
+
+#[test]
+fn runtime_archive_materialization_is_safe_within_one_process() {
+    let source_root = target_debug_dir();
+    let source_deps = source_root.join("deps");
+    let source = fs::read_dir(&source_deps)
+        .expect("read source deps")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("libchelis_runtime-") && name.ends_with(".a")
+            })
+        })
+        .expect("hashed runtime archive");
+
+    let sandbox = tempdir().expect("runtime materialization sandbox");
+    let deps = sandbox.path().join("deps");
+    fs::create_dir(&deps).expect("create sandbox deps");
+    fs::copy(&source, deps.join(source.file_name().unwrap())).expect("seed hashed archive");
+    let canonical = sandbox.path().join("libchelis_runtime.a");
+
+    std::thread::scope(|scope| {
+        let mut threads = Vec::new();
+        for _ in 0..16 {
+            threads.push(scope.spawn(|| ensure_runtime_static_lib(&canonical)));
+        }
+        for thread in threads {
+            thread.join().expect("materialization thread").unwrap();
+        }
+    });
+
+    assert!(
+        canonical.is_file(),
+        "canonical runtime archive was not created"
+    );
 }
 
 fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {
@@ -147,6 +190,13 @@ const HARNESS_INCLUDES: &str = r#"
 #include <string.h>
 #include <stdint.h>
 #include "chelis_runtime.h"
+
+static chelis_dtype harness_dtype(const chelis_tensor *tensor) {
+    return chelis_tensor_read_view(tensor).dtype;
+}
+static const void *harness_data(const chelis_tensor *tensor) {
+    return chelis_tensor_read_view(tensor).data;
+}
 "#;
 
 /// `add(cast(t, f64), cast(t, f64))` from f32 source.  The host
@@ -173,19 +223,13 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(
+        1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    chelis_tensor* out = composed(t);
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -225,19 +269,13 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(
+        1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    chelis_tensor* out = composed(t);
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -277,19 +315,13 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(
+        1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    chelis_tensor* out = composed(t);
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -329,29 +361,15 @@ extern chelis_tensor* composed(chelis_tensor* x, chelis_tensor* y);
 int main(void) {{
     float in_x[3] = {{2.0f, 3.0f, 4.0f}};
     double in_y[3] = {{0.5, 0.25, 0.125}};
-    chelis_tensor tx;
-    memset(&tx, 0, sizeof(tx));
-    tx.data = in_x;
-    tx.shape[0] = 3;
-    tx.strides[0] = 1;
-    tx.ndim = 1;
-    tx.dtype = CHELIS_F32;
-    tx.size = 3;
-    tx.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* tx = chelis_tensor_entry_borrow(
+        1, in_shape, CHELIS_DTYPE_F32, in_x, (int64_t)sizeof(in_x));
+    chelis_tensor* ty = chelis_tensor_entry_borrow(
+        1, in_shape, CHELIS_DTYPE_F64, in_y, (int64_t)sizeof(in_y));
 
-    chelis_tensor ty;
-    memset(&ty, 0, sizeof(ty));
-    ty.data = (float*)in_y;
-    ty.shape[0] = 3;
-    ty.strides[0] = 1;
-    ty.ndim = 1;
-    ty.dtype = CHELIS_F64;
-    ty.size = 3;
-    ty.owns_data = 0;
-
-    chelis_tensor* out = composed(&tx, &ty);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    chelis_tensor* out = composed(tx, ty);
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -392,19 +410,13 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     int32_t in_data[3] = {{7, 11, 13}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = (float*)in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_I32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_tensor_entry_borrow(
+        1, in_shape, CHELIS_DTYPE_I32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    chelis_tensor* out = composed(t);
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}

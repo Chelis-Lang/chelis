@@ -1,0 +1,16 @@
+require_version: ">=2.2.0, <=2.2.2"
+inputs:
+  devenv:
+    url: github:cachix/devenv/v2.2.2?dir=src/modules
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/6004ea8c229fe9d41b21c6f4c76bf6c2e10771dd
+  rust-overlay:
+    url: github:oxalica/rust-overlay/89abdfd661ea493cde2f73d7b1332cb34150aa43
+    inputs:
+      nixpkgs:
+        follows: nixpkgs

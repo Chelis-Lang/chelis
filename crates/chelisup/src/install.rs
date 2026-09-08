@@ -554,9 +554,9 @@ pub(crate) fn uninstall(store: &Store, version: &str) -> Result<bool, String> {
     Ok(was_default)
 }
 
-/// Remove the shim and installer copies and the recorded default,
-/// leaving installed toolchains and the reef/src stores intact. Returns
-/// the list of paths removed.
+/// Removes the shim, installer copy, and recorded default.
+/// Installed toolchains and the reef/src stores remain intact. The function
+/// returns the list of paths removed.
 ///
 /// `pub(crate)`: chelisup owns the toolchain lifecycle. Other crates drive
 /// it through the `chelisup` binary, never in-process (see [`install`]).
@@ -567,7 +567,7 @@ pub(crate) fn self_uninstall(store: &Store) -> Result<Vec<PathBuf>, String> {
         store.chelisup_path(),
         store.default_file(),
     ] {
-        if path.exists() {
+        if path.exists() || path.is_symlink() {
             fs::remove_file(&path)
                 .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
             removed.push(path);

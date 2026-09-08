@@ -100,7 +100,7 @@ fn cdf_identity_black_scholes_price(spot: f64) -> f64 {
     let strike: f64 = 100.0;
     let rate: f64 = 0.05;
     let time: f64 = 1.25;
-    let sigma: f64 = 0.30;
+    let sigma: f64 = 0.3;
     let root_time = time.sqrt();
     let vol_root_time = sigma * root_time;
     let carry = (rate + 0.5 * sigma * sigma) * time;
@@ -114,7 +114,7 @@ fn cdf_identity_black_scholes_delta(spot: f64) -> f64 {
     let strike: f64 = 100.0;
     let rate: f64 = 0.05;
     let time: f64 = 1.25;
-    let sigma: f64 = 0.30;
+    let sigma: f64 = 0.3;
     let root_time = time.sqrt();
     let vol_root_time = sigma * root_time;
     let carry = (rate + 0.5 * sigma * sigma) * time;
@@ -127,7 +127,7 @@ fn cdf_identity_black_scholes_gamma(spot: f64) -> f64 {
     let strike: f64 = 100.0;
     let rate: f64 = 0.05;
     let time: f64 = 1.25;
-    let sigma: f64 = 0.30;
+    let sigma: f64 = 0.3;
     let root_time = time.sqrt();
     let vol_root_time = sigma * root_time;
     let discount = (-rate * time).exp();
@@ -151,7 +151,7 @@ def bs_price(spot: f32) -> f32 = {
   strike = cast(100.0, f32)
   rate = cast(0.05, f32)
   time = cast(1.25, f32)
-  sigma = cast(0.30, f32)
+  sigma = cast(0.3, f32)
   root_time = sqrt(time)
   vol_root_time = mul(sigma, root_time)
   carry = mul(add(rate, mul(cast(0.5, f32), mul(sigma, sigma))), time)
@@ -233,7 +233,7 @@ out = grad(bs_total, wrt=spots)(
   to_tensor([cast(90.0, f64), cast(100.0, f64), cast(110.0, f64)]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -288,7 +288,7 @@ out = grad(bs_total_one_delta, wrt=spots)(
   to_tensor([cast(100.0, f64)]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -331,7 +331,7 @@ out = grad(bs_price, wrt=spot)(
   cast(100.0, f64),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "
@@ -359,7 +359,7 @@ out = vmap(grad(bs_total_one_batched, wrt=spots))(
   to_tensor([[cast(90.0, f64)], [cast(100.0, f64)], [cast(110.0, f64)]]),
   cast(100.0, f64),
   cast(0.05, f64),
-  cast(0.30, f64),
+  cast(0.3, f64),
   cast(1.25, f64)
 )
 "

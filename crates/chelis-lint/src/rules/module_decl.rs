@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn ignores_non_module_keyword_lines() {
-        let src = "def x = 1\nimport Foo.Bar\nmodule Real.One\n";
+        let src = "def x() = 1\nimport Foo.Bar\nmodule Real.One\n";
         let decls = find_module_decls(src);
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].components, vec!["Real", "One"]);

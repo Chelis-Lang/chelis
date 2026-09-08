@@ -29,34 +29,85 @@ fn deep(src: &str) -> Vec<Expr> {
 /// Walk an Expr tree and return the first node whose tag matches.
 /// Used to locate the inner pat-var/pat-as we want to inspect.
 fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
-    if let Expr::List(list, _) = expr {
-        if let Some(Expr::Atom(chelis_deep::ast::Atom::Symbol(t), _)) = list.elements.first()
-            && t == tag
-        {
-            return Some(expr);
-        }
-        for child in &list.elements {
-            if let Some(found) = find_tagged(child, tag) {
-                return Some(found);
+    if expr.tag().is_some_and(|found| found.as_str() == tag) {
+        return Some(expr);
+    }
+    match expr {
+        Expr::List(list, _) => {
+            for child in &list.elements {
+                if let Some(found) = find_tagged(child, tag) {
+                    return Some(found);
+                }
             }
         }
+        Expr::Node(node, _) => {
+            for (_, value) in &node.meta().entries {
+                if let Some(found) = find_tagged(value, tag) {
+                    return Some(found);
+                }
+            }
+            for child in node.children_slice() {
+                if let Some(found) = find_tagged(child, tag) {
+                    return Some(found);
+                }
+            }
+        }
+        Expr::BareList(elements, _) => {
+            for child in elements {
+                if let Some(found) = find_tagged(child, tag) {
+                    return Some(found);
+                }
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                if let Some(found) = find_tagged(value, tag) {
+                    return Some(found);
+                }
+            }
+            for child in &data.children {
+                if let Some(found) = find_tagged(child, tag) {
+                    return Some(found);
+                }
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                if let Some(found) = find_tagged(value, tag) {
+                    return Some(found);
+                }
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            if let Some(found) = find_tagged(&meta.expr, tag) {
+                return Some(found);
+            }
+            for (_, value) in &meta.entries {
+                if let Some(found) = find_tagged(value, tag) {
+                    return Some(found);
+                }
+            }
+        }
+        Expr::Atom(_, _) => {}
     }
     None
 }
 
-/// Extract the `type` entry from an Expr's metadata map. Returns None
-/// if the expr isn't a list, has no metadata map, or has no `type` key.
+/// Extract the `type` entry from either stamped or legacy node metadata.
 fn type_metadata(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
+    let meta = match expr {
+        Expr::Node(node, _) => node.meta(),
+        Expr::List(list, _) => {
+            let Expr::Map(meta, _) = list.elements.get(1)? else {
+                return None;
+            };
+            meta
+        }
+        _ => return None,
     };
-    let meta = list.elements.get(1)?;
-    let Expr::Map(map, _) = meta else {
-        return None;
-    };
-    map.entries
+    meta.entries
         .iter()
-        .find_map(|(k, v)| (k == "type").then_some(v))
+        .find_map(|(key, value)| (key == "type").then_some(value))
 }
 
 /// Render an Expr to canonical Deep text for substring matching.

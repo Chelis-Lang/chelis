@@ -58,7 +58,7 @@ mylib = {{ path = "./mylib" }}
     );
     write_file(
         &root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     );
 
     write_file(
@@ -123,19 +123,14 @@ fn expected_stdout(package_root: &Path, snippet: &str) -> String {
     let ctx = compile_reef_context(Path::new(""), package_root).expect("compile_reef_context");
     let result = eval_in_context(&ctx, snippet).expect("eval_in_context");
     let mut lines = result.transcript.clone();
-    if result.roots.len() == 1 {
-        if let Some(root) = result.roots.first() {
-            lines.push(root_display(root));
-        }
-    } else {
-        for (index, root) in result.roots.iter().enumerate() {
-            let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
-            lines.push(format!(
-                "{} = {}",
-                display_root_name(&name),
-                root_display(root)
-            ));
-        }
+    // Issue #912 [05-OBS-6]: always label, matching format_eval_result.
+    for (index, root) in result.roots.iter().enumerate() {
+        let name = root.name.clone().unwrap_or_else(|| format!("_{index}"));
+        lines.push(format!(
+            "{} = {}",
+            display_root_name(&name),
+            root_display(root)
+        ));
     }
     let mut out = lines.join("\n");
     if !out.is_empty() {
@@ -177,7 +172,7 @@ fn root_display(root: &chelis_compiler_api::schema::EvaluatedRoot) -> String {
 fn cmd_eval_reef_package_simple_def_matches_baseline() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalsimple.ch");
-    let snippet = "module App.EvalSimple\n\ndef simple_value -> int32 = 42\n";
+    let snippet = "module App.EvalSimple\n\ndef simple_value() -> int32 = 42\n";
     write_file(&entry_path, snippet);
 
     let expected = expected_stdout(&root, snippet);
@@ -210,7 +205,7 @@ fn cmd_eval_reef_package_simple_def_matches_baseline() {
 fn cmd_eval_json_reef_package_simple_def_emits_json() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evaljson.ch");
-    let snippet = "module App.EvalJson\n\ndef simple_value -> int32 = 42\n";
+    let snippet = "module App.EvalJson\n\ndef simple_value() -> int32 = 42\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")
@@ -232,16 +227,10 @@ fn cmd_eval_json_reef_package_simple_def_emits_json() {
         .iter()
         .find(|r| r["name"] == "simple_value")
         .expect("simple_value root present");
-    // `42` is an int literal lowered through the IR evaluator, so it
-    // surfaces as a scalar tensor (shape []), matching the human path.
-    assert_eq!(simple["value"]["type"], "tensor");
-    assert_eq!(
-        simple["value"]["value"]["shape"]
-            .as_array()
-            .expect("shape")
-            .len(),
-        0
-    );
+    // [05-OBS-4]: scalar-typed roots are bare scalars at every exit even
+    // when a lane internally realizes them through a rank-0 tensor.
+    assert_eq!(simple["value"]["type"], "int32");
+    assert_eq!(simple["value"]["value"], 42);
 }
 
 /// Fixture #2: reef package with a path-dep import. Covers the
@@ -253,7 +242,7 @@ fn cmd_eval_reef_package_path_dep_import_matches_baseline() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalpathdep.ch");
     let snippet = "module App.EvalPathDep\nimport Mylib.Math (add)\n\n\
-                   def imported_sum -> int32 = add(20, 22)\n";
+                   def imported_sum() -> int32 = add(20, 22)\n";
     write_file(&entry_path, snippet);
 
     let expected = expected_stdout(&root, snippet);
@@ -399,5 +388,245 @@ fn cmd_eval_value_binding_calling_imported_fn_is_not_dropped() {
         Some(42),
         "value binding calling an imported fn must evaluate (chelis#423), \
          not be silently dropped; got roots: {roots:?}"
+    );
+}
+
+/// Regression for Chelis-Lang/chelis#991: compiling a dependency package
+/// includes declarations outside the selected eval root. A generic parameter
+/// in one of those unrelated declarations is not a top-level input to the
+/// live imported calculation and must not make `chelis eval` demand it.
+#[test]
+fn cmd_eval_ignores_dead_generic_inputs_from_unrelated_dependency_modules() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("app");
+    fs::create_dir_all(root.join("src")).expect("app src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mylib src");
+
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "App"
+
+[dependencies]
+mylib = {{ path = "./mylib" }}
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/reef.toml"),
+        &format!(
+            r#"[package]
+name = "mylib"
+version = "0.1.0"
+compiler = "={}"
+module_prefix = "Mylib"
+"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    write_file(
+        &root.join("mylib/src/live.ch"),
+        "module Mylib.Live\nexport (answer)\n\ndef answer() -> f32 = cast(7.0, f32)\n",
+    );
+    write_file(
+        &root.join("mylib/src/unrelated.ch"),
+        "module Mylib.Unrelated\nexport (generic_identity)\n\ndef generic_identity[k](a: tensor[k, f32]) -> tensor[k, f32] = a\n",
+    );
+    let entry = root.join("src/main.ch");
+    write_file(
+        &entry,
+        "module App.Main\nimport Mylib.Live (answer)\n\nresult = answer()\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--json", "--file", entry.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "dead generic dependency declaration escaped into live eval: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("eval stdout is JSON");
+    let result = json["roots"]
+        .as_array()
+        .expect("roots")
+        .iter()
+        .find(|root| root["name"] == "result")
+        .expect("result root");
+    assert_eq!(
+        result["value"]["value"],
+        serde_json::json!(7.0),
+        "[05-OBS-4] requires a scalar-typed root to stay bare"
+    );
+}
+
+/// Host-arrow-root surfacing, case (a) — POSITIVE.
+///
+/// The arrow form `def n() -> int32 = <host expr>` desugars to a nullary
+/// thunk `(def n (fn () body))`. The host runtime's eager value-binding
+/// order skips it (it looks like a function), so before the surfacing
+/// pass a host-lane arrow root was dropped entirely: `--json` reported
+/// `{"roots":[]}` for it. This is the arrow-form counterpart to the
+/// chelis#423 colon-form drop above.
+///
+/// The body here (`add(20, 22)`) is a PURE host-lane call, so the
+/// effect-free guard admits it and the pass applies the thunk and
+/// surfaces `42`.
+#[test]
+fn cmd_eval_host_arrow_pure_root_surfaces_applied_value() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/arrowpure.ch");
+    let snippet = "module App.ArrowPure\n\
+                   import Mylib.Math (add)\n\n\
+                   def priced() -> int32 = add(20, 22)\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    let priced = roots.iter().find_map(|r| {
+        (r["name"].as_str() == Some("priced")).then(|| r["value"]["value"].as_i64())?
+    });
+    assert_eq!(
+        priced,
+        Some(42),
+        "a PURE host-lane arrow-form root must surface its applied value, \
+         not be silently dropped; got roots: {roots:?}"
+    );
+}
+
+/// Host-arrow-root surfacing, case (b) — NEGATIVE (the effect-free guard).
+///
+/// The surfacing pass APPLIES a nullary host thunk to compute its display
+/// value. If the body carries an effect (here `debug`, which is `Io`),
+/// applying it at display time would RUN that effect — 1x where the host
+/// runtime otherwise runs it 0x. The effect-free guard keeps any
+/// effect-carrying root UNsurfaced, so the effect must NOT fire and the
+/// root must NOT appear. This is the negative-parity partner of the pure
+/// case above: the pass adds a value only when doing so is side-effect
+/// free.
+#[test]
+fn cmd_eval_host_arrow_effectful_root_stays_unsurfaced_and_effect_does_not_run() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/arroweff.ch");
+    // `SENTINEL_QF017` is the rendered `debug` argument; if the effect ran
+    // it would land in the transcript (stdout) and/or the surfaced value.
+    let snippet = "module App.ArrowEff\n\n\
+                   def logged() -> string = debug(\"SENTINEL_QF017\")\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    assert!(
+        !roots.iter().any(|r| r["name"].as_str() == Some("logged")),
+        "an EFFECTFUL host-lane arrow-form root must NOT be surfaced \
+         (applying it would run its effect at display time); got roots: {roots:?}"
+    );
+    assert!(
+        !stdout.contains("SENTINEL_QF017"),
+        "the effect of an unsurfaced host-arrow root must not run (0x): \
+         the debug sentinel leaked into stdout: {stdout:?}"
+    );
+    assert!(
+        !stderr.contains("SENTINEL_QF017"),
+        "the effect of an unsurfaced host-arrow root must not run (0x): \
+         the debug sentinel leaked into stderr: {stderr}"
+    );
+}
+
+/// Host-arrow-root surfacing, case (c) — CONSUMED pure root, applied once.
+///
+/// When a pure host-arrow root is also CONSUMED (something calls `name()`),
+/// resolving that call binds the root's closure in the runtime frame. The
+/// manifest realization pass must still apply the effect-free declaration
+/// exactly once for its own owed root; it cannot mistake the closure binding
+/// for the declaration's concrete result.
+///
+/// This locks both observable values: the consumer evaluates correctly
+/// (`base() + 100 == 142`) and the automatically selected `base` root realizes
+/// the declaration result as `42`, never as the intermediate closure value.
+#[test]
+fn cmd_eval_host_arrow_consumed_pure_root_realizes_concrete_value() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("src/arrowconsumed.ch");
+    let snippet = "module App.ArrowConsumed\n\
+                   import Mylib.Math (add)\n\n\
+                   def base() -> int32 = add(20, 22)\n\
+                   consumer: int32 = base() + cast(100, int32)\n";
+    write_file(&entry_path, snippet);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", entry_path.to_str().unwrap(), "--json"])
+        .output()
+        .expect("run chelis eval");
+    assert!(
+        output.status.success(),
+        "exit status: {:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
+    let roots = parsed["roots"].as_array().expect("roots array");
+    let consumer = roots.iter().find_map(|r| {
+        (r["name"].as_str() == Some("consumer")).then(|| r["value"]["value"].as_i64())?
+    });
+    assert_eq!(
+        consumer,
+        Some(142),
+        "the consumer of a host-arrow root must evaluate it once and correctly \
+         (42 + 100); got roots: {roots:?}"
+    );
+    // The consumed root surfaces as its concrete result, not the closure
+    // binding installed while evaluating `consumer`.
+    let base = roots.iter().find(|r| r["name"].as_str() == Some("base"));
+    assert!(
+        base.is_some(),
+        "the consumed root `base` must still surface; got roots: {roots:?}"
+    );
+    assert_eq!(
+        base.and_then(|r| r["value"]["value"].as_i64()),
+        Some(42),
+        "a consumed pure nullary root must surface its concrete result; got roots: {roots:?}"
     );
 }

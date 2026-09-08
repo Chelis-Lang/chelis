@@ -1,6 +1,6 @@
 (deftype {}
   Option
-  (t-var {} a)
+  (a)
   (variant {} Some (t-var {} a))
   (variant {} None))
 

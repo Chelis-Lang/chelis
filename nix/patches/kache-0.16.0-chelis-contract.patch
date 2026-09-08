@@ -1,0 +1,126 @@
+diff --git a/src/cli.rs b/src/cli.rs
+index a78d85c..a889235 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -3247,14 +3247,22 @@ fn is_doctor_issue(pass: bool, optional: bool) -> bool {
+     !pass && !optional
+ }
+
++/// Turn the displayed issue count into the command's process status.
++fn doctor_status(issues: usize) -> Result<()> {
++    if issues == 0 {
++        Ok(())
++    } else {
++        anyhow::bail!("kache doctor found {issues} issue(s)")
++    }
++}
++
+ /// Labels of the daemon-related checks that become informational when the
+ /// daemon is optional. Kept in sync with the check constructions in
+ /// [`doctor`]; module-level so the disposition logic below is unit-testable.
+-const DAEMON_CHECK_LABELS: [&str; 5] = [
++const DAEMON_CHECK_LABELS: [&str; 4] = [
+     "Daemon version",
+     "Daemon service",
+     "Daemon processes",
+-    "Stale locks",
+     "Service exe",
+ ];
+
+@@ -4039,7 +4047,7 @@ pub fn doctor(
+         }
+     }
+
+-    Ok(())
++    doctor_status(issues)
+ }
+
+ /// Migrate from sccache to kache (called by `doctor --fix`).
+@@ -5560,6 +5568,17 @@ mod tests {
+         assert!(!doctor_check_is_optional("Compiler probe", true, false));
+         // Non-daemon, non-probe labels are never optional.
+         assert!(!doctor_check_is_optional("Remote", true, true));
++        assert!(
++            !doctor_check_is_optional("Stale locks", true, false),
++            "abandoned locks are a real local-only failure"
++        );
++    }
++
++    #[test]
++    fn doctor_status_is_nonzero_exactly_when_issues_were_reported() {
++        assert!(doctor_status(0).is_ok());
++        assert!(doctor_status(1).is_err());
++        assert!(doctor_status(7).is_err());
+     }
+
+     #[test]
+diff --git a/src/heartbeat.rs b/src/heartbeat.rs
+index daf51eb..bbe561e 100644
+--- a/src/heartbeat.rs
++++ b/src/heartbeat.rs
+@@ -210,7 +210,7 @@ fn run_ticks(
+                 },
+             );
+         }
+-        let eta = typical.map(|t| t.saturating_sub(elapsed.as_secs()));
++        let eta = typical.and_then(|t| t.checked_sub(elapsed.as_secs()));
+
+         write_stderr_heartbeat(
+             ctx.stderr_enabled,
+@@ -285,10 +285,18 @@ fn write_stderr_heartbeat(
+         return;
+     }
+     let suffix = match (typical_s, eta_s) {
+-        (Some(t), Some(e)) => format!(
++        (Some(t), Some(e)) if elapsed_s < t => format!(
+             " (typical: {}, ETA {})",
+             format_secs(t),
+-            format_secs(e.max(1))
++            format_secs(e)
++        ),
++        (Some(t), _) if elapsed_s == t => {
++            format!(" (typical: {}, typical time reached)", format_secs(t))
++        }
++        (Some(t), _) => format!(
++            " (typical: {}, {} over typical)",
++            format_secs(t),
++            format_secs(elapsed_s.saturating_sub(t))
+         ),
+         _ => String::new(),
+     };
+@@ -386,16 +394,30 @@ mod tests {
+     }
+
+     #[test]
+-    fn stderr_heartbeat_is_opt_in_and_writes_verbatim() {
++    fn stderr_heartbeat_distinguishes_below_equal_and_above_typical() {
+         let mut silent = Vec::new();
+-        write_stderr_heartbeat(false, &mut silent, "arrow_array", 30, Some(18), Some(0));
++        write_stderr_heartbeat(false, &mut silent, "arrow_array", 12, Some(18), Some(6));
+         assert!(silent.is_empty());
+
+-        let mut verbose = Vec::new();
+-        write_stderr_heartbeat(true, &mut verbose, "arrow_array", 30, Some(18), Some(0));
++        let mut below = Vec::new();
++        write_stderr_heartbeat(true, &mut below, "arrow_array", 12, Some(18), Some(6));
++        assert_eq!(
++            below,
++            "[kache] still compiling arrow_array — 12s elapsed (typical: 18s, ETA 6s)\n".as_bytes()
++        );
++
++        let mut equal = Vec::new();
++        write_stderr_heartbeat(true, &mut equal, "arrow_array", 18, Some(18), Some(0));
++        assert_eq!(
++            equal,
++            "[kache] still compiling arrow_array — 18s elapsed (typical: 18s, typical time reached)\n".as_bytes()
++        );
++
++        let mut above = Vec::new();
++        write_stderr_heartbeat(true, &mut above, "arrow_array", 30, Some(18), None);
+         assert_eq!(
+-            verbose,
+-            "[kache] still compiling arrow_array — 30s elapsed (typical: 18s, ETA 1s)\n".as_bytes()
++            above,
++            "[kache] still compiling arrow_array — 30s elapsed (typical: 18s, 12s over typical)\n".as_bytes()
+         );
+     }

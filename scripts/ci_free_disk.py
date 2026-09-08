@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Reclaim disk on GitHub-hosted Ubuntu CI runners before the Rust build.
 
-The `lint-and-unit` and `integration` Linux jobs build and test the full
-Cargo workspace. The debug `target/` plus all build artifacts pushes the
-runner past its disk ceiling intermittently, surfacing as
+The `lint-rust` and `workspace-tests-shard` Linux workers compile or test the
+full Cargo workspace. The debug `target/` plus all build artifacts pushes
+the runner past its disk ceiling intermittently, surfacing as
 `No space left on device (os error 28)` during an in-test `gcc` build or
 `/usr/bin/ld: final link failed: No space left on device`
 (`ld terminated with signal 7 [Bus error]`) while linking the `chelis`
 binary. Those failures land on whatever crate happens to be building at the
 moment (often unrelated `chelis-backend-c` f16 tests), so they read like a
-code regression but are purely environmental. The macOS Smoke job (more
-disk) runs the same `cargo nextest run --workspace` and stays green.
+code regression but are purely environmental. The macOS workspace workers
+(more disk) run the same partitioned `cargo nextest run --workspace` suite.
 
 This mirrors the `Free Disk Space (Ubuntu)` step the neoteny repo runs in
 its CI: it removes large pre-installed SDK toolchains that the chelis
@@ -33,6 +33,7 @@ tool cache — not the whole `$AGENT_TOOLSDIRECTORY` — so the Rust toolchain,
 
 from __future__ import annotations
 
+import concurrent.futures
 import shutil
 import subprocess
 import sys
@@ -85,14 +86,28 @@ def free_disk_space() -> int:
     print("ci_free_disk: disk usage before cleanup:")
     _df()
 
-    for path in PURGE_PATHS:
-        # `sudo` is required: these live under root-owned system dirs on
-        # the runner. A missing path or a non-zero exit is fine.
-        rc = _run(["sudo", "rm", "-rf", path])
-        print(f"ci_free_disk: rm -rf {path} -> exit {rc}")
-
+    # `sudo` is required: these live under root-owned system dirs on the
+    # runner. A missing path or a non-zero exit is fine.
+    #
+    # The removals are disjoint directory trees, and the step is dominated
+    # by unlink syscalls rather than CPU, so running them one at a time
+    # left the runner blocked on I/O for the whole step: measured 0.8-3.5
+    # min per job across the five Linux jobs that call this. Dispatching
+    # them together overlaps that wait. Threads (not processes) are the
+    # right tool because every worker blocks inside `subprocess.run`,
+    # which releases the GIL. The docker prune joins the same batch: it is
+    # independent of every path above.
+    commands = [["sudo", "rm", "-rf", path] for path in PURGE_PATHS]
     if shutil.which("docker") is not None:
-        _run(["sudo", "docker", "image", "prune", "--all", "--force"])
+        commands.append(["sudo", "docker", "image", "prune", "--all", "--force"])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(commands)) as pool:
+        # `map` yields in submission order, so the log stays deterministic
+        # even though the removals do not finish in that order.
+        codes = list(pool.map(_run, commands))
+
+    for cmd, rc in zip(commands, codes):
+        print(f"ci_free_disk: {' '.join(cmd[1:])} -> exit {rc}")
 
     print("ci_free_disk: disk usage after cleanup:")
     _df()

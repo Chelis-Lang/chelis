@@ -252,7 +252,7 @@ stay in `chelis-std` because every domain needs dates and exact arithmetic.
 
 **Reproducibility manifests.** `chelis manifest program.ch` extracts all `Random`-effect-annotated operations from the typed AST into a structured JSON report: which operations introduce randomness, which seed handlers cover them, and whether the computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating. Finance product feature for model validation teams. Full design: `chelis_reproducibility_manifests.md`.
 
-**Executable properties as spec (trust stack Level 2).** Properties are first-class Chelis functions annotated with `@property`. They define what "correct" means for the implementation they accompany. `chelis prove` discovers properties, generates type-directed random inputs, and verifies each property holds. Three categories: domain invariants (output bounds, conservation laws), spec correspondence (optimized impl matches simple reference impl), and behavioral constraints (monotonicity, continuity, symmetry). Properties are the primary artifact the customer interacts with for verification of AI-generated code. Generated code is not reviewed directly — properties are reviewed, and the toolchain enforces agreement. Full design: `chelis_trust_stack.md`.
+**Executable properties as spec (trust stack Level 2).** Properties are first-class Chelis functions annotated with `@property`. They define what "correct" means for the implementation they accompany. `chelis prove` discovers properties, generates type-directed random inputs, and verifies each property holds. Scalar interval/order guards additionally direct the generator into their declared machine-representable domain, with strict spacing computed at the binder dtype; unsupported, inconsistent, or unrepresentable scalar guard shapes fail closed, and machine records disclose accepted/attempted/rejected counts. Three categories: domain invariants (output bounds, conservation laws), spec correspondence (optimized impl matches simple reference impl), and behavioral constraints (monotonicity, continuity, symmetry). Properties are the primary artifact the customer interacts with for verification of AI-generated code. Generated code is not reviewed directly — properties are reviewed, and the toolchain enforces agreement. Full design: `chelis_trust_stack.md`.
 
 **Canonical domain properties ship with domain shells.** Every domain shell includes a `properties/` directory containing reference `@property` functions for the domain's standard invariants. These are onboarding templates, credibility artifacts, and documentation-by-example. They are co-located with the implementation code they verify, NOT packaged as separate shells. `chelis prove src/` runs all properties against the shell's exports. Convention applies to Shoals (finance invariants — put-call parity, delta/gamma bounds, Monte Carlo convergence, no-arbitrage), Octant (round-trip and provenance invariants), and any future vertical shell. A standalone "properties" package with no implementation is an empty vessel; the convention exists so no future agent creates one.
 
@@ -314,6 +314,13 @@ chelis prove src/ --only delta      # filter to properties matching "delta"
 chelis prove src/ --seed 42            # reproducible property run
 chelis prove src/ --json               # machine-readable output for CI integration
 ```
+
+`chelis reef build` is byte-reproducible for unchanged inputs. Its source
+archive uses lexical UTF-8 member order, normalized regular-file metadata
+(`0644`, uid/gid `0`), and `SOURCE_DATE_EPOCH` as the member mtime (Unix epoch
+`0` when absent); malformed epoch values fail the build. The CHB embeds the
+canonical archive SHA-256. See `spec/design/reef_distribution.md` for the
+complete artifact contract.
 
 `chelis manifest` and `chelis prove` are demo-blocking for the first commercial CProof prospect. Full CLI surface and JSON schemas: `chelis_manifest_spec.md`, `chelis_property_spec.md`.
 
@@ -455,7 +462,8 @@ Core transforms remain first-class:
 
 Implementation-surface note:
 
-- `min_elem` is part of the specified derived built-in surface.
+- `sub` and `min_elem` are direct Tier-1 RISC identities governed by
+  [05-OP-41] and [05-OP-40], respectively.
 - `block` is part of the Deep syntax vocabulary and Surf block desugaring.
 - `normalize` currently exists in the type checker built-in environment, but it is not
   yet a stable specified/lowered built-in.
@@ -586,10 +594,14 @@ Python interop. The remaining Phase 3 work is not more ecosystem polish or resea
 prestige work; it is the language-completeness gap between "tensor programs compile"
 and "a full AI workflow can run in pure Chelis."
 
-As part of that practical gap, Phase `3m` rewrites the runtime in Rust and cleans up
-the host-value ABI: `chelis_tensor` stays layout-visible for generated numeric code,
-while strings, collections, and other host values move to opaque runtime-managed
-handles with accessors and explicit ownership.
+As part of that practical gap, Phase `3m` rewrote the runtime in Rust. Its original
+ABI cut left `chelis_tensor` layout-visible while strings and collections became
+opaque handles. The controlling successor architecture is now
+[`compiled_value_ownership.md`](compiled_value_ownership.md): tensors, storage,
+strings, and collections share one runtime ownership model; `chelis_tensor` is opaque;
+and generated numeric code receives typed access plus a verified unique-storage proof
+instead of reading ownership or data fields. The implementation migration remains
+tracked by chelis#1286.
 
 That means the next practical surfaces are:
 

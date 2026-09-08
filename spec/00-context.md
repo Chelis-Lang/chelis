@@ -1,10 +1,5 @@
 # Chelis Language Specification: Context and Philosophy
 
-**Version:** 0.2.0-draft
-**Status:** Authoritative specification draft
-
----
-
 ## 1. What Chelis Is
 
 Chelis is a functional programming language for AI research.
@@ -57,18 +52,21 @@ When tradeoffs appear, Chelis applies these in order:
 4. **Machine generation first**
 5. **Additive sugar only**
 6. **Explicit over implicit**
-7. **Small language, big library** — the compiler knows about ~12 RISC primitives and
-   their derived built-ins; everything else is a library.
+7. **Small language, big library** — the compiler knows only the closed RISC primitive
+   set and its derived built-ins; everything else is a library.
    See `spec/design/chelis_canonical_reference.md` §8.5 for the full core/standard-library/external-library taxonomy.
 8. **Future-proof without over-building**
 
-These principles lead directly to several current rules:
+These principles determine the following rules:
 
 - Deep is canonical
 - Surf is sugar over Deep
 - broadcasting and precision conversion are explicit
 - compiler stages should remain mechanically understandable
 - the core IR stays small even when the user-facing language grows
+- for fixed program text, compiler build, target, and declared inputs, every
+  check, evaluation, and build result is a function of those inputs; feedback
+  that varies between identical runs is a defect, not an implementation freedom
 
 ## 6. Dual Syntax
 
@@ -92,19 +90,17 @@ The compiler treats Deep as the source of truth.
 
 ## 7. Type System Scope
 
-Phase 0 / v1 scope:
+The type system includes:
 
 - algebraic data types
 - Hindley-Milner inference
 - named tensor dimensions
 - explicit precision tracking
 - graded fitness scoring with repair suggestions
-
-Deferred:
-
 - algebraic effects
 - linear types and borrowing
-- richer research type features
+
+General dependent types beyond named dimensions are outside the language contract.
 
 ## 8. Computational Model
 
@@ -123,13 +119,13 @@ They are compiler transforms, not ordinary library conveniences.
 
 ## 9. Backends and Execution
 
-The current reference backend is C with BLAS and OpenMP.
-Future GPU compilation is planned around HIP, not separate CUDA and OpenCL backends.
-StableHLO and FX are later integration layers rather than replacements.
+The reference backend is C with BLAS and OpenMP.
+GPU compilation uses HIP rather than separate CUDA and OpenCL backends.
+StableHLO and FX are integration layers rather than replacements.
 
-Interactive execution uses the IR evaluator first.
-If latency later becomes a problem, the escalation order is cached C artifacts,
-persistent compiler helpers, and only then a possible JIT path.
+Interactive execution uses the IR evaluator. Cached C artifacts, persistent compiler
+helpers, and JIT compilation are alternative implementation strategies; each must
+preserve the language semantics defined by the controlling specifications.
 
 ## 10. Key Influences
 

@@ -29,10 +29,9 @@ fn list_tag(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // element-0 string.
+    list.tag().map(|tag| tag.as_str())
 }
 
 /// The `type:` metadata value of a node whose element 1 is a meta map.
@@ -66,7 +65,7 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
         return None;
     };
     match var_list.elements.get(2) {
-        Some(Expr::Atom(Atom::Symbol(name), _)) => Some(name.as_str()),
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -91,6 +90,35 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
             visit(&meta.expr, f);
         }
+        Expr::Node(node, _) => {
+            for (_, value) in &node.meta().entries {
+                visit(value, f);
+            }
+            for child in node.children_iter() {
+                match child {
+                    chelis_deep::node::ChildRef::Expr(expr)
+                    | chelis_deep::node::ChildRef::Syntax(expr)
+                    | chelis_deep::node::ChildRef::Type(expr)
+                    | chelis_deep::node::ChildRef::EffectHandler(expr)
+                    | chelis_deep::node::ChildRef::Bypass(expr) => visit(expr, f),
+                    chelis_deep::node::ChildRef::Binder(_)
+                    | chelis_deep::node::ChildRef::Selector(_) => {}
+                }
+            }
+        }
+        Expr::BareList(elements, _) => {
+            for child in elements {
+                visit(child, f);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                visit(value, f);
+            }
+            for child in &data.children {
+                visit(child, f);
+            }
+        }
         Expr::Atom(_, _) => {}
     }
 }
@@ -102,7 +130,7 @@ fn is_named_def(expr: &Expr, def_name: &str) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Symbol(name), _)) if name == def_name)
+    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
 }
 
 fn checked_def(src: &str, def_name: &str) -> Expr {

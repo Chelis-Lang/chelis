@@ -48,6 +48,22 @@ enumerated in PR #88's audit were independently grepped and match
 exactly. Zero in `chelis-backend-c/`, `chelis-backend-hip/`,
 `chelis-backend-metal/`, `chelis-ir/`. Audit is honest.
 
+**Stale anchors (recorded, not rewritten).** This table pins the state at
+the 0.7.8 cleanup and is kept as the historical record. Two of its anchors
+no longer exist:
+
+- `Linearity-F2`'s `destructure_scope_depth` was deleted by chelis#1200.
+  A block-scoped depth counter cannot express "is this value a
+  destructured component" — it answered "am I anywhere inside a
+  destructure region", which poisoned every later binding in the enclosing
+  block. The gate is now a per-binding mark on the scope entry. The
+  contract lives in `spec/04-type-system.md` §8.3 and
+  `spec/design/implicit_linearity.md` §"Destructured components".
+- `Linearity-AliasedConsume-F1`'s `aliases: HashMap<String, Vec<Option<String>>>`
+  became `origins: HashMap<String, Vec<BindingOrigin>>` in the same change,
+  which carries the alias link and the component mark on one stacked
+  entry.
+
 ## Adversarial coverage delta
 
 ### §3.1 HostEval-ScalarFn-F1
@@ -56,7 +72,7 @@ PR #80's fixtures cover bare zero-arg `result = go()` for each scalar
 return type, plus a one-arg negative control. They do not cover:
 
 - Nested zero-arg (`def outer -> i32 = inner()`).
-- Three-level chain (`def deepest = ...; def middle = deepest(); def outer = middle()`).
+- Three-level chain (`def deepest() = ...; def middle() = deepest(); def outer() = middle()`).
 - Zero-arg call as a subexpression (`result = add(go(), 1)`).
 - Zero-arg call inside another zero-arg fn's body.
 - Large i64 above f32 representable range.
@@ -233,7 +249,7 @@ Finding F1 below.
   arity guard), but the regression fixtures only exercise the
   top-level `result = go()` shape. The same guard fires for nested
   forms (`add(go(), 1)`) and zero-arg-inside-zero-arg
-  (`def go = add(helper(), 3)`). A future regression that re-tightens
+  (`def go() = add(helper(), 3)`). A future regression that re-tightens
   the guard would still pass the existing fixtures.
 - **Verification:** Inspected `host_eval_scalar_fn_call.rs` — all five
   fixtures use the top-level shape.

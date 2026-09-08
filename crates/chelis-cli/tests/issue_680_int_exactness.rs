@@ -2,10 +2,8 @@
 //!
 //! ## Why this file exists
 //!
-//! The evaluator computes integer scalar arithmetic in `f64` and casts back
-//! with a saturating `as i64`
-//! (`crates/chelis-compiler-api/src/runtime/host_ops.rs:362`, in
-//! `dispatch_scalar_binop`):
+//! The pre-chelis#729 evaluator computed integer scalar arithmetic in `f64`
+//! and cast back with a saturating `as i64`:
 //!
 //! ```ignore
 //! // Mirror pre-WS-A0 behavior: integer scalar ops compute the
@@ -13,15 +11,15 @@
 //! let value = op(lb.as_f64(), rb.as_f64()) as i64;
 //! ```
 //!
-//! `add`/`sub`/`mul` are declared as `f64` lambdas
-//! (`crates/chelis-compiler-api/src/runtime/eval.rs:820-822`) and the shared
-//! helpers `numeric_binop` / `numeric_unop` / `tensor_numeric_binop` are all
-//! typed `Fn(f64, f64) -> f64`. Two defects fall out of that one line:
+//! `add`/`sub`/`mul` were declared as `f64` lambdas and the shared helpers
+//! accepted `Fn(f64, f64) -> f64`. Two defects fell out of that one line:
 //!
 //!   * precision loss above `2^53` (the f64 mantissa is 53 bits), and
 //!   * saturation at `i64::MAX` (Rust's `f64 as i64` is a saturating cast).
 //!
-//! The C backend lowers `RiscOp::Add` to a native `+` on `int64_t`
+//! Chelis#729 Phase 2 replaces that route with closed typed kernels over
+//! sealed scalars and buffers. The C backend lowers `RiscOp::Add` to a native
+//! `+` on `int64_t`
 //! (`crates/chelis-backend-c/src/emit.rs:441`), so it is exact for scalars.
 //! The two lanes therefore disagree on the same program. Cross-lane parity is
 //! the load-bearing invariant here, and it is what the tests below lock down.
@@ -48,8 +46,8 @@
 //!      `TensorElement` trait (see `crates/chelis-e2e/tests/dtype_op_matrix.rs`),
 //!   2. integer `div`/`mod` round-tripped through f64 and yielded `i64::MAX`;
 //!      fixed for those four ops with `checked_int_binop` (#387),
-//!   3. `add`/`sub`/`mul`/`neg`/`abs`/`lt`/`gt`/`max_elem`/reductions were
-//!      left on the f64 path (this issue).
+//!   3. `add`/`sub`/`mul`/`neg`/`abs`/`lt`/`gt`/`max_elem` were left on the
+//!      f64 host-runtime path (this issue; now locked by the tests below).
 //!
 //! Every assertion below states an exactness or parity invariant rather than a
 //! tolerance, so the class stays locked once fixed.
@@ -235,9 +233,6 @@ fn assert_lane_parity(expr: &str, expected: i64, name: &str) {
 /// returns 9007199254740993. `2^53` and `1` are both exactly representable in
 /// f64; their true sum is not. This is the minimal reproduction of #680.
 #[test]
-#[ignore = "chelis#680: eval 9007199254740992, compiled C 9007199254740993. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn add_at_two_pow_53_agrees_across_lanes() {
     assert_lane_parity(
         &format!("add(cast({TWO_POW_53}, int64), cast(1, int64))"),
@@ -251,9 +246,6 @@ fn add_at_two_pow_53_agrees_across_lanes() {
 /// and reports `2^53 < 2^53 + 1` as false. A program must not change control
 /// flow based on its execution lane.
 #[test]
-#[ignore = "chelis#680: eval takes else (222), compiled C takes then (111). This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn static_int_condition_selects_same_branch_across_lanes() {
     let expr = format!(
         "if lt(cast({TWO_POW_53}, int64), cast({TWO_POW_53_PLUS_1}, int64)) \
@@ -303,17 +295,12 @@ fn i64_max_literal_survives_the_front_end_exactly() {
 }
 
 // ---------------------------------------------------------------------------
-// Group 3: comparison ops. Verified WRONG today.
+// Group 3: comparison ops. Exact finalized-value comparisons.
 // ---------------------------------------------------------------------------
 
-/// Verified: returns `false`. `ordered_compare`
-/// (`host_ops.rs:881-893`) compares integer scalars via `.as_f64()` even
-/// though `ScalarBits::I64` holds them exactly. Note `compare_eq` directly
-/// above it was fixed to use `.as_i64()`; `ordered_compare` never was.
+/// Historical failure: the old `ordered_compare` compared integer scalars
+/// via `.as_f64()` and returned `false`.
 #[test]
-#[ignore = "chelis#680: ordered_compare compares via as_f64; returns false. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn lt_is_exact_at_two_pow_53_boundary() {
     assert!(
         eval_bool(&format!(
@@ -323,11 +310,8 @@ fn lt_is_exact_at_two_pow_53_boundary() {
     );
 }
 
-/// Verified: returns `false`.
+/// Negative-direction sibling for the same exact comparison boundary.
 #[test]
-#[ignore = "chelis#680: ordered_compare compares via as_f64; returns false. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn gt_is_exact_at_two_pow_53_boundary() {
     assert!(
         eval_bool(&format!(
@@ -348,12 +332,9 @@ fn eq_is_exact_at_two_pow_53_boundary() {
     );
 }
 
-/// Verified: returns 9007199254740992, i.e. the SMALLER operand. `max_elem`
-/// routes through `numeric_binop(args, f64::max)` (`eval.rs:843`).
+/// Historical failure: the f64 closure returned the smaller operand after
+/// both int64 inputs collapsed to the same float image.
 #[test]
-#[ignore = "chelis#680: returns the SMALLER operand. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn max_elem_is_exact_at_two_pow_53_boundary() {
     assert_eq!(
         eval_int(&format!(
@@ -364,7 +345,7 @@ fn max_elem_is_exact_at_two_pow_53_boundary() {
     );
 }
 
-/// Sibling of `max_elem`; `min_elem` lowers via `neg(max_elem(neg, neg))`.
+/// Sibling of `max_elem`; direct `min_elem` compares the stored int64 operands.
 #[test]
 fn min_elem_is_exact_at_two_pow_53_boundary() {
     assert_eq!(
@@ -381,7 +362,7 @@ fn min_elem_is_exact_at_two_pow_53_boundary() {
 // ---------------------------------------------------------------------------
 
 /// Assert an expression fails with a branded integer-overflow diagnostic.
-fn assert_overflow_traps(expr: &str, label: &str) {
+fn assert_overflow_traps(expr: &str, expected: &str, label: &str) {
     let program = format!("module Probe.Main\nout = print({expr})\n");
     let (ok, stdout, stderr) = eval_lane(&program);
     assert!(
@@ -389,73 +370,67 @@ fn assert_overflow_traps(expr: &str, label: &str) {
         "{label}: `{expr}` must trap on integer overflow, but it succeeded \
          and printed: {stdout}"
     );
-    let combined = format!("{stdout}{stderr}");
-    assert!(
-        combined.contains("overflow"),
-        "{label}: `{expr}` failed but without a branded overflow diagnostic. \
-         Got: {combined}"
+    let trap = stderr
+        .lines()
+        .find_map(|line| line.find("numeric trap:").map(|start| &line[start..]))
+        .unwrap_or_else(|| {
+            panic!(
+                "{label}: `{expr}` failed without a numeric-trap line. \
+                 stdout: {stdout}; stderr: {stderr}"
+            )
+        });
+    assert_eq!(
+        trap, expected,
+        "{label}: numeric traps are a byte-frozen cross-lane contract"
     );
 }
 
-/// Verified today: returns `9223372036854775807` (saturates), because the f64
-/// round-trip's `as i64` saturates.
+/// Historical failure: the f64 round-trip saturated to `i64::MAX`.
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int64_add_overflow_traps() {
     assert_overflow_traps(
         &format!("add(cast({I64_MAX}, int64), cast(1, int64))"),
+        "numeric trap: overflow in add at int64",
         "int64_add_overflow",
     );
 }
 
-/// Verified today: returns `9223372036854775807`. Both operands are in range;
-/// only the product overflows, so this cannot be dismissed as a bad literal.
+/// Both operands are in range and only the product overflows.
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int64_mul_overflow_traps() {
     assert_overflow_traps(
         "mul(cast(4000000000, int64), cast(4000000000, int64))",
+        "numeric trap: overflow in mul at int64",
         "int64_mul_overflow",
     );
 }
 
-/// Verified today: returns `-128` (wraps). int8/16/32 wrap while int64
-/// saturates, decided purely by which Rust `as` cast runs last:
-/// `ScalarBits::from_i64_as` narrows with `value as i8`
-/// (`crates/chelis-compiler-api/src/runtime/mod.rs:145`), and int->int `as`
-/// truncates bits.
+/// Historical failure: the old narrowing cast wrapped this to `-128`.
 #[test]
-#[ignore = "chelis#680: wraps to -128 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int8_add_overflow_traps() {
-    assert_overflow_traps("add(cast(127, int8), cast(1, int8))", "int8_add_overflow");
+    assert_overflow_traps(
+        "add(cast(127, int8), cast(1, int8))",
+        "numeric trap: overflow in add at int8",
+        "int8_add_overflow",
+    );
 }
 
-/// Verified today: returns `-32768` (wraps).
+/// Int16 parity for the same overflow contract.
 #[test]
-#[ignore = "chelis#680: wraps to -32768 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int16_add_overflow_traps() {
     assert_overflow_traps(
         "add(cast(32767, int16), cast(1, int16))",
+        "numeric trap: overflow in add at int16",
         "int16_add_overflow",
     );
 }
 
-/// Verified today: returns `-2147483648` (wraps).
+/// Int32 parity for the same overflow contract.
 #[test]
-#[ignore = "chelis#680: wraps to -2147483648 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int32_add_overflow_traps() {
     assert_overflow_traps(
         "add(cast(2147483647, int32), cast(1, int32))",
+        "numeric trap: overflow in add at int32",
         "int32_add_overflow",
     );
 }
@@ -487,21 +462,11 @@ fn int8_add_at_max_does_not_trap() {
 // ---------------------------------------------------------------------------
 // Group 5: tensor storage fidelity.
 //
-// `IrTensorValue` stores `data: Vec<f64>` for every dtype
-// (`crates/chelis-ir/src/eval.rs:13`), so int64 tensors are lossy AT REST,
-// before any op runs. Verified: `to_list(to_tensor([2^53+1]))` returns
-// `[9007199254740992]`.
-//
-// This needs a dtype-tagged tensor storage change rather than an arithmetic
-// fix, so it is tracked separately and ignored here rather than silently
-// omitted (see the "no silent caps" rule in CLAUDE.md).
+// Phase 1 replaced `Vec<f64>` with sealed dtype-tagged tensor storage, so the
+// exact-at-rest lock is active alongside the Phase 2 arithmetic locks.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "chelis#680 follow-up: int64 tensor storage is Vec<f64> \
-            (crates/chelis-ir/src/eval.rs:13) and is lossy at rest. Needs \
-            dtype-tagged storage, not an arithmetic fix. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn int64_tensor_survives_to_tensor_round_trip() {
     let program = format!(
         "module Probe.Main\n\
@@ -579,24 +544,12 @@ fn decimal_mul_does_not_silently_saturate() {
 // ---------------------------------------------------------------------------
 // Group 7: bitwise / shift codegen parity (chelis#682).
 //
-// `chelis build --target c` has no match arm for bitand/bitor/bitxor/shl/shr
-// in `crates/chelis-backend-c/src/host_emit.rs`, so all five fall through to
-// the generic fallback `other => format!("/* unsupported builtin {other} */ 0")`
-// and silently compile to the literal 0. The evaluator implements all five
-// correctly via `int_binop` / `int_shift_binop`
-// (`crates/chelis-compiler-api/src/runtime/eval.rs:942-946`), so the lanes
-// disagree on every one of them.
-//
-// Verified by compiling and running: eval gives 8/14/6/1024/128 while the
-// compiled binary gives 0 for all five. No large values are involved; this is
-// a missing-codegen bug, not a precision bug.
+// The five rows below were the minimized red corpus for chelis#682. They are
+// now permanent eval/C parity locks over the closed C-expression operators.
 // ---------------------------------------------------------------------------
 
-/// `bitand(12, 10) == 8`. Verified: eval 8, compiled C 0.
+/// `bitand(12, 10) == 8` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 8, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn bitand_agrees_across_lanes() {
     assert_lane_parity(
         "bitand(cast(12, int64), cast(10, int64))",
@@ -605,11 +558,8 @@ fn bitand_agrees_across_lanes() {
     );
 }
 
-/// `bitor(12, 10) == 14`. Verified: eval 14, compiled C 0.
+/// `bitor(12, 10) == 14` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 14, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn bitor_agrees_across_lanes() {
     assert_lane_parity(
         "bitor(cast(12, int64), cast(10, int64))",
@@ -618,11 +568,8 @@ fn bitor_agrees_across_lanes() {
     );
 }
 
-/// `bitxor(12, 10) == 6`. Verified: eval 6, compiled C 0.
+/// `bitxor(12, 10) == 6` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 6, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn bitxor_agrees_across_lanes() {
     assert_lane_parity(
         "bitxor(cast(12, int64), cast(10, int64))",
@@ -631,20 +578,14 @@ fn bitxor_agrees_across_lanes() {
     );
 }
 
-/// `shl(1, 10) == 1024`. Verified: eval 1024, compiled C 0.
+/// `shl(1, 10) == 1024` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 1024, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn shl_agrees_across_lanes() {
     assert_lane_parity("shl(cast(1, int64), cast(10, int64))", 1024, "shl_parity");
 }
 
-/// `shr(1024, 3) == 128`. Verified: eval 128, compiled C 0.
+/// `shr(1024, 3) == 128` in both lanes.
 #[test]
-#[ignore = "chelis#682: eval 128, compiled C 0. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with `cargo test -p \
-            chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn shr_agrees_across_lanes() {
     assert_lane_parity("shr(cast(1024, int64), cast(3, int64))", 128, "shr_parity");
 }
@@ -658,9 +599,6 @@ fn shr_agrees_across_lanes() {
 /// garbage at runtime. This test pins that no emitted C ever contains the
 /// silent-stub marker.
 #[test]
-#[ignore = "chelis#682: build emits a silent `unsupported builtin` stub. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test issue_680_int_exactness -- --ignored`."]
 fn unsupported_builtin_never_silently_emits_a_zero_stub() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
@@ -703,15 +641,13 @@ fn unsupported_builtin_never_silently_emits_a_zero_stub() {
 // Group 8: front-end literal range.
 // ---------------------------------------------------------------------------
 
-/// Verified: `cast(-9223372036854775808, int64)` dies with
-/// `lex error: invalid number '9223372036854775808'`, because the lexer parses
-/// the magnitude as a positive `i64` before the parser applies negation, and
-/// `2^63` overflows `i64`. Fails loudly rather than silently, so it is a
-/// usability gap rather than a correctness hole.
+/// chelis#683, FIXED and un-ignored: `cast(-9223372036854775808, int64)` used
+/// to die with `lex error: invalid number '9223372036854775808'`, because the
+/// Surf lexer read the bare magnitude and the parser applied negation
+/// separately, so `2^63` overflowed `i64` before the sign was known. The
+/// `IntMinMagnitude` sentinel (`chelis-surf/src/lexer.rs`) closed that: the
+/// magnitude is now carried to the negation site and folded into `i64::MIN`.
 #[test]
-#[ignore = "i64::MIN is not writable as a literal (lexer parses the magnitude \
-            as a positive i64 before negation, crates/chelis-surf/src/lexer.rs:717). \
-            Not yet filed; unignore when it is fixed."]
 fn i64_min_is_writable_as_a_literal() {
     let program = "module Probe.Main\nout = print(cast(-9223372036854775808, int64))\n";
     let (ok, stdout, stderr) = eval_lane(program);
@@ -719,6 +655,44 @@ fn i64_min_is_writable_as_a_literal() {
     assert_eq!(
         stdout.lines().next().unwrap_or("").trim(),
         "-9223372036854775808"
+    );
+}
+
+/// chelis#683, Deep lane: the same boundary through a `.dp` source.
+///
+/// Deep never had the Surf defect and needs no `IntMinMagnitude` mirror,
+/// because `chelis-deep`'s `lex_number` slices the token from a `start` taken
+/// before the sign, so `parse::<i64>()` receives the signed string and the bare
+/// `2^63` magnitude is never parsed on its own. That
+/// asymmetry was previously untested in either crate, which is how the Deep
+/// half of chelis#683 came to be reported as still broken. The exactness is
+/// pinned here end to end, and the lexer-level reasoning is pinned by
+/// `chelis-deep`'s `i64_boundary_literals_lex_exactly`.
+#[test]
+fn i64_min_is_writable_as_a_deep_literal() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("probe.dp");
+    write_file(
+        &path,
+        "(module {}\n  Probe.Main\n  (def {} out (app {} (var {} print) \
+         (lit {} -9223372036854775808i64))))\n",
+    );
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "i64::MIN must be writable as a Deep literal, got: {stderr}"
+    );
+    assert_eq!(
+        stdout.lines().next().unwrap_or("").trim(),
+        "-9223372036854775808",
+        "the Deep lane must print i64::MIN exactly, got:\n{stdout}"
     );
 }
 

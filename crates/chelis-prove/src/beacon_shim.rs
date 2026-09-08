@@ -4,7 +4,7 @@
 //!
 //! Beacon's verifier logic stays OUT of tree. This shim only:
 //!
-//! 1. transports the goal (its box/range bounds + the serialized `WireDag` v1
+//! 1. transports the goal (its box/range bounds + the serialized exact-version `WireDag` v6
 //!    bytes, inline base64) to the pinned binary;
 //! 2. enforces the discharge `timeout_ms` as a HARD subprocess kill;
 //! 3. maps the returned `CheckReport` JSON to a [`Discharge`], fail-closed, via
@@ -17,7 +17,7 @@
 //!
 //! The frozen [`DischargeEngine::discharge`] signature gives the shim only the
 //! [`Goal`], whose [`IrHandle`] carries `dag_hash` + `root_index` and NO bytes.
-//! The serialized `WireDag` v1 bytes the shim must transport live in
+//! The serialized exact-version `WireDag` v6 bytes the shim must transport live in
 //! [`crate::graph_extract::ExtractedGoal::wire_dag_bytes`], which never enters
 //! the `Goal`. A [`WireDagByteStore`] bridges the two: the dispatch site (the
 //! caller that runs the WI-3 producer and registers the shim) populates the
@@ -34,7 +34,7 @@
 //! `wait-timeout`, `std::process`, `serde_json`, `sha2`) are transport
 //! utilities.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -53,7 +53,7 @@ use crate::discharge::{
 use crate::tier_b::TierBResult;
 
 /// The schema version of the request the shim emits. Beacon pins against this.
-const REQUEST_SCHEMA_VERSION: u32 = 1;
+const REQUEST_SCHEMA_VERSION: u32 = 2;
 
 /// The request-size ceiling above which the [`RequestTransport::Stdin`] path
 /// auto-falls-back to [`RequestTransport::TempFile`] to stay deadlock-safe.
@@ -102,7 +102,7 @@ impl BeaconOracleMode {
     }
 }
 
-/// A content-addressed store mapping a `WireDag` v1 artifact's content hash
+/// A content-addressed store mapping an exact-version `WireDag` v6 artifact's content hash
 /// (lowercase-hex sha256, the same key the WI-3 producer computes) to the EXACT
 /// serialized bytes.
 ///
@@ -114,7 +114,7 @@ impl BeaconOracleMode {
 /// hash) — see the module docs.
 #[derive(Debug, Clone, Default)]
 pub struct WireDagByteStore {
-    inner: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    inner: Arc<Mutex<UnordMap<String, Vec<u8>>>>,
 }
 
 impl WireDagByteStore {
@@ -123,7 +123,7 @@ impl WireDagByteStore {
         Self::default()
     }
 
-    /// Insert the exact serialized `WireDag` v1 bytes under their content hash.
+    /// Insert the exact serialized `WireDag` v6 bytes under their content hash.
     /// The key MUST be the lowercase-hex sha256 of `bytes` (the producer's
     /// `ExtractedGoal::dag_hash`); the shim recomputes and re-checks the digest
     /// before trusting any report, so a mis-keyed insert fails closed rather
@@ -246,7 +246,7 @@ impl BeaconShim {
         }
     }
 
-    /// Build the request JSON for a box/range goal. Q5/Q6: `wire_dag_v1_base64`
+    /// Build the request JSON for a box/range goal. Q5/Q6: `wire_dag_v6_base64`
     /// is base64 of the EXACT `bytes` (no parse/reformat between the WI-3 bytes
     /// and the base64), and `expected_dag_sha256` is the handle's `dag_hash`.
     fn build_request(
@@ -264,7 +264,7 @@ impl BeaconShim {
             .collect();
         serde_json::json!({
             "schema_version": REQUEST_SCHEMA_VERSION,
-            "wire_dag_v1_base64": BASE64.encode(bytes),
+            "wire_dag_v6_base64": BASE64.encode(bytes),
             "expected_dag_sha256": dag_hash,
             "root_index": root_index,
             "inputs": input_dims,

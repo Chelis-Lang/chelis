@@ -30,10 +30,9 @@ fn list_tag(expr: &Expr) -> Option<&str> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // element-0 string.
+    list.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
@@ -64,7 +63,7 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
         return None;
     };
     match var_list.elements.get(2) {
-        Some(Expr::Atom(Atom::Symbol(name), _)) => Some(name.as_str()),
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -87,6 +86,35 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
                 visit(value, f);
             }
             visit(&meta.expr, f);
+        }
+        Expr::Node(node, _) => {
+            for (_, value) in &node.meta().entries {
+                visit(value, f);
+            }
+            for child in node.children_iter() {
+                match child {
+                    chelis_deep::node::ChildRef::Expr(expr)
+                    | chelis_deep::node::ChildRef::Syntax(expr)
+                    | chelis_deep::node::ChildRef::Type(expr)
+                    | chelis_deep::node::ChildRef::EffectHandler(expr)
+                    | chelis_deep::node::ChildRef::Bypass(expr) => visit(expr, f),
+                    chelis_deep::node::ChildRef::Binder(_)
+                    | chelis_deep::node::ChildRef::Selector(_) => {}
+                }
+            }
+        }
+        Expr::BareList(elements, _) => {
+            for child in elements {
+                visit(child, f);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                visit(value, f);
+            }
+            for child in &data.children {
+                visit(child, f);
+            }
         }
         Expr::Atom(_, _) => {}
     }
@@ -125,11 +153,15 @@ const SUM_SRC: &str = r#"
            (var {} sum) (var {} x) (lit {} 1)))
 "#;
 
+// A rank-increasing call, so it spells `insert`: `expand` leaves the rank
+// alone (spec/04-type-system.md section 4.7.2). The subject is the write-back
+// of a concrete annotation over an error operand, which the operation's
+// identity does not affect.
 const EXPAND_SRC: &str = r#"
     (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
     (def {} e
       (app {type: (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))}
-           (var {} expand) (var {} x) (lit {} 0) (lit {} 4)))
+           (var {} insert) (var {} x) (lit {} 0) 4i64))
 "#;
 
 #[test]
@@ -153,12 +185,12 @@ fn sum_error_operand_does_not_clobber_concrete_annotation() {
 }
 
 #[test]
-fn expand_error_operand_does_not_clobber_concrete_annotation() {
-    let tags = writeback_type_tags(EXPAND_SRC, "expand");
-    assert!(!tags.is_empty(), "expected an expand app node type");
+fn insert_error_operand_does_not_clobber_concrete_annotation() {
+    let tags = writeback_type_tags(EXPAND_SRC, "insert");
+    assert!(!tags.is_empty(), "expected an insert app node type");
     assert!(
         tags.iter().all(|t| t == "t-tensor"),
-        "expand written-back type must stay concrete t-tensor, got {tags:?}",
+        "insert written-back type must stay concrete t-tensor, got {tags:?}",
     );
 }
 
@@ -262,7 +294,7 @@ fn sum_unbound_operand_single_diagnostic_no_accept() {
 #[test]
 fn expand_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver() -> f32 = {\n  e = expand(missing_x, 0, 4)\n  cast(0.0, f32)\n}\n",
+        "def driver() -> f32 = {\n  e = insert(missing_x, 0, 4i64)\n  cast(0.0, f32)\n}\n",
         "missing_x",
         "expand main-pass",
     );
@@ -277,7 +309,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
     // `Error`; the unbound-var diagnostic still fires. Exactly ONE diagnostic
     // — no silent accept, no ICE.
     assert_single_unbound(
-        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = expand(x, 0, add(missing_v, cast(1, int32)))\n  cast(0.0, f32)\n}\n",
+        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = insert(x, 0, add(missing_v, cast(1, int64)))\n  cast(0.0, f32)\n}\n",
         "missing_v",
         "expand error-size main-pass",
     );

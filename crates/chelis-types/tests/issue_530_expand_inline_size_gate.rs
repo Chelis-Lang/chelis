@@ -13,7 +13,7 @@
 //! Form-3 gate. The sourceless size was silently accepted: `chelis check`
 //! scored 1.0 / 0 errors, `chelis build` emitted C that hardcodes the
 //! inserted axis to extent 1, while `chelis eval` computes the real
-//! extent — an eval-vs-C divergence (`[3, 2]` vs `[1, 2]`). A second
+//! extent — an eval-vs-C divergence (`[3i64, 2i64]` vs `[1i64, 2i64]`). A second
 //! latent layer: even when the size typed cleanly, `classify_expand_size`
 //! returned `Unknown` (not `Sourceless`) for an unmodeled List tag, so
 //! `check_expand_signature` accepted it via the Form-2 named-dim
@@ -57,7 +57,7 @@ fn assert_form3_reject_message(source: &str, label: &str) {
         .unwrap_or_else(|| panic!("{label}: sourceless inline `expand` size must reject at check"));
     let msgs = messages(&rep);
     assert!(
-        msgs.iter().any(|m| m.contains("expand")
+        msgs.iter().any(|m| m.contains("insert")
             && m.contains("no tensor in scope carries it")
             && m.contains("chelis#469")),
         "{label}: expected the Form-3 sourceless-size reject diagnostic citing #469, got {msgs:?}"
@@ -77,27 +77,27 @@ fn assert_form3_reject_message(source: &str, label: &str) {
 #[test]
 fn issue530_tuple_get_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = expand(b, 0, t.0)\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, t.0)\n",
         "tuple-get size",
     );
 }
 
-/// `cast(t.0, int32)`: the `cast` wrapper must not launder the sourceless
+/// `cast(t.0, int64)`: the `cast` wrapper must not launder the sourceless
 /// tuple-get into an accept (the provenance walk follows through `cast`).
 #[test]
 fn issue530_cast_wrapped_tuple_get_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = expand(b, 0, cast(t.0, int32))\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, cast(t.0, int64))\n",
         "cast(tuple-get) size",
     );
 }
 
-/// `add(t.0, cast(0, int32))`: integer arithmetic CONTAINING a sourceless
+/// `add(t.0, cast(0, int64))`: integer arithmetic CONTAINING a sourceless
 /// operand is itself sourceless (`Sourceless` is absorbing) and rejects.
 #[test]
 fn issue530_arith_over_tuple_get_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], t: (int32, int32)) -> tensor[a, n, f32] = expand(b, 0, add(t.0, cast(0, int32)))\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, add(t.0, cast(0, int64)))\n",
         "add(tuple-get, ...) size",
     );
 }
@@ -107,12 +107,10 @@ fn issue530_arith_over_tuple_get_size_rejected() {
 #[test]
 fn issue530_inline_match_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], k: int32) -> tensor[a, n, f32] = {\n\
-         \x20 expand(b, 0, match k with {\n\
-         \x20   | 0 => 1\n\
-         \x20   | _ => 2\n\
-         \x20 })\n\
-         }\n",
+        "def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = insert(b, 0, match k with {\n\
+         \x20   | 0 => 1i64\n\
+         \x20   | _ => 2i64\n\
+         \x20 })\n",
         "inline match size",
     );
 }
@@ -122,7 +120,7 @@ fn issue530_inline_match_size_rejected() {
 #[test]
 fn issue530_inline_if_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], c: bool) -> tensor[a, n, f32] = expand(b, 0, if c then 3 else 4)\n",
+        "def g[a, n](b: tensor[n, f32], c: bool) -> tensor[a, n, f32] = insert(b, 0, if c then 3i64 else 4i64)\n",
         "inline if size",
     );
 }
@@ -136,8 +134,8 @@ fn issue530_inline_if_size_rejected() {
 #[test]
 fn issue530_ident_callee_size_rejects_identically() {
     assert_form3_reject_message(
-        "def ident(x: int32) -> int32 = x\n\
-         def g[a, n](b: tensor[n, f32], k: int32) -> tensor[a, n, f32] = expand(b, 0, ident(k))\n",
+        "def ident(x: int64) -> int64 = x\n\
+         def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = insert(b, 0, ident(k))\n",
         "ident(k) callee size",
     );
 }
@@ -145,7 +143,7 @@ fn issue530_ident_callee_size_rejects_identically() {
 #[test]
 fn issue530_bare_scalar_size_rejects_identically() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], k: int32) -> tensor[a, n, f32] = expand(b, 0, k)\n",
+        "def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = insert(b, 0, k)\n",
         "bare runtime scalar size",
     );
 }
@@ -160,7 +158,7 @@ fn issue530_bare_scalar_size_rejects_identically() {
 /// shape source and must check clean.
 #[test]
 fn issue530_shape_sourced_size_still_accepted() {
-    let source = "def g[a, n](b: tensor[n, f32], c: tensor[a, f32]) -> tensor[a, n, f32] = expand(b, 0, shape(c, 0))\n";
+    let source = "def g[a, n](b: tensor[n, f32], c: tensor[a, f32]) -> tensor[a, n, f32] = insert(b, 0, shape(c, 0))\n";
     let deep = surf_to_deep(source);
     let rep = check_ir_program(&deep);
     assert!(
@@ -174,7 +172,7 @@ fn issue530_shape_sourced_size_still_accepted() {
 /// a §4.7.2 Form-2 symbolic dim and must check clean.
 #[test]
 fn issue530_named_dim_size_still_accepted() {
-    let source = "def g[a, n](b: tensor[n, f32], c: tensor[a, f32]) -> tensor[a, n, f32] = expand(b, 0, a)\n";
+    let source = "def g[a, n](b: tensor[n, f32], c: tensor[a, f32]) -> tensor[a, n, f32] = insert(b, 0, a)\n";
     let deep = surf_to_deep(source);
     let rep = check_ir_program(&deep);
     assert!(
@@ -187,7 +185,7 @@ fn issue530_named_dim_size_still_accepted() {
 /// A static literal size must still check clean.
 #[test]
 fn issue530_static_literal_size_still_accepted() {
-    let source = "def g[n](b: tensor[n, f32]) -> tensor[3, n, f32] = expand(b, 0, 3)\n";
+    let source = "def g[n](b: tensor[n, f32]) -> tensor[3, n, f32] = insert(b, 0, 3i64)\n";
     let deep = surf_to_deep(source);
     let rep = check_ir_program(&deep);
     assert!(
@@ -197,17 +195,17 @@ fn issue530_static_literal_size_still_accepted() {
     );
 }
 
-/// A static `cast`-wrapped literal size (`cast(2, int32)`) must still
+/// A static `cast`-wrapped literal size (`cast(2, int64)`) must still
 /// check clean — the provenance walk classifies it `Static`.
 #[test]
 fn issue530_cast_literal_size_still_accepted() {
     let source =
-        "def g[n](b: tensor[n, f32]) -> tensor[2, n, f32] = expand(b, 0, cast(2, int32))\n";
+        "def g[n](b: tensor[n, f32]) -> tensor[2, n, f32] = insert(b, 0, cast(2, int64))\n";
     let deep = surf_to_deep(source);
     let rep = check_ir_program(&deep);
     assert!(
         rep.is_ok(),
-        "a cast(2, int32) static expand size must still check clean; got {:?}",
+        "a cast(2, int64) static expand size must still check clean; got {:?}",
         rep.err().map(|r| messages(&r))
     );
 }

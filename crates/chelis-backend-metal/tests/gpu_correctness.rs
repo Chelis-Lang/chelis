@@ -17,15 +17,16 @@
 //! for transcendental-heavy kernels — see ABS_TOL/REL_TOL constants and
 //! the per-test relaxations.
 
-use chelis_backend_metal::codegen_metal;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+mod support;
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::codegen_metal;
 
 // f32 tolerance for Metal vs evaluator agreement. MSL's default
 // transcendentals are fast-math; widen vs HIP's tolerance for safety.
@@ -113,9 +114,10 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    let include = cpu_runtime_include_dir();
+    let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",
@@ -123,7 +125,8 @@ fn copy_runtime_artifacts(dst: &Path) {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include_dir.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
@@ -167,7 +170,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
             let (ndim, c_dims) = c_shape(&input.shape);
             if ndim == 0 {
                 body.push(format!(
-                    "    input_storage[{slot}] = chelis_alloc(0, NULL, CHELIS_F32);"
+                    "    input_storage[{slot}] = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);"
                 ));
             } else {
                 let dims = c_dims
@@ -175,20 +178,27 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
                     .map(|d| d.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                body.push(format!("    int shape_{slot}[{ndim}] = {{ {dims} }};"));
+                body.push(format!("    int64_t shape_{slot}[{ndim}] = {{ {dims} }};"));
                 body.push(format!(
-                    "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_F32);"
+                    "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_DTYPE_F32);"
                 ));
             }
+            body.push(format!(
+                "    chelis_tensor_write *input_guard_{slot} = chelis_tensor_begin_write(input_storage[{slot}]);"
+            ));
+            body.push(format!(
+                "    chelis_write_view input_view_{slot} = chelis_tensor_write_view(input_guard_{slot});"
+            ));
             for (idx, value) in input.data.iter().enumerate() {
                 // Sibling of #250/#251/#252: exact f32 bit pattern via
                 // `chelis_f32_from_bits` (from the included
                 // `chelis_runtime.h`), not a lossy `{:.8}f` decimal.
                 let bits = value.to_bits();
                 body.push(format!(
-                    "    input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    "    ((float *)input_view_{slot}.data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
+            body.push(format!("    chelis_tensor_end_write(input_guard_{slot});"));
         }
     }
 
@@ -201,14 +211,17 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
         "    if (outputs[0] == NULL) { fprintf(stderr, \"output 0 is NULL\\n\"); return 2; }"
             .to_string(),
     );
-    body.push("    for (int i = 0; i < outputs[0]->size; i++) {".to_string());
+    body.push(
+        "    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);".to_string(),
+    );
+    body.push("    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {".to_string());
     body.push("        if (i > 0) printf(\" \");".to_string());
-    body.push("        printf(\"%.6f\", outputs[0]->data[i]);".to_string());
+    body.push("        printf(\"%.6f\", ((const float *)output_view.data)[i]);".to_string());
     body.push("    }".to_string());
     body.push("    printf(\"\\n\");".to_string());
-    body.push("    chelis_free(outputs[0]);".to_string());
+    body.push("    chelis_tensor_release(outputs[0]);".to_string());
     for slot in 0..input_labels.len() {
-        body.push(format!("    chelis_free(input_storage[{slot}]);"));
+        body.push(format!("    chelis_tensor_release(input_storage[{slot}]);"));
     }
 
     format!(
@@ -297,7 +310,7 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
 /// Run the IR evaluator on the same DAG with the same inputs and return
 /// the flattened f32 result for the first DAG root.
 fn evaluator_single_output(dag: &Dag, inputs: &[TestInput]) -> Vec<f32> {
-    let env: HashMap<String, TensorValue> = inputs
+    let env: UnordMap<String, TensorValue> = inputs
         .iter()
         .map(|i| (i.name.clone(), i.evaluator_value()))
         .collect();
@@ -312,7 +325,7 @@ fn evaluator_single_output(dag: &Dag, inputs: &[TestInput]) -> Vec<f32> {
     let value = outputs
         .get(&roots[0])
         .unwrap_or_else(|| panic!("evaluator did not produce a value for root {:?}", roots[0]));
-    value.data.iter().map(|&v| v as f32).collect()
+    value.to_f64_lossy_vec().iter().map(|&v| v as f32).collect()
 }
 
 fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, label: &str) {
@@ -553,7 +566,6 @@ fn m6_full_axis_min_reduction_matches_evaluator() {
 #[test]
 #[ignore]
 fn m6_tiled_matmul_matches_evaluator() {
-    use chelis_ir::dag::DimExpr;
     fn mat_f32(r: usize, c: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
@@ -587,7 +599,7 @@ fn m6_tiled_matmul_matches_evaluator() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(n),
+            size: chelis_ir::dag::RtDim::Lit(n),
         },
         vec![a],
         tensor3_f32(m, k, n),
@@ -596,7 +608,7 @@ fn m6_tiled_matmul_matches_evaluator() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(m),
+            size: chelis_ir::dag::RtDim::Lit(m),
         },
         vec![b],
         tensor3_f32(m, k, n),
@@ -772,13 +784,14 @@ int main(void) {{
         chelis_tensor *outputs[1] = {{0}};
         {func_name}(NULL, 0, outputs, 1);
         if (outputs[0] == NULL) {{ fprintf(stderr, "output 0 is NULL\n"); return 2; }}
-        uint16_t *bits = (uint16_t*)outputs[0]->data;
+        chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+        const uint16_t *bits = (const uint16_t*)output_view.data;
         for (int i = 0; i < {n}; i++) {{
             if (i > 0) printf(" ");
             printf("0x%04X", bits[i]);
         }}
         printf("\n");
-        chelis_free(outputs[0]);
+        chelis_tensor_release(outputs[0]);
     }}
     return 0;
 }}
@@ -864,7 +877,12 @@ int main(void) {{
     const N: usize = 4;
     for (prec, value, expected_bits, func_name) in cases {
         let mut dag = Dag::new();
-        let c = dag.add_node(RiscOp::Const { value }, vec![], vec_prec(N, prec), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(prec, value),
+            vec![],
+            vec_prec(N, prec),
+            None,
+        );
         let stored = dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![c],
@@ -911,10 +929,10 @@ fn m6_pad_1d_zero_fill_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -932,10 +950,10 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(2), RtDim::Lit(1))],
-            fill: -7.5,
-        },
+        RiscOp::pad(
+            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
+            chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -958,13 +976,13 @@ fn m6_pad_2d_asymmetric_matches_evaluator() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![
-                (RtDim::Lit(1), RtDim::Lit(0)),
-                (RtDim::Lit(0), RtDim::Lit(2)),
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![
+                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(0)),
+                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
             ],
-            fill: 0.0,
-        },
+        ),
         vec![x],
         mat_f32(3, 5),
         None,
@@ -987,7 +1005,7 @@ fn m6_shrink_1d_matches_evaluator() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -1013,8 +1031,8 @@ fn m6_shrink_2d_matches_evaluator() {
     let s = dag.add_node(
         RiscOp::Shrink {
             bounds: vec![
-                (RtDim::Lit(1), RtDim::Lit(3)),
-                (RtDim::Lit(0), RtDim::Lit(2)),
+                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3)),
+                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
             ],
         },
         vec![x],
@@ -1040,17 +1058,17 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(2), RtDim::Lit(2))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2))],
+        ),
         vec![x],
         vec_f32(8),
         None,
     );
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(2), RtDim::Lit(6))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(6))],
         },
         vec![p],
         vec_f32(4),

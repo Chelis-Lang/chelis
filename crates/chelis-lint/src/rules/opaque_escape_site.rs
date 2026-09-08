@@ -26,7 +26,7 @@
 //! value is reported. The provenance labels are local one-hop, as the RFC
 //! specifies; they are advisory direction for the audit, never blocking.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use crate::{Context, Rule, Severity, Surface, Violation};
 use chelis_surf::ast::{Decl, Expr, Param, TypeExpr, VariantFields};
@@ -80,7 +80,7 @@ struct Scope<'a> {
     /// The invariant-carrying opaque type names declared in this module.
     opaque_types: Vec<String>,
     /// Constructor name -> opaque type it constructs (raw construction).
-    ctor_to_type: HashMap<String, String>,
+    ctor_to_type: UnordMap<String, String>,
     /// Names of defs DEFINED in this module (callees not here are
     /// out-of-module).
     local_defs: Vec<String>,
@@ -113,7 +113,7 @@ fn check_scope(decls: &[Decl], source: &str, ctx: &Context<'_>, out: &mut Vec<Vi
         return;
     }
 
-    let mut ctor_to_type = HashMap::new();
+    let mut ctor_to_type = UnordMap::new();
     for d in decls {
         if let Decl::TypeDef {
             name,
@@ -166,7 +166,7 @@ fn check_scope(decls: &[Decl], source: &str, ctx: &Context<'_>, out: &mut Vec<Vi
 
     for d in decls {
         if let Decl::FunDef { params, body, .. } = d {
-            let mut env: HashMap<String, Provenance> = HashMap::new();
+            let mut env: UnordMap<String, Provenance> = UnordMap::new();
             // Type-T input parameters are attested.
             for p in params {
                 if param_is_opaque(p, &scope) {
@@ -182,7 +182,7 @@ fn check_scope(decls: &[Decl], source: &str, ctx: &Context<'_>, out: &mut Vec<Vi
 /// provenance environment and emitting egress sites.
 fn walk_expr(
     expr: &Expr,
-    env: &mut HashMap<String, Provenance>,
+    env: &mut UnordMap<String, Provenance>,
     scope: &Scope<'_>,
     ctx: &Context<'_>,
     out: &mut Vec<Violation>,
@@ -244,7 +244,7 @@ fn walk_expr(
         Expr::Unary(_, e, _)
         | Expr::Access(e, _, _)
         | Expr::TupleGet(e, _, _)
-        | Expr::Cast(e, _, _)
+        | Expr::Cast(e, _, _, _)
         | Expr::Copy(e, _)
         | Expr::Borrow(e, _)
         | Expr::Annotate(e, _, _) => walk_expr(e, env, scope, ctx, out),
@@ -266,7 +266,7 @@ fn walk_expr(
 /// Provenance of a value-producing expression, when it is a T-value.
 fn value_provenance(
     expr: &Expr,
-    env: &HashMap<String, Provenance>,
+    env: &UnordMap<String, Provenance>,
     scope: &Scope<'_>,
 ) -> Option<Provenance> {
     match expr {
@@ -299,7 +299,7 @@ fn value_provenance(
 /// constructors of T, and producer-def references all egress.
 fn egressing_value(
     arg: &Expr,
-    env: &HashMap<String, Provenance>,
+    env: &UnordMap<String, Provenance>,
     scope: &Scope<'_>,
 ) -> Option<Provenance> {
     match arg {
@@ -389,6 +389,7 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::Apply(_, _, s)
         | Expr::List(_, s)
         | Expr::Record(_, _, s)
+        | Expr::RecordUpdate(_, _, s)
         | Expr::Access(_, _, s)
         | Expr::TupleGet(_, _, s)
         | Expr::Binary(_, _, _, s)
@@ -398,7 +399,7 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::Match(_, _, s)
         | Expr::Lambda(_, _, s)
         | Expr::Tuple(_, s)
-        | Expr::Cast(_, _, s)
+        | Expr::Cast(_, _, _, s)
         | Expr::Grad(_, _, s)
         | Expr::Vmap(_, _, s)
         | Expr::Jit(_, s)
@@ -408,6 +409,10 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::WithSeed(_, _, s)
         | Expr::WithDevice(_, _, s)
         | Expr::Par(_, s)
+        | Expr::Do(_, s)
+        | Expr::Quote(_, s)
+        | Expr::Unquote(_, s)
+        | Expr::Splice(_, s)
         | Expr::Annotate(_, _, s)
         | Expr::Block(_, _, s) => s.offset,
     }
@@ -508,7 +513,10 @@ export (probability)
 type Probability =
   | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
-def use_it(x: f32) -> f32 = { p = probability(x); outside_sink(p) }
+def use_it(x: f32) -> f32 = {
+  p = probability(x)
+  outside_sink(p)
+}
 ";
         let v = run(src);
         assert_eq!(v.len(), 1);

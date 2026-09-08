@@ -23,7 +23,7 @@ use std::process::Command;
 /// against, probing from `probe_dir`.
 ///
 /// Exception patterns in [`exceptions`] are authored workspace-root
-/// relative (e.g. `crates/chelis-surf/tests/fixtures/*.ch`), so
+/// relative (e.g. `crates/chelisup/bootstrap/chelisup.sh`), so
 /// exception matching must strip the workspace-root prefix from each
 /// violation's absolute path. The workspace root is detected with
 /// `cargo locate-project --workspace --message-format plain` run with
@@ -93,15 +93,6 @@ pub fn detect_lint_workspace_root(probe_dir: &Path) -> Result<PathBuf, String> {
 /// inside the rule itself (it short-circuits when the source declares
 /// `module Std.Test`) and does not need a path-glob entry here.
 ///
-/// `crates/chelis-surf/tests/fixtures/*.ch`: the Surf parser test
-/// corpus deliberately exercises legacy syntactic shapes — including
-/// the `def name(...) : T = ...` colon form — to verify the parser
-/// still accepts them so existing files compile after `chelis fmt`
-/// rewrites them to canonical arrow form. Renaming or rewriting
-/// these fixtures would defeat their purpose. §3.5 explicitly notes
-/// the formatter rewrites colon to arrow, which is what the parser
-/// must still accept on input.
-///
 /// `crates/chelisup/bootstrap/chelisup.sh`: the single shell carve-out
 /// to the `no-shell-scripts` rule (§2.9). The chelisup bootstrap
 /// one-liner runs on a bare machine before any chelis, cargo, or Python
@@ -109,18 +100,11 @@ pub fn detect_lint_workspace_root(probe_dir: &Path) -> Result<PathBuf, String> {
 /// shellcheck-clean, and test-covered. Every other script remains
 /// Python.
 pub fn exceptions() -> Vec<Exception> {
-    vec![
-        Exception {
-            pattern: "crates/chelis-surf/tests/fixtures/*.ch".to_string(),
-            rule_id: "surf-def-arrow-form".to_string(),
-            cross_ref: "§3.5".to_string(),
-        },
-        Exception {
-            pattern: "crates/chelisup/bootstrap/chelisup.sh".to_string(),
-            rule_id: "no-shell-scripts".to_string(),
-            cross_ref: "§2.9".to_string(),
-        },
-    ]
+    vec![Exception {
+        pattern: "crates/chelisup/bootstrap/chelisup.sh".to_string(),
+        rule_id: "no-shell-scripts".to_string(),
+        cross_ref: "§2.9".to_string(),
+    }]
 }
 
 /// Outcome of one style-gate run on one file.
@@ -212,11 +196,27 @@ fn check_fmt(file: &Path, source: &str) -> Option<FmtDiff> {
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     let canonical = if ext == "dp" {
         let format_source = strip_deep_lint_directive_lines(source);
-        match chelis_deep::parser::parse_str_strict(&format_source) {
+        // Canonical Deep always uses LF and ends non-empty programs with a
+        // newline. Check these byte-level invariants before parsing: malformed
+        // or role-invalid Deep may be rejected by the stamped parser, but that
+        // must not make CRLF or a missing final newline silently pass the
+        // formatting gate.
+        if format_source.contains('\r')
+            || (!format_source.is_empty() && !format_source.ends_with('\n'))
+        {
+            return Some(FmtDiff {
+                path: file.to_path_buf(),
+            });
+        }
+        match chelis_deep::parser::parse_and_stamp_file(&format_source) {
             Ok(exprs) => chelis_deep::printer::print_canonical(&exprs),
-            // If the file doesn't parse, the regular compile path will
-            // surface that error with a better message; we don't
-            // double-report here.
+            // The stamped ingress is the only Deep ingress (chelis#1088):
+            // there is no weaker second parse to fall back to. A `.dp` it
+            // rejects is malformed or role-invalid, and the regular compile
+            // path surfaces that with a better message than a formatting
+            // diff would; we don't double-report here. The byte-level LF and
+            // final-newline invariants above already ran, so the line-ending
+            // cases the old fallback covered are still reported.
             Err(_) => return None,
         }
     } else {
@@ -253,11 +253,21 @@ pub fn strip_deep_lint_directive_lines(source: &str) -> String {
 
 fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
     let rules = chelis_lint::registry::all_rules();
-    // Lint the file directly. `WalkDir` accepts file roots, and this avoids
-    // path-shape mismatches between `message.ch` and `./message.ch`.
+    // Lint the file directly. The canonical walker admits explicit file
+    // roots, which avoids path-shape mismatches between `message.ch` and
+    // `./message.ch`.
     let raw = match chelis_lint::lint(file, &rules) {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            return vec![Violation {
+                rule_id: "lint-traversal-policy".to_string(),
+                spec_ref: "§12.2".to_string(),
+                path: file.to_path_buf(),
+                line: None,
+                col: None,
+                message: error.to_string(),
+            }];
+        }
     };
     let exceptions_list = exceptions();
     // Anchor exception matching against the detected Cargo workspace
@@ -272,7 +282,7 @@ fn run_lint_for_single_file(file: &Path) -> Vec<Violation> {
     // no workspace-rooted exception glob can legitimately apply. The
     // raw violations pass through unfiltered: that is the correct
     // behavior (a file outside the workspace is not, e.g.,
-    // `crates/chelis-surf/tests/fixtures/*.ch`), not a second
+    // `crates/chelisup/bootstrap/chelisup.sh`), not a second
     // detection mechanism with different semantics.
     let probe_dir = file
         .parent()
@@ -392,6 +402,52 @@ mod tests {
         ));
         let res = chelis_lint::exceptions::verify_cross_refs(&exceptions(), spec);
         assert!(res.is_ok(), "unresolvable cross_refs: {:?}", res.err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inadmissible_lint_root_fails_closed() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("socket.ch");
+        let _socket = UnixListener::bind(&path).unwrap();
+        let canonical = chelis_surf::format::format_program(&[]);
+
+        let outcome = run_gate(&path, &canonical);
+        assert_eq!(outcome.lint_violations.len(), 1);
+        assert_eq!(outcome.lint_violations[0].rule_id, "lint-traversal-policy");
+        assert!(
+            outcome.lint_violations[0]
+                .message
+                .contains("not a regular file or directory"),
+            "the gate must surface the depth-zero rejection reason: {}",
+            outcome.lint_violations[0].message
+        );
+    }
+
+    #[test]
+    fn malformed_traversal_policy_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("spec")).unwrap();
+        std::fs::write(
+            dir.path().join("spec/lint.md"),
+            "# Lint\n\n### 12.2 Traversal exclusions\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("chelis-lint.toml"),
+            "version = 2\nspec = \"spec/lint.md\"\n",
+        )
+        .unwrap();
+        let path = dir.path().join("clean.ch");
+        let canonical = chelis_surf::format::format_program(&[]);
+        std::fs::write(&path, &canonical).unwrap();
+
+        let outcome = run_gate(&path, &canonical);
+        assert_eq!(outcome.lint_violations.len(), 1);
+        assert_eq!(outcome.lint_violations[0].rule_id, "lint-traversal-policy");
+        assert!(outcome.lint_violations[0].message.contains("unsupported"));
     }
 
     #[test]

@@ -10,8 +10,8 @@
 //!
 //! Gated on the `chelis-prove` optional dependency (the shared runner lives
 //! there). Without the capability the CLI falls back to its local
-//! Tier-C-only property path in the parent module.
-#![cfg(feature = "chelis-prove")]
+//! Tier-C-only property path in the parent module. The parent module
+//! declaration owns this feature gate.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -247,11 +247,23 @@ fn emit(
         if let Some(goal) = &outcome.goal {
             value["goal"] = json!(goal);
         }
-        if outcome.proof_tier != PropertyTier::None {
-            value["proof_tier"] = json!(outcome.proof_tier.as_str());
+        // Machine records always carry an explicit tier. Terminal outcomes
+        // use `none`, matching Tide, so consumers never reconstruct absence.
+        value["proof_tier"] = json!(outcome.proof_tier.as_str());
+        if let Some(method) = &outcome.sampling_method {
+            value["sampling_method"] = json!(method);
+            value["accepted_samples"] = json!(outcome.accepted_samples);
+            value["attempted_samples"] = json!(outcome.attempted_samples);
+            value["rejected_samples"] = json!(outcome.rejected_samples);
         }
-        if outcome.proof_tier == PropertyTier::Smt {
+        if matches!(
+            outcome.proof_tier,
+            PropertyTier::Smt | PropertyTier::Induction
+        ) {
             value["arith_model"] = json!("real");
+        }
+        if let Some(evidence) = &outcome.induction_evidence {
+            value["induction"] = json!(evidence);
         }
         if let Some(cx) = &outcome.counterexample {
             value["counterexample"] = cx.clone();
@@ -269,10 +281,17 @@ fn emit(
         match status {
             "passed" => {
                 let suffix = if outcome.injected { " (injected)" } else { "" };
-                println!(
-                    "property: {} -- {}/{} passed{suffix}",
-                    outcome.name, outcome.samples, outcome.samples
-                )
+                if outcome.proof_tier == PropertyTier::Induction {
+                    println!(
+                        "property: {} -- proved (induction: base + step){suffix}",
+                        outcome.name
+                    )
+                } else {
+                    println!(
+                        "property: {} -- {}/{} passed{suffix}",
+                        outcome.name, outcome.samples, outcome.samples
+                    )
+                }
             }
             "failed" => println!(
                 "property failure: {}\n  --> {}",

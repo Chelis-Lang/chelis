@@ -22,12 +22,13 @@ would let a code change skip the heavy gate.
 Usage:
     git diff --name-only <base>..<head> | python3 scripts/ci_detect_docs_only.py
 
-Writes `docs_only=true` or `docs_only=false` to the file named by
-`$GITHUB_OUTPUT` (the GitHub Actions step-output mechanism); if that env
-var is unset it prints the same `docs_only=<bool>` line to stdout so the
-script is runnable and testable off CI. Exit status is always 0 -- a
-detection failure must not fail the run; it just yields `false` (full
-suite).
+Writes `docs_only=<bool>`, `rejection_authority_changed=<bool>`, and
+`diagnostic_kind_changed=<bool>` to
+the file named by `$GITHUB_OUTPUT` (the GitHub Actions step-output
+mechanism); if that env var is unset it prints both lines to stdout so the
+script is runnable and testable off CI. Exit status is always 0. An empty or
+unreadable change set fails safe in both directions: it runs the full build
+and the network-backed rejection-authority liveness check.
 """
 
 from __future__ import annotations
@@ -55,9 +56,74 @@ DOC_EXACT_NAMES: frozenset[str] = frozenset(
 # mdBook source and investigations; an mdBook-only change still has its
 # own Docs job (mdbook build + the skill_suite validator), which is one
 # of the always-run jobs, so skipping the heavy jobs for a docs/-only
-# change keeps coverage. Trailing slash is required so a sibling file
+# change keeps coverage. `openspec/changes/` is planning prose, but every
+# change carries a non-Markdown `.openspec.yaml`, which alone would force
+# the full matrix; the openspec-validate workflow keys on `openspec/**`
+# and still runs. `openspec/config.yaml` stays code -- it configures the
+# tool, not one change. Trailing slash is required so a sibling file
 # like `docsignore` does not match.
-DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/",)
+DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/", "openspec/changes/")
+
+# Markdown inputs consumed structurally by blocking oracles are executable
+# contracts, not prose-only changes. Editing one must run the heavy suite even
+# when every changed path otherwise matches the documentation allowlist.
+EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
+    {
+        "docs/investigations/remediation_status_2026_08_04.md",
+        "spec/02-surf-syntax.md",
+        "spec/03-deep-syntax.md",
+        "spec/04-type-system.md",
+        "spec/05-risc-primitives.md",
+        "spec/11-ffi.md",
+        "spec/design/capability_table.md",
+        "spec/design/compiled_value_ownership.md",
+        "spec/design/dtype_semantics.md",
+        "spec/design/faithful_observation.md",
+        "spec/design/loud_unsupported.md",
+        "spec/design/remediation_roadmap.md",
+        "spec/design/spec_provenance.md",
+    }
+)
+
+# Inputs whose edits could authorize a new [05-UNS-5] issue citation or weaken
+# its checker. The CI workflow itself is included so a would-be bypass to the
+# job is exercised by the job in the same pull request.
+REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
+    {
+        ".github/workflows/ci.yml",
+        "crates/chelis-types/src/lib.rs",
+        "crates/chelis-types/src/rejection_registry_generated.rs",
+        "crates/chelis-types/src/unsupported.rs",
+        "scripts/capacity_census_liveness.py",
+        "scripts/check_rejection_authority_boundary.py",
+        "scripts/ci_detect_docs_only.py",
+        "scripts/generate_rejection_registries.py",
+        "scripts/test_check_rejection_authority_boundary.py",
+        "scripts/validate_rejection_issue_manifest.py",
+        "spec/design/loud_unsupported_issue_manifest.json",
+    }
+)
+
+# Every source or control whose edit could reopen same-crate Diagnostic.kind
+# construction/mutation or make the closed-vocabulary mutation oracle stop
+# exercising its real owner. The required diagnostic-kind-oracle job consumes
+# this output. Including the detector and workflow makes bypass edits
+# self-triggering.
+DIAGNOSTIC_KIND_PATHS: frozenset[str] = frozenset(
+    {
+        ".github/workflows/ci.yml",
+        "crates/chelis-compiler-api/src/context.rs",
+        "crates/chelis-compiler-api/src/lib.rs",
+        "crates/chelis-compiler-api/src/schema.rs",
+        "crates/chelis-compiler-api/tests/diagnostic_kind_pipeline.rs",
+        "crates/chelis-vocab/src/lib.rs",
+        "scripts/ci_detect_docs_only.py",
+        "scripts/diagnostic_kind_oracle.py",
+        "scripts/test_ci_detect_docs_only.py",
+        "scripts/test_diagnostic_kind_oracle.py",
+        "scripts/test_gate.py",
+    }
+)
 
 
 def is_doc_path(path: str) -> bool:
@@ -85,23 +151,55 @@ def is_docs_only(paths: list[str]) -> bool:
     cleaned = [p.strip().strip('"') for p in paths if p.strip()]
     if not cleaned:
         return False
-    return all(is_doc_path(p) for p in cleaned)
+    return not any(
+        path in EXECUTABLE_DOC_PATHS for path in cleaned
+    ) and all(is_doc_path(path) for path in cleaned)
 
 
-def _emit(docs_only: bool) -> None:
-    line = f"docs_only={'true' if docs_only else 'false'}"
+def rejection_authority_changed(paths: list[str]) -> bool:
+    """Whether the diff must run live validation; empty input fails safe."""
+    cleaned = [p.strip().strip('"') for p in paths if p.strip()]
+    if not cleaned:
+        return True
+    return any(path in REJECTION_AUTHORITY_PATHS for path in cleaned)
+
+
+def diagnostic_kind_changed(paths: list[str]) -> bool:
+    """Whether the diff must run the C2.2 mutation oracle; empty fails safe."""
+    cleaned = [p.strip().strip('"') for p in paths if p.strip()]
+    if not cleaned:
+        return True
+    return any(path in DIAGNOSTIC_KIND_PATHS for path in cleaned)
+
+
+def _emit(
+    docs_only: bool,
+    authority_changed: bool,
+    diagnostic_changed: bool,
+) -> None:
+    lines = [
+        f"docs_only={'true' if docs_only else 'false'}",
+        "rejection_authority_changed="
+        f"{'true' if authority_changed else 'false'}",
+        "diagnostic_kind_changed="
+        f"{'true' if diagnostic_changed else 'false'}",
+    ]
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+            fh.write("\n".join(lines) + "\n")
     # Always echo to stdout too so the decision is visible in the CI log
     # and the script is testable off CI.
-    print(line)
+    print("\n".join(lines))
 
 
 def main(argv: list[str]) -> int:
     paths = sys.stdin.read().splitlines()
-    _emit(is_docs_only(paths))
+    _emit(
+        is_docs_only(paths),
+        rejection_authority_changed(paths),
+        diagnostic_kind_changed(paths),
+    )
     return 0
 
 

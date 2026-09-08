@@ -11,29 +11,45 @@ pub enum LexError {
     #[error("invalid escape sequence '\\{ch}' at byte {offset}")]
     InvalidEscape { ch: char, offset: usize },
 
+    #[error("unescaped control character U+{code:04X} in string at byte {offset}")]
+    UnescapedControl { code: u32, offset: usize },
+
     #[error("invalid number '{text}' at byte {offset}")]
     InvalidNumber { text: String, offset: usize },
 
     #[error("unexpected character '{ch}' at byte {offset}")]
     UnexpectedChar { ch: char, offset: usize },
 
+    #[error("keyword '{keyword}' is reserved for future use at byte {offset}")]
+    ReservedForFuture { keyword: String, offset: usize },
+
     #[error("unterminated block comment starting at byte {offset}")]
     UnterminatedBlockComment { offset: usize },
 
-    /// `f8e4m3` suffix attached to a numeric literal per
-    /// `spec/04-type-system.md` §5.5: f8e4m3 is deferred (§1.1.1).
-    #[error(
-        "invalid literal suffix `f8e4m3` on `{literal}` at byte {offset}: \
-         f8e4m3 is deferred per spec/04-type-system.md §1.1.1"
-    )]
-    DeferredF8e4m3Suffix { literal: String, offset: usize },
-
-    /// Unsigned integer suffix attached to a numeric literal per
-    /// `spec/04-type-system.md` §5.5: unsigned integer types are out of
-    /// scope (§1.1.2).
+    /// A suffix spelling one of the reserved-but-deferred dtype names of
+    /// `spec/04-type-system.md` §1.1.1 (`f8e4m3`, `f8e5m2`, `int4`/`uint4`,
+    /// `complex64`/`complex128`, `decimal128`/`decimal256`). No suffix
+    /// exists for a deferred name; one is authored only when the dtype
+    /// activates (§5.5).
     #[error(
         "invalid literal suffix `{suffix}` on `{literal}` at byte {offset}: \
-         unsigned integer types are out of scope per spec/04-type-system.md §1.1.2"
+         {suffix} is deferred per spec/04-type-system.md §1.1.1"
+    )]
+    DeferredSuffix {
+        literal: String,
+        suffix: String,
+        offset: usize,
+    },
+
+    /// Unsigned integer suffix attached to a numeric literal. The `uint*`
+    /// family is reserved-but-deferred per `spec/04-type-system.md`
+    /// §1.1.1; the short `u*` spellings are not reserved at all (§1.1.2
+    /// names `uint8`/`uint16`/`uint32`/`uint64` canonical).
+    #[error(
+        "invalid literal suffix `{suffix}` on `{literal}` at byte {offset}: \
+         unsigned integer types are deferred per spec/04-type-system.md \
+         §1.1.1 (canonical spelling uint8/uint16/uint32/uint64 per §1.1.2; \
+         the short u* spellings are not reserved)"
     )]
     UnsignedSuffix {
         literal: String,
@@ -474,6 +490,12 @@ fn lex_inner(
                     i += 1;
                 }
                 let text = &source[start..i];
+                if is_future_reserved(text) {
+                    return Err(LexError::ReservedForFuture {
+                        keyword: text.to_string(),
+                        offset: start,
+                    });
+                }
                 let kind = classify_ident(text);
                 tokens.push(Token {
                     kind,
@@ -492,6 +514,10 @@ fn lex_inner(
 
 fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_future_reserved(text: &str) -> bool {
+    matches!(text, "effect" | "handler" | "perform" | "resume" | "borrow")
 }
 
 fn classify_ident(text: &str) -> TokenKind {
@@ -516,8 +542,13 @@ fn classify_ident(text: &str) -> TokenKind {
         "copy" => TokenKind::Copy,
         "tensor" => TokenKind::Tensor,
         "cast" => TokenKind::Cast,
+        "cast_trunc" => TokenKind::CastTrunc,
         "export" => TokenKind::Export,
         "par" => TokenKind::Par,
+        "do" => TokenKind::Do,
+        "quote" => TokenKind::Quote,
+        "unquote" => TokenKind::Unquote,
+        "splice" => TokenKind::Splice,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         _ => {
@@ -558,6 +589,34 @@ fn lex_string(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     b't' => s.push('\t'),
                     b'r' => s.push('\r'),
                     b'0' => s.push('\0'),
+                    b'u' => {
+                        *i += 1;
+                        if *i >= bytes.len() || bytes[*i] != b'{' {
+                            return Err(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: *i - 1,
+                            });
+                        }
+                        *i += 1;
+                        let digits_start = *i;
+                        while *i < bytes.len() && bytes[*i].is_ascii_hexdigit() {
+                            *i += 1;
+                        }
+                        if digits_start == *i || *i >= bytes.len() || bytes[*i] != b'}' {
+                            return Err(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: digits_start.saturating_sub(2),
+                            });
+                        }
+                        let scalar = u32::from_str_radix(&source[digits_start..*i], 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: digits_start.saturating_sub(2),
+                            })?;
+                        s.push(scalar);
+                    }
                     other => {
                         return Err(LexError::InvalidEscape {
                             ch: other as char,
@@ -569,6 +628,12 @@ fn lex_string(source: &str, i: &mut usize) -> Result<Token, LexError> {
             }
             _ => {
                 let ch = source[*i..].chars().next().unwrap();
+                if ch.is_control() {
+                    return Err(LexError::UnescapedControl {
+                        code: ch as u32,
+                        offset: *i,
+                    });
+                }
                 s.push(ch);
                 *i += ch.len_utf8();
             }
@@ -591,6 +656,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     *i += 1;
                 }
                 let text = &source[start..*i];
+                if !underscores_separate_digits(&text[2..], |byte| byte.is_ascii_hexdigit()) {
+                    return Err(LexError::InvalidNumber {
+                        text: text.to_string(),
+                        offset: start,
+                    });
+                }
                 let digits: String = text[2..].chars().filter(|c| *c != '_').collect();
                 let val =
                     i64::from_str_radix(&digits, 16).map_err(|_| LexError::InvalidNumber {
@@ -627,6 +698,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     *i += 1;
                 }
                 let text = &source[start..*i];
+                if !underscores_separate_digits(&text[2..], |byte| matches!(byte, b'0' | b'1')) {
+                    return Err(LexError::InvalidNumber {
+                        text: text.to_string(),
+                        offset: start,
+                    });
+                }
                 let digits: String = text[2..].chars().filter(|c| *c != '_').collect();
                 let val = i64::from_str_radix(&digits, 2).map_err(|_| LexError::InvalidNumber {
                     text: text.to_string(),
@@ -688,6 +765,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
     }
 
     let text = &source[start..*i];
+    if !underscores_separate_digits(text, |byte| byte.is_ascii_digit()) {
+        return Err(LexError::InvalidNumber {
+            text: text.to_string(),
+            offset: start,
+        });
+    }
     let clean: String = text.chars().filter(|c| *c != '_').collect();
     let suffix = lex_literal_suffix(source, i, text, start, /* on_hex = */ false)?;
     if is_float {
@@ -714,6 +797,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             })
         }
     } else {
+        if clean == "9223372036854775808" && matches!(suffix, None | Some(LiteralSuffix::I64)) {
+            return Ok(Token {
+                kind: TokenKind::IntMinMagnitude(suffix),
+                span: Span::new(start, *i - start),
+            });
+        }
         let val: i64 = clean.parse().map_err(|_| LexError::InvalidNumber {
             text: text.to_string(),
             offset: start,
@@ -727,6 +816,17 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             span: Span::new(start, *i - start),
         })
     }
+}
+
+fn underscores_separate_digits(text: &str, is_digit: impl Fn(u8) -> bool) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'_'
+            || (index > 0
+                && index + 1 < bytes.len()
+                && is_digit(bytes[index - 1])
+                && is_digit(bytes[index + 1]))
+    })
 }
 
 /// Detect whether a hex digit sequence (without the `0x` prefix) ends in
@@ -776,9 +876,11 @@ fn lex_literal_suffix(
         "i16" => LiteralSuffix::I16,
         "i32" => LiteralSuffix::I32,
         "i64" => LiteralSuffix::I64,
-        "f8e4m3" => {
-            return Err(LexError::DeferredF8e4m3Suffix {
+        "f8e4m3" | "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128"
+        | "decimal256" => {
+            return Err(LexError::DeferredSuffix {
                 literal: literal_text.to_string(),
+                suffix: suffix_text.to_string(),
                 offset: literal_offset,
             });
         }
@@ -822,7 +924,7 @@ mod tests {
     fn all_keywords() {
         assert_eq!(
             lex_kinds(
-                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast export par"
+                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast cast_trunc export par do quote unquote splice"
             ),
             vec![
                 TokenKind::Def,
@@ -845,8 +947,13 @@ mod tests {
                 TokenKind::Copy,
                 TokenKind::Tensor,
                 TokenKind::Cast,
+                TokenKind::CastTrunc,
                 TokenKind::Export,
                 TokenKind::Par,
+                TokenKind::Do,
+                TokenKind::Quote,
+                TokenKind::Unquote,
+                TokenKind::Splice,
             ]
         );
     }
@@ -1340,23 +1447,38 @@ mod tests {
     }
 
     #[test]
-    fn deferred_f8e4m3_suffix_is_lex_error() {
-        let err = lex("1.0f8e4m3").unwrap_err();
-        assert!(
-            matches!(err, LexError::DeferredF8e4m3Suffix { .. }),
-            "expected DeferredF8e4m3Suffix, got {err:?}"
-        );
-        // Diagnostic must mention deferral and §1.1.1 spec section.
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("f8e4m3 is deferred") && msg.contains("§1.1.1"),
-            "diagnostic must cite §1.1.1 and contain 'f8e4m3 is deferred', got: {msg}"
-        );
+    fn deferred_suffix_is_lex_error() {
+        // Every reserved-but-deferred name of spec/04 §1.1.1: no suffix
+        // exists until the dtype activates, and the diagnostic cites the
+        // owning section.
+        for (src, name) in [
+            ("1.0f8e4m3", "f8e4m3"),
+            ("1.0f8e5m2", "f8e5m2"),
+            ("42int4", "int4"),
+            ("42uint4", "uint4"),
+            ("1.0complex64", "complex64"),
+            ("1.0complex128", "complex128"),
+            ("1.0decimal128", "decimal128"),
+            ("1.0decimal256", "decimal256"),
+        ] {
+            let err = lex(src).unwrap_err();
+            assert!(
+                matches!(err, LexError::DeferredSuffix { ref suffix, .. } if suffix == name),
+                "expected DeferredSuffix for {src}, got {err:?}"
+            );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(&format!("{name} is deferred")) && msg.contains("§1.1.1"),
+                "diagnostic must cite §1.1.1 and contain '{name} is deferred', got: {msg}"
+            );
+        }
     }
 
     #[test]
     fn unsigned_suffix_is_lex_error() {
-        for src in ["42u8", "42u16", "42u32", "42u64"] {
+        for src in [
+            "42u8", "42u16", "42u32", "42u64", "42uint8", "42uint16", "42uint32", "42uint64",
+        ] {
             let err = lex(src).unwrap_err();
             assert!(
                 matches!(err, LexError::UnsignedSuffix { .. }),
@@ -1364,8 +1486,9 @@ mod tests {
             );
             let msg = format!("{err}");
             assert!(
-                msg.contains("unsigned integer types are out of scope") && msg.contains("§1.1.2"),
-                "diagnostic must cite §1.1.2 and contain 'unsigned integer types are out of scope', got: {msg}"
+                msg.contains("unsigned integer types are deferred") && msg.contains("§1.1.1"),
+                "diagnostic must cite §1.1.1 and contain 'unsigned integer types are deferred', \
+                 got: {msg}"
             );
         }
     }

@@ -34,11 +34,12 @@
 //!   - runtime-dependent constructor (an `if` between constructors) feeding
 //!     a differentiated `match` scrutinee
 //!   - guarded arm reached during static arm selection
-//!   - mixed tensor/non-tensor ADT fields in a grad argument
-//!   - mixed SIBLING variant (float-clean constructed variant of a type
-//!     whose other variant carries a non-tensor field)
-//!   - pure enum (no fields in any variant) as a grad argument
+//!   - explicitly targeting a pure enum (no float leaf in any variant)
 //!   - compiled-lane `out = grad(f)` export over an ADT-typed param
+//!
+//! Recursive cotangent parity also pins mixed tensor/non-tensor ADT fields
+//! and mixed sibling variants as legal: differentiable fields receive their
+//! cotangents while discrete fields remain present as unit.
 //!
 //! Zero-fill parity (unused multi-target argument -> shaped zero slot, the
 //! negative-of-the-bug pinned by output assertions rather than a
@@ -95,7 +96,11 @@ fn parse_scalar(stdout: &str) -> f64 {
         .trim()
         .lines()
         .last()
-        .and_then(|l| l.trim().parse::<f64>().ok())
+        .and_then(|l| {
+            let trimmed = l.trim();
+            let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+            value_str.parse::<f64>().ok()
+        })
         .unwrap_or_else(|| panic!("no scalar in eval output: {stdout}"))
 }
 
@@ -117,12 +122,11 @@ type Mode =\n\
 /// constructor; the taken arm is linear in `x`, the dead arm is constant.
 fn d1_match_fn(body_a: &str, body_b: &str) -> String {
     format!(
-        "def fwd_match(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match ModeA with {{\n\
+        "def fwd_match(x: tensor[2, f32]) -> f32 = match ModeA with {{\n\
          \x20   | ModeA => {body_a}\n\
          \x20   | ModeB => {body_b}\n\
          \x20 }}\n\
-         }}\n"
+"
     )
 }
 
@@ -153,9 +157,7 @@ fn issue_520_d1_grad_through_static_match_eval() {
 fn issue_520_d1_control_without_match_eval() {
     let source = format!(
         "module Repro.Ctrl\n\n\
-         def fwd_plain(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 sum(x, cast(0, int32)) |> tensor_to_scalar\n\
-         }}\n\n\
+         def fwd_plain(x: tensor[2, f32]) -> f32 = sum(x, cast(0, int32)) |> tensor_to_scalar\n\n\
          out = grad(fwd_plain)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
@@ -228,15 +230,14 @@ fn issue_520_d1_nested_static_match_grads_taken_arm() {
          type Kind =\n\
          \x20 | KindX\n\
          \x20 | KindY\n\n\
-         def fwd_nested(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match ModeA with {{\n\
+         def fwd_nested(x: tensor[2, f32]) -> f32 = match ModeA with {{\n\
          \x20   | ModeA => match KindY with {{\n\
          \x20     | KindX => cast(0.0, f32)\n\
          \x20     | KindY => sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
          \x20   }}\n\
          \x20   | ModeB => cast(0.0, f32)\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_nested)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
@@ -255,10 +256,8 @@ fn issue_520_d1_static_tag_runtime_field_gradient_flows() {
     let body = "module Repro.D1Field\n\n\
                 type Box =\n\
                 \x20 | Box { t: tensor[2, f32] }\n\n\
-                def fwd_field(x: tensor[2, f32]) -> f32 = {\n\
-                \x20 match Box { t: mul(&x, &x) } with {\n\
-                \x20   | Box { t: t } => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
-                \x20 }\n\
+                def fwd_field(x: tensor[2, f32]) -> f32 = match Box { t: mul(&x, &x) } with {\n\
+                \x20   | Box { t } => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
                 }\n\n";
     let source = format!(
         "{body}out = grad(fwd_field)(to_tensor([{}]))\n",
@@ -298,10 +297,8 @@ fn issue_520_d1_static_tag_runtime_field_gradient_flows() {
 }
 
 /// Static selection of a constant taken arm must behave exactly like the
-/// no-match constant-function control: today both fail with the same
-/// pre-existing "produced no roots" diagnostic (grad of a constant has no
-/// adjoint; zero-filling constant gradients is tracked separately from
-/// chelis#520). The match must introduce no divergence from the control.
+/// no-match constant-function control: both produce the exact shaped zero
+/// cotangent. The match must introduce no divergence from the control.
 #[test]
 fn issue_520_d1_constant_taken_arm_matches_constant_fn_control() {
     let match_source = format!(
@@ -315,27 +312,19 @@ fn issue_520_d1_constant_taken_arm_matches_constant_fn_control() {
     );
     let control_source = format!(
         "module Repro.CtrlConst\n\n\
-         def fwd_const(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 cast(0.0, f32)\n\
-         }}\n\n\
+         def fwd_const(x: tensor[2, f32]) -> f32 = cast(0.0, f32)\n\n\
          out = grad(fwd_const)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, match_stderr, match_ok) = eval_program(&match_source);
-    let (_stdout, control_stderr, control_ok) = eval_program(&control_source);
+    let (match_stdout, match_stderr, match_ok) = eval_program(&match_source);
+    let (control_stdout, control_stderr, control_ok) = eval_program(&control_source);
+    assert!(match_ok, "constant-arm grad failed: {match_stderr}");
     assert!(
-        !match_ok,
-        "constant-arm grad currently has no adjoint roots"
+        control_ok,
+        "constant-fn grad control failed: {control_stderr}"
     );
-    assert!(!control_ok, "constant-fn grad control must agree");
-    assert!(
-        match_stderr.contains("produced no roots"),
-        "constant-arm diagnostic: {match_stderr}"
-    );
-    assert!(
-        control_stderr.contains("produced no roots"),
-        "control diagnostic: {control_stderr}"
-    );
+    assert_eq!(parse_tensor_data(&match_stdout), vec![0.0, 0.0]);
+    assert_eq!(parse_tensor_data(&control_stdout), vec![0.0, 0.0]);
 }
 
 // --- D1 compiled lane ----------------------------------------------------------
@@ -419,13 +408,19 @@ fn issue_520_d1_grad_through_static_match_c_backend_agrees() {
 #include "chelis_runtime.h"
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
-    int shape[1] = {2};
-    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
+    int64_t shape[1] = {2};
+    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     float xd[2] = {1.0f, 2.0f};
-    memcpy(x->data, xd, sizeof(xd));
+    chelis_tensor_write* x_guard = chelis_tensor_begin_write(x);
+    chelis_write_view x_view = chelis_tensor_write_view(x_guard);
+    memcpy(x_view.data, xd, sizeof(xd));
+    chelis_tensor_end_write(x_guard);
     chelis_tensor* g = out(x);
-    if (g->size != 2) { printf("FAIL_SIZE %d\n", g->size); return 1; }
-    for (int i = 0; i < 2; i++) printf("%.6f\n", g->data[i]);
+    chelis_read_view g_view = chelis_tensor_read_view(g);
+    if (g_view.count != 2) { printf("FAIL_SIZE %lld\n", (long long)g_view.count); return 1; }
+    for (int i = 0; i < 2; i++) printf("%.6f\n", ((const float *)g_view.data)[i]);
+    chelis_tensor_release(g);
+    chelis_tensor_release(x);
     return 0;
 }
 "#;
@@ -464,11 +459,10 @@ fn d2_source(arm_body: &str, input: &[f64]) -> String {
         "module Repro.D2\n\n\
          type Box =\n\
          \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-         def fwd_box(p: Box) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Box {{ t: t }} => {arm_body}\n\
+         def fwd_box(p: Box) -> f32 = match p with {{\n\
+         \x20   | Box {{ t }} => {arm_body}\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_box)(Box {{ t: to_tensor([{}]) }})\n",
         fmt_f32_list(input),
     )
@@ -523,11 +517,10 @@ fn issue_520_d2_grad_adt_arg_nonlinear_matches_fd() {
                 "module Repro.D2\n\n\
                  type Box =\n\
                  \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-                 def fwd_box(p: Box) -> f32 = {{\n\
-                 \x20 match p with {{\n\
-                 \x20   | Box {{ t: t }} => {arm}\n\
+                 def fwd_box(p: Box) -> f32 = match p with {{\n\
+                 \x20   | Box {{ t }} => {arm}\n\
                  \x20 }}\n\
-                 }}\n\n\
+\n\
                  out = fwd_box(Box {{ t: to_tensor([{}]) }})\n",
                 fmt_f32_list(xs),
             );
@@ -555,12 +548,11 @@ fn issue_520_d2_multi_ctor_value_gradient_follows_taken_variant() {
          type Pick =\n\
          \x20 | A {{ s: tensor[2, f32] }}\n\
          \x20 | B {{ u: tensor[2, f32] }}\n\n\
-         def fwd_pick(p: Pick) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | A {{ s: s }} => sum(s, cast(0, int32)) |> tensor_to_scalar\n\
-         \x20   | B {{ u: u }} => sum(mul(&u, &u), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_pick(p: Pick) -> f32 = match p with {{\n\
+         \x20   | A {{ s }} => sum(s, cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | B {{ u }} => sum(mul(&u, &u), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_pick)(B {{ u: to_tensor([{}]) }})\n",
         fmt_f32_list(&[3.0, 4.0]),
     );
@@ -584,14 +576,11 @@ fn issue_520_d2_composed_def_returns_typed_box_gradient() {
         "module Repro.D2Composed\n\n\
          type Box =\n\
          \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-         def fwd_box(p: Box) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Box {{ t: t }} => sum(mul(&t, &t), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_box(p: Box) -> f32 = match p with {{\n\
+         \x20   | Box {{ t }} => sum(mul(&t, &t), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
-         def jac(x: tensor[2, f32]) -> Box = {{\n\
-         \x20 grad(fwd_box)(Box {{ t: x }})\n\
-         }}\n\n\
+\n\
+         def jac(x: tensor[2, f32]) -> Box = grad(fwd_box)(Box {{ t: x }})\n\n\
          out = jac(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
@@ -612,11 +601,10 @@ fn issue_520_d2_unused_field_gets_shaped_zero_gradient() {
         "module Repro.D2Zero\n\n\
          type Pair =\n\
          \x20 | Pair {{ a: tensor[2, f32], b: tensor[3, f32] }}\n\n\
-         def fwd_pair(p: Pair) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Pair {{ a: a, b: _ }} => sum(mul(&a, &a), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_pair(p: Pair) -> f32 = match p with {{\n\
+         \x20   | Pair {{ a, b: _ }} => sum(mul(&a, &a), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_pair)(Pair {{ a: to_tensor([{}]), b: to_tensor([{}]) }})\n",
         fmt_f32_list(&[1.0, 2.0]),
         fmt_f32_list(&[5.0, 6.0, 7.0]),
@@ -645,11 +633,10 @@ fn issue_520_d2_alias_typed_float_field_accepted() {
          type V2 = tensor[2, f32]\n\n\
          type Box2 =\n\
          \x20 | Box2 {{ t: V2 }}\n\n\
-         def fwd_alias(p: Box2) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Box2 {{ t: t }} => sum(mul(&t, &t), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_alias(p: Box2) -> f32 = match p with {{\n\
+         \x20   | Box2 {{ t }} => sum(mul(&t, &t), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_alias)(Box2 {{ t: to_tensor([{}]) }})\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
@@ -675,12 +662,11 @@ fn issue_520_d1_runtime_ctor_through_if_still_rejected() {
          \x20 | ModeA\n\
          \x20 | ModeB\n\n\
          def pick(c: f32) -> Mode = if c > 0.0 then ModeA else ModeB\n\n\
-         def fwd_dynpick(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match pick(tensor_to_scalar(sum(&x, cast(0, int32)))) with {{\n\
+         def fwd_dynpick(x: tensor[2, f32]) -> f32 = match pick(tensor_to_scalar(sum(&x, cast(0, int32)))) with {{\n\
          \x20   | ModeA => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
          \x20   | ModeB => cast(0.0, f32)\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_dynpick)(to_tensor([{}]))\n",
         fmt_f32_list(&[-1.0, -2.0]),
     );
@@ -701,12 +687,11 @@ fn issue_520_d1_runtime_ctor_through_if_still_rejected() {
 fn issue_520_d1_runtime_scrutinee_match_still_rejected() {
     let source = format!(
         "module Repro.Neg1\n\n\
-         def fwd_dyn(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match tensor_to_scalar(sum(&x, cast(0, int32))) with {{\n\
+         def fwd_dyn(x: tensor[2, f32]) -> f32 = match tensor_to_scalar(sum(&x, cast(0, int32))) with {{\n\
          \x20   | 0.0 => cast(0.0, f32)\n\
          \x20   | _ => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_dyn)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
@@ -727,12 +712,11 @@ fn issue_520_d1_guarded_arm_still_rejected() {
          type Mode =\n\
          \x20 | ModeA\n\
          \x20 | ModeB\n\n\
-         def fwd_guard(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match ModeA with {{\n\
+         def fwd_guard(x: tensor[2, f32]) -> f32 = match ModeA with {{\n\
          \x20   | ModeA if true => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
          \x20   | _ => cast(0.0, f32)\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_guard)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
@@ -744,83 +728,79 @@ fn issue_520_d1_guarded_arm_still_rejected() {
     );
 }
 
-/// Mixed tensor/non-tensor fields in an ADT grad argument stay rejected
-/// with a diagnostic naming the non-differentiable field.
+/// Mixed tensor/non-tensor fields are legal recursive cotangents: the float
+/// field receives its gradient and the discrete field remains present as unit.
 #[test]
-fn issue_520_d2_mixed_field_struct_rejected() {
+fn issue_520_d2_mixed_field_struct_replaces_discrete_field_with_unit() {
     let source = format!(
         "module Repro.Neg3\n\n\
          type Mixed =\n\
          \x20 | Mixed {{ t: tensor[2, f32], n: int32 }}\n\n\
-         def fwd_mixed(p: Mixed) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Mixed {{ t: t, n: _ }} => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_mixed(p: Mixed) -> f32 = match p with {{\n\
+         \x20   | Mixed {{ t, n: _ }} => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_mixed)(Mixed {{ t: to_tensor([{}]), n: cast(3, int32) }})\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
-    assert!(!ok, "mixed-field ADT grad arg must stay rejected");
+    let (stdout, stderr, ok) = eval_program(&source);
     assert!(
-        stderr.contains("`n`") && stderr.contains("float tensor"),
-        "diagnostic must name the non-tensor field: {stderr}"
+        ok,
+        "mixed-field ADT grad must preserve the discrete field as unit: {stderr}"
+    );
+    assert!(
+        stdout.contains("Mixed(tensor(shape=[2], data=[1.0, 1.0]), ())"),
+        "mixed-field cotangent must be Mixed([1,1], ()): {stdout}"
     );
 }
 
-/// A mixed SIBLING variant poisons the whole type: grad over a value of
-/// the float-clean variant of a sum type whose other variant carries a
-/// non-tensor field is rejected. The checker types this gradient as
-/// unit, so the eval lane must not fabricate a gradient struct the
-/// static type does not admit.
+/// A discrete field in a sibling variant does not poison a float-clean
+/// executed variant. The cotangent preserves the executed constructor.
 #[test]
-fn issue_520_d2_mixed_sibling_variant_rejected() {
+fn issue_520_d2_mixed_sibling_variant_preserves_executed_constructor() {
     let source = format!(
         "module Repro.Neg6\n\n\
          type Pick =\n\
          \x20 | A {{ s: tensor[2, f32] }}\n\
          \x20 | B {{ u: tensor[2, f32], n: int32 }}\n\n\
-         def fwd_pick(p: Pick) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | A {{ s: s }} => sum(mul(&s, &s), cast(0, int32)) |> tensor_to_scalar\n\
-         \x20   | B {{ u: u, n: _ }} => sum(u, cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_pick(p: Pick) -> f32 = match p with {{\n\
+         \x20   | A {{ s }} => sum(mul(&s, &s), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | B {{ u, n: _ }} => sum(u, cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_pick)(A {{ s: to_tensor([{}]) }})\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
+    let (stdout, stderr, ok) = eval_program(&source);
     assert!(
-        !ok,
-        "grad over a mixed-sibling-variant type must stay rejected"
+        ok,
+        "mixed sibling variant must not poison the executed constructor: {stderr}"
     );
     assert!(
-        stderr.contains("field `n` of constructor `B`") && stderr.contains("float tensor"),
-        "diagnostic must name the poisoning sibling field: {stderr}"
+        stdout.contains("A(tensor(shape=[2], data=[2.0, 4.0]))"),
+        "executed A cotangent must preserve A and equal 2s: {stdout}"
     );
 }
 
 /// A pure enum (no fields in any variant) has no continuous payload:
-/// the checker keeps its gradient payload unit, and the eval lane names
-/// the reason instead of dying downstream with a bare no-roots error.
+/// explicitly selecting it as `wrt` is a checker error because the target
+/// contains no differentiable float leaf.
 #[test]
 fn issue_520_d2_pure_enum_grad_rejected() {
     let source = "module Repro.Neg7\n\n\
 type Mode =\n\
   | ModeA\n\
   | ModeB\n\n\
-def fwd_mode(m: Mode) -> f32 = {\n\
-  match m with {\n\
+def fwd_mode(m: Mode) -> f32 = match m with {\n\
     | ModeA => cast(1.0, f32)\n\
     | ModeB => cast(2.0, f32)\n\
-  }\n\
 }\n\n\
-out = grad(fwd_mode)(ModeA)\n";
+out = grad(fwd_mode, wrt=m)(ModeA)\n";
     let (_stdout, stderr, ok) = eval_program(source);
     assert!(!ok, "grad over a pure enum must stay rejected");
     assert!(
-        stderr.contains("no fields in any constructor"),
-        "diagnostic must name the empty payload: {stderr}"
+        stderr.contains("grad `wrt` index 0 is not differentiable"),
+        "diagnostic must name the all-unit target: {stderr}"
     );
 }
 
@@ -845,12 +825,11 @@ fn issue_520_together_multi_arg_adt_grad_wrt_params() {
         "module Repro.Together\n\n\
          type Params =\n\
          \x20 | Params {{ w: tensor[2, f32] }}\n\n\
-         def model_forward(x: tensor[2, f32], p: Params) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Params {{ w: w }} => sum(mul(&x, &w), cast(0, int32)) |> tensor_to_scalar\n\
+         def model_forward(x: tensor[2, f32], p: Params) -> f32 = match p with {{\n\
+         \x20   | Params {{ w }} => sum(mul(&x, &w), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
-         out = grad(model_forward, wrt=(p))(to_tensor([{x}]), Params {{ w: to_tensor([{w}]) }})\n",
+\n\
+         out = grad(model_forward, wrt=p)(to_tensor([{x}]), Params {{ w: to_tensor([{w}]) }})\n",
         x = fmt_f32_list(&x),
         w = fmt_f32_list(&w),
     );
@@ -887,11 +866,10 @@ fn issue_520_multi_arg_adt_grad_default_wrt_returns_tuple() {
         "module Repro.MultiDefault\n\n\
          type Params =\n\
          \x20 | Params {{ w: tensor[2, f32] }}\n\n\
-         def model_forward(x: tensor[2, f32], p: Params) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Params {{ w: w }} => sum(mul(&x, &w), cast(0, int32)) |> tensor_to_scalar\n\
+         def model_forward(x: tensor[2, f32], p: Params) -> f32 = match p with {{\n\
+         \x20   | Params {{ w }} => sum(mul(&x, &w), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(model_forward)(to_tensor([{x}]), Params {{ w: to_tensor([{w}]) }})\n",
         x = fmt_f32_list(&x),
         w = fmt_f32_list(&w),
@@ -928,11 +906,10 @@ fn issue_520_multi_arg_adt_grad_shared_adjoint_keeps_both_slots() {
         "module Repro.Shared\n\n\
          type Box =\n\
          \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-         def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Box {{ t: t }} => sum(add(t, y), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = match p with {{\n\
+         \x20   | Box {{ t }} => sum(add(t, y), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_two)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
         a = fmt_f32_list(&[1.0, 2.0]),
     );
@@ -964,11 +941,10 @@ fn issue_520_multi_arg_adt_grad_nonlinear_matches_fd() {
             "module Repro.MultiFD\n\n\
              type Box =\n\
              \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-             def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
-             \x20 match p with {{\n\
-             \x20   | Box {{ t: t }} => sum(add(mul(&t, &t), mul(&y, &y)), cast(0, int32)) |> tensor_to_scalar\n\
+             def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = match p with {{\n\
+             \x20   | Box {{ t }} => sum(add(mul(&t, &t), mul(&y, &y)), cast(0, int32)) |> tensor_to_scalar\n\
              \x20 }}\n\
-             }}\n\n\
+\n\
              out = {applied}(Box {{ t: to_tensor([{tl}]) }}, to_tensor([{yl}]))\n",
             tl = fmt_f32_list(t),
             yl = fmt_f32_list(y),
@@ -1025,19 +1001,18 @@ fn issue_520_multi_arg_grad_wrt_tensor_only_returns_bare() {
         "module Repro.WrtTensor\n\n\
          type Box =\n\
          \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-         def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Box {{ t: t }} => sum(add(t, y), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd_two(p: Box, y: tensor[2, f32]) -> f32 = match p with {{\n\
+         \x20   | Box {{ t }} => sum(add(t, y), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
-         out = grad(fwd_two, wrt=(y))(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
+\n\
+         out = grad(fwd_two, wrt=y)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
         a = fmt_f32_list(&[1.0, 2.0]),
     );
     let (stdout, stderr, ok) = eval_program(&source);
     assert!(ok, "wrt-tensor-only multi-arg grad failed: {stderr}");
     assert!(
         !stdout.contains("Box("),
-        "wrt=(y) must not pack an ADT slot: {stdout}"
+        "wrt=y must not pack an ADT slot: {stdout}"
     );
     let grad = parse_tensor_data(&stdout);
     assert_eq!(grad, vec![1.0, 1.0], "d/dy sum(t + y) = [1,1]: {stdout}");
@@ -1052,11 +1027,10 @@ fn issue_520_multi_arg_adt_grad_unused_field_shaped_zero() {
         "module Repro.MultiZero\n\n\
          type Pair =\n\
          \x20 | Pair {{ a: tensor[2, f32], b: tensor[3, f32] }}\n\n\
-         def fwd(p: Pair, y: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Pair {{ a: a, b: _ }} => sum(add(mul(&a, &a), y), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd(p: Pair, y: tensor[2, f32]) -> f32 = match p with {{\n\
+         \x20   | Pair {{ a, b: _ }} => sum(add(mul(&a, &a), y), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd)(Pair {{ a: to_tensor([{a}]), b: to_tensor([{b}]) }}, to_tensor([{a}]))\n",
         a = fmt_f32_list(&[1.0, 2.0]),
         b = fmt_f32_list(&[5.0, 6.0, 7.0]),
@@ -1091,10 +1065,8 @@ fn issue_520_d2_build_lane_adt_param_grad_export_still_rejected() {
     let source = "module Repro.Neg5\n\n\
 type Box =\n\
   | Box { t: tensor[2, f32] }\n\n\
-def fwd_box(p: Box) -> f32 = {\n\
-  match p with {\n\
-    | Box { t: t } => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
-  }\n\
+def fwd_box(p: Box) -> f32 = match p with {\n\
+    | Box { t } => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\n\
 out = grad(fwd_box)\n";
     let dir = tempdir().expect("tempdir");
@@ -1138,9 +1110,7 @@ out = grad(fwd_box)\n";
 fn issue_614_multi_target_grad_binding_displays_values() {
     let source = format!(
         "module Repro.GradTuple614\n\n\
-         def fwd(x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {{\n\
-         \x20 sum(add(mul(&x, &x), mul(&y, &y)), cast(0, int32)) |> tensor_to_scalar\n\
-         }}\n\n\
+         def fwd(x: tensor[2, f32], y: tensor[2, f32]) -> f32 = sum(add(mul(&x, &x), mul(&y, &y)), cast(0, int32)) |> tensor_to_scalar\n\n\
          out = grad(fwd)(to_tensor([{x}]), to_tensor([{y}]))\n",
         x = fmt_f32_list(&[1.0, 2.0]),
         y = fmt_f32_list(&[5.0, 6.0]),
@@ -1176,14 +1146,13 @@ fn issue_520_multi_arg_two_adt_args_align_per_constructor() {
          \x20 | A {{ u: tensor[2, f32] }}\n\n\
          type B =\n\
          \x20 | B {{ v: tensor[2, f32] }}\n\n\
-         def fwd(p: A, q: B) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | A {{ u: u }} =>\n\
+         def fwd(p: A, q: B) -> f32 = match p with {{\n\
+         \x20   | A {{ u }} =>\n\
          \x20     match q with {{\n\
-         \x20       | B {{ v: v }} => sum(add(mul(&u, &u), mul(&v, &v)), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20       | B {{ v }} => sum(add(mul(&u, &u), mul(&v, &v)), cast(0, int32)) |> tensor_to_scalar\n\
          \x20     }}\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd)(A {{ u: to_tensor([{u}]) }}, B {{ v: to_tensor([{v}]) }})\n",
         u = fmt_f32_list(&[1.0, 2.0]),
         v = fmt_f32_list(&[3.0, 4.0]),
@@ -1221,11 +1190,10 @@ fn issue_520_multi_arg_three_way_shared_adjoint_keeps_all_slots() {
         "module Repro.ThreeShare\n\n\
          type Box =\n\
          \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-         def fwd(p: Box, y: tensor[2, f32], z: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Box {{ t: t }} => sum(add(add(t, y), z), cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd(p: Box, y: tensor[2, f32], z: tensor[2, f32]) -> f32 = match p with {{\n\
+         \x20   | Box {{ t }} => sum(add(add(t, y), z), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]), to_tensor([{a}]))\n",
         a = fmt_f32_list(&[1.0, 2.0]),
     );
@@ -1260,11 +1228,10 @@ fn issue_520_multi_arg_adt_unused_tensor_zero_slot() {
         "module Repro.DropTensor\n\n\
          type Box =\n\
          \x20 | Box {{ t: tensor[2, f32] }}\n\n\
-         def fwd(p: Box, y: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Box {{ t: t }} => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
+         def fwd(p: Box, y: tensor[2, f32]) -> f32 = match p with {{\n\
+         \x20   | Box {{ t }} => sum(t, cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd)(Box {{ t: to_tensor([{a}]) }}, to_tensor([{a}]))\n",
         a = fmt_f32_list(&[1.0, 2.0]),
     );
@@ -1301,9 +1268,7 @@ fn issue_520_multi_arg_adt_unused_tensor_zero_slot() {
 fn issue_520_multi_arg_pure_tensor_unused_middle_zero_slot() {
     let source = format!(
         "module Repro.PureMid\n\n\
-         def fwd(x: tensor[2, f32], y: tensor[2, f32], z: tensor[2, f32]) -> f32 = {{\n\
-         \x20 sum(add(mul(&x, &x), mul(&z, &z)), cast(0, int32)) |> tensor_to_scalar\n\
-         }}\n\n\
+         def fwd(x: tensor[2, f32], y: tensor[2, f32], z: tensor[2, f32]) -> f32 = sum(add(mul(&x, &x), mul(&z, &z)), cast(0, int32)) |> tensor_to_scalar\n\n\
          out = grad(fwd)(to_tensor([{x}]), to_tensor([{y}]), to_tensor([{z}]))\n",
         x = fmt_f32_list(&[1.0, 2.0]),
         y = fmt_f32_list(&[3.0, 4.0]),
@@ -1359,9 +1324,7 @@ fn issue_520_multi_arg_pure_tensor_unused_middle_zero_slot() {
 fn issue_520_multi_arg_pure_tensor_unused_leading_no_vanish() {
     let source = format!(
         "module Repro.PureLead\n\n\
-         def fwd(x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {{\n\
-         \x20 sum(mul(&y, &y), cast(0, int32)) |> tensor_to_scalar\n\
-         }}\n\n\
+         def fwd(x: tensor[2, f32], y: tensor[2, f32]) -> f32 = sum(mul(&y, &y), cast(0, int32)) |> tensor_to_scalar\n\n\
          out = grad(fwd)(to_tensor([{x}]), to_tensor([{y}]))\n",
         x = fmt_f32_list(&[1.0, 2.0]),
         y = fmt_f32_list(&[3.0, 4.0]),

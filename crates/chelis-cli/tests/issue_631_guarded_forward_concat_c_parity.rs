@@ -32,9 +32,9 @@ def avgpool1d(x) = {\n\
   }\n\
 }\n\
 def window_row[n](x: &tensor[n, f32], m: int64, k: int64) -> tensor[u, m, f32] = {\n\
-  start = cast(k, int32)\n\
-  extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int32)\n\
-  reshape(stride(shrink(x, [[start, extent]]), cast(2, int32)), [cast(1, int64), m])\n\
+  start = cast(k, int64)\n\
+  extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int64)\n\
+  reshape(stride(shrink(x, [[start, extent]]), cast(2, int64)), [cast(1, int64), m])\n\
 }";
 
 fn avgpool_source(values: &[f64]) -> String {
@@ -217,7 +217,7 @@ fn issue_631_guarded_forward_avgpool_matches_c_at_n6() {
 /// whose `fail` branch fires while the OTHER branch computes cleanly
 /// must abort in the C lane too. The DAG lane lowers `fail` to a
 /// mask-selected zero placeholder (grad-lane semantics); before the
-/// `expr_reaches_fail` host-lane gate, this program's compiled binary
+/// `expr_reaches_forward_fail` host-lane gate, this program's compiled binary
 /// exited 0 printing ZEROS where eval aborts with the user's message —
 /// silent-wrong, not just a message mismatch. Fail-reaching bodies must
 /// stay in the host lane, whose `if`/`fail` are real control flow.

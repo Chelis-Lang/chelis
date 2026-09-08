@@ -5,7 +5,7 @@
 //! - Output rank equals input rank.
 //! - Trailing windowed-axis extent is
 //!   `floor((input - window) / stride) + 1` under Valid padding.
-//! - `window_shape` and `strides` must be int32 lists of equal
+//! - `window_shape` and `strides` must be int64 lists of equal
 //!   non-empty length; entries must be positive.
 //! - Window arity may not exceed input rank.
 //! - `window > input_dim` is rejected as a `DimensionMismatch`.
@@ -44,12 +44,12 @@ fn check_reducer(
         .join(", ");
     let window_str = window
         .iter()
-        .map(|w| w.to_string())
+        .map(|w| format!("{w}i64"))
         .collect::<Vec<_>>()
         .join(", ");
     let strides_str = strides
         .iter()
-        .map(|s| s.to_string())
+        .map(|s| format!("{s}i64"))
         .collect::<Vec<_>>()
         .join(", ");
     let src = format!(
@@ -69,7 +69,7 @@ def run(x) = {reducer_name}(x, [{window_str}], [{strides_str}])
 fn issue254_reduce_window_max_acceptance_shape_typechecks() {
     let src = r#"
 sig run: tensor[2, 3, 8, 8, f32] -> tensor[2, 3, 7, 7, f32]
-def run(x) = reduce_window_max(x, [2, 2], [1, 1])
+def run(x) = reduce_window_max(x, [2i64, 2i64], [1i64, 1i64])
 "#;
     check_surf(src).expect("acceptance shape must typecheck");
 }
@@ -80,7 +80,7 @@ def run(x) = reduce_window_max(x, [2, 2], [1, 1])
 fn issue254_reduce_window_max_nonoverlapping_pool2d_typechecks() {
     let src = r#"
 sig run: tensor[2, 3, 8, 8, f32] -> tensor[2, 3, 4, 4, f32]
-def run(x) = reduce_window_max(x, [2, 2], [2, 2])
+def run(x) = reduce_window_max(x, [2i64, 2i64], [2i64, 2i64])
 "#;
     check_surf(src).expect("non-overlapping pool2d must typecheck");
 }
@@ -97,7 +97,7 @@ fn issue254_all_four_reducers_typecheck_with_same_shape_contract() {
         let src = format!(
             r#"
 sig run: tensor[1, 1, 3, 3, f32] -> tensor[1, 1, 2, 2, f32]
-def run(x) = {name}(x, [2, 2], [1, 1])
+def run(x) = {name}(x, [2i64, 2i64], [1i64, 1i64])
 "#
         );
         check_surf(&src).unwrap_or_else(|errors| panic!("{name} must typecheck, got {errors:?}"));
@@ -168,7 +168,7 @@ fn issue254_reduce_window_rejects_wrong_declared_output_shape_at_check() {
     // is [1,1,8,8]. Type checker must reject.
     let src = r#"
 sig run: tensor[1, 1, 8, 8, f32] -> tensor[1, 1, 8, 8, f32]
-def run(x) = reduce_window_max(x, [2, 2], [1, 1])
+def run(x) = reduce_window_max(x, [2i64, 2i64], [1i64, 1i64])
 "#;
     let errors = check_surf(src).expect_err("wrong declared output shape must NOT typecheck");
     assert!(

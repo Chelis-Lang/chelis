@@ -52,8 +52,10 @@ jobs:
 
       - name: Install C dependencies
         # libz3-dev provides the unversioned libz3 on default linker and
-        # loader paths. libopenblas-dev backs the Clarabel SDP backend.
-        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libz3-dev
+        # loader paths. gmp-mpfr-sys and openblas-src build their locked
+        # sources; distribution versions can be older than the Rust bindings
+        # accept. m4 and make support those source builds.
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev m4 make libz3-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -111,6 +113,21 @@ jobs:
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
 
+      # This runner is the only one that provisions every solver toolchain, so
+      # it is the only place `--all-features` can compile. It closes Clippy's
+      # `disallowed_types` coverage over the `z3`, `carcara`, and `arb`
+      # features, whose per-pull-request cost this repository has declined.
+      # Registered in scripts/check_configuration_closure.py CLIPPY_MATRIX.
+      - name: Clippy over every declared feature
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # With every feature compiled, the nightly-only allowance is dropped: the
+      # reconciliation must account for every repository source from dep-info
+      # alone. This is what keeps NIGHTLY_ONLY_SOURCES from becoming a place to
+      # park an uncovered file.
+      - name: Reconcile every source against dep-info
+        run: python3 scripts/check_configuration_closure.py --require-complete
+
       - name: Harvest cvc5 build for cache
         id: cvc5harvest
         run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
@@ -128,7 +145,10 @@ jobs:
         run: cargo test -p chelis-prove --features smt
 
       - name: Run carcara-gated chelis-prove tests
-        run: cargo test -p chelis-prove --features carcara
+        # The nightly parallel process exited with SIGSEGV after tests; the
+        # same complete suite passed serially. Retain the full corpus while
+        # containing that nondeterministic failure in this optional lane.
+        run: cargo test -p chelis-prove --features carcara -- --test-threads=1
 
       - name: Run z3-gated chelis-prove tests
         run: cargo test -p chelis-prove --features z3
@@ -142,8 +162,8 @@ jobs:
       - name: Run the production solver config (cvc5 + Clarabel, both live)
         run: cargo test -p chelis-prove --features "smt clarabel"
 
-      - name: Install arb lane prerequisites (m4, make, gappa)
-        run: python3 scripts/ci_apt_get.py m4 make gappa
+      - name: Install Gappa proof checker
+        run: python3 scripts/ci_apt_get.py gappa
 
       - name: Re-validate committed Gappa proofs (--check-only)
         run: .venv/bin/python scripts/generate_erf_proof.py --check-only

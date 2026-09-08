@@ -72,8 +72,8 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![20000]);
-    assert_eq!(out.data[0], 1.0);
-    assert_eq!(out.data[19999], 20000.0);
+    assert_eq!(out.data.element_as_f64_lossy(0), 1.0);
+    assert_eq!(out.data.element_as_f64_lossy(19999), 20000.0);
 }
 
 #[test]
@@ -90,8 +90,8 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![40000]);
-    assert_eq!(out.data[0], 1.0);
-    assert_eq!(out.data[39999], 40000.0);
+    assert_eq!(out.data.element_as_f64_lossy(0), 1.0);
+    assert_eq!(out.data.element_as_f64_lossy(39999), 40000.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ out = tensor_scan(
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![8]);
     let expected: Vec<f64> = (1..=8).map(|v| v as f64).collect();
-    assert_eq!(out.data, expected);
+    assert_eq!(out.data.to_f64_lossy_vec(), expected);
 }
 
 #[test]
@@ -131,7 +131,7 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![5]);
-    assert_eq!(out.data, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![0.0, 1.0, 2.0, 3.0, 4.0]);
 }
 
 #[test]
@@ -251,7 +251,7 @@ out = tensor_scan(
     let out = root_tensor(&result, "out");
     // Element zero is fn(initial=1.0, 0) = 2.0; 4, 8, 16 follow.
     assert_eq!(out.shape, vec![4]);
-    assert_eq!(out.data, vec![2.0, 4.0, 8.0, 16.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![2.0, 4.0, 8.0, 16.0]);
 }
 
 #[test]
@@ -268,7 +268,7 @@ out = tensor_scan(
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4]);
     // not(true) = false (0); then not(false) = true (1); alternating.
-    assert_eq!(out.data, vec![0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![0.0, 1.0, 0.0, 1.0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,9 +300,15 @@ out = tensor_scan(
         message.contains("tensor_scan"),
         "rejection must name the builtin, got: {message}"
     );
+    // [05-UNS-5]: the host-only contract is now carried by the TYPED
+    // authority rather than the prose "host-only builtin" this replaced.
+    // [05-HOST-1] is the atom that decides it, so pin the citation and the
+    // explanation together - strictly stronger than the former either/or
+    // spelling check.
     assert!(
-        message.contains("host-only") || message.contains("Host-Runtime"),
-        "rejection must explain the host-only contract, got: {message}"
+        message.contains("deliberate [05-HOST-1]") && message.contains("host-runtime"),
+        "rejection must cite the deciding atom and explain the host-only contract, \
+         got: {message}"
     );
     // Belt-and-suspenders: confirm no C source containing the silent
     // stub was emitted via the err path. The previous regression
@@ -421,7 +427,7 @@ out = grad(target)(cast(1.0, f32))
         .expect("missing out root");
     // d/dx (2x) = 2.
     match &root.value {
-        ExecutionValue::Tensor { value } => assert_eq!(value.data, vec![2.0]),
+        ExecutionValue::Tensor { value } => assert_eq!(value.data.to_f64_lossy_vec(), vec![2.0]),
         other => panic!("expected scalar gradient tensor, got {other:?}"),
     }
 }
@@ -512,7 +518,7 @@ target = fn (row: tensor[1, f32]) -> tensor_scan(
   fn (prev: f32, _i: int64) -> mul(prev, cast(2.0, f32)),
   cast(4, int64)
 )
-out = vmap(target, axis=0)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
+out = vmap(target)(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))
 "#;
     let result = eval(EvalRequest {
         source_kind: SourceKind::Surf,

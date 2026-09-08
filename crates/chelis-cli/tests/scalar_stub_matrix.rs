@@ -1,13 +1,12 @@
-//! chelis#715 - eight more scalar builtins hit `host_emit.rs:2300`'s
-//! `/* unsupported builtin */ 0` substitution, at EVERY dtype including
-//! plain f32/f64: `tan`, `atan`, `floor`, `ceil`, `round`, `recip`,
-//! `max_elem`, `min_elem`.
+//! chelis#715 - eight scalar builtins formerly hit the C host emitter's
+//! `/* unsupported builtin */ 0` substitution, including plain f32/f64:
+//! `tan`, `atan`, `floor`, `ceil`, `round`, `recip`, `max_elem`, `min_elem`.
 //!
 //! Unlike chelis#704 (scalar activations, where eval also rejects), eval
-//! computes all of these correctly - so nothing warns the user before the
-//! compiled binary replaces `floor(1.5)` or `max_elem(lr, floor_val)` with
-//! `0`. Same substitution site as #682/#704/#705; this file extends the
-//! confirmed blast radius to ordinary scalar math.
+//! computed all of these correctly, so nothing warned the user before the
+//! compiled binary replaced `floor(1.5)` or `max_elem(lr, floor_val)` with
+//! `0`. Same historical substitution site as #682/#704/#705; these ordinary
+//! regressions preserve the confirmed blast radius.
 //!
 //! Also carried here: the chelis#719 regression locks. The C backend's
 //! contiguous f32 tensor `sqrt` path used Accelerate's `vvsqrtf`, which is not
@@ -16,14 +15,15 @@
 //! scalar `sqrtf` loop; these tests lock correct rounding and layout
 //! independence in the compiled lane.
 //!
-//! The passing controls bound the stub list exactly: the working scalar ops
-//! stay locked in both lanes, the tensor forms of the broken ops stay
-//! locked (the stub is scalar-only, like #704's split), and the int-dtype
-//! rejections that are correct stay rejected.
+//! The passing controls bound the historical stub list exactly: the already
+//! working scalar ops stay locked in both lanes, the corresponding tensor
+//! forms stay locked, and correct int-dtype rejections stay rejected.
 
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
+use chelis_types::agreement::{AgreementOp, ArithmeticWidthStatus, compare_rendered_elements};
+use chelis_types::types::Prim;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -100,18 +100,41 @@ fn c_lane(program: &str, name: &str) -> Result<(String, String), String> {
     Ok((emitted, line))
 }
 
+fn assert_check_rejects(program: &str, op: &str, rejected_dtype: &str) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("reject_{op}_{rejected_dtype}.ch"));
+    write_file(&path, program);
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("chelis check should run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() || !stdout.contains("\"score\": 1"),
+        "`{op}` must reject scalar {rejected_dtype} at check time; \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(op) || stderr.contains(op) || stdout.contains("PrecisionMismatch"),
+        "the rejection should identify `{op}` or its precision contract; \
+         stdout={stdout} stderr={stderr}"
+    );
+}
+
 fn scalar_program(op_expr: &str, ret_ty: &str) -> String {
     format!("module M.Main\ndef run() -> {ret_ty} = {op_expr}\nout = print(run())\n")
 }
 
 const STUB_MARKER: &str = "unsupported builtin";
 
-/// One broken row: eval computes `eval_expected`, the C lane must agree on
-/// the VALUE and must not contain the stub marker. Fails today with C
-/// printing `0`. Per-lane expected strings since chelis#732 Phase 1: eval
-/// renders in the pinned grammar (own-width digits, integral floats keep
-/// one fractional digit) while the compiled lane keeps its pre-contract
-/// printf forms until the Phase 2 generated printer restores byte parity.
+/// One formerly broken row: eval computes `eval_expected`, the C lane must
+/// agree on the VALUE and must not contain the stub marker. Before Phase 3,
+/// C printed `0`. The observation contract requires the compiled lane to use
+/// the same own-width rendering as eval, so the two expected strings are
+/// byte-identical for every repaired row.
 fn assert_scalar_parity(
     op_expr: &str,
     ret_ty: &str,
@@ -144,75 +167,282 @@ fn assert_scalar_parity(
     );
 }
 
+fn scalar_number(line: &str, context: &str) -> f64 {
+    line.parse::<f64>().unwrap_or_else(|error| {
+        panic!("{context}: expected a scalar number, got `{line}`: {error}")
+    })
+}
+
+/// [05-OP-43] requires reduced-float scalar ReLU to select the stored input
+/// bits, rather than round-trip a selected NaN through f32. Keep this check
+/// independent of the emitter's temporary names: recover the predicate
+/// operand from the emitted selection and require the selected operand to be
+/// that same raw value.
+fn assert_reduced_relu_raw_selection(run_body: &str, dtype: &str, name: &str) {
+    let decoder = format!("chelis_{dtype}_to_f32(");
+    let selection = run_body
+        .lines()
+        .find(|line| line.contains(&decoder) && line.contains(") < 0) ? 0 : "))
+        .unwrap_or_else(|| {
+            panic!("{name}: no decoded-predicate/raw-value ReLU selection:\n{run_body}")
+        });
+    let (_, after_decoder) = selection
+        .split_once(&decoder)
+        .expect("selection line contains the decoder");
+    let (predicate_arg, selected) = after_decoder
+        .split_once(") < 0) ? 0 : ")
+        .expect("selection line has the closed conditional spelling");
+    let selected_arg = selected
+        .strip_suffix(");")
+        .unwrap_or_else(|| panic!("{name}: ReLU selection has an unexpected tail: {selection}"));
+    assert_eq!(
+        selected_arg, predicate_arg,
+        "{name}: ReLU must select the same raw value used by its decoded predicate"
+    );
+
+    for forbidden in [
+        format!("chelis_host_relu_{dtype}("),
+        format!("chelis_host_finalize_{dtype}("),
+        format!("chelis_f32_to_{dtype}("),
+    ] {
+        assert!(
+            !run_body.contains(&forbidden),
+            "{name}: reduced ReLU must not call `{forbidden}`:\n{run_body}"
+        );
+    }
+}
+
+/// The scalar activation surface decided on chelis#712: every active float
+/// width is admitted, eval and compiled C both execute it, and each lane
+/// follows the Tier-2 composition. The non-zero input makes the former C stub
+/// observable for every operation (including silu/gelu, whose value at zero
+/// would not distinguish a stub). The f64 input also distinguishes every f64
+/// helper call from an f32 detour.
+fn assert_activation_width_matrix(op: &str) {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let input = if dtype == "f64" {
+            "1.0000000000000002"
+        } else {
+            "1.0"
+        };
+        let expr = format!("{op}(cast({input}, {dtype}))");
+        let name = format!("scalar_{op}_{dtype}");
+        let program = scalar_program(&expr, dtype);
+        let eval = eval_first_line(&program)
+            .unwrap_or_else(|error| panic!("{name}: eval rejected a supported scalar: {error}"));
+        common::assert_elements_in_domain(dtype, &eval, &name);
+        let eval_number = scalar_number(&eval, &name);
+        let (emitted, compiled) = c_lane(&program, &name)
+            .unwrap_or_else(|error| panic!("{name}: C lane failed: {error}"));
+        assert!(
+            !emitted.contains(STUB_MARKER),
+            "{name}: emitted the historical unsupported-builtin stub"
+        );
+        let run_body = emitted
+            .rfind(" run__chelis_owned_body() {")
+            .and_then(|start| emitted.get(start..))
+            .unwrap_or_else(|| panic!("{name}: emitted C has no consuming `run` body:\n{emitted}"));
+        let reduced_relu = op == "relu" && matches!(dtype, "f16" | "bf16");
+        if reduced_relu {
+            assert_reduced_relu_raw_selection(run_body, dtype, &name);
+        } else {
+            let helper_call = format!("chelis_host_{op}_{dtype}(");
+            assert!(
+                run_body.contains(&helper_call),
+                "{name}: no call site selects `{helper_call}`:\n{emitted}"
+            );
+        }
+        for wrong_width in ["f16", "bf16", "f32", "f64"]
+            .into_iter()
+            .filter(|width| *width != dtype)
+        {
+            let wrong_call = format!("chelis_host_{op}_{wrong_width}(");
+            assert!(
+                !run_body.contains(&wrong_call),
+                "{name}: a call site incorrectly selects `{wrong_call}`:\n{emitted}"
+            );
+        }
+        common::assert_elements_in_domain(dtype, &compiled, &name);
+        assert_eq!(
+            compiled, eval,
+            "{name}: scalar activation differs between eval and compiled C"
+        );
+
+        match op {
+            "relu" => assert_eq!(
+                eval_number,
+                input.parse::<f64>().unwrap(),
+                "{name}: relu of a positive input must be exact"
+            ),
+            "sigmoid" | "tanh" | "silu" => assert!(
+                (0.7..0.8).contains(&eval_number),
+                "{name}: {op}({input}) must lie in (0.7, 0.8), got {eval_number}"
+            ),
+            "gelu" => assert!(
+                (0.8..0.9).contains(&eval_number),
+                "{name}: gelu({input}) must lie in (0.8, 0.9), got {eval_number}"
+            ),
+            _ => unreachable!("activation matrix called for `{op}`"),
+        }
+    }
+}
+
+fn tier2_sigmoid_expr(x: &str, dtype: &str) -> String {
+    format!("recip(add(cast(1.0, {dtype}), exp(neg({x}))))")
+}
+
+fn tier2_tanh_expr(x: &str, dtype: &str) -> String {
+    let sigmoid = tier2_sigmoid_expr(&format!("mul(cast(2.0, {dtype}), {x})"), dtype);
+    format!("add(mul(cast(2.0, {dtype}), {sigmoid}), cast(-1.0, {dtype}))")
+}
+
+fn tier2_activation_expr(op: &str, x: &str, dtype: &str) -> String {
+    match op {
+        "sigmoid" => tier2_sigmoid_expr(x, dtype),
+        "tanh" => tier2_tanh_expr(x, dtype),
+        "silu" => format!("mul({x}, {})", tier2_sigmoid_expr(x, dtype)),
+        "gelu" => {
+            let x_sq = format!("mul({x}, {x})");
+            let x_cu = format!("mul({x_sq}, {x})");
+            let k_x_cu = format!("mul(cast(0.044715, {dtype}), {x_cu})");
+            let sum_inner = format!("add({x}, {k_x_cu})");
+            let inner = format!("mul(cast(0.7978845608028654, {dtype}), {sum_inner})");
+            let tanh_inner = tier2_tanh_expr(&inner, dtype);
+            let one_plus_tanh = format!("add(cast(1.0, {dtype}), {tanh_inner})");
+            format!("mul(cast(0.5, {dtype}), mul({x}, {one_plus_tanh}))")
+        }
+        _ => unreachable!("no Tier-2 activation expression for `{op}`"),
+    }
+}
+
+#[test]
+fn reduced_float_scalar_activations_match_tier2_node_finalization() {
+    for (dtype, op, input) in [
+        ("f16", "sigmoid", "0.0007328987121582031"),
+        ("f16", "tanh", "5.960464477539063e-8"),
+        ("f16", "silu", "2.9802322387695313e-7"),
+        ("f16", "gelu", "2.9802322387695313e-7"),
+        ("bf16", "sigmoid", "0.005889892578125"),
+        ("bf16", "tanh", "9.183549615799121e-41"),
+        ("bf16", "silu", "0.00555419921875"),
+        ("bf16", "gelu", "0.0030975341796875"),
+    ] {
+        let x = format!("cast({input}, {dtype})");
+        let activation = format!("{op}({x})");
+        let tier2 = tier2_activation_expr(op, &x, dtype);
+        let name = format!("{dtype}_{op}_tier2_finalization");
+        let expected = eval_first_line(&scalar_program(&tier2, dtype))
+            .unwrap_or_else(|error| panic!("{name}: Tier-2 expression failed: {error}"));
+        let scalar = eval_first_line(&scalar_program(&activation, dtype))
+            .unwrap_or_else(|error| panic!("{name}: scalar activation failed: {error}"));
+        assert_eq!(
+            scalar, expected,
+            "{name}: scalar activation must equal its Tier-2 composition"
+        );
+        let (emitted, compiled) = c_lane(&scalar_program(&activation, dtype), &name)
+            .unwrap_or_else(|error| panic!("{name}: C lane failed: {error}"));
+        assert!(
+            !emitted.contains(STUB_MARKER),
+            "{name}: emitted the historical unsupported-builtin stub"
+        );
+        assert_eq!(
+            compiled, expected,
+            "{name}: compiled scalar activation must equal its Tier-2 composition"
+        );
+    }
+}
+
+/// [05-OBS-3] parity for an f64 transcendental whose libm result may differ
+/// by one ULP across supported platforms.  The shared closed-op comparator is
+/// the only authority for the tolerance; the emitted-source assertion keeps
+/// a mutually wrong f32 implementation from passing by byte agreement.
+fn assert_f64_transcendental_parity(op_expr: &str, op: AgreementOp, name: &str) {
+    let program = scalar_program(op_expr, "f64");
+    let eval_got = eval_first_line(&program).unwrap_or_else(|e| panic!("{name}: eval failed: {e}"));
+    common::assert_elements_in_domain("f64", &eval_got, name);
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let (emitted, c_got) = c_lane(&program, name).expect("C lane should build and run");
+    common::assert_elements_in_domain("f64", &c_got, name);
+    assert!(
+        !emitted.contains(&format!("{}f(", op.name())),
+        "{name}: an f64 operation must not route through the f32 libm entry"
+    );
+    compare_rendered_elements(
+        op,
+        Prim::F64,
+        ArithmeticWidthStatus::StoredAtArithmeticWidth,
+        &eval_got,
+        &c_got,
+    )
+    .unwrap_or_else(|error| panic!("{name}: {error}"));
+}
+
 // ===========================================================================
-// chelis#715 - the broken rows (all observed printing 0 from the binary)
+// chelis#715 - repaired rows (all printed 0 before the Phase 3 fix)
 // ===========================================================================
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar tan compiles to the 0 stub (C prints 0; eval 1.5574077367782593). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_tan_agrees_across_lanes() {
     assert_scalar_parity(
         "tan(cast(1.0, f32))",
         "f32",
         "1.5574077",
-        "1.5574077367782593",
+        "1.5574077",
         "f32_tan",
     );
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar atan compiles to the 0 stub (C prints 0; eval 0.7853981852531433). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_atan_agrees_across_lanes() {
     assert_scalar_parity(
         "atan(cast(1.0, f32))",
         "f32",
         "0.7853982",
-        "0.7853981852531433",
+        "0.7853982",
         "f32_atan",
     );
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar floor compiles to the 0 stub at plain f32 (C prints 0; eval 1). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_floor_agrees_across_lanes() {
-    assert_scalar_parity("floor(cast(1.5, f32))", "f32", "1.0", "1", "f32_floor");
+    assert_scalar_parity("floor(cast(1.5, f32))", "f32", "1.0", "1.0", "f32_floor");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar ceil compiles to the 0 stub (C prints 0; eval 2). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_ceil_agrees_across_lanes() {
-    assert_scalar_parity("ceil(cast(1.5, f32))", "f32", "2.0", "2", "f32_ceil");
+    assert_scalar_parity("ceil(cast(1.5, f32))", "f32", "2.0", "2.0", "f32_ceil");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar round compiles to the 0 stub (C prints 0; eval 2). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_round_agrees_across_lanes() {
-    assert_scalar_parity("round(cast(1.5, f32))", "f32", "2.0", "2", "f32_round");
+    // [05] §2.2 requires roundTiesToEven. Both signs distinguish the
+    // C `rint{,f}` family from `round{,f}`, whose half ties go away from
+    // zero. Cover both scalar host widths because each selects a distinct
+    // libm entry point.
+    for (dtype, input, expected, name) in [
+        ("f32", "2.5", "2.0", "f32_round_positive_even_tie"),
+        ("f32", "-2.5", "-2.0", "f32_round_negative_even_tie"),
+        ("f64", "2.5", "2.0", "f64_round_positive_even_tie"),
+        ("f64", "-2.5", "-2.0", "f64_round_negative_even_tie"),
+    ] {
+        assert_scalar_parity(
+            &format!("round(cast({input}, {dtype}))"),
+            dtype,
+            expected,
+            expected,
+            name,
+        );
+    }
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar recip compiles to the 0 stub (C prints 0; eval 0.25). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_recip_agrees_across_lanes() {
     assert_scalar_parity("recip(cast(4.0, f32))", "f32", "0.25", "0.25", "f32_recip");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar max_elem compiles to the 0 stub at every dtype (C prints 0; \
-            eval 1.5). Ordinary clamp code silently returns 0 when compiled. Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "max_elem(cast(1.5, f32), cast(0.25, f32))",
@@ -224,9 +454,6 @@ fn f32_scalar_max_elem_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar min_elem compiles to the 0 stub (C prints 0; eval 0.25). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_min_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "min_elem(cast(1.5, f32), cast(0.25, f32))",
@@ -238,17 +465,11 @@ fn f32_scalar_min_elem_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: the stub fires at f64 too - scalar floor(1.5f64) compiles to 0. \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f64_scalar_floor_agrees_across_lanes() {
-    assert_scalar_parity("floor(cast(1.5, f64))", "f64", "1.0", "1", "f64_floor");
+    assert_scalar_parity("floor(cast(1.5, f64))", "f64", "1.0", "1.0", "f64_floor");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar max_elem at int64 compiles to 0 (eval 7). Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn i64_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "max_elem(cast(7, int64), cast(3, int64))",
@@ -266,40 +487,110 @@ fn i64_scalar_max_elem_agrees_across_lanes() {
 /// absent from TRANSCENDENTAL_FLOAT_ONLY_OPS, per chelis#699), so the
 /// correct behavior is identity.
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: floor(5i64) - checker accepts, eval rejects at runtime, compiled C \
-            prints 0. Three lanes, three answers. Correct is 5 everywhere. Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
-fn i64_scalar_floor_is_identity_in_all_lanes() {
-    assert_scalar_parity("floor(cast(5, int64))", "int64", "5", "5", "i64_floor");
+fn integer_scalar_floor_ceil_round_are_identity_in_all_lanes() {
+    for dtype in ["int8", "int16", "int32", "int64"] {
+        for (op, input) in [("floor", "5"), ("ceil", "-5"), ("round", "5")] {
+            let name = format!("{dtype}_{op}_identity");
+            let expected = input;
+            assert_scalar_parity(
+                &format!("{op}(cast({input}, {dtype}))"),
+                dtype,
+                expected,
+                expected,
+                &name,
+            );
+        }
+    }
+}
+
+#[test]
+fn scalar_activation_family_agrees_at_every_float_width() {
+    for op in ["relu", "sigmoid", "tanh", "silu", "gelu"] {
+        assert_activation_width_matrix(op);
+    }
+}
+
+#[test]
+fn scalar_transcendental_and_rounding_families_cover_reduced_float_widths() {
+    for dtype in ["f16", "bf16"] {
+        for (op, input) in [
+            ("tan", "1.0"),
+            ("atan", "1.0"),
+            ("recip", "4.0"),
+            ("floor", "1.5"),
+            ("ceil", "1.5"),
+            ("round", "2.5"),
+        ] {
+            let name = format!("{dtype}_{op}");
+            let program = scalar_program(&format!("{op}(cast({input}, {dtype}))"), dtype);
+            let eval = eval_first_line(&program)
+                .unwrap_or_else(|error| panic!("{name}: eval failed: {error}"));
+            let (emitted, compiled) = c_lane(&program, &name)
+                .unwrap_or_else(|error| panic!("{name}: C lane failed: {error}"));
+            assert!(!emitted.contains(STUB_MARKER), "{name}: emitted a stub");
+            assert_eq!(compiled, eval, "{name}: reduced-float lane divergence");
+        }
+    }
+}
+
+#[test]
+fn scalar_max_min_cover_all_admitted_widths() {
+    for dtype in ["int8", "int16", "int32", "int64"] {
+        for (op, expected) in [("max_elem", "7"), ("min_elem", "-3")] {
+            let name = format!("{dtype}_{op}");
+            assert_scalar_parity(
+                &format!("{op}(cast(7, {dtype}), cast(-3, {dtype}))"),
+                dtype,
+                expected,
+                expected,
+                &name,
+            );
+        }
+    }
+    for dtype in ["f16", "bf16"] {
+        for (op, expected) in [("max_elem", "1.5"), ("min_elem", "-0.25")] {
+            let name = format!("{dtype}_{op}");
+            assert_scalar_parity(
+                &format!("{op}(cast(1.5, {dtype}), cast(-0.25, {dtype}))"),
+                dtype,
+                expected,
+                expected,
+                &name,
+            );
+        }
+    }
+}
+
+#[test]
+fn float_only_scalar_families_reject_integer_and_bool_at_check_time() {
+    for op in [
+        "relu", "sigmoid", "tanh", "silu", "gelu", "tan", "atan", "recip",
+    ] {
+        assert_check_rejects(
+            &format!(
+                "module M.Main\ndef run() -> int64 = {op}(cast(1, int64))\nout = print(run())\n"
+            ),
+            op,
+            "int64",
+        );
+        assert_check_rejects(
+            &format!("module M.Main\ndef run() -> bool = {op}(true)\nout = print(run())\n"),
+            op,
+            "bool",
+        );
+    }
 }
 
 /// The f64 rows of the stub family, distilled from the probe battery
 /// (`docs/investigations/probes/bat_scalar_ops.py`) - chelis#715's title
 /// says EVERY dtype, so the f64 half is asserted too, not just f32.
-/// Observed today: C prints 0 for all seven rows; eval is correct.
+/// Before Phase 3, C printed 0 for all seven rows while eval was correct.
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: the stub fires at f64 for the whole family - tan/atan/ceil/round/\
-            recip/max_elem/min_elem all print 0 from the compiled binary (floor has its \
-            own row above). Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f64_scalar_stub_family_agrees_across_lanes() {
+    assert_f64_transcendental_parity("tan(cast(1.0, f64))", AgreementOp::Tan, "f64_tan");
+    assert_f64_transcendental_parity("atan(cast(1.0, f64))", AgreementOp::Atan, "f64_atan");
     for (expr, eval_expected, c_expected, name) in [
-        (
-            "tan(cast(1.0, f64))",
-            "1.557407724654902",
-            "1.557407724654902",
-            "f64_tan",
-        ),
-        (
-            "atan(cast(1.0, f64))",
-            "0.7853981633974483",
-            "0.7853981633974483",
-            "f64_atan",
-        ),
-        ("ceil(cast(1.5, f64))", "2.0", "2", "f64_ceil"),
-        ("round(cast(1.5, f64))", "2.0", "2", "f64_round"),
+        ("ceil(cast(1.5, f64))", "2.0", "2.0", "f64_ceil"),
         ("recip(cast(4.0, f64))", "0.25", "0.25", "f64_recip"),
         (
             "max_elem(cast(1.5, f64), cast(0.25, f64))",
@@ -319,7 +610,7 @@ fn f64_scalar_stub_family_agrees_across_lanes() {
 }
 
 /// The f64 working-op controls, mirroring the f32 set: bounds the f64 half
-/// of #715 to exactly the seven broken ops above.
+/// of #715 to exactly the seven formerly broken ops above.
 #[test]
 fn working_f64_scalar_ops_agree_across_lanes() {
     if !c_toolchain_available() {
@@ -330,10 +621,10 @@ fn working_f64_scalar_ops_agree_across_lanes() {
         ("abs(cast(-1.5, f64))", "1.5", "1.5", "ctl64_abs"),
         ("neg(cast(1.5, f64))", "-1.5", "-1.5", "ctl64_neg"),
         ("sqrt(cast(2.25, f64))", "1.5", "1.5", "ctl64_sqrt"),
-        ("exp(cast(0.0, f64))", "1.0", "1", "ctl64_exp"),
-        ("log(cast(1.0, f64))", "0.0", "0", "ctl64_log"),
-        ("sin(cast(0.0, f64))", "0.0", "0", "ctl64_sin"),
-        ("cos(cast(0.0, f64))", "1.0", "1", "ctl64_cos"),
+        ("exp(cast(0.0, f64))", "1.0", "1.0", "ctl64_exp"),
+        ("log(cast(1.0, f64))", "0.0", "0.0", "ctl64_log"),
+        ("sin(cast(0.0, f64))", "0.0", "0.0", "ctl64_sin"),
+        ("cos(cast(0.0, f64))", "1.0", "1.0", "ctl64_cos"),
         (
             "add(cast(1.5, f64), cast(0.25, f64))",
             "1.75",
@@ -355,7 +646,7 @@ fn working_f64_scalar_ops_agree_across_lanes() {
         (
             "div(cast(1.5, f64), cast(0.25, f64))",
             "6.0",
-            "6",
+            "6.0",
             "ctl64_div",
         ),
     ] {
@@ -504,7 +795,7 @@ fn c_f32_tensor_sqrt_ordinary_values_agree_across_lanes() {
 // ===========================================================================
 
 /// The scalar ops that DO work, at f32, with values whose printed form is
-/// identical in both lanes. Bounds #715 to exactly the eight broken ops.
+/// identical in both lanes. Bounds #715 to the eight formerly broken ops.
 #[test]
 fn working_f32_scalar_ops_agree_across_lanes() {
     if !c_toolchain_available() {
@@ -515,10 +806,10 @@ fn working_f32_scalar_ops_agree_across_lanes() {
         ("abs(cast(-1.5, f32))", "1.5", "1.5", "ctl_abs"),
         ("neg(cast(1.5, f32))", "-1.5", "-1.5", "ctl_neg"),
         ("sqrt(cast(2.25, f32))", "1.5", "1.5", "ctl_sqrt"),
-        ("exp(cast(0.0, f32))", "1.0", "1", "ctl_exp"),
-        ("log(cast(1.0, f32))", "0.0", "0", "ctl_log"),
-        ("sin(cast(0.0, f32))", "0.0", "0", "ctl_sin"),
-        ("cos(cast(0.0, f32))", "1.0", "1", "ctl_cos"),
+        ("exp(cast(0.0, f32))", "1.0", "1.0", "ctl_exp"),
+        ("log(cast(1.0, f32))", "0.0", "0.0", "ctl_log"),
+        ("sin(cast(0.0, f32))", "0.0", "0.0", "ctl_sin"),
+        ("cos(cast(0.0, f32))", "1.0", "1.0", "ctl_cos"),
         (
             "add(cast(1.5, f32), cast(0.25, f32))",
             "1.75",
@@ -540,7 +831,7 @@ fn working_f32_scalar_ops_agree_across_lanes() {
         (
             "div(cast(1.5, f32), cast(0.25, f32))",
             "6.0",
-            "6",
+            "6.0",
             "ctl_div",
         ),
     ] {
@@ -578,8 +869,8 @@ fn working_i64_scalar_ops_agree_across_lanes() {
     }
 }
 
-/// The TENSOR forms of the broken ops are correct in both lanes - the stub
-/// is scalar-only, exactly like #704's tensor/scalar split. (floor and
+/// The TENSOR forms of the formerly broken ops are correct in both lanes -
+/// the stub was scalar-only, exactly like #704's tensor/scalar split. (floor and
 /// max_elem chosen for exact printed values; tan/recip carry rounding
 /// differences that belong to chelis#717/#719, not here.)
 #[test]

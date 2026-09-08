@@ -38,7 +38,7 @@ use chelis_deep::span::Span;
 use chelis_types::check_ir_program;
 
 fn sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), Span::new(0, 0))
+    Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 
 fn empty_meta() -> Expr {
@@ -126,14 +126,24 @@ fn check_deep_on_bounded_stack(
             if let Some(bytes) = grow_segment_bytes {
                 chelis_types::set_grow_segment_bytes_for_test(bytes);
             }
-            match check_ir_program(&program) {
+            let messages = match check_ir_program(&program) {
                 Ok(_) => Vec::new(),
                 Err(result) => result
                     .errors
                     .iter()
                     .map(|e| e.message.clone())
                     .collect::<Vec<_>>(),
-            }
+            };
+
+            // `check_ir_program` borrows its input, so the worker still owns
+            // and drops this 4,000-deep fixture after the guarded check has
+            // returned.  Dropping a nested `Expr` is itself recursive.  Keep
+            // that teardown inside a fresh production-sized segment instead
+            // of letting it overflow the deliberately bounded worker stack
+            // and disguising a successful checker rejection as SIGBUS.
+            chelis_types::reset_grow_segment_bytes_for_test();
+            chelis_types::run_on_grown_stack(|| drop(program));
+            messages
         })
         .expect("spawn checker worker thread")
         .join()
@@ -155,7 +165,7 @@ const SAFETY_NET_SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 
 /// POSITIVE (safety net): a chain far deeper than a (shrunk) grown segment
 /// allows yields the typed located depth diagnostic through the FULL pipeline,
-/// NOT a SIGSEGV. With the grown segment shrunk to 2 MiB, depth 4000 reliably
+/// NOT a SIGSEGV. With the grown segment shrunk to 8 MiB, depth 4000 reliably
 /// exhausts the budget while staying well under the depth that would overflow
 /// the same segment outright, so the per-site guard (not a crash) is what stops
 /// it. This proves the guard still backs up the grow for input deeper than a

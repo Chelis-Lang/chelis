@@ -4,143 +4,62 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "chelis_simd.h"
-
-#define CHELIS_F32 0
-#define CHELIS_F64 1
-#define CHELIS_I32 2
-#define CHELIS_BOOL 3
-#define CHELIS_I64 4
-/* WS-A3 introduced bf16 / f16 dtype tags as storage-only. WS-1 (dtype
- * + Metal cleanup cycle) promotes both to arithmetic-supported on the
- * C backend: storage stays two bytes (uint16_t), and the C backend
- * routes every arithmetic kernel through `chelis_bf16_to_f32` /
- * `chelis_f32_to_bf16` (and f16 analogues), keeping per-element math
- * in f32. Matmul on bf16/f16 dispatches via convert-then-`cblas_sgemm`
- * with f32 scratch buffers (spec/04-type-system.md §5.7.1). The HIP
- * and Metal backends continue to use their native dispatch paths. */
-#define CHELIS_BF16 5
-#define CHELIS_F16 6
-/* WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
- * Element sizes (1 byte for i8, 2 bytes for i16) are honored by
- * `chelis_alloc` so generated C code can index `(int8_t*)t->data` /
- * `(int16_t*)t->data` directly without overrunning the buffer. */
-#define CHELIS_I8 7
-#define CHELIS_I16 8
-#define CHELIS_MAX_DIM 8
-
-typedef struct {
-    float *data;
-    int shape[CHELIS_MAX_DIM];
-    int strides[CHELIS_MAX_DIM];
-    int ndim;
-    int dtype;
-    int size;
-    int owns_data;
-} chelis_tensor;
+#include "chelis_runtime_dtype.h"
 
 typedef struct {
     void *handle;
 } chelis_string;
 
 typedef struct chelis_list chelis_list;
+typedef struct chelis_tensor chelis_tensor;
+typedef struct chelis_tensor_write chelis_tensor_write;
 typedef struct chelis_tuple chelis_tuple;
 typedef struct chelis_dict chelis_dict;
 typedef struct chelis_adt chelis_adt;
+typedef struct chelis_option chelis_option;
 typedef struct chelis_mapped_file chelis_mapped_file;
 
-typedef enum {
-    CHELIS_VALUE_INT64,
-    CHELIS_VALUE_FLOAT64,
-    CHELIS_VALUE_BOOL,
-    CHELIS_VALUE_STRING,
-    CHELIS_VALUE_TENSOR,
-    CHELIS_VALUE_LIST,
-    CHELIS_VALUE_TUPLE,
-    CHELIS_VALUE_DICT,
-    CHELIS_VALUE_ADT
-} chelis_value_tag;
-
-typedef struct {
-    chelis_value_tag tag;
-    union {
-        int64_t i64;
-        double f64;
-        bool boolean;
-        chelis_string string;
-        chelis_tensor *tensor;
-        chelis_list *list;
-        chelis_tuple *tuple;
-        chelis_dict *dict;
-        chelis_adt *adt;
-    } as;
-} chelis_value;
-
-typedef struct {
-    chelis_value key;
-    chelis_value value;
-} chelis_dict_entry;
-
-typedef struct {
-    bool is_some;
-    int64_t value;
-} chelis_option_i64;
-
-typedef struct {
-    bool is_some;
-    double value;
-} chelis_option_f64;
-
-typedef struct {
-    bool is_some;
-    chelis_value value;
-} chelis_option_value;
+typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;
+typedef uint8_t chelis_value_tag;
+enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };
+typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;
+typedef struct { chelis_value_tag tag; uint8_t reserved[7]; chelis_value_payload payload; } chelis_value;
+typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;
+typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;
+typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);
-chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
+chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype);
+chelis_tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape, chelis_dtype dtype, const void *data, int64_t byte_capacity);
+void chelis_tensor_retain(const chelis_tensor *tensor);
+void chelis_tensor_release(const chelis_tensor *tensor);
+/* A successful chelis_tensor_begin_write invalidates every prior read view; dereferencing a stale view violates the caller precondition. */
+chelis_read_view chelis_tensor_read_view(const chelis_tensor *tensor);
+void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape);
+chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor);
+chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard);
+void chelis_tensor_end_write(chelis_tensor_write *guard);
 /* Element size in bytes for the given CHELIS_* dtype tag. Mirrors the
  * per-dtype dispatch inside `chelis_alloc` and the GPU-side
  * `chelis_gpu_dtype_size`. Generated C code calls this when sizing
  * memcpys / per-element strides so the byte stride matches the storage
  * layout. RT-4 F2/F3 fix: replaces hardcoded `sizeof(float)` in the C
  * backend's reshape and cast emitters. */
-int chelis_dtype_size(int dtype);
-void chelis_free(chelis_tensor *t);
-void chelis_fill_f32(chelis_tensor *t, float val);
-void chelis_fill_i64(chelis_tensor *t, int64_t val);
-void chelis_fill_f64(chelis_tensor *t, double val);
-/* Issue #189: bit-pattern fill helpers for f32 / f64 Const emission.
- * Codegen computes the IEEE 754 bit pattern of the source value at
- * compile time (`f32::to_bits()` / `f64::to_bits()`) and emits
- * `chelis_fill_f32_bits(t, 0xXXXXXXXXu)` / `chelis_fill_f64_bits(t,
- * 0xXXXXXXXXXXXXXXXXuLL)`. The runtime bit-casts the integer pattern
- * back to the IEEE 754 value before filling, so the constant is
- * bit-identical to the source value -- avoiding the lossy
- * decimal-format-string round-trip that the pre-fix emitter used. The
- * shape mirrors `chelis_fill_bf16` / `chelis_fill_f16`. */
-void chelis_fill_f32_bits(chelis_tensor *t, uint32_t bits);
-void chelis_fill_f64_bits(chelis_tensor *t, uint64_t bits);
-/* Issue #365: bit-pattern fill helper for Bool tensors. A Bool tensor uses
- * the same 4-byte f32-encoded storage (0.0 / 1.0) the comparison ops write,
- * but its dtype tag is CHELIS_BOOL. Filling it through
- * chelis_fill_f32_bits trips the debug-build dtype assertion; this helper
- * asserts CHELIS_BOOL and fills the f32-encoded storage so a debug-runtime
- * reduce/softmax/cross-entropy backward mask fill is dtype-correct. */
-void chelis_fill_bool_bits(chelis_tensor *t, uint32_t bits);
+int64_t chelis_dtype_size(chelis_dtype dtype);
 /* Issue #248: scalar bit-pattern reconstruction helpers. The C backend
  * emits `chelis_uniform_sample_f32(..., chelis_f32_from_bits(0xXXXXXXXXu),
  * chelis_f32_from_bits(0xYYYYYYYYu))` so the runtime sees the byte-identical
  * f32 narrowing of the source `low` / `high` instead of a `%.8` decimal
- * round-trip. Symmetric with `chelis_fill_f32_bits` / `chelis_fill_f64_bits`
- * but for per-call scalar args rather than buffer fills, so a `static inline`
- * bit-cast suffices; no Rust-side `extern "C"` symbol is needed. */
+ * round-trip. A `static inline` bit-cast suffices; no Rust-side symbol is
+ * needed. */
 static inline float chelis_f32_from_bits(uint32_t bits) {
     float v;
     memcpy(&v, &bits, sizeof(float));
@@ -169,29 +88,239 @@ static inline int64_t chelis_int_div_guard(int64_t divisor) {
     }
     return divisor;
 }
-/* WS-1 (dtype + Metal cleanup cycle): two-byte fill helpers for bf16
- * and f16 tensors. Codegen computes the exact 16-bit pattern from the
- * IR literal at compile time (the `half` crate's `to_bits()`) and
- * passes it as `bits`; the runtime writes that pattern into every
- * element so the storage round-trips exactly. */
-void chelis_fill_bf16(chelis_tensor *t, uint16_t bits);
-void chelis_fill_f16(chelis_tensor *t, uint16_t bits);
-/* WS-1 buffer-conversion helpers used by the C backend's bf16/f16
- * matmul wrapper (convert-then-`cblas_sgemm`). The host-side
- * arithmetic story for bf16/f16 is "always go through f32"; matmul
- * batches the conversion to amortize the per-element cost across the
- * GEMM call. */
-void chelis_bf16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);
-void chelis_f32_buffer_to_bf16(const float *src, uint16_t *dst, int64_t n);
-void chelis_f16_buffer_to_f32(const uint16_t *src, float *dst, int64_t n);
-void chelis_f32_buffer_to_f16(const float *src, uint16_t *dst, int64_t n);
-chelis_tensor *chelis_scalar_tensor_from_i64(int64_t value);
-chelis_tensor *chelis_scalar_tensor_from_f64(double value);
-chelis_tensor *chelis_scalar_tensor_from_f32(float value);
-double chelis_tensor_to_f64(const chelis_tensor *t);
-int64_t chelis_tensor_rank(const chelis_tensor *t);
-int64_t chelis_tensor_shape(const chelis_tensor *t, int64_t axis);
-int64_t chelis_tensor_numel(const chelis_tensor *t);
+/* chelis#729 Phase 3: exact signed-integer absolute value. The generated
+ * caller supplies the declared width and the frozen C2 diagnostic produced
+ * from chelis_types::dtype_semantics::NumericTrap. Checking the minimum
+ * before negation avoids C signed-overflow undefined behavior. */
+static inline int64_t chelis_int_abs_guard(int64_t value, int bits,
+                                          const char *trap_message) {
+    int64_t minimum;
+    switch (bits) {
+        case 8: minimum = INT8_MIN; break;
+        case 16: minimum = INT16_MIN; break;
+        case 32: minimum = INT32_MIN; break;
+        case 64: minimum = INT64_MIN; break;
+        default:
+            fprintf(stderr, "chelis internal error: invalid integer abs width %d\n", bits);
+            abort();
+    }
+    if (value == minimum) {
+        fprintf(stderr, "%s\n", trap_message);
+        abort();
+    }
+    return value < 0 ? -value : value;
+}
+
+/* chelis#729 Phase 3: checked signed arithmetic at the declared width.
+ * Every check happens before the C operation, so signed-overflow undefined
+ * behavior is unreachable. These are header-local implementation helpers,
+ * not exported runtime callables. */
+static inline void chelis_int_limits(int bits, int64_t *minimum, int64_t *maximum) {
+    switch (bits) {
+        case 8: *minimum = INT8_MIN; *maximum = INT8_MAX; break;
+        case 16: *minimum = INT16_MIN; *maximum = INT16_MAX; break;
+        case 32: *minimum = INT32_MIN; *maximum = INT32_MAX; break;
+        case 64: *minimum = INT64_MIN; *maximum = INT64_MAX; break;
+        default:
+            fprintf(stderr, "chelis internal error: invalid integer width %d\n", bits);
+            abort();
+    }
+}
+
+static inline void chelis_numeric_trap(const char *message) {
+    fprintf(stderr, "%s\n", message);
+    abort();
+}
+
+static inline int64_t chelis_int_checked_add(int64_t lhs, int64_t rhs, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if ((rhs > 0 && lhs > maximum - rhs) || (rhs < 0 && lhs < minimum - rhs)) {
+        chelis_numeric_trap(trap_message);
+    }
+    return lhs + rhs;
+}
+
+static inline int64_t chelis_int_checked_sub(int64_t lhs, int64_t rhs, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if ((rhs < 0 && lhs > maximum + rhs) || (rhs > 0 && lhs < minimum + rhs)) {
+        chelis_numeric_trap(trap_message);
+    }
+    return lhs - rhs;
+}
+
+static inline int64_t chelis_int_checked_mul(int64_t lhs, int64_t rhs, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if (lhs != 0 && rhs != 0) {
+        if ((lhs == -1 && rhs == minimum) || (rhs == -1 && lhs == minimum)) {
+            chelis_numeric_trap(trap_message);
+        }
+        if ((lhs > 0 && rhs > 0 && lhs > maximum / rhs) ||
+            (lhs > 0 && rhs < 0 && rhs < minimum / lhs) ||
+            (lhs < 0 && rhs > 0 && lhs < minimum / rhs) ||
+            (lhs < 0 && rhs < 0 && lhs < maximum / rhs)) {
+            chelis_numeric_trap(trap_message);
+        }
+    }
+    return lhs * rhs;
+}
+
+static inline int64_t chelis_int_checked_neg(int64_t value, int bits,
+                                             const char *trap_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    (void)maximum;
+    if (value == minimum) chelis_numeric_trap(trap_message);
+    return -value;
+}
+
+static inline int64_t chelis_int_checked_divisor(int64_t dividend, int64_t divisor,
+                                                 int bits, const char *zero_message,
+                                                 const char *overflow_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    (void)maximum;
+    if (divisor == 0) chelis_numeric_trap(zero_message);
+    if (dividend == minimum && divisor == -1) chelis_numeric_trap(overflow_message);
+    return divisor;
+}
+
+static inline int64_t chelis_checked_int_cast(int64_t value, int bits,
+                                              const char *overflow_message) {
+    int64_t minimum, maximum;
+    chelis_int_limits(bits, &minimum, &maximum);
+    if (value < minimum || value > maximum) chelis_numeric_trap(overflow_message);
+    return value;
+}
+
+static inline int64_t chelis_checked_float_to_int(double value, int bits,
+                                                  const char *domain_message,
+                                                  const char *overflow_message) {
+    if (!isfinite(value) || trunc(value) != value) chelis_numeric_trap(domain_message);
+    if (bits == 64) {
+        if (value < -9223372036854775808.0 || value >= 9223372036854775808.0) {
+            chelis_numeric_trap(overflow_message);
+        }
+    } else {
+        int64_t minimum, maximum;
+        chelis_int_limits(bits, &minimum, &maximum);
+        if (value < (double)minimum || value > (double)maximum) {
+            chelis_numeric_trap(overflow_message);
+        }
+    }
+    return (int64_t)value;
+}
+
+/* [05-OP-6] `cast_trunc`: truncate toward zero, then range-check at the
+   target width. Unlike chelis_checked_float_to_int, a fractional value is
+   the WHOLE point and is not a domain error; only a non-finite source is.
+   Truncating BEFORE the range check is what makes the two lanes agree:
+   the evaluator range-checks its already-truncated value too, so e.g.
+   2147483647.9 -> int32 succeeds in both rather than overflowing here and
+   succeeding there. */
+static inline int64_t chelis_trunc_float_to_int(double value, int bits,
+                                                const char *domain_message,
+                                                const char *overflow_message) {
+    double truncated;
+    if (!isfinite(value)) chelis_numeric_trap(domain_message);
+    truncated = trunc(value);
+    if (bits == 64) {
+        if (truncated < -9223372036854775808.0 || truncated >= 9223372036854775808.0) {
+            chelis_numeric_trap(overflow_message);
+        }
+    } else {
+        int64_t minimum, maximum;
+        chelis_int_limits(bits, &minimum, &maximum);
+        if (truncated < (double)minimum || truncated > (double)maximum) {
+            chelis_numeric_trap(overflow_message);
+        }
+    }
+    return (int64_t)truncated;
+}
+
+static inline bool chelis_checked_bool_from_int(int64_t value,
+                                                const char *domain_message) {
+    if (value != 0 && value != 1) chelis_numeric_trap(domain_message);
+    return value == 1;
+}
+
+static inline bool chelis_checked_bool_from_float(double value,
+                                                  const char *domain_message) {
+    if (!isfinite(value) || (value != 0.0 && value != 1.0)) {
+        chelis_numeric_trap(domain_message);
+    }
+    return value == 1.0;
+}
+/* [04-NUM-13] / chelis#682: width-bounded two's-complement shifts.
+ * Generated code must not use C's signed shift operators directly:
+ * left-shifting a negative value or into the sign bit is undefined, a
+ * negative count is undefined, and a count at least the promoted width is
+ * undefined. These helpers perform every bit movement on uint64_t, then
+ * decode the declared-width two's-complement result without an
+ * out-of-range unsigned-to-signed cast. */
+static inline uint64_t chelis_int_width_mask(int bits) {
+    if (bits == 64) return UINT64_MAX;
+    return (UINT64_C(1) << bits) - UINT64_C(1);
+}
+
+static inline int64_t chelis_int_from_twos(uint64_t value, int bits) {
+    uint64_t mask = chelis_int_width_mask(bits);
+    uint64_t sign = UINT64_C(1) << (bits - 1);
+    value &= mask;
+    if ((value & sign) == 0) return (int64_t)value;
+    uint64_t magnitude = ((~value) & mask) + UINT64_C(1);
+    if (bits == 64 && magnitude == (UINT64_C(1) << 63)) return INT64_MIN;
+    return -(int64_t)magnitude;
+}
+
+static inline void chelis_int_shift_validate(int64_t amount, int bits) {
+    if (bits != 8 && bits != 16 && bits != 32 && bits != 64) {
+        fprintf(stderr, "invalid integer shift width: %d\n", bits);
+        abort();
+    }
+    if (amount < 0) {
+        fprintf(stderr, "shift amount must be non-negative, got %lld\n",
+                (long long)amount);
+        abort();
+    }
+}
+
+static inline int64_t chelis_int_shl(int64_t value, int64_t amount, int bits) {
+    chelis_int_shift_validate(amount, bits);
+    if (amount >= bits) return 0;
+    uint64_t mask = chelis_int_width_mask(bits);
+    uint64_t shifted = (((uint64_t)value & mask) << (uint32_t)amount) & mask;
+    return chelis_int_from_twos(shifted, bits);
+}
+
+static inline int64_t chelis_int_shr(int64_t value, int64_t amount, int bits) {
+    chelis_int_shift_validate(amount, bits);
+    uint64_t mask = chelis_int_width_mask(bits);
+    uint64_t raw = (uint64_t)value & mask;
+    bool negative = (raw & (UINT64_C(1) << (bits - 1))) != 0;
+    if (amount >= bits) return negative ? -1 : 0;
+    uint32_t count = (uint32_t)amount;
+    uint64_t shifted = raw >> count;
+    if (negative && count != 0) shifted |= mask ^ (mask >> count);
+    return chelis_int_from_twos(shifted, bits);
+}
+chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits);
+chelis_value chelis_value_box_scalar(chelis_scalar value);
+chelis_scalar chelis_value_unbox_scalar(chelis_value value);
+chelis_tensor *chelis_scalar_tensor(chelis_scalar value);
+chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor);
+void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value);
+chelis_string chelis_string_from_scalar(chelis_scalar value);
+chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype);
+chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype);
+int32_t chelis_tensor_rank(const chelis_tensor *tensor);
+int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis);
+int64_t chelis_tensor_numel(const chelis_tensor *tensor);
 
 chelis_string chelis_string_from_cstr(const char *value);
 const char *chelis_string_data(chelis_string value);
@@ -205,11 +334,6 @@ bool chelis_string_contains(chelis_string haystack, chelis_string needle);
 bool chelis_string_starts_with(chelis_string value, chelis_string prefix);
 bool chelis_string_ends_with(chelis_string value, chelis_string suffix);
 int64_t chelis_string_len(chelis_string value);
-chelis_string chelis_string_from_int64(int64_t value);
-chelis_string chelis_string_from_f64(double value);
-chelis_string chelis_string_from_bool(bool value);
-chelis_option_i64 chelis_parse_int64(chelis_string value);
-chelis_option_f64 chelis_parse_f64(chelis_string value);
 
 void chelis_list_retain(const chelis_list *list);
 void chelis_list_release(const chelis_list *list);
@@ -222,32 +346,48 @@ void chelis_dict_release(const chelis_dict *dict);
 int64_t chelis_dict_len(const chelis_dict *dict);
 void chelis_adt_retain(const chelis_adt *adt);
 void chelis_adt_release(const chelis_adt *adt);
+void chelis_option_retain(const chelis_option *option);
+void chelis_option_release(const chelis_option *option);
+void chelis_mapped_file_retain(const chelis_mapped_file *mapped);
+void chelis_mapped_file_release(const chelis_mapped_file *mapped);
 chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len);
 chelis_string chelis_adt_get_tag(const chelis_adt *adt);
 bool chelis_adt_tag_equals(const chelis_adt *adt, chelis_string ctor);
 int64_t chelis_adt_field_count(const chelis_adt *adt);
 chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index);
 
-chelis_value chelis_value_from_int64(int64_t value);
-chelis_value chelis_value_from_f64(double value);
-chelis_value chelis_value_from_bool(bool value);
-chelis_value chelis_value_from_string(chelis_string value);
-chelis_value chelis_value_from_tensor(chelis_tensor *value);
-chelis_value chelis_value_from_list(chelis_list *value);
-chelis_value chelis_value_from_tuple(chelis_tuple *value);
-chelis_value chelis_value_from_dict(chelis_dict *value);
-chelis_value chelis_value_from_adt(chelis_adt *value);
-void chelis_value_retain(chelis_value value);
+chelis_value chelis_value_take_string(chelis_string value);
+chelis_value chelis_value_take_tensor(chelis_tensor *tensor);
+chelis_value chelis_value_take_list(chelis_list *list);
+chelis_value chelis_value_take_tuple(chelis_tuple *tuple);
+chelis_value chelis_value_take_dict(chelis_dict *dict);
+chelis_value chelis_value_take_adt(chelis_adt *adt);
+chelis_value chelis_value_take_option(chelis_option *option);
+chelis_value chelis_value_take_mapped_file(chelis_mapped_file *mapped);
+chelis_value chelis_value_clone(chelis_value value);
 void chelis_value_release(chelis_value value);
-int64_t chelis_value_as_int64(chelis_value value);
-double chelis_value_as_f64(chelis_value value);
-bool chelis_value_as_bool(chelis_value value);
-chelis_string chelis_value_as_string(chelis_value value);
-chelis_tensor *chelis_value_as_tensor(chelis_value value);
-chelis_list *chelis_value_as_list(chelis_value value);
-chelis_tuple *chelis_value_as_tuple(chelis_value value);
-chelis_dict *chelis_value_as_dict(chelis_value value);
-chelis_adt *chelis_value_as_adt(chelis_value value);
+
+chelis_string chelis_string_take_value(chelis_value value);
+chelis_string chelis_string_borrow_value(chelis_value value);
+chelis_tensor *chelis_tensor_take_value(chelis_value value);
+const chelis_tensor *chelis_tensor_borrow_value(chelis_value value);
+chelis_list *chelis_list_take_value(chelis_value value);
+const chelis_list *chelis_list_borrow_value(chelis_value value);
+chelis_tuple *chelis_tuple_take_value(chelis_value value);
+const chelis_tuple *chelis_tuple_borrow_value(chelis_value value);
+chelis_dict *chelis_dict_take_value(chelis_value value);
+const chelis_dict *chelis_dict_borrow_value(chelis_value value);
+chelis_adt *chelis_adt_take_value(chelis_value value);
+const chelis_adt *chelis_adt_borrow_value(chelis_value value);
+chelis_option *chelis_option_take_value(chelis_value value);
+const chelis_option *chelis_option_borrow_value(chelis_value value);
+chelis_mapped_file *chelis_mapped_file_take_value(chelis_value value);
+const chelis_mapped_file *chelis_mapped_file_borrow_value(chelis_value value);
+
+chelis_option *chelis_option_none(void);
+chelis_option *chelis_option_some(chelis_value value);
+bool chelis_option_is_some(const chelis_option *option);
+chelis_value chelis_option_unwrap(const chelis_option *option);
 
 chelis_list *chelis_list_empty(void);
 chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len);
@@ -265,53 +405,42 @@ chelis_tuple *chelis_tuple_from_values(const chelis_value *items, int64_t len);
 chelis_value chelis_tuple_get(const chelis_tuple *tuple, int64_t index);
 chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs);
 bool chelis_dict_contains(const chelis_dict *dict, chelis_value key);
-chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key);
-chelis_option_i64 chelis_dict_get_i64(const chelis_dict *dict, chelis_value key);
-chelis_option_f64 chelis_dict_get_f64(const chelis_dict *dict, chelis_value key);
+chelis_option *chelis_dict_get(const chelis_dict *dict, chelis_value key);
 chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key);
 chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value);
-chelis_dict *chelis_dict_merge(const chelis_dict *lhs, const chelis_dict *rhs);
+chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right);
 chelis_list *chelis_dict_keys(const chelis_dict *dict);
 chelis_list *chelis_dict_values(const chelis_dict *dict);
 chelis_list *chelis_dict_entries(const chelis_dict *dict);
-chelis_tensor *chelis_tensor_from_value_list(const chelis_list *list);
-/* RT-4 F1: dtype-aware variant. Honors the declared destination dtype
- * for both allocation and per-element writes. The C backend calls this
- * when the surface-level annotation disambiguates storage width
- * (e.g. `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`). */
-chelis_tensor *chelis_tensor_from_value_list_typed(const chelis_list *list, int dst_dtype);
-chelis_list *chelis_list_from_tensor(const chelis_tensor *tensor);
-chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_value pad_value);
-chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_value pad_value);
-chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int64_t axis);
-chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int64_t axis, const chelis_list *sizes);
-chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int64_t axis);
-chelis_tensor *chelis_tensor_cmplt(const chelis_tensor *lhs, const chelis_tensor *rhs);
-chelis_tensor *chelis_tensor_scatter(
-    const chelis_tensor *base,
-    const chelis_tensor *indices,
-    const chelis_tensor *updates,
-    int64_t axis,
-    chelis_string mode
-);
+chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype);
+chelis_list *chelis_tensor_elements(const chelis_tensor *tensor);
+chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value);
+chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value);
+chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis);
+chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes);
+chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int32_t axis);
+chelis_tensor *chelis_tensor_cmplt(const chelis_tensor *left, const chelis_tensor *right);
+chelis_tensor *chelis_tensor_scatter_replace(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis);
+chelis_tensor *chelis_tensor_scatter_add(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis);
 chelis_tensor *chelis_tensor_where(
-    const chelis_tensor *cond,
+    const chelis_tensor *condition,
     const chelis_tensor *then_tensor,
     const chelis_tensor *else_tensor
 );
-chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int64_t axis);
-chelis_tuple *chelis_tensor_sort(const chelis_tensor *tensor, int64_t axis);
-chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int64_t axis1, int64_t axis2);
-chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int64_t axis1, int64_t axis2);
+chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int32_t axis);
+chelis_tuple *chelis_tensor_sort(const chelis_tensor *tensor, int32_t axis);
+chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2);
+chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2);
 chelis_tensor *chelis_tensor_clamp(
     const chelis_tensor *tensor,
-    const chelis_tensor *lo,
-    const chelis_tensor *hi
+    const chelis_tensor *lower,
+    const chelis_tensor *upper
 );
 chelis_tensor *chelis_tensor_einsum(
     chelis_string equation,
-    const chelis_tensor *lhs,
-    const chelis_tensor *rhs
+    const chelis_tensor *left,
+    const chelis_tensor *right,
+    chelis_dtype accumulator
 );
 void chelis_print_list(const chelis_list *list);
 void chelis_print_tuple(const chelis_tuple *tuple);
@@ -327,49 +456,6 @@ chelis_list *chelis_list_dir(chelis_string path);
 chelis_mapped_file *chelis_mmap_file(chelis_string path);
 chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len);
 int64_t chelis_mmap_len(const chelis_mapped_file *mapped);
-
-/*
- * Stable tuple ABI for generated C drivers:
- *
- * - Construct tuples with `chelis_tuple_from_values(...)` after boxing each item with
- *   the matching `chelis_value_from_*` helper.
- * - Extract typed items from tuple-returning Chelis functions with the helpers below.
- */
-static inline int64_t chelis_tuple_get_int64(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_int64(chelis_tuple_get(tuple, index));
-}
-
-static inline double chelis_tuple_get_f64(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_f64(chelis_tuple_get(tuple, index));
-}
-
-static inline bool chelis_tuple_get_bool(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_bool(chelis_tuple_get(tuple, index));
-}
-
-static inline chelis_string chelis_tuple_get_string(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_string(chelis_tuple_get(tuple, index));
-}
-
-static inline chelis_tensor *chelis_tuple_get_tensor(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_tensor(chelis_tuple_get(tuple, index));
-}
-
-static inline chelis_list *chelis_tuple_get_list(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_list(chelis_tuple_get(tuple, index));
-}
-
-static inline chelis_tuple *chelis_tuple_get_tuple(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_tuple(chelis_tuple_get(tuple, index));
-}
-
-static inline chelis_dict *chelis_tuple_get_dict(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_dict(chelis_tuple_get(tuple, index));
-}
-
-static inline chelis_adt *chelis_tuple_get_adt(const chelis_tuple *tuple, int64_t index) {
-    return chelis_value_as_adt(chelis_tuple_get(tuple, index));
-}
 
 /*
  * WS-1: bf16 / f16 per-element conversion to and from f32.
@@ -473,7 +559,8 @@ static inline uint16_t chelis_f32_to_f16(float v) {
             return (uint16_t)sign;
         }
         mant = (mant | 0x00800000u) >> (1 - exp);
-        uint32_t rounded = mant + 0x00001000u;
+        uint32_t lsb = (mant >> 13) & 1u;
+        uint32_t rounded = mant + 0x00000FFFu + lsb;
         return (uint16_t)(sign | (rounded >> 13));
     }
     /* Normal: round-to-nearest-even on the discarded 13 mantissa bits. */
@@ -489,32 +576,27 @@ static inline uint16_t chelis_f32_to_f16(float v) {
     return (uint16_t)(sign | ((uint32_t)exp << 10) | (rounded >> 13));
 }
 
-static inline void chelis_flat_to_indices(int flat, const int *shape, int ndim, int *out) {
+/* chelis#1112: a flat offset and a per-axis index are both bounded by
+ * extents, so they live in the extent domain and carry int64_t. `ndim`
+ * remains the axis-domain loop bound. */
+static inline void chelis_flat_to_indices(int64_t flat, const int64_t *shape, int ndim,
+                                          int64_t *out) {
     for (int d = ndim - 1; d >= 0; d--) {
         out[d] = flat % shape[d];
         flat /= shape[d];
     }
 }
 
-static inline int chelis_indices_to_flat(const int *indices, const int *strides, int ndim) {
-    int flat = 0;
+static inline int64_t chelis_indices_to_flat(const int64_t *indices, const int64_t *strides,
+                                             int ndim) {
+    int64_t flat = 0;
     for (int d = 0; d < ndim; d++) {
         flat += indices[d] * strides[d];
     }
     return flat;
 }
 
-static inline int chelis_is_contiguous(const chelis_tensor *t) {
-    int expected = 1;
-    for (int d = t->ndim - 1; d >= 0; d--) {
-        if (t->strides[d] != expected) return 0;
-        expected *= t->shape[d];
-    }
-    return 1;
-}
-
-chelis_tensor *chelis_contiguous(const chelis_tensor *t);
-void chelis_print_f32(const chelis_tensor *t);
+chelis_tensor *chelis_contiguous(const chelis_tensor *tensor);
 
 #ifdef __cplusplus
 }

@@ -6,16 +6,27 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+checkpoint-compile-probe = []
+generalize-sweep-oracle = []
+
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-pred.workspace = true
+chelis-vocab.workspace = true
 half.workspace = true
 serde.workspace = true
+sha2 = "0.10"
 stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+bincode = "1"
 chelis-surf.workspace = true
 chelis-macros.workspace = true
 syn.workspace = true
 quote.workspace = true
+
+[lints]
+workspace = true

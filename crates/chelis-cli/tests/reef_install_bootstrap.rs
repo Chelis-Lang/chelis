@@ -97,7 +97,7 @@ module_prefix = "Test"
 {deps_toml}"#,
         compiler = CURRENT_COMPILER_PIN,
     );
-    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder -> int32 = 0\n";
+    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> int32 = 0\n";
 
     let mut tar_bytes = Vec::new();
     {
@@ -137,6 +137,7 @@ fn sha256_bytes(b: &[u8]) -> String {
 /// agreement check, and an empty list keeps the fixture minimal.
 fn build_test_shell_bytes(name: &str, version: &str, archive_sha256: &str) -> Vec<u8> {
     let shell = chelis_shell::ShellPackage {
+        format_version: chelis_shell::SHELL_FORMAT_VERSION,
         package: chelis_shell::PackageId {
             name: name.to_string(),
             version: version.to_string(),

@@ -47,16 +47,18 @@ Windowed reductions slide a window over the tensor:
   for these.
 
 ```chelis-surf-fragment
-windowed_max = reduce_window_max(pool_grid, [2, 2], [1, 1])
-windowed_mean = reduce_window_mean(pool_grid, [2, 2], [2, 2])
+windowed_max = reduce_window_max(pool_grid, [2i64, 2i64], [1i64, 1i64])
+windowed_mean = reduce_window_mean(pool_grid, [2i64, 2i64], [2i64, 2i64])
 ```
 
 ### Structural and shape operations
 
 - `reshape(x, shape)` reinterprets the layout; the product of dimensions must match.
 - `permute(x, axes)` reorders dimensions by a permutation.
-- `expand(x, axis, size)` adds a dimension explicitly. This is the tool that replaces
-  broadcasting.
+- `insert(x, axis, size)` adds a dimension explicitly, raising the rank by one.
+  This is the tool that replaces broadcasting.
+- `expand(x, axis, size)` broadcasts an existing size-1 dimension to `size`,
+  leaving the rank alone.
 - `pad(x, padding, fill)`, `shrink(x, bounds)` add or slice boundary elements.
 - `concat(tensors, axis)`, `split(x, axis, sizes)` join and divide along an axis.
 - `gather(table, indices, axis)`, `scatter(base, indices, updates, axis, mode)` index and
@@ -84,7 +86,8 @@ clipped = clamp(running, floor15, ceil30)
 - `to_tensor(list)`, `to_list(tensor)` bridge lists and tensors. `pad_sequences(list, fill)`
   builds a rectangular tensor from ragged rows.
 - `cast(x, precision)` changes precision.
-- `shape(t, axis)` returns a runtime `int32` scalar for an axis length.
+- `shape(t, axis)` returns a runtime `int64` scalar for an axis length; the
+  axis argument itself is `int32`.
 - `copy(x)` produces a fresh owned value; `realize(x)` materializes an intermediate.
 
 ### Randomness
@@ -98,9 +101,18 @@ clipped = clamp(running, floor15, ceil30)
 
 `Std.Tensor.Construct` builds and reshapes tensors:
 
-- `linspace(start, stop, count)`, `arange(start, stop)`.
-- `stack(xs)` concatenates a list of rows along a new leading axis.
-- `squeeze(x)` removes a size-1 dimension, `unsqueeze(x)` inserts one.
+- `linspace(start, stop, count)` uses float endpoints and an `int64` count;
+  `arange(start, stop)` uses signed-integer endpoints.
+- `stack(xs, axis)` concatenates tensors along a new axis.
+- `squeeze(x, axis)` removes a size-1 dimension; `unsqueeze(x, axis)` inserts
+  one.
+
+The three rank-changing exports are specified but their public signatures do
+not yet type-check for concrete tensor callers; see [chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416).
+The checker does not yet enforce the endpoint dtype families
+([chelis#1417](https://github.com/Chelis-Lang/chelis/issues/1417)), and C builds
+do not yet actualize the helpers' generic cast targets
+([chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)).
 
 `Std.Tensor.Mask`:
 
@@ -121,14 +133,19 @@ clipped = clamp(running, floor15, ceil30)
 - `xavier_uniform(template, fan_in, fan_out)`, `xavier_normal(template, fan_in, fan_out)`.
 - `trunc_normal(template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
 
-All initializers carry the `Random` effect.
+All initializers carry the `Random` effect. A `with seed(...)` handler advances
+only for draws that actually execute: an untaken conditional branch inside a
+forward call or `grad(...)` consumes no stream positions. This includes
+computed and nested predicates, branches with different numbers of draws, and
+repeated or nested seed handlers.
 
 ### Sorting and scanning
 
 `Std.Sort`:
 
-- `sort_1d(values, axis)`, `sort_2d(values, axis)`, each returning a `(values, indices)`
-  tuple.
+- `sort(values, axis)` accepts a numeric tensor of any rank and returns
+  `(sorted_values, indices)`, with both tensors preserving the input shape and
+  the indices using `int64`.
 
 `Std.Scan`:
 
@@ -137,6 +154,14 @@ All initializers carry the `Random` effect.
 `Std.Index`:
 
 - `list_index(values, idx)`, `take_list(values, count)`, `drop_list(values, count)`.
+  Their adjoints preserve the input List's runtime length and positions: index
+  routes the cotangent to the selected element, while take/drop fill excluded
+  positions with zeros. Negative indices/counts fail; take/drop counts beyond
+  the length retain their ordinary truncation behavior. Scalar, tensor, empty,
+  nested, and multiple-List targets use the same rule, including runtime
+  selectors/counts reused elsewhere in the differentiated body and selection
+  composed through wrappers. These public `grad(...)` calls run in both the
+  evaluator and generated-C programs.
 
 ### Decimal and time
 
@@ -163,15 +188,47 @@ with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
 
 - `read_csv(path)` returns a list of header-keyed dictionaries, `try_read_csv(path)` returns
   the optional form.
+- `to_csv(rows)` renders that same shape back to CSV text (header from the first
+  row's key order, minimal quoting with doubled embedded quotes, LF line endings,
+  trailing newline; zero rows render as the empty string; a record that would
+  render as a blank line — a single empty value or header — renders as a quoted
+  empty field `""` so `read_csv`'s blank-line filter cannot drop it). Fields or
+  headers containing CR or LF are **rejected** — the line-based reader cannot
+  round-trip them (chelis#954 tracks the whole-file reader that lifts this), so
+  the writer refuses rather than emit output its own reader mangles. `try_to_csv` returns `None` instead of failing (mismatched row key
+  sets, CR/LF content); `write_csv(path, rows)` writes the rendered text and
+  names the path and first offending row on failure; `try_write_csv` is its
+  `Option` twin.
 
 `Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
-`JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`):
+`JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors
+are exported, so documents can be built directly). Integer-form tokens outside
+int64 retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
+image is non-finite are rejected:
 
 - `load_json(path)`, `parse_json(text)` and their `try_` variants.
-- `json_get`, and the typed accessors `json_string`, `json_int`, `json_float`, `json_bool`,
-  `json_array`, `json_object`, plus `json_is_null`.
+- `json_get`, and the typed accessors `json_string`, `json_int`, `json_bigint`,
+  `json_float`, `json_bool`, `json_array`, `json_object`, plus `json_is_null`.
+- `to_json(value)` renders a `Json` value compactly (object keys recursively
+  sorted by increasing Unicode scalar-value sequence before escaping, f64 via
+  `to_string`'s shortest-round-trip form — a claim made for **f64
+  specifically**, the dtype `JsonFloat` carries — escapes for `\" \\ \n \t
+  \r`). Equal object mappings therefore produce the same bytes regardless of
+  insertion history. Non-finite numbers have no JSON representation: `to_json`
+  fails on them and `try_to_json` returns `None`. `write_json(path, value)`
+  writes the rendered text and names the path on failure; `try_write_json` is
+  its `Option` twin. Control characters outside the escaped set pass through
+  unescaped — RFC 8259-invalid output for such input — because chelis has no
+  `char_code` primitive to emit `\u00XX`; the parser's `decode_escape` likewise
+  rejects `\uXXXX` input. Both halves of that asymmetry need a character-level
+  primitive and are tracked as chelis#953.
 
-These IO modules carry the `IO` effect and run on the evaluator and host paths.
+These IO modules carry the `IO` effect and run in **both lanes**: under
+`chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.
+`Std.Io.Json` is the sole public JSON value surface. `Std.Io.Csv` is distinct
+from the eval-only prelude CSV builtins (`parse_csv`/`to_csv`, chelis#903),
+which `chelis build` rejects whole-program; reef package name-rewriting keeps
+the shared CSV names apart in both lanes.
 
 ### Tokenization
 
@@ -186,9 +243,8 @@ These IO modules carry the `IO` effect and run on the evaluator and host paths.
 `Std.Test` provides assertion helpers for `def test_*()` functions discovered by
 `chelis test`. They carry the `Test` effect:
 
-- `assert_true`, `assert_false`, `assert_eq`, `assert_eq_int`, `assert_eq_bool`,
-  `assert_eq_string`, `assert_close`.
-- `assert_close_tensor`, `assert_eq_tensor_int64`, `assert_shape` for tensors.
+- `assert_true`, `assert_false`, generic `assert_eq`, and `assert_close`.
+- `assert_close_tensor`, generic `assert_eq_tensor`, and `assert_shape` for tensors.
 - `fail(msg)`.
 
 ## Process execution

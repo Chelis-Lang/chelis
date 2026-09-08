@@ -62,6 +62,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "layer_norm",
     "conv2d",
     "sum",
+    "count",
     "max_reduce",
     "min_reduce",
     "prod_reduce",
@@ -77,6 +78,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "reshape",
     "permute",
     "expand",
+    "insert",
     "pad",
     "shrink",
     "stride",
@@ -84,12 +86,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "fail",
     "debug",
     "test_assert",
-    "test_assert_eq_f32",
-    "test_assert_eq_int",
-    "test_assert_eq_bool",
-    "test_assert_eq_string",
+    "test_assert_eq",
     "test_assert_close_tensor",
-    "test_assert_eq_tensor_int64",
+    "test_assert_eq_tensor",
     "string_len",
     "string_concat",
     "string_slice",
@@ -146,6 +145,20 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
+    "round_to",
+    // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
+    // column accessors over List[Dict[string,string]].
+    // Eval-only (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
+    "parse_csv",
+    "to_csv",
+    "csv_f64s",
+    "csv_ints",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_f64",
+    "csv_int",
+    "csv_str",
     "einsum",
     "split",
     "gather",
@@ -159,6 +172,1397 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "trace",
     "clamp",
 ];
+
+/// Zero-based argument slots, after the callee, whose values name tensor
+/// axes and therefore carry the [05-DIM-3] `int32` contract.
+///
+/// This is semantic registration, not a name heuristic. A new axis-taking
+/// builtin must select a layout here; inference consults this table before
+/// the operation-specific shape rule. `concat` is registered but screened
+/// in its overloaded tensor-list arm because list concatenation uses the
+/// same surface name with no axis argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisArgumentLayout {
+    NoAxes,
+    Fixed(&'static [usize]),
+    VariadicFrom(usize),
+}
+
+/// Lane realizability declaration for a builtin. Part of `BuiltinDecl`.
+/// Determines whether the tensor-DAG path or host path realizes this op.
+///
+/// This is NOT `#[derive(Default)]` — omitting realizability on a new
+/// `BuiltinDecl` entry must be a compile error, not a silent default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Realizability {
+    /// Both lanes can realize this op (when types permit).
+    Universal,
+    /// Only the host lane can realize this op, regardless of types.
+    HostOnly,
+    /// Tensor-lane when the resolved type is tensor; host-only when scalar.
+    /// The precision-capability check (def-level, issue #912 Task 6) is
+    /// separate — it is NOT encoded here.
+    TensorAtTensorType,
+}
+
+/// Whether a builtin is accepted solely by its polymorphic HM signature or
+/// must reach checker-owned semantic inference. Required on every
+/// [`BuiltinDecl`]; there is intentionally no default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceDisposition {
+    /// The signature fully determines the builtin's type behavior. The reason
+    /// is part of the reviewed declaration rather than an implicit fallback.
+    GenericAccepted { reason: &'static str },
+    /// The builtin must reach the named semantic checker family.
+    Checked(BuiltinInferenceRule),
+}
+
+/// Closed checker families used by builtin declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinInferenceRule {
+    /// A shape-computed result that may owe a deferred obligation when an
+    /// input is not yet bound.
+    ShapeComputed,
+    /// A dedicated type/arity/static-value rule in the application dispatcher.
+    Specialized,
+}
+
+const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
+    "matmul",
+    "sum",
+    "count",
+    "max_reduce",
+    "min_reduce",
+    "prod_reduce",
+    "argmax_reduce",
+    "argmin_reduce",
+    "mean",
+    "expand",
+    "insert",
+    "layer_norm",
+    "conv2d",
+    "scatter_elements",
+];
+
+const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
+    "add",
+    "mul",
+    "max_elem",
+    "neg",
+    "recip",
+    "exp",
+    "log",
+    "sin",
+    "tan",
+    "atan",
+    "sqrt",
+    "floor",
+    "ceil",
+    "round",
+    "uniform_like",
+    "cmplt",
+    "sub",
+    "div",
+    "floor_div",
+    "trunc_div",
+    "mod",
+    "eq",
+    "neq",
+    "lt",
+    "gt",
+    "lte",
+    "gte",
+    "bitand",
+    "bitor",
+    "bitxor",
+    "shl",
+    "shr",
+    "and",
+    "or",
+    "not",
+    "relu",
+    "sigmoid",
+    "tanh",
+    "silu",
+    "gelu",
+    "softmax",
+    "normalize",
+    "min_elem",
+    "reduce_window_max",
+    "reduce_window_min",
+    "reduce_window_sum",
+    "reduce_window_mean",
+    "reshape",
+    "permute",
+    "pad",
+    "shrink",
+    "stride",
+    "print",
+    "fail",
+    "debug",
+    "test_assert_close_tensor",
+    "string_len",
+    "string_concat",
+    "string_slice",
+    "string_contains",
+    "string_starts_with",
+    "string_ends_with",
+    "string_trim",
+    "to_string",
+    "to_int",
+    "to_float",
+    "rank",
+    "shape",
+    "numel",
+    "tensor_to_scalar",
+    "scalar_to_tensor",
+    "len",
+    "index",
+    "append",
+    "concat",
+    "take",
+    "drop",
+    "chunk",
+    "range",
+    "map",
+    "filter",
+    "fold",
+    "scan",
+    "tensor_scan",
+    "partition",
+    "flat_map",
+    "flatten",
+    "zip",
+    "enumerate",
+    "dict_of",
+    "dict_get",
+    "dict_contains",
+    "dict_remove",
+    "dict_insert",
+    "dict_merge",
+    "dict_keys",
+    "dict_values",
+    "dict_entries",
+    "to_tensor",
+    "to_list",
+    "pad_sequences",
+    "pad_sequences_to",
+    "read_file",
+    "write_file",
+    "read_lines",
+    "read_bytes",
+    "file_exists",
+    "list_dir",
+    "mmap_file",
+    "mmap_read",
+    "mmap_len",
+    "process_run",
+    "round_to",
+    "parse_csv",
+    "to_csv",
+    "csv_f64s",
+    "csv_ints",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_f64",
+    "csv_int",
+    "csv_str",
+    "einsum",
+    "split",
+    "gather",
+    "scatter",
+    "scatter_replace",
+    "where",
+    "cumsum",
+    "sort",
+    "diagonal",
+    "trace",
+    "clamp",
+];
+
+/// True only when the declared rule is wired to the corresponding closed
+/// application-dispatch family. This is consulted at runtime and by the
+/// registry tripwire; a checked declaration with no route fails loudly.
+pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceRule) -> bool {
+    match rule {
+        BuiltinInferenceRule::ShapeComputed => SHAPE_COMPUTED_INFERENCE_BUILTINS.contains(&name),
+        BuiltinInferenceRule::Specialized => SPECIALIZED_INFERENCE_BUILTINS.contains(&name),
+    }
+}
+/// A builtin's complete declaration: name, inference disposition,
+/// realizability, shape class, and axis-argument layout.
+/// All fields are required — adding a builtin without any field is a
+/// compile error (missing struct field). No `Default` implementation.
+///
+/// ```compile_fail
+/// // Omitting `realizability` must fail to compile.
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, ShapeClass};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+///     shape_class: ShapeClass::Rewriting,
+///     axis_arguments: AxisArgumentLayout::NoAxes,
+/// };
+/// ```
+///
+/// ```compile_fail
+/// // Omitting `shape_class` must fail to compile.
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+///     realizability: Realizability::Universal,
+///     axis_arguments: AxisArgumentLayout::NoAxes,
+/// };
+/// ```
+///
+/// ```compile_fail
+/// // Omitting `inference` must fail to compile.
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, Realizability, ShapeClass};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     realizability: Realizability::Universal,
+///     shape_class: ShapeClass::Rewriting,
+///     axis_arguments: AxisArgumentLayout::NoAxes,
+/// };
+/// ```
+///
+/// ```compile_fail
+/// // Omitting `axis_arguments` must fail to compile.
+/// use chelis_types::{BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability, ShapeClass};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+///     realizability: Realizability::Universal,
+///     shape_class: ShapeClass::Rewriting,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinDecl {
+    pub name: &'static str,
+    pub inference: InferenceDisposition,
+    pub realizability: Realizability,
+    pub shape_class: ShapeClass,
+    pub axis_arguments: AxisArgumentLayout,
+}
+
+/// The consolidated builtin table. Single source of truth for builtin
+/// metadata. Each entry declares name, inference disposition, realizability,
+/// shape class, and axis layout.
+/// Omitting any field is a compile error.
+pub const BUILTINS: &[BuiltinDecl] = &[
+    // ─── Tensor elementwise (Universal, Identity) ────────────────────
+    BuiltinDecl {
+        name: "add",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mul",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "sub",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "div",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "floor_div",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "trunc_div",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "max_elem",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "min_elem",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "neg",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "recip",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "exp",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "log",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "sin",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "sqrt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "cos",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "tan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "atan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "abs",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "floor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "ceil",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "round",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "relu",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "sigmoid",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "tanh",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "silu",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "gelu",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "uniform_like",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "cmplt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "eq",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "neq",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "lt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "gt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "lte",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "gte",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mod",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "bitand",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "bitor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "bitxor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "shl",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "shr",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::TensorAtTensorType,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "and",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "or",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "not",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "where",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "clamp",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── Reductions (Universal, NameTracked) ─────────────────────────
+    BuiltinDecl {
+        name: "softmax",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
+    },
+    BuiltinDecl {
+        name: "normalize",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mean",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "sum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "count",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "max_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "min_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "prod_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "argmax_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "argmin_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    // ─── Windowed reductions ─────────────────────────────────────────
+    BuiltinDecl {
+        name: "reduce_window_max",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "reduce_window_min",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "reduce_window_sum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "reduce_window_mean",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── Shape ops (Universal, Rewriting) ────────────────────────────
+    BuiltinDecl {
+        name: "matmul",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "layer_norm",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "conv2d",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "reshape",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "permute",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "expand",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 3]),
+    },
+    BuiltinDecl {
+        name: "insert",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 3]),
+    },
+    BuiltinDecl {
+        name: "pad",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "shrink",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "stride",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "gather",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[2]),
+    },
+    BuiltinDecl {
+        name: "scatter",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[3]),
+    },
+    BuiltinDecl {
+        name: "scatter_replace",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[3]),
+    },
+    BuiltinDecl {
+        name: "scatter_elements",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[3]),
+    },
+    BuiltinDecl {
+        name: "einsum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "split",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
+    },
+    BuiltinDecl {
+        name: "cumsum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
+    },
+    BuiltinDecl {
+        name: "sort",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
+    },
+    BuiltinDecl {
+        name: "diagonal",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
+    },
+    BuiltinDecl {
+        name: "trace",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
+    },
+    // ─── IO / effects (HostOnly) ─────────────────────────────────────
+    BuiltinDecl {
+        name: "print",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "fail",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "debug",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "read_file",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "write_file",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "read_lines",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "read_bytes",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "file_exists",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "list_dir",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mmap_file",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mmap_read",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "mmap_len",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "process_run",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "round_to",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── Host-lane CSV I/O (chelis#903, HostOnly, eval-only) ─────────
+    BuiltinDecl {
+        name: "parse_csv",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "to_csv",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_f64s",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_ints",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_strs",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_nrows",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_cols",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_f64",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_int",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "csv_str",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── String ops (HostOnly) ───────────────────────────────────────
+    BuiltinDecl {
+        name: "string_len",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "string_concat",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "string_slice",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "string_contains",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "string_starts_with",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "string_ends_with",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "string_trim",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "to_string",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "to_int",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "to_float",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── Tensor introspection (HostOnly at scalar type) ──────────────
+    BuiltinDecl {
+        name: "rank",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "shape",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
+    },
+    BuiltinDecl {
+        name: "numel",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "tensor_to_scalar",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "scalar_to_tensor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── List ops (HostOnly) ─────────────────────────────────────────
+    BuiltinDecl {
+        name: "len",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "index",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "append",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "concat",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
+    },
+    BuiltinDecl {
+        name: "take",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "drop",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "chunk",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "range",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "map",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "filter",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "fold",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "scan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "tensor_scan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "partition",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "flat_map",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "flatten",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "zip",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "enumerate",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── Dict ops (HostOnly) ─────────────────────────────────────────
+    BuiltinDecl {
+        name: "dict_of",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_get",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_contains",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_remove",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_insert",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_merge",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_keys",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_values",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "dict_entries",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── Tensor conversion (HostOnly) ────────────────────────────────
+    BuiltinDecl {
+        name: "to_tensor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "to_list",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "pad_sequences",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "pad_sequences_to",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // ─── Test builtins (HostOnly) ────────────────────────────────────
+    BuiltinDecl {
+        name: "test_assert",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "test_assert_eq",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "test_assert_close_tensor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "test_assert_eq_tensor",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+];
+
+/// Look up a builtin's declaration by name. Returns `None` for non-builtins.
+pub fn builtin_decl(name: &str) -> Option<&'static BuiltinDecl> {
+    BUILTINS.iter().find(|b| b.name == name)
+}
+
+pub fn axis_argument_layout(name: &str) -> Option<AxisArgumentLayout> {
+    match builtin_decl(name)?.axis_arguments {
+        AxisArgumentLayout::NoAxes => None,
+        layout => Some(layout),
+    }
+}
+
+/// Look up a builtin's realizability by name.
+pub fn realizability(name: &str) -> Option<Realizability> {
+    builtin_decl(name).map(|b| b.realizability)
+}
 
 /// Shape semantics of a builtin for the Tier-2 rank-polymorphism
 /// Body-Discipline check (`spec/design/rank_polymorphism.md` §Soundness
@@ -225,8 +1629,8 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // and the procedural arm (`check_expand_signature`) computes the
         // symbolic output row, rejecting positional axes at symbolic rank —
         // the same gate structure as the reductions.
-        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
-        | "argmin_reduce" | "expand" => ShapeClass::NameTracked,
+        "sum" | "count" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
+        | "argmax_reduce" | "argmin_reduce" | "expand" | "insert" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
@@ -261,6 +1665,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![dv],
             rvars: vec![],
             body: Type::Fn(
@@ -277,6 +1682,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -307,13 +1713,19 @@ pub fn builtin_env() -> (Env, VarGen) {
         // The builtin entry just marks it as a 2-arg function.
         let _ = (dv, input_tv);
         let tv = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
         let scheme = Scheme {
-            tvars: vec![tv],
+            tvars: vec![tv, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
-                Box::new(Type::Var(tv)), // inference engine overrides for cmplt
+                // The application checker replaces this with bool on the
+                // operand's surface. Keeping the placeholder independent
+                // avoids binding an unresolved operand variable to bool
+                // before that procedural result rule runs.
+                Box::new(Type::Var(output)),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -325,6 +1737,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -340,6 +1753,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -353,6 +1767,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let t3 = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, t3],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -373,6 +1788,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -388,6 +1804,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -402,13 +1819,14 @@ pub fn builtin_env() -> (Env, VarGen) {
     /// `infer_reduce_window_app` arm in `infer.rs` overrides the result
     /// type with the spec §2.3.1 shape contract; this scheme exists so
     /// the function name is in scope at lookup time and the canonical
-    /// arg-arity / list-of-int32 constraints are visible during unification.
+    /// arg-arity / list-of-int64 constraints are visible during unification.
     fn tensor_reduce_window(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
-        let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+        let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -424,13 +1842,16 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(input)),
+                    // [05-DIM-1]: axis-domain axis (int32), extent-domain
+                    // size (int64).
                     Type::Prim(Prim::Int32),
-                    Type::Prim(Prim::Int32),
+                    Type::Prim(Prim::Int64),
                 ],
                 Box::new(Type::Var(out)),
             ),
@@ -442,6 +1863,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -456,6 +1878,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -476,6 +1899,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, kernel, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -495,6 +1919,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -510,6 +1935,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![Type::Var(input)], Box::new(Type::Var(output))),
@@ -523,6 +1949,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -540,6 +1967,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -557,6 +1985,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -574,6 +2003,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -591,6 +2021,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -612,6 +2043,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -631,6 +2063,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, d, e, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -655,6 +2088,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, d, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -670,6 +2104,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -684,6 +2119,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -697,6 +2133,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -711,6 +2148,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     // Tier 1: RISC Primitives
     tensor_binop("add", &mut env, &mut vg);
+    tensor_binop("sub", &mut env, &mut vg);
     tensor_binop("mul", &mut env, &mut vg);
     // `div` and `recip` were promoted from a Tier 2
     // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
@@ -724,6 +2162,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_binop("floor_div", &mut env, &mut vg);
     tensor_binop("trunc_div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
+    tensor_binop("min_elem", &mut env, &mut vg);
 
     tensor_unop("neg", &mut env, &mut vg);
     tensor_unop("recip", &mut env, &mut vg);
@@ -743,7 +2182,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
-    tensor_binop("sub", &mut env, &mut vg);
     generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
@@ -776,10 +2214,10 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);
-    tensor_binop("min_elem", &mut env, &mut vg);
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
     tensor_conv2d("conv2d", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
+    tensor_reduce_to_out("count", &mut env, &mut vg);
     tensor_reduce_to_out("max_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("min_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("prod_reduce", &mut env, &mut vg);
@@ -804,6 +2242,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("reshape", &mut env, &mut vg);
     tensor_unop("permute", &mut env, &mut vg);
     tensor_expand_to_out("expand", &mut env, &mut vg);
+    tensor_expand_to_out("insert", &mut env, &mut vg);
     tensor_unop("pad", &mut env, &mut vg);
     tensor_unop("shrink", &mut env, &mut vg);
     tensor_unop("stride", &mut env, &mut vg);
@@ -819,6 +2258,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "test_assert".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -827,84 +2267,47 @@ pub fn builtin_env() -> (Env, VarGen) {
             ),
         },
     );
-    env.bind(
-        "test_assert_eq_f32".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_int".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::Int64),
-                    Type::Prim(Prim::Int64),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_bool".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::Bool),
-                    Type::Prim(Prim::Bool),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_string".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::String),
-                    Type::Prim(Prim::String),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
     {
-        // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> unit
-        let tensor_tv = vg.fresh_tvar();
+        let value = vg.fresh_tvar();
         env.bind(
-            "test_assert_close_tensor".to_string(),
+            "test_assert_eq".to_string(),
             Scheme {
-                tvars: vec![tensor_tv],
+                tvars: vec![value],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
+                    vec![Type::Var(value), Type::Var(value), Type::Prim(Prim::String)],
+                    Box::new(Type::Unit),
+                ),
+            },
+        );
+    }
+    {
+        // test_assert_close_tensor:
+        //   (&tensor[..r,p_float], &tensor[..r,p_float], p_float, string) -> unit
+        // One quantified type variable occupies both tensor precision slots
+        // and the scalar tolerance position. This makes same-dtype equality a
+        // structural unification constraint. The quantified variable's
+        // ActiveFloat restriction is part of the function value, so aliases,
+        // polymorphic wrappers, and higher-order calls retain admissibility.
+        // The shared rank variable preserves arbitrary rank and exact shape
+        // equality between the tensors.
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let tensor = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
+        env.bind(
+            "test_assert_close_tensor".to_string(),
+            Scheme {
+                tvars: vec![precision],
+                tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
+                dvars: vec![],
+                rvars: vec![rank],
+                body: Type::Fn(
                     vec![
-                        borrowed(Type::Var(tensor_tv)),
-                        borrowed(Type::Var(tensor_tv)),
-                        Type::Prim(Prim::F32),
+                        borrowed(tensor.clone()),
+                        borrowed(tensor),
+                        Type::Var(precision),
                         Type::Prim(Prim::String),
                     ],
                     Box::new(Type::Unit),
@@ -913,13 +2316,13 @@ pub fn builtin_env() -> (Env, VarGen) {
         );
     }
     {
-        // test_assert_eq_tensor_int64: (tensor a, tensor a, string) -> unit
-        // Bit-exact comparison; the Std.Test wrapper restricts a to int64.
+        // test_assert_eq_tensor: (tensor a, tensor a, string) -> unit
         let tensor_tv = vg.fresh_tvar();
         env.bind(
-            "test_assert_eq_tensor_int64".to_string(),
+            "test_assert_eq_tensor".to_string(),
             Scheme {
                 tvars: vec![tensor_tv],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -941,6 +2344,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_contains".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -953,6 +2357,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_starts_with".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -965,6 +2370,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_ends_with".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -998,6 +2404,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "fold".to_string(),
         Scheme {
             tvars: vec![fold_acc, fold_item, fold_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1017,6 +2424,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "scan".to_string(),
         Scheme {
             tvars: vec![scan_acc, scan_item, scan_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1044,6 +2452,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "tensor_scan".to_string(),
         Scheme {
             tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1087,6 +2496,19 @@ pub fn builtin_env() -> (Env, VarGen) {
     // `infer.rs` and the IO effect is assigned in `chelis-effects`, mirroring
     // how `read_file` acquires IO. Rejected by the C/HIP build backends.
     generic_binop("process_run", &mut env, &mut vg);
+    generic_binop("round_to", &mut env, &mut vg);
+    // Host-lane CSV I/O (chelis#903); the concrete contracts live in
+    // `check_csv_builtin_signature` (infer/app_hostio.rs).
+    generic_unop("parse_csv", &mut env, &mut vg);
+    generic_unop("to_csv", &mut env, &mut vg);
+    generic_binop("csv_f64s", &mut env, &mut vg);
+    generic_binop("csv_ints", &mut env, &mut vg);
+    generic_binop("csv_strs", &mut env, &mut vg);
+    generic_unop("csv_nrows", &mut env, &mut vg);
+    generic_unop("csv_cols", &mut env, &mut vg);
+    generic_triop("csv_f64", &mut env, &mut vg);
+    generic_triop("csv_int", &mut env, &mut vg);
+    generic_triop("csv_str", &mut env, &mut vg);
     generic_triop("mmap_read", &mut env, &mut vg);
     generic_unop("mmap_len", &mut env, &mut vg);
     generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
@@ -1117,19 +2539,23 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let option_tvar = vg.fresh_tvar();
     let option_type = Type::Adt("Option".to_string(), vec![Type::Var(option_tvar)]);
 
-    env.bind(
+    env.bind_constructor(
         "Some".to_string(),
+        "Option".to_string(),
         Scheme {
             tvars: vec![option_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![Type::Var(option_tvar)], Box::new(option_type.clone())),
         },
     );
-    env.bind(
+    env.bind_constructor(
         "None".to_string(),
+        "Option".to_string(),
         Scheme {
             tvars: vec![option_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: option_type.clone(),
@@ -1142,7 +2568,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "Option".to_string(),
             type_params: vec!["a".to_string()],
+            param_kinds: vec![NominalParamKind::Type],
             param_vars: vec![option_tvar],
+            param_args: vec![NominalArg::Type(Type::Var(option_tvar))],
             opaque: false,
             defining_module: None,
             variants: vec![
@@ -1160,10 +2588,12 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let list_tvar = vg.fresh_tvar();
     let list_type = Type::Adt("List".to_string(), vec![Type::Var(list_tvar)]);
 
-    env.bind(
+    env.bind_constructor(
         "Cons".to_string(),
+        "List".to_string(),
         Scheme {
             tvars: vec![list_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1172,10 +2602,12 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
             ),
         },
     );
-    env.bind(
+    env.bind_constructor(
         "Nil".to_string(),
+        "List".to_string(),
         Scheme {
             tvars: vec![list_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: list_type.clone(),
@@ -1188,7 +2620,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "List".to_string(),
             type_params: vec!["a".to_string()],
+            param_kinds: vec![NominalParamKind::Type],
             param_vars: vec![list_tvar],
+            param_args: vec![NominalArg::Type(Type::Var(list_tvar))],
             opaque: false,
             defining_module: None,
             variants: vec![
@@ -1209,11 +2643,34 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "MappedFile".to_string(),
             type_params: Vec::new(),
+            param_kinds: Vec::new(),
             param_vars: Vec::new(),
+            param_args: Vec::new(),
             opaque: false,
             defining_module: None,
             variants: Vec::new(),
         });
+}
+
+/// Capacity-census enumeration source for Rust-registered prelude value
+/// ADTs (spec/design/dtype_semantics.md §C6, the `prelude-adt-numeric`
+/// leg): every prelude ADT whose registration lives in this file, exactly
+/// as registered. The census tripwire
+/// (crates/chelis-cli/tests/capacity_census_tripwire.rs) renders these
+/// defs through the same canonical shape identity as the
+/// `packages/chelis-std` `.ch` ADT rows, so a numeric field added to a
+/// prelude ADT is a censused row -- never an unenumerated numeric channel.
+///
+/// Deliberately reconstructed from the single registration path
+/// (`register_prelude_adts`) rather than a hand-maintained list: an ADT
+/// registered there but absent here is impossible.
+pub fn prelude_adt_defs() -> Vec<AdtDef> {
+    let (mut env, mut vg) = builtin_env();
+    let mut adt_reg = AdtRegistry::new();
+    register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
+    let mut defs: Vec<AdtDef> = adt_reg.defs.into_values().collect();
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    defs
 }
 
 /// Names that the inference engine should special-case for return type.
@@ -1296,6 +2753,7 @@ mod tests {
         // end-to-end in a rank-poly body.
         let name_tracked: &[&str] = &[
             "sum",
+            "count",
             "mean",
             "max_reduce",
             "min_reduce",
@@ -1303,6 +2761,7 @@ mod tests {
             "argmax_reduce",
             "argmin_reduce",
             "expand",
+            "insert",
         ];
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
@@ -1332,8 +2791,10 @@ mod tests {
         // rejects positional axes at symbolic rank, so admitting it in a
         // `..r` body cannot hide a transposition.
         assert_eq!(shape_class("sum"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("count"), ShapeClass::NameTracked);
         assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
         assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("insert"), ShapeClass::NameTracked);
         // chelis#340: the rest of the reduction family is name-tracked too.
         assert_eq!(shape_class("max_reduce"), ShapeClass::NameTracked);
         assert_eq!(shape_class("min_reduce"), ShapeClass::NameTracked);
@@ -1504,6 +2965,43 @@ mod tests {
     }
 
     #[test]
+    fn builtin_env_has_csv_io_builtins() {
+        // chelis#903 host-lane CSV I/O: every builtin is registered with
+        // the declared arity; infer/app_hostio.rs pins the canonical
+        // List[Dict[string,string]] table carrier.
+        let (env, _) = builtin_env();
+        for (name, arity) in [
+            ("parse_csv", 1),
+            ("to_csv", 1),
+            ("csv_f64s", 2),
+            ("csv_ints", 2),
+            ("csv_strs", 2),
+            ("csv_nrows", 1),
+            ("csv_cols", 1),
+            ("csv_f64", 3),
+            ("csv_int", 3),
+            ("csv_str", 3),
+        ] {
+            let scheme = env
+                .lookup(name)
+                .unwrap_or_else(|| panic!("`{name}` must be registered"));
+            match &scheme.body {
+                Type::Fn(params, _) => assert_eq!(
+                    params.len(),
+                    arity,
+                    "`{name}` should take {arity} args, got {}",
+                    params.len()
+                ),
+                other => panic!("`{name}` should be a function type, got {other:?}"),
+            }
+            assert!(
+                BUILTIN_NAMES.contains(&name),
+                "`{name}` must be in the closed BUILTIN_NAMES vocabulary"
+            );
+        }
+    }
+
+    #[test]
     fn builtin_env_missing_name_returns_none() {
         let (env, _) = builtin_env();
         assert!(env.lookup("nonexistent").is_none());
@@ -1513,7 +3011,8 @@ mod tests {
     fn instantiate_add_produces_fn_type() {
         let (env, mut vg) = builtin_env();
         let scheme = env.lookup("add").unwrap();
-        let ty = env.instantiate(scheme, &mut vg);
+        let subst = crate::unify::Subst::new();
+        let ty = env.instantiate(scheme, &mut vg, &subst);
         match ty {
             Type::Fn(args, _ret) => assert_eq!(args.len(), 2),
             other => panic!("expected Fn, got {other:?}"),
@@ -1526,7 +3025,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add should accept two tensors of the same type
         let tensor_f32 = Type::Tensor(
@@ -1541,7 +3041,6 @@ mod tests {
             Box::new(tensor_f32),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &expected_fn, &mut subst).is_ok());
     }
 
@@ -1551,7 +3050,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
         let t1 = Type::Tensor(
@@ -1567,7 +3067,6 @@ mod tests {
             Box::new(Type::Var(vg.fresh_tvar())),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
     }
 
@@ -1577,7 +3076,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], int32) should fail
         let t1 = Type::Tensor(
@@ -1590,7 +3090,81 @@ mod tests {
             Box::new(Type::Var(vg.fresh_tvar())),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
+    }
+
+    /// Issue #912: BUILTINS table must contain every entry from BUILTIN_NAMES
+    /// and vice versa. This ensures the consolidated table doesn't drift.
+    #[test]
+    fn builtins_table_matches_builtin_names() {
+        use std::collections::BTreeSet;
+        let table_names: BTreeSet<&str> = super::BUILTINS.iter().map(|b| b.name).collect();
+        let array_names: BTreeSet<&str> = super::BUILTIN_NAMES.iter().copied().collect();
+
+        let in_table_not_array: Vec<&str> = table_names.difference(&array_names).copied().collect();
+        let in_array_not_table: Vec<&str> = array_names.difference(&table_names).copied().collect();
+
+        assert!(
+            in_table_not_array.is_empty() && in_array_not_table.is_empty(),
+            "BUILTINS table and BUILTIN_NAMES must contain the same names.\n\
+             In BUILTINS but not BUILTIN_NAMES: {in_table_not_array:?}\n\
+             In BUILTIN_NAMES but not BUILTINS: {in_array_not_table:?}"
+        );
+    }
+
+    /// Issue #912: every BUILTINS entry's shape_class must match the existing
+    /// shape_class() function (consistency during migration).
+    #[test]
+    fn builtins_table_shape_class_consistent() {
+        for decl in super::BUILTINS {
+            assert_eq!(
+                super::shape_class(decl.name),
+                decl.shape_class,
+                "shape_class mismatch for builtin `{}`",
+                decl.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_checked_builtin_has_an_exact_inference_route() {
+        for decl in super::BUILTINS {
+            match decl.inference {
+                super::InferenceDisposition::Checked(rule) => assert!(
+                    super::has_registered_inference_route(decl.name, rule),
+                    "builtin `{}` declares {rule:?} but no exact route owns it",
+                    decl.name
+                ),
+                super::InferenceDisposition::GenericAccepted { reason } => assert!(
+                    !reason.trim().is_empty(),
+                    "generic acceptance for `{}` requires a reviewable reason",
+                    decl.name
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn every_inference_route_is_owned_by_the_exact_checked_declaration() {
+        for (rule, names) in [
+            (
+                super::BuiltinInferenceRule::ShapeComputed,
+                super::SHAPE_COMPUTED_INFERENCE_BUILTINS,
+            ),
+            (
+                super::BuiltinInferenceRule::Specialized,
+                super::SPECIALIZED_INFERENCE_BUILTINS,
+            ),
+        ] {
+            for name in names {
+                let decl = super::builtin_decl(name)
+                    .unwrap_or_else(|| panic!("inference route names unknown builtin `{name}`"));
+                assert_eq!(
+                    decl.inference,
+                    super::InferenceDisposition::Checked(rule),
+                    "inference route for `{name}` is not owned by its exact declaration"
+                );
+            }
+        }
     }
 }

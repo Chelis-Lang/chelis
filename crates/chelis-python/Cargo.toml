@@ -17,6 +17,7 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 chelis-backend-c.workspace = true
 chelis-compiler-api.workspace = true
+chelis-vocab.workspace = true
 libc = "0.2"
 libloading = "0.8"
 pyo3 = { version = "0.24", features = ["abi3-py39", "auto-initialize"] }
@@ -27,3 +28,6 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
+
+[lints]
+workspace = true

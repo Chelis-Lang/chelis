@@ -1,6 +1,6 @@
 //! Basic DAG optimization passes.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
 
@@ -22,25 +22,80 @@ pub fn constant_fold(dag: &mut Dag) {
     // (when distinct from the operation's) and each operand's existing
     // `merged_spans` — i.e. the operand's full provenance flowing onto
     // the folded result.
-    let mut replacements: Vec<(NodeId, f64, Vec<String>)> = Vec::new();
+    let mut replacements: Vec<(NodeId, chelis_types::ScalarValue, Vec<String>)> = Vec::new();
+
+    // Direct subtraction and value extrema fold through their exact typed
+    // kernels below. The remaining legacy fold set computes on the f64 wide
+    // image (the chelis#680 residue) and FINALIZES the result at the node's
+    // dtype through the sealed module. Two decline rules keep that older set
+    // conservative per the section C2 contract: an integer payload whose f64
+    // image is not exact declines (never bake a collapsed value in,
+    // chelis#856), and a result that does not finalize at the node's dtype
+    // declines (never bake a trap away nor in - the runtime evaluates the
+    // unfolded graph and traps with its full diagnostic).
+    let wide_image = |value: &chelis_types::ScalarValue| -> Option<f64> {
+        if let Some(i) = value.as_i64_exact()
+            && (i as f64) as i128 != i as i128
+        {
+            return None;
+        }
+        Some(value.as_f64_lossy())
+    };
 
     for node in dag.nodes() {
         if node.inputs.len() == 2 {
             let lhs = dag.get(node.inputs[0]);
             let rhs = dag.get(node.inputs[1]);
             if let (Some(l), Some(r)) = (lhs, rhs)
-                && let (RiscOp::Const { value: lv }, RiscOp::Const { value: rv }) = (&l.op, &r.op)
+                && let (RiscOp::Const { value: lval }, RiscOp::Const { value: rval }) =
+                    (&l.op, &r.op)
             {
+                let direct = match &node.op {
+                    RiscOp::Sub => Some(if node.output_type.precision.is_integer() {
+                        chelis_types::int_binop(chelis_types::IntBinOp::Sub, *lval, *rval)
+                    } else {
+                        chelis_types::float_binop(chelis_types::FloatBinOp::Sub, *lval, *rval)
+                    }),
+                    RiscOp::MaxElem => Some(if node.output_type.precision.is_integer() {
+                        chelis_types::int_binop(chelis_types::IntBinOp::Max, *lval, *rval)
+                    } else {
+                        chelis_types::float_binop(chelis_types::FloatBinOp::Max, *lval, *rval)
+                    }),
+                    RiscOp::MinElem => Some(if node.output_type.precision.is_integer() {
+                        chelis_types::int_binop(chelis_types::IntBinOp::Min, *lval, *rval)
+                    } else {
+                        chelis_types::float_binop(chelis_types::FloatBinOp::Min, *lval, *rval)
+                    }),
+                    _ => None,
+                };
+                if let Some(result) = direct {
+                    if let Ok(sealed) = result
+                        && sealed.prim() == node.output_type.precision
+                    {
+                        let merge_spans = collect_operand_spans(node, &[l, r]);
+                        replacements.push((node.id, sealed, merge_spans));
+                    }
+                    // A direct typed fold that traps or finds a malformed
+                    // dtype declines the fold; it must never fall through to
+                    // the legacy f64-wide optimizer path.
+                    continue;
+                }
+
+                let (Some(lv), Some(rv)) = (wide_image(lval), wide_image(rval)) else {
+                    continue;
+                };
                 let result = match &node.op {
                     RiscOp::Add => Some(lv + rv),
                     RiscOp::Mul => Some(lv * rv),
                     RiscOp::CmpLt => Some(if lv < rv { 1.0 } else { 0.0 }),
-                    RiscOp::MaxElem => Some(if lv >= rv { *lv } else { *rv }),
                     _ => None,
                 };
-                if let Some(val) = result {
+                if let Some(val) = result
+                    && let Ok(sealed) =
+                        chelis_types::scalar_from_f64("const", node.output_type.precision, val)
+                {
                     let merge_spans = collect_operand_spans(node, &[l, r]);
-                    replacements.push((node.id, val, merge_spans));
+                    replacements.push((node.id, sealed, merge_spans));
                 }
             }
         }
@@ -48,7 +103,8 @@ pub fn constant_fold(dag: &mut Dag) {
         if node.inputs.len() == 1 {
             let input = dag.get(node.inputs[0]);
             if let Some(inp) = input
-                && let RiscOp::Const { value: v } = &inp.op
+                && let RiscOp::Const { value: inner } = &inp.op
+                && let Some(v) = wide_image(inner)
             {
                 let result = match &node.op {
                     RiscOp::Neg => Some(-v),
@@ -65,9 +121,12 @@ pub fn constant_fold(dag: &mut Dag) {
                     RiscOp::Round => Some(v.round_ties_even()),
                     _ => None,
                 };
-                if let Some(val) = result {
+                if let Some(val) = result
+                    && let Ok(sealed) =
+                        chelis_types::scalar_from_f64("const", node.output_type.precision, val)
+                {
                     let merge_spans = collect_operand_spans(node, &[inp]);
-                    replacements.push((node.id, val, merge_spans));
+                    replacements.push((node.id, sealed, merge_spans));
                 }
             }
         }
@@ -123,10 +182,10 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
 /// Same as [`dead_code_eliminate`] but also returns the `old_id -> new_id`
 /// remapping. Phase F (`lower_program_with_context`) needs the remap to
 /// rewrite the library's name → NodeId symbol table after DCE renumbering.
-pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
+pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
-        return (Dag::new(), HashMap::new());
+        return (Dag::new(), UnordMap::new());
     }
 
     // Mark live nodes: DAG roots + all Store nodes.
@@ -154,7 +213,7 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
                 live[reusable_input.0] = true;
             }
             // chelis#384/#397: a shape-only dependency (the `x` whose runtime
-            // shape supplies a Form-3 `expand` extent) is consumed for its
+            // shape supplies an `expand` extent) is consumed for its
             // shape, not its data, so it is not in `inputs`. Keep it live so
             // its `Load` survives and the symbolic dim it declares retains its
             // source. See `DagNode::shape_deps`.
@@ -164,9 +223,40 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
         }
     }
 
+    // chelis#1277 C2.4 rule 2: no guard is ever discharged. An INTERFACE
+    // witness - a `Load` axis a class groups - is an observable root, because
+    // the guard comparing it can trap and a trap is an observation under
+    // `spec/06` section 5.2. Without this a witness read by nothing is
+    // dropped, its claim is left with one witness, the class dissolves and
+    // the guard silently disappears, which is chelis#1374's shape.
+    //
+    // Two bounds keep this from resurrecting dead computation. It runs AFTER
+    // ordinary liveness, and it force-keeps only members whose source is an
+    // external axis. A LOCAL member is the operation introducing the extent:
+    // if that operation is dead, no lane emits its guard, and C4.5 derives
+    // classes "from the DAG a lane consumes, after the last rewrite" - a node
+    // a rewrite has replaced is not in that graph. Forcing local members live
+    // made the liveness circular, since a dead `Expand` carrying a claim
+    // became a member and the membership then kept it alive; that resurrected
+    // the dense product path specialization had just replaced with a
+    // `BlasMatmul`.
+    let mut extra = Vec::new();
+    for class in crate::axis_sources::derive_runtime_dim_classes(dag) {
+        for member in &class.members {
+            if let crate::axis_sources::AxisSource::ExternalAxis { load, .. } = member.source
+                && !live[load.0]
+            {
+                extra.push(load);
+            }
+        }
+    }
+    for load in extra {
+        live[load.0] = true;
+    }
+
     // Rebuild with only live nodes, remapping IDs.
     let mut new_dag = Dag::new();
-    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
 
     for (old_id, node) in dag.nodes().iter().enumerate() {
         if live[old_id] {
@@ -223,7 +313,8 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
         }
     }
 
-    let node_remap: HashMap<NodeId, NodeId> = id_map
+    let node_remap: UnordMap<NodeId, NodeId> = id_map
+        .into_sorted()
         .into_iter()
         .map(|(old, new)| (NodeId(old), new))
         .collect();
@@ -243,8 +334,8 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 /// dedup'd by the helper.
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
-    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
-    let mut seen: HashMap<(String, Vec<NodeId>, Vec<NodeId>), NodeId> = HashMap::new();
+    let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
+    let mut seen: UnordMap<(String, Vec<NodeId>, Vec<NodeId>), NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node
@@ -253,7 +344,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             .map(|&old| *id_map.get(&old.0).unwrap_or(&old))
             .collect();
         // chelis#384/#397: two otherwise-identical nodes that depend on
-        // DIFFERENT shape sources (a Form-3 `expand` extent) are NOT
+        // DIFFERENT shape sources (an `expand` extent) are NOT
         // interchangeable — merging them would drop one source. Fold the
         // remapped shape-deps into the CSE key so such nodes stay distinct.
         let remapped_shape_deps: Vec<NodeId> = node
@@ -290,7 +381,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             {
                 new_node.merged_spans = node.merged_spans.clone();
             }
-            // chelis#384/#397: preserve the (remapped) Form-3 `expand`
+            // chelis#384/#397: preserve the (remapped) shape-derived `expand`
             // shape-deps so CSE does not drop the liveness edge.
             if !remapped_shape_deps.is_empty()
                 && let Some(new_node) = new_dag.node_mut(new_id)
@@ -320,6 +411,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
 mod tests {
     use super::*;
     use crate::dag::{Dag, RiscOp, TensorType};
+    use chelis_types::{ElementRef, scalar_from_f64, scalar_from_i64};
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -328,47 +420,200 @@ mod tests {
     #[test]
     fn constant_fold_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(2)).unwrap();
-        assert_eq!(result.op, RiscOp::Const { value: 3.0 });
+        assert_eq!(
+            result.op,
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 3.0)
+        );
         assert!(result.inputs.is_empty());
     }
 
     #[test]
     fn constant_fold_mul() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 3.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 4.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(2)).unwrap();
-        assert_eq!(result.op, RiscOp::Const { value: 12.0 });
+        assert_eq!(
+            result.op,
+            RiscOp::synth_const(chelis_types::types::Prim::F32, 12.0)
+        );
     }
 
     #[test]
     fn constant_fold_neg() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 5.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
 
         constant_fold(&mut dag);
 
         let result = dag.get(NodeId(1)).unwrap();
-        assert_eq!(result.op, RiscOp::Const { value: -5.0 });
+        assert_eq!(
+            result.op,
+            RiscOp::synth_const(chelis_types::types::Prim::F32, -5.0)
+        );
+    }
+
+    #[test]
+    fn constant_fold_direct_integer_subtraction_is_exact_or_declines_overflow() {
+        let scalar_i64 = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Int64,
+        };
+        let mut exact = Dag::new();
+        let lhs = exact.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, 9_007_199_254_740_993)
+                    .unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        let rhs = exact.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, 1).unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        exact.add_node(RiscOp::Sub, vec![lhs, rhs], scalar_i64.clone(), None);
+        constant_fold(&mut exact);
+        match &exact.get(NodeId(2)).unwrap().op {
+            RiscOp::Const { value } => {
+                assert_eq!(value.as_i64_exact(), Some(9_007_199_254_740_992));
+            }
+            other => panic!("exact int64 subtraction must fold directly, got {other:?}"),
+        }
+
+        let mut overflow = Dag::new();
+        let lhs = overflow.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, i64::MAX).unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        let rhs = overflow.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, -1).unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        overflow.add_node(RiscOp::Sub, vec![lhs, rhs], scalar_i64, None);
+        constant_fold(&mut overflow);
+        assert!(matches!(overflow.get(NodeId(2)).unwrap().op, RiscOp::Sub));
+    }
+
+    #[test]
+    fn constant_fold_direct_extrema_preserves_selected_f64_bits() {
+        let scalar_f64 = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::F64,
+        };
+        let cases = [
+            (
+                f64::from_bits(0x7ff8_1111_2222_3333),
+                1.0,
+                0x7ff8_1111_2222_3333,
+            ),
+            (
+                1.0,
+                f64::from_bits(0xfff8_4444_5555_6666),
+                0xfff8_4444_5555_6666,
+            ),
+            (0.0, -0.0, 0),
+            (-0.0, 0.0, 0x8000_0000_0000_0000),
+        ];
+        for op in [RiscOp::MaxElem, RiscOp::MinElem] {
+            for (lhs_value, rhs_value, expected_bits) in cases {
+                let mut dag = Dag::new();
+                let lhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_f64("test", scalar_f64.precision, lhs_value).unwrap(),
+                    },
+                    vec![],
+                    scalar_f64.clone(),
+                    None,
+                );
+                let rhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_f64("test", scalar_f64.precision, rhs_value).unwrap(),
+                    },
+                    vec![],
+                    scalar_f64.clone(),
+                    None,
+                );
+                dag.add_node(op.clone(), vec![lhs, rhs], scalar_f64.clone(), None);
+                constant_fold(&mut dag);
+                match &dag.get(NodeId(2)).unwrap().op {
+                    RiscOp::Const { value } => match value.element_ref() {
+                        ElementRef::F64(observed) => {
+                            assert_eq!(observed.to_bits(), expected_bits, "{op:?}")
+                        }
+                        other => panic!("expected f64 folded value, got {other:?}"),
+                    },
+                    other => panic!("direct extrema must fold through exact selection: {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]
     fn dce_removes_dead_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let _dead = dag.add_node(RiscOp::Const { value: 99.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let _dead = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 99.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let live = dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         dag.add_root(live);
 
@@ -380,14 +625,24 @@ mod tests {
     #[test]
     fn dce_keeps_store_nodes() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![a],
             scalar_f32(),
             None,
         );
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let live = dag.add_node(RiscOp::Neg, vec![b], scalar_f32(), None);
         dag.add_root(live);
 
@@ -399,8 +654,18 @@ mod tests {
     #[test]
     fn cse_deduplicates_consts() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let sum = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(sum);
 
@@ -416,8 +681,18 @@ mod tests {
     #[test]
     fn dce_keeps_all_roots() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_root(a);
         dag.add_root(b);
 

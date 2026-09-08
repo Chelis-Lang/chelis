@@ -294,7 +294,12 @@ fn eval_scalar(source: &str, stem: &str) -> f64 {
 /// the given `shape`, e.g. `([2,3], [1..6]) -> "[[1.0, 2.0, 3.0], [4.0, ..]]"`.
 fn nested_literal(data: &[f64], shape: &[usize]) -> String {
     if shape.is_empty() {
-        return format!("{:.10}", data[0]);
+        let text = data[0].to_string();
+        return if text.contains('.') || text.contains('e') {
+            text
+        } else {
+            format!("{text}.0")
+        };
     }
     let inner: usize = shape[1..].iter().product::<usize>().max(1);
     let parts: Vec<String> = (0..shape[0])

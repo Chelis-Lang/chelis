@@ -32,8 +32,11 @@
 //!    includes the canonical user-facing language. Locks `Display` so
 //!    downstream consumers that *do* render for humans (CLI diagnostics)
 //!    don't silently regress.
+//! 9. **ScatterAdd reverse mode**: target cotangents pass through, update
+//!    cotangents gather at the same indices, and the discrete indices receive
+//!    no cotangent.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::DimInfo;
 use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
@@ -128,20 +131,14 @@ fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
     let grad = grad_dag_checked(&dag, out, &[table]).expect("grad");
     let grad_node = grad.grad_nodes[&table];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 8],
-            shape: vec![4, 2],
-        },
+        TensorValue::from_vec(vec![4, 2], vec![1.0; 8]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, 2.0, 3.0],
-            shape: vec![3],
-        },
+        TensorValue::from_vec(vec![3], vec![0.0, 2.0, 3.0]),
     );
     let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
     let dtable = &vals[&grad_node];
@@ -151,9 +148,9 @@ fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
     let expected = [1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "distinct-index grad at table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -176,20 +173,14 @@ fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
     let grad = grad_dag_checked(&dag, out, &[table]).expect("grad");
     let grad_node = grad.grad_nodes[&table];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 8],
-            shape: vec![4, 2],
-        },
+        TensorValue::from_vec(vec![4, 2], vec![1.0; 8]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, 0.0, 2.0, 0.0],
-            shape: vec![4],
-        },
+        TensorValue::from_vec(vec![4], vec![0.0, 0.0, 2.0, 0.0]),
     );
     let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
     let dtable = &vals[&grad_node];
@@ -198,9 +189,9 @@ fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
     let expected = [3.0, 3.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "mixed-index grad at table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -255,20 +246,14 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad");
     let grad_node = grad.grad_nodes[&table];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 10],
-            shape: vec![2, 5],
-        },
+        TensorValue::from_vec(vec![2, 5], vec![1.0; 10]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, 2.0, 0.0, 4.0],
-            shape: vec![4],
-        },
+        TensorValue::from_vec(vec![4], vec![0.0, 2.0, 0.0, 4.0]),
     );
     let vals = eval_tensor_with(&grad.dag, |n| inputs.get(n).cloned()).expect("bwd eval");
     let dtable = &vals[&grad_node];
@@ -277,9 +262,9 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     let expected = [2.0, 0.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 0.0, 1.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (dtable.data[i] - want).abs() < 1e-6,
+            (dtable.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "axis-1 mixed-index grad at table[{i}]: expected {want}, got {}",
-            dtable.data[i]
+            dtable.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -314,21 +299,15 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![1.0; 6]),
     );
     // Index 5 is way out of range for a 3-row table.
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![1.0, 5.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![1.0, 5.0]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }
@@ -361,20 +340,14 @@ fn gather_eval_negative_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
-        TensorValue {
-            data: vec![1.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![1.0; 6]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![0.0, -1.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![0.0, -1.0]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }
@@ -414,27 +387,18 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "target".to_string(),
-        TensorValue {
-            data: vec![0.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![0.0; 6]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![1.0, 9.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![1.0, 9.0]),
     );
     inputs.insert(
         "updates".to_string(),
-        TensorValue {
-            data: vec![1.0; 4],
-            shape: vec![2, 2],
-        },
+        TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }
@@ -474,27 +438,18 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "target".to_string(),
-        TensorValue {
-            data: vec![0.0; 6],
-            shape: vec![3, 2],
-        },
+        TensorValue::from_vec(vec![3, 2], vec![0.0; 6]),
     );
     inputs.insert(
         "indices".to_string(),
-        TensorValue {
-            data: vec![1.0, 9.0],
-            shape: vec![2],
-        },
+        TensorValue::from_vec(vec![2], vec![1.0, 9.0]),
     );
     inputs.insert(
         "updates".to_string(),
-        TensorValue {
-            data: vec![1.0; 4],
-            shape: vec![2, 2],
-        },
+        TensorValue::from_vec(vec![2, 2], vec![1.0; 4]),
     );
     let _ = eval_tensor_with(&dag, |n| inputs.get(n).cloned()).unwrap();
 }
@@ -514,7 +469,12 @@ fn scatter_ad_rejects_regardless_of_wrt_subset() {
         t(vec![3, 2]),
         None,
     );
-    let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], t_i32(vec![2]), None);
+    let indices = dag.add_node(
+        RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
+        vec![],
+        t_i32(vec![2]),
+        None,
+    );
     let updates = dag.add_node(
         RiscOp::Load {
             name: "updates".into(),
@@ -601,62 +561,91 @@ fn scatter_ad_error_display_contains_canonical_language() {
     }
 }
 
-/// Defensive: ScatterAdd's AD path remains None (the adjoint flows
-/// through Gather elsewhere — see `grad.rs::backward_op`'s ScatterAdd
-/// arm returns `None`). Locks the contract that ScatterAdd's own
-/// backward is not auto-synthesized at this layer.
+/// ScatterAdd is linear in its target and updates: the target cotangent is
+/// the upstream value and the updates cotangent gathers that value at the
+/// forward indices. Its integer indices are discrete and receive no
+/// cotangent even when explicitly requested.
 #[test]
-fn scatter_add_backward_op_returns_no_individual_adjoint() {
-    use chelis_ir::grad::grad_dag;
+fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
     let mut dag = Dag::new();
     let target = dag.add_node(
         RiscOp::Load {
             name: "target".into(),
         },
         vec![],
-        t(vec![3, 2]),
+        t(vec![4]),
         None,
     );
-    let indices = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], t_i32(vec![2]), None);
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        t_i32(vec![2]),
+        None,
+    );
     let updates = dag.add_node(
         RiscOp::Load {
             name: "updates".into(),
         },
         vec![],
-        t(vec![2, 2]),
+        t(vec![2]),
         None,
     );
     let sa = dag.add_node(
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
-        t(vec![3, 2]),
+        t(vec![4]),
         None,
     );
-    let s1 = dag.add_node(
-        RiscOp::Sum {
-            axis: 0,
-            accumulator: Prim::F32,
-        },
-        vec![sa],
-        t(vec![2]),
+    let coefficients = dag.add_node(
+        RiscOp::synth_const_tensor(Prim::F32, vec![2.0, 3.0, 5.0, 7.0]),
+        vec![],
+        t(vec![4]),
         None,
     );
+    let weighted = dag.add_node(RiscOp::Mul, vec![sa, coefficients], t(vec![4]), None);
     let out = dag.add_node(
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
         },
-        vec![s1],
+        vec![weighted],
         TensorType::scalar_f32(),
         None,
     );
 
-    // grad_dag(unchecked) returns None for ScatterAdd whose backward_op
-    // path returns None (no individual adjoint synthesized at the op level).
-    let result = grad_dag(&dag, out, &[updates]);
+    let grad = grad_dag_checked(&dag, out, &[target, indices, updates])
+        .expect("ScatterAdd reverse mode must be defined");
+    assert!(grad.grad_nodes.contains_key(&target));
+    assert!(grad.grad_nodes.contains_key(&updates));
     assert!(
-        result.is_none(),
-        "grad_dag over ScatterAdd alone should return None at the op-adjoint layer; \
-         got Some(_) (means the backward arm got rewired)"
+        !grad.grad_nodes.contains_key(&indices),
+        "integer ScatterAdd indices must remain a stop-gradient boundary"
+    );
+
+    let inputs = UnordMap::from([
+        (
+            "target".to_string(),
+            TensorValue::from_vec(vec![4], vec![11.0, 13.0, 17.0, 19.0]),
+        ),
+        (
+            "indices".to_string(),
+            TensorValue::from_vec(vec![2], vec![1.0, 3.0]),
+        ),
+        (
+            "updates".to_string(),
+            TensorValue::from_vec(vec![2], vec![23.0, 29.0]),
+        ),
+    ]);
+    let values = eval_tensor_with(&grad.dag, |name| inputs.get(name).cloned())
+        .expect("ScatterAdd adjoints evaluate");
+    assert_eq!(
+        values[&grad.grad_nodes[&target]].to_f64_lossy_vec(),
+        vec![2.0, 3.0, 5.0, 7.0]
+    );
+    assert_eq!(
+        values[&grad.grad_nodes[&updates]].to_f64_lossy_vec(),
+        vec![3.0, 7.0]
     );
 }

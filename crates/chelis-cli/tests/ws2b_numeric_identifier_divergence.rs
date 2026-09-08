@@ -9,7 +9,7 @@
 //! * #387 — integer `div`/`mod` by zero must TRAP, not return a finite
 //!   wrong value. The evaluator halts with one clean diagnostic shared
 //!   between `div` and `mod`; the C backend emits an EXPLICIT, PORTABLE
-//!   `chelis_int_div_guard` (`abort()` with the same diagnostic) rather than
+//!   `chelis_int_checked_divisor` (`abort()` with the same diagnostic) rather than
 //!   relying on a hardware fault — x86 raises SIGFPE on integer #DE but ARM64
 //!   does not fault, so a SIGFPE-dependent trap silently returned a wrong
 //!   value on macOS arm64. Float `div` keeps IEEE-754 (`1.0 / 0.0 == inf`).
@@ -21,15 +21,14 @@
 //! * #379 — top-level bindings spelled like C keywords or the emitted
 //!   helper scheme must produce compilable C (identifier mangling).
 //! * #365 — a `Bool` comparison-mask const (max-reduce / softmax backward)
-//!   must fill through the dtype-correct `chelis_fill_bool_bits`, not
-//!   `chelis_fill_f32_bits`, so a debug-runtime build does not abort on the
-//!   dtype assertion. (The test links the debug `libchelis_runtime.a`, whose
-//!   `debug_assert` is active.)
+//!   must fill through `chelis_fill_scalar` with a Bool-tagged exact scalar,
+//!   so a debug-runtime build does not abort on the dtype assertion. (The test
+//!   links the debug `libchelis_runtime.a`, whose `debug_assert` is active.)
 //!
 //! #378 (route a captured top-level scalar binding into `HostProgram::globals`)
 //! landed in chelis-ir, so the #381 program now compiles on the C backend and
 //! its arm is a full eval-vs-C parity oracle (the captured f64 scalar is packed
-//! into a `CHELIS_F64` rank-0 tensor for the tensor-helper input). All arms
+//! into a `CHELIS_DTYPE_F64` rank-0 tensor for the tensor-helper input). All arms
 //! here exercise eval-vs-C agreement.
 
 use assert_cmd::Command;
@@ -84,7 +83,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),
@@ -280,9 +284,10 @@ fn tensor_value<'a>(stdout: &'a str, name: &str) -> &'a str {
 // #387 — integer division / remainder by zero must TRAP
 // -----------------------------------------------------------------------------
 
-/// The single canonical evaluator diagnostic shared by integer `div` and
-/// `mod` (the consistency requirement: the two must agree).
-const INT_DIV_ZERO_DIAGNOSTIC: &str = "integer division or remainder by zero";
+/// [04-NUM-9] branded diagnostics shared by eval and the C backend after
+/// chelis#729 Phase 3. The actual operation and dtype are part of the contract.
+const EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in trunc_div at int64";
+const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at int64";
 
 /// POSITIVE: integer `trunc_div` is truncating (round toward zero) and
 /// agrees byte-for-byte between eval and the C backend. `7/2 == 3`,
@@ -298,7 +303,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("inttruncdiv.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[3.0, -3.0])",
+        "out = tensor(shape=[2], data=[3, -3])",
         "integer trunc_div must truncate toward zero (7/2=3, -7/2=-3); stdout={stdout:?}",
     );
 
@@ -306,7 +311,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of integer trunc_div (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of integer trunc_div (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -324,7 +329,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("intfloordiv.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[3.0, -4.0])",
+        "out = tensor(shape=[2], data=[3, -4])",
         "integer floor_div must round toward -inf (7/2=3, -7/2=-4); stdout={stdout:?}",
     );
 
@@ -332,7 +337,7 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of integer floor_div (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of integer floor_div (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -348,7 +353,7 @@ fn issue_387_float_div_by_zero_is_ieee_inf() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim_end(),
-        "inf",
+        "eval_result = inf",
         "float 1.0/0.0 must be +inf per IEEE-754",
     );
 }
@@ -386,7 +391,7 @@ fn chelis_178_scalar_floor_trunc_div_exact_sign_rounding() {
         );
         assert_eq!(
             String::from_utf8_lossy(&out.stdout).trim_end(),
-            *expected,
+            format!("eval_result = {expected}"),
             "`{expr}` must equal {expected} (spec/05 §2.1 sign-rounding)",
         );
     }
@@ -406,7 +411,7 @@ fn issue_387_integer_trunc_div_by_zero_traps_in_eval() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
+        stderr.contains(EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC),
         "integer div by zero must emit the canonical diagnostic; stderr={stderr:?}",
     );
     // The pre-fix silently-wrong value must never appear.
@@ -416,10 +421,9 @@ fn issue_387_integer_trunc_div_by_zero_traps_in_eval() {
     );
 }
 
-/// NEGATIVE / consistency: integer `mod` by zero traps with the SAME clean
-/// diagnostic as `trunc_div` (pre-fix: a raw Rust remainder panic). The
-/// integer division/remainder family (`trunc_div`, `floor_div`, `mod`) must
-/// agree.
+/// NEGATIVE / consistency: integer `mod` by zero traps with the same branded
+/// kind/dtype shape as `trunc_div`, while [04-NUM-9]'s required operation slot
+/// distinguishes `mod` from `trunc_div` (pre-fix: a raw Rust panic).
 #[test]
 fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
     let out = chelis_eval_expr("mod(cast(7, int64), cast(0, int64))");
@@ -430,9 +434,9 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
-        "integer mod by zero must emit the SAME canonical diagnostic as trunc_div \
-         (integer division/remainder consistency); stderr={stderr:?}",
+        stderr.contains(EVAL_MOD_ZERO_DIAGNOSTIC),
+        "integer mod by zero must emit the branded diagnostic with its actual op; \
+         stderr={stderr:?}",
     );
     assert!(
         !stderr.contains("attempt to calculate the remainder"),
@@ -442,7 +446,7 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
 }
 
 /// NEGATIVE parity: the C backend must trap integer division by zero with
-/// an EXPLICIT, PORTABLE guard (`chelis_int_div_guard` -> `abort()` with the
+/// an EXPLICIT, PORTABLE guard (`chelis_int_checked_divisor` -> `abort()` with the
 /// clean diagnostic), not by relying on a hardware fault. The divisor is
 /// computed at RUNTIME (`sub(y, z)`), so the compiler cannot constant-fold it
 /// to a literal `0` and elide the division. This is the regression that
@@ -462,7 +466,7 @@ out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_
     // Emit-shape: the integer divisor must be wrapped in the portable guard.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_int_div_guard("),
+        c_source.contains("chelis_int_checked_divisor("),
         "integer trunc_div must emit the portable zero-divisor guard (#387); \
          emitted C=\n{c_source}",
     );
@@ -485,7 +489,7 @@ out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_
     // than the old SIGFPE silent exit).
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
+        stderr.contains(EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC),
         "C backend trap must emit the canonical diagnostic on stderr (#387); \
          stderr={stderr:?}",
     );
@@ -510,7 +514,7 @@ out = d(cast(7, int64), cast(5, int64))\n";
     let kernel_c = build.path().join("scalardivtrap.c");
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_int_div_guard("),
+        c_source.contains("chelis_int_checked_divisor("),
         "scalar integer trunc_div must emit the portable guard (#387); emitted C=\n{c_source}",
     );
 
@@ -527,7 +531,7 @@ out = d(cast(7, int64), cast(5, int64))\n";
         String::from_utf8_lossy(&run.stdout),
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains(INT_DIV_ZERO_DIAGNOSTIC),
+        String::from_utf8_lossy(&run.stderr).contains(EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC),
         "scalar trap must emit the canonical diagnostic; stderr={:?}",
         String::from_utf8_lossy(&run.stderr),
     );
@@ -556,7 +560,7 @@ out = d(cast(7, int64), cast(5, int64))\n";
         String::from_utf8_lossy(&run.stdout),
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains(INT_DIV_ZERO_DIAGNOSTIC),
+        String::from_utf8_lossy(&run.stderr).contains(EVAL_MOD_ZERO_DIAGNOSTIC),
         "scalar mod trap must emit the canonical diagnostic; stderr={:?}",
         String::from_utf8_lossy(&run.stderr),
     );
@@ -574,7 +578,7 @@ out = d(1.0, 5.0)\n";
     let kernel_c = build.path().join("scalarfdiv.c");
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        !c_source.contains("chelis_int_div_guard("),
+        !c_source.contains("chelis_int_checked_divisor("),
         "float div must NOT emit the integer trap guard (#387); emitted C=\n{c_source}",
     );
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
@@ -598,8 +602,8 @@ out = d(1.0, 5.0)\n";
 /// The C-backend arm is now live: #378 (chelis-ir, merged) routes the
 /// captured scalar binding into `HostProgram::globals` so the C emitter
 /// declares it, and #381 (this PR) packs that captured f64 scalar into a
-/// `CHELIS_F64` rank-0 tensor for the tensor-helper input (the pre-fix
-/// catch-all packed it as `CHELIS_F32`, storing only the low 4 bytes, so the
+/// `CHELIS_DTYPE_F64` rank-0 tensor for the tensor-helper input (the pre-fix
+/// catch-all packed it as `CHELIS_DTYPE_F32`, storing only the low 4 bytes, so the
 /// f64 kernel read garbage and silently dropped the value -- the eval-vs-C
 /// divergence this arm exists to lock). `out` is a rank-1 f64 tensor, so
 /// both lanes render it identically; the comparison uses the value to stay
@@ -609,7 +613,7 @@ out = d(1.0, 5.0)\n";
 fn issue_381_scalar_to_tensor_on_captured_scalar_evals_and_matches_backend() {
     let source = "c = cast(1.1, f64)\n\
 def make(n: tensor[2, f64]) -> tensor[2, f64] = \
-add(n, expand(scalar_to_tensor(c), cast(0, int32), cast(2, int32)))\n\
+add(n, insert(scalar_to_tensor(c), cast(0, int32), cast(2, int64)))\n\
 out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
 
     // Eval lane (the reference): 1.1 broadcast-added to [1.0, 2.0].
@@ -625,12 +629,13 @@ out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
     // f32 and the C output was [1.0, 2.0] (the captured 1.1 dropped to ~0).
     let build = chelis_build_c(source, "s2t_capture");
     let kernel_c = build.path().join("s2t_capture.c");
-    // Emit-shape: the captured f64 scalar packs into a CHELIS_F64 rank-0
-    // tensor through a double*, not CHELIS_F32.
+    // Emit-shape: the captured f64 scalar packs into a CHELIS_DTYPE_F64 rank-0
+    // tensor through a double*, not CHELIS_DTYPE_F32.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_alloc(0, NULL, CHELIS_F64)") && c_source.contains("((double*)"),
-        "captured f64 scalar must pack into a CHELIS_F64 rank-0 tensor (#381); \
+        c_source.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F64)")
+            && c_source.contains("((double*)"),
+        "captured f64 scalar must pack into a CHELIS_DTYPE_F64 rank-0 tensor (#381); \
          emitted C=\n{c_source}",
     );
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
@@ -684,7 +689,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmax.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[1.0, 0.0])",
+        "out = tensor(shape=[2], data=[1, 0])",
         "argmax of row 0 is index 1, row 1 is index 0; stdout={stdout:?}",
     );
     // The reinterpreted-f32-bits signature must never appear.
@@ -697,7 +702,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of argmax int64 indices (#347) (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of argmax int64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -711,7 +716,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("argmin.c"));
     assert_eq!(
         binding_line(&stdout, "out"),
-        "out = tensor(shape=[2], data=[0.0, 1.0])",
+        "out = tensor(shape=[2], data=[0, 1])",
         "argmin of row 0 is index 0, row 1 is index 1; stdout={stdout:?}",
     );
     assert!(
@@ -723,7 +728,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of argmin int64 indices (#347) (values; byte parity returns at chelis#732 Phase 2)",
+        "eval and C backend must agree on the VALUES of argmin int64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -844,15 +849,14 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
 }
 
 // -----------------------------------------------------------------------------
-// #365 — Bool comparison-mask const fills through the dtype-correct helper
+// #365 / #1289 - Bool comparison-mask const uses the tagged scalar fill
 // -----------------------------------------------------------------------------
 
 /// POSITIVE + emit-shape: a `max_reduce` backward materializes a `Bool`
-/// comparison mask. The mask const must fill through `chelis_fill_bool_bits`
-/// (dtype-correct for CHELIS_BOOL), NOT `chelis_fill_f32_bits` (which asserts
-/// CHELIS_F32). The build links the debug `libchelis_runtime.a`, so the
-/// debug-build dtype assertion is active: a regression aborts the run.
-/// Pre-fix the Bool const used `chelis_fill_f32_bits` and aborted here.
+/// comparison mask. The mask const must cross the runtime boundary as a
+/// dtype-tagged scalar and fill through `chelis_fill_scalar`, never through a
+/// removed dtype-specific helper. The build links the debug runtime, so an
+/// invalid scalar/tensor dtype pairing aborts the run.
 #[test]
 fn issue_365_max_reduce_backward_bool_mask_fill_is_dtype_correct() {
     let source = "def f(x: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(x, 0))\n\
@@ -862,12 +866,17 @@ out = df(to_tensor([1.0, 5.0, 3.0]))\n";
     let build = chelis_build_c(source, "maxback");
     let kernel_c = build.path().join("maxback.c");
 
-    // Emit-shape: the Bool mask const must use the dtype-correct fill.
+    // Emit-shape: the Bool mask const must use the exact tagged carrier.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_fill_bool_bits("),
-        "a Bool mask const must fill through chelis_fill_bool_bits (#365); \
+        c_source.contains("chelis_fill_scalar(")
+            && c_source.contains("chelis_scalar_from_bits(CHELIS_DTYPE_BOOL"),
+        "a Bool mask const must fill through a Bool-tagged chelis_scalar (#365/#1289); \
          emitted C=\n{c_source}",
+    );
+    assert!(
+        !c_source.contains("chelis_fill_bool_bits("),
+        "the removed dtype-specific Bool fill must not reappear; emitted C=\n{c_source}"
     );
 
     // Compile + run against the (debug) runtime; a dtype-assert abort would
@@ -924,13 +933,13 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 // #476 — inline sparse gather/scatter read int32 indices through the
 // dtype-correct pointer, not `(int)t->data[i]`. Same #347 class as the
 // argmax/argmin index prints above: int tensors bit-pack their values into
-// the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_I32 index
+// the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_DTYPE_I32 index
 // `(int)`-truncates the FLOAT reinterpretation of the int32 bits (index `2`
 // → `(int)2.8e-45f` → `0`), silently gathering the WRONG row. The user
 // surface defaults integer literals to int32 (`to_tensor([2, 0, 1])` is a
-// CHELIS_I32 tensor), so this fires on ordinary index code; the pre-fix
+// CHELIS_DTYPE_I32 tensor), so this fires on ordinary index code; the pre-fix
 // corpus never reproduced it because every gather fixture cast indices to
-// int64 (`cast(_, int64)`), which took the always-correct CHELIS_I64 branch.
+// int64 (`cast(_, int64)`), which took the always-correct CHELIS_DTYPE_I64 branch.
 //
 // The acceptance oracle is BIT-IDENTITY eval-vs-C on the integer/index path
 // (no float summation here — indices are exact), PLUS a negative assertion

@@ -43,6 +43,76 @@ module_prefix = "Smoke"
     (dir, pkg)
 }
 
+/// The headline of the attributed report `chelis test` prints when
+/// `--batch-mode auto` gives up on a batch it had already started (chelis#1261).
+const BATCH_FALLBACK_NOTE: &str = "suite batching was abandoned";
+
+/// A reef package with two library modules that export the same name `same`.
+/// This is chelis#1261's shape: an explicit `import M (same)` in one test file
+/// must survive a sibling test file that declares its own `same`, and must not
+/// be silently rebound to a second module's `same` either.
+fn make_shared_name_reef_package(dir_name: &str) -> (tempfile::TempDir, PathBuf) {
+    let (dir, pkg) = make_reef_package(dir_name);
+    write_file(
+        &pkg.join("src/helpers.ch"),
+        "module Smoke.Helpers\n\
+         export (same)\n\
+         def same(a: int64, b: int64) -> bool = eq(a, b)\n",
+    );
+    write_file(
+        &pkg.join("src/other.ch"),
+        "module Smoke.Other\n\
+         export (same)\n\
+         def same(a: int64, b: int64) -> bool = eq(a, b)\n",
+    );
+    (dir, pkg)
+}
+
+/// chelis#1261's two test files: `a_import.ch` imports the package's `same`
+/// over `int64`, `b_local.ch` declares an unrelated local `same` over lists.
+fn write_import_collision_files(pkg: &Path) {
+    write_file(
+        &pkg.join("tests/a_import.ch"),
+        "module Smoke.Tests.UsesImport\n\
+         import Smoke.Helpers (same)\n\
+         def test_uses_import() -> unit = \
+         test_assert(same(cast(1, int64), cast(1, int64)), \"1 == 1\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_local.ch"),
+        "module Smoke.Tests.LocalSame\n\
+         def same(xs: List[int64], ys: List[int64]) -> bool = eq(len(xs), len(ys))\n\
+         def test_local_same() -> unit = \
+         test_assert(same([cast(1, int64)], [cast(2, int64)]), \"same length\")\n",
+    );
+}
+
+/// Run the suite with the batch worker forced to abort, and return stderr.
+///
+/// The abort kills whatever files the parent handed the batch worker, and the
+/// fallback note names exactly those files. That makes this the membership
+/// oracle for the eligibility guard: a file the guard demoted never reaches
+/// the worker, so it cannot appear in the note.
+fn forced_batch_abort_stderr(pkg: &Path) -> String {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_FORCE_BATCH_ABORT", "1")
+        .current_dir(pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains(BATCH_FALLBACK_NOTE),
+        "the forced batch abort was not reported, so this run proves nothing \
+         about batch membership:\nstdout={}\nstderr={stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    stderr
+}
+
 #[test]
 fn chelis_test_passing_file_exits_zero() {
     let (_dir, pkg) = make_reef_package("phase3t-smoke-pass");
@@ -366,6 +436,21 @@ def test_ok() -> unit = test_assert(true, "ok")
         stdout.contains("tests/b_ok.ch") && stdout.contains("test_ok") && stdout.contains("PASS"),
         "healthy sibling PASS missing from:\nstdout={stdout}\nstderr={stderr}"
     );
+    // chelis#1261: the batch worker's own diagnostic used to be the only
+    // signal that the batched path had been dropped, and nothing said which
+    // files it belonged to. The runner now attributes the abandonment.
+    assert!(
+        stderr.contains(BATCH_FALLBACK_NOTE),
+        "abandoned batch was not reported:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("tests/a_broken.ch") && stderr.contains("tests/b_ok.ch"),
+        "fallback note did not name the abandoned files:\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("reason: batch worker exited with status"),
+        "fallback note did not give a reason:\nstderr={stderr}"
+    );
 }
 
 #[test]
@@ -496,6 +581,552 @@ def test_second() -> unit = test_assert(true, "second")
         stdout.contains("2 passed, 0 failed"),
         "fallback summary missing:\nstdout={stdout}\nstderr={stderr}"
     );
+    // chelis#1261: a green summary is honest here (every test really ran),
+    // but it must not be the whole report. The abandoned batch is named.
+    assert!(
+        stderr.contains(BATCH_FALLBACK_NOTE)
+            && stderr.contains("tests/a_first.ch")
+            && stderr.contains("tests/b_second.ch"),
+        "green fallback did not report the abandoned batch:\nstderr={stderr}"
+    );
+}
+
+/// The chelis#1261 reproducer: `tests/b_local.ch` declares a local `same` over
+/// lists while `tests/a_import.ch` explicitly imports the package's `same` over
+/// `int64`. Under `--batch-mode auto` the two files used to be merged into one
+/// compilation unit, where B's declaration captured A's import, so the batch
+/// failed to compile and the whole suite silently degraded to per-file.
+#[test]
+fn chelis_test_auto_batch_sibling_def_does_not_capture_an_explicit_import() {
+    let (_dir, pkg) = make_shared_name_reef_package("phase3t-smoke-batch-import-capture");
+    write_import_collision_files(&pkg);
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("test_uses_import")
+            && stdout.contains("test_local_same")
+            && stdout.contains("2 passed, 0 failed"),
+        "both files must run and pass:\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("error:"),
+        "chelis#1261: the merged unit still miscompiles:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains(BATCH_FALLBACK_NOTE),
+        "eligibility demotion is the sanctioned path, not an abandoned batch:\nstderr={stderr}"
+    );
+}
+
+/// The reversed file order of the reproducer. Discovery is alphabetical, so
+/// `a_local.ch` is admitted to the batch scope first and the *importer* is the
+/// one demoted. Import-versus-declaration is the same collision either way
+/// round, and only the import-then-declaration order was otherwise exercised.
+#[test]
+fn chelis_test_auto_batch_local_def_before_sibling_import_demotes_the_importer() {
+    let (_dir, pkg) = make_shared_name_reef_package("phase3t-smoke-batch-decl-then-import");
+    write_file(
+        &pkg.join("tests/a_local.ch"),
+        "module Smoke.Tests.LocalFirst\n\
+         def same(xs: List[int64], ys: List[int64]) -> bool = eq(len(xs), len(ys))\n\
+         def test_local_same() -> unit = \
+         test_assert(same([cast(1, int64)], [cast(2, int64)]), \"same length\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_import.ch"),
+        "module Smoke.Tests.ImportSecond\n\
+         import Smoke.Helpers (same)\n\
+         def test_uses_import() -> unit = \
+         test_assert(same(cast(1, int64), cast(1, int64)), \"1 == 1\")\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("error:"),
+        "the merged unit still miscompiles in the reversed order:\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("2 passed, 0 failed"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains("tests/a_local.ch"),
+        "the declaring file should still have been batched:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("tests/b_import.ch"),
+        "the importer whose name a sibling declares was not demoted:\nstderr={stderr}"
+    );
+}
+
+/// ADT variant constructors share one namespace in the merged unit, so two
+/// types with different names but a shared variant collide. Nothing else
+/// exercises the `Decl::TypeDef` variant arm.
+#[test]
+fn chelis_test_auto_batch_shared_adt_variant_uses_file_isolation() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-shared-variant");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        "module Smoke.Tests.VariantFirst\n\
+         type FirstFlag =\n  | Shared\n  | OnlyFirst\n\
+         def test_first() -> unit = test_assert(true, \"first\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        "module Smoke.Tests.VariantSecond\n\
+         type SecondFlag =\n  | Shared\n  | OnlySecond\n\
+         def test_second() -> unit = test_assert(true, \"second\")\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 passed, 0 failed"));
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains("tests/a_first.ch"),
+        "the first file should still have been batched:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("tests/b_second.ch"),
+        "a shared ADT variant constructor did not demote the second file:\nstderr={stderr}"
+    );
+}
+
+/// A `@property` binds a top-level name too, so two files declaring the same
+/// property name collide. Nothing else exercises the `Decl::Property` arm.
+#[test]
+fn chelis_test_auto_batch_shared_property_name_uses_file_isolation() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-shared-property");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        "module Smoke.Tests.PropertyFirst\n\
+         @property shared_bound forall(x: int32) where x > 0:\n  x > 0\n\
+         def test_first() -> unit = test_assert(true, \"first\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        "module Smoke.Tests.PropertySecond\n\
+         @property shared_bound forall(y: int32) where y > 1:\n  y > 0\n\
+         def test_second() -> unit = test_assert(true, \"second\")\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 passed, 0 failed"));
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains("tests/a_first.ch"),
+        "the first file should still have been batched:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("tests/b_second.ch"),
+        "a shared property name did not demote the second file:\nstderr={stderr}"
+    );
+}
+
+/// The plain-text summary line carries the degradation too. A CI job that
+/// captures only stdout would otherwise read a fallback run as identical to a
+/// clean one, which is chelis#1261's complaint one channel over.
+#[test]
+fn chelis_test_auto_batch_fallback_marks_the_plain_summary_line() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-plain-marker");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        "module Smoke.Tests.MarkerFirst\n\
+         def test_first() -> unit = test_assert(true, \"first\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        "module Smoke.Tests.MarkerSecond\n\
+         def test_second() -> unit = test_assert(true, \"second\")\n",
+    );
+
+    let degraded = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_FORCE_BATCH_ABORT", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&degraded.stdout);
+    assert_eq!(degraded.status.code(), Some(0), "stdout={stdout}");
+    assert!(
+        stdout.contains("2 passed, 0 failed (batch abandoned: ran per-file)"),
+        "the degraded summary line is indistinguishable from a clean one:\nstdout={stdout}"
+    );
+
+    // Negative parity: a clean run's summary line is byte-identical to before.
+    let clean = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let clean_stdout = String::from_utf8_lossy(&clean.stdout);
+    assert!(
+        clean_stdout.ends_with("\n2 passed, 0 failed\n"),
+        "a clean run's summary line changed:\nstdout={clean_stdout}"
+    );
+}
+
+/// `CHELIS_TEST_EXPLAIN_BATCHING` is the operator knob for the silent half:
+/// demotion stays quiet by default, and names its reason when asked.
+#[test]
+fn chelis_test_auto_batch_explains_demotion_only_when_asked() {
+    let (_dir, pkg) = make_shared_name_reef_package("phase3t-smoke-batch-explain");
+    write_import_collision_files(&pkg);
+
+    let quiet = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let quiet_stderr = String::from_utf8_lossy(&quiet.stderr);
+    assert!(
+        quiet_stderr.is_empty(),
+        "demotion must stay silent by default:\nstderr={quiet_stderr}"
+    );
+
+    let explained = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_EXPLAIN_BATCHING", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&explained.stderr);
+    assert_eq!(explained.status.code(), Some(0), "stderr={stderr}");
+    assert!(
+        stderr.contains("tests/b_local.ch is not in the suite batch"),
+        "the demoted file was not named:\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("`same`")
+            && stderr.contains("Smoke.Helpers")
+            && stderr.contains("tests/a_import.ch"),
+        "the explanation did not name the colliding name, its module, and the \
+         file it collides with:\nstderr={stderr}"
+    );
+}
+
+/// Membership oracle: `CHELIS_TEST_FORCE_BATCH_ABORT` kills whatever the batch
+/// worker was given, and the fallback note names exactly those files. A file
+/// that the collision guard demoted is therefore absent from the note.
+#[test]
+fn chelis_test_auto_batch_import_collision_demotes_only_the_colliding_file() {
+    let (_dir, pkg) = make_shared_name_reef_package("phase3t-smoke-batch-import-demote");
+    write_import_collision_files(&pkg);
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains(BATCH_FALLBACK_NOTE) && stderr.contains("tests/a_import.ch"),
+        "the importing file should still have been batched:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("tests/b_local.ch"),
+        "the file whose `def same` captures the sibling import was not demoted:\nstderr={stderr}"
+    );
+}
+
+/// Negative parity for the guard: importing the SAME name from the SAME module
+/// is agreement, not collision. Demoting it would push every suite that shares
+/// one helper import onto the per-file path and delete the batch optimization.
+#[test]
+fn chelis_test_auto_batch_shared_import_of_one_module_stays_batched() {
+    let (_dir, pkg) = make_shared_name_reef_package("phase3t-smoke-batch-shared-import");
+    write_file(
+        &pkg.join("tests/a_one.ch"),
+        "module Smoke.Tests.One\n\
+         import Smoke.Helpers (same)\n\
+         def test_one() -> unit = test_assert(same(cast(1, int64), cast(1, int64)), \"one\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_two.ch"),
+        "module Smoke.Tests.Two\n\
+         import Smoke.Helpers (same)\n\
+         def test_two() -> unit = test_assert(same(cast(2, int64), cast(2, int64)), \"two\")\n",
+    );
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains("tests/a_one.ch") && stderr.contains("tests/b_two.ch"),
+        "a shared import must not demote either file out of the batch:\nstderr={stderr}"
+    );
+}
+
+/// The same name imported from two DIFFERENT modules is a real collision: the
+/// merged unit has one top-level scope and cannot hold both bindings.
+#[test]
+fn chelis_test_auto_batch_same_name_from_two_modules_uses_file_isolation() {
+    let (_dir, pkg) = make_shared_name_reef_package("phase3t-smoke-batch-two-modules");
+    write_file(
+        &pkg.join("tests/a_helpers.ch"),
+        "module Smoke.Tests.FromHelpers\n\
+         import Smoke.Helpers (same)\n\
+         def test_from_helpers() -> unit = \
+         test_assert(same(cast(1, int64), cast(1, int64)), \"helpers\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_other.ch"),
+        "module Smoke.Tests.FromOther\n\
+         import Smoke.Other (same)\n\
+         def test_from_other() -> unit = \
+         test_assert(same(cast(2, int64), cast(2, int64)), \"other\")\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 passed, 0 failed"));
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains("tests/a_helpers.ch"),
+        "the first importer should still have been batched:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("tests/b_other.ch"),
+        "an import of the same name from another module was not demoted:\nstderr={stderr}"
+    );
+}
+
+/// A wildcard import brings in a name set this runner cannot enumerate without
+/// resolving the package graph, so it cannot prove no sibling declaration
+/// captures one of those names. It takes the per-file path.
+#[test]
+fn chelis_test_auto_batch_wildcard_import_uses_file_isolation() {
+    let (_dir, pkg) = make_shared_name_reef_package("phase3t-smoke-batch-wildcard-import");
+    write_file(
+        &pkg.join("tests/a_plain.ch"),
+        "module Smoke.Tests.PlainSibling\n\
+         def test_plain() -> unit = test_assert(true, \"plain\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_wildcard.ch"),
+        "module Smoke.Tests.Wildcard\n\
+         import Smoke.Helpers (..)\n\
+         def test_wildcard() -> unit = \
+         test_assert(same(cast(3, int64), cast(3, int64)), \"wildcard\")\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 passed, 0 failed"));
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains("tests/a_plain.ch"),
+        "the sibling without a wildcard should still be batched:\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("tests/b_wildcard.ch"),
+        "a wildcard-importing file was not demoted:\nstderr={stderr}"
+    );
+}
+
+/// The parent's eligibility classifier and the batch worker's own guard have to
+/// agree on what a collision is. They did not: the worker counted a `sig` and
+/// its matching `def` as one name declared twice, hard-errored, and the suite
+/// fell back per-file with no report. Both now admit files through one rule.
+#[test]
+fn chelis_test_auto_batch_sig_beside_its_def_stays_batched() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-sig-and-def");
+    write_file(
+        &pkg.join("tests/a_sig.ch"),
+        "module Smoke.Tests.SigAndDef\n\
+         sig helper: int64 -> bool\n\
+         def helper(x: int64) -> bool = eq(x, x)\n\
+         def test_helper() -> unit = test_assert(helper(cast(1, int64)), \"helper\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_plain.ch"),
+        "module Smoke.Tests.SigSibling\n\
+         def test_plain() -> unit = test_assert(true, \"plain\")\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains(BATCH_FALLBACK_NOTE),
+        "the worker guard still rejects a manifest the classifier accepted:\nstderr={stderr}"
+    );
+
+    let stderr = forced_batch_abort_stderr(&pkg);
+    assert!(
+        stderr.contains("tests/a_sig.ch") && stderr.contains("tests/b_plain.ch"),
+        "a `sig` beside its `def` must not cost the file its batch slot:\nstderr={stderr}"
+    );
+}
+
+/// Negative parity for the report: a batch that completes says nothing, on
+/// either channel. The note is a degradation signal, not a banner.
+#[test]
+fn chelis_test_auto_batch_healthy_run_reports_no_fallback() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-healthy-quiet");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        "module Smoke.Tests.HealthyFirst\n\
+         def test_first() -> unit = test_assert(true, \"first\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        "module Smoke.Tests.HealthySecond\n\
+         def test_second() -> unit = test_assert(true, \"second\")\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "--json", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains(BATCH_FALLBACK_NOTE),
+        "a healthy batch must stay quiet on stderr:\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("batch_fallback"),
+        "a healthy batch must emit no fallback record and no summary flag:\nstdout={stdout}"
+    );
+    assert!(
+        stdout.contains("{\"summary\":{\"passed\":2,\"failed\":0}}"),
+        "the existing summary bytes must be unchanged:\nstdout={stdout}"
+    );
+}
+
+/// The `--json` shape of an abandoned batch: one additive `batch_fallback`
+/// record beside the rows, plus a `batch_fallback` flag on the summary so a
+/// consumer that reads only the final record still sees the degradation.
+#[test]
+fn chelis_test_auto_batch_fallback_json_record_and_summary_flag() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-batch-fallback-json");
+    write_file(
+        &pkg.join("tests/a_first.ch"),
+        "module Smoke.Tests.JsonFallbackFirst\n\
+         def test_first() -> unit = test_assert(true, \"first\")\n",
+    );
+    write_file(
+        &pkg.join("tests/b_second.ch"),
+        "module Smoke.Tests.JsonFallbackSecond\n\
+         def test_second() -> unit = test_assert(true, \"second\")\n",
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_FORCE_BATCH_ABORT", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto", "--json", "tests/"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "stdout={stdout}");
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("json line"))
+        .collect();
+
+    let fallback = lines
+        .iter()
+        .find(|line| line.get("batch_fallback").is_some_and(|v| v.is_object()))
+        .unwrap_or_else(|| panic!("no batch_fallback record in {lines:#?}"))["batch_fallback"]
+        .clone();
+    assert_eq!(fallback["status"], "worker-failed");
+    assert!(
+        fallback["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "fallback record carried no reason: {fallback}"
+    );
+    assert_eq!(
+        fallback["files"],
+        serde_json::json!(["tests/a_first.ch", "tests/b_second.ch"])
+    );
+
+    // Additive: the rows and the summary keep their existing shape.
+    assert_eq!(lines[1]["file"], "tests/a_first.ch");
+    assert_eq!(lines[2]["file"], "tests/b_second.ch");
+    let summary = &lines.last().expect("summary")["summary"];
+    assert_eq!(summary["passed"], 2);
+    assert_eq!(summary["failed"], 0);
+    assert_eq!(summary["batch_fallback"], true);
 }
 
 #[test]
@@ -612,8 +1243,8 @@ def test_visible() -> unit = test_assert(true, "ok")
 
 #[test]
 fn chelis_test_non_unit_returning_def_is_not_enumerated() {
-    // RT3 H4: `def test_x : bool = true` parses as a zero-param FunDef but
-    // is not a test — it's a typed value binding with non-unit type. The
+    // RT3 H4: `def test_x() -> bool = true` is a nullary function but is not
+    // a test because its result is non-unit. The
     // enumerator must skip it so the real `def test_real() -> unit`
     // alongside it runs and passes.
     let (_dir, pkg) = make_reef_package("phase3t-smoke-non-unit");
@@ -621,7 +1252,7 @@ fn chelis_test_non_unit_returning_def_is_not_enumerated() {
         &pkg.join("tests/mixed.ch"),
         r#"module Smoke.Tests.Mixed
 
-def test_x : bool = true
+def test_x() -> bool = true
 
 def test_real() -> unit = test_assert(true, "real test runs")
 "#,

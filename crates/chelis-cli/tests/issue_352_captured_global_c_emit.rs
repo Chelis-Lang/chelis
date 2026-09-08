@@ -18,9 +18,11 @@
 //! the function definitions); `main()` assigns them in binding order instead
 //! of declaring locals. Both the function bodies and `main()` then resolve
 //! the same object, mirroring eval's call-time load-closure semantics.
-//! Check-time name resolution already rejects forward references from a
-//! call site to a later binding, so every captured binding is initialized
-//! before any user call runs.
+//! [04-INF-4] rejects a direct forward reference from a compiled function
+//! to a later binding at check time, so a captured binding a function names
+//! is initialized before any user call reads it. [04-INF-8] rejects the
+//! indirect shape, where an earlier binding's initializer calls a function
+//! that reaches a later value, before this source-ordered backend runs.
 //!
 //! This file is the closing oracle for #352: build --target c, compile with
 //! the native cc, run, and assert exact output plus `chelis eval` agreement.
@@ -76,7 +78,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),
@@ -599,7 +606,7 @@ out = f(1.0)\n";
 fn issue_352_vmap_over_capturing_def_gap() {
     let source = "w = to_tensor([10.0, 20.0])\n\
 def dot_w(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
-def fv(xs: tensor[3, 2, f32]) -> tensor[3, f32] = xs |> vmap(dot_w, axis=0)\n\
+def fv(xs: tensor[3, 2, f32]) -> tensor[3, f32] = xs |> vmap(dot_w)\n\
 out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
 
     let build = chelis_build_c(source, "vmapcap");
@@ -670,7 +677,7 @@ fn issue_377_vmap_of_grad_over_capturing_def_fails_clean() {
     let source = "w = to_tensor([10.0, 20.0])\n\
 def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def gradf(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
-def batched(xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = xs |> vmap(gradf, axis=0)\n\
+def batched(xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = xs |> vmap(gradf)\n\
 out = batched(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
 
     let dir = tempdir().expect("tempdir");

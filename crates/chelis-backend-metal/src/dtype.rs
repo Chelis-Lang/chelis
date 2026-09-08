@@ -129,27 +129,22 @@ pub fn host_sizeof_expr(prec: Prim) -> &'static str {
 /// Shared `chelis_runtime` dtype enum tag for an active Metal dtype.
 /// Used at the host writeback site to match the runtime's `chelis_alloc`
 /// dispatch. Tag spellings match `crates/chelis-runtime/include/chelis_runtime.h`
-/// (`CHELIS_I8`, `CHELIS_I16`, `CHELIS_I32`, `CHELIS_I64` — not `CHELIS_INT*`).
+/// (`CHELIS_DTYPE_I8`, `CHELIS_DTYPE_I16`, `CHELIS_DTYPE_I32`, `CHELIS_DTYPE_I64` — not `CHELIS_INT*`).
 pub fn runtime_dtype_tag(prec: Prim) -> &'static str {
-    match prec {
-        Prim::F32 => "CHELIS_F32",
-        Prim::F16 => "CHELIS_F16",
-        Prim::Bf16 => "CHELIS_BF16",
-        Prim::Int8 => "CHELIS_I8",
-        Prim::Int16 => "CHELIS_I16",
-        Prim::Int32 => "CHELIS_I32",
-        Prim::Int64 => "CHELIS_I64",
-        Prim::Bool => "CHELIS_BOOL",
-        Prim::F64 => panic!(
+    if prec == Prim::F64 {
+        panic!(
             "Metal backend rejects f64 (Apple Silicon GPUs lack FP64 ALUs); \
              reject_unsupported_metal_ops should have caught the rest"
-        ),
-        other => panic!(
-            "Metal backend dtype not in the active per-backend matrix: {} \
-             (see spec/04-type-system.md §1.1.3)",
-            other.name()
-        ),
+        );
     }
+    prec.runtime_dtype()
+        .unwrap_or_else(|error| {
+            panic!(
+                "Metal backend dtype not in the active per-backend matrix: {error} \
+                 (see spec/04-type-system.md §1.1.3)"
+            )
+        })
+        .c_macro()
 }
 
 /// Reduction-accumulator promotion per spec §5.7.1.

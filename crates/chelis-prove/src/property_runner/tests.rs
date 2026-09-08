@@ -12,6 +12,171 @@ fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     o
 }
 
+#[cfg(feature = "smt")]
+const GENERAL_BOND_INDUCTION: &str = "module M
+def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+  if (n <= 0) then cast(1.0, f64)
+  else coupon + discount * bond_value(n - 1, coupon, discount)
+@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
+  (bond_value(n, coupon, discount) >= cast(0.0, f64))
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn general_bond_induction_disposes_real_base_and_step_obligations() {
+    let outcomes = run_surf(GENERAL_BOND_INDUCTION, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert!(outcome.is_pass());
+    let evidence = outcome
+        .induction_evidence
+        .as_ref()
+        .expect("a green induction must disclose both obligations");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "proved");
+    assert!(
+        outcome
+            .assumptions
+            .iter()
+            .all(|record| !format!("{record:?}").contains("ASSUMED")),
+        "caller assertions must never become proof: {outcome:#?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn false_general_bond_induction_is_rejected_by_step_obligation() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "coupon + discount * bond_value(n - 1, coupon, discount)",
+        "coupon - cast(1.0, f64) + discount * bond_value(n - 1, coupon, discount)",
+    );
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:#?}");
+    assert!(!outcome.is_pass());
+    let evidence = outcome
+        .induction_evidence
+        .as_ref()
+        .expect("the failed step must remain visible");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "disproved");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn auto_dispatches_eligible_induction_before_recursive_tier_b_lowering() {
+    let outcomes = run_surf(GENERAL_BOND_INDUCTION, "auto");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert!(outcome.induction_evidence.is_some());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn auto_keeps_failed_induction_terminal_instead_of_fuzz_laundering() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "coupon + discount * bond_value(n - 1, coupon, discount)",
+        "coupon - cast(1.0, f64) + discount * bond_value(n - 1, coupon, discount)",
+    );
+    let outcome = &run_surf(&source, "auto")[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert!(!outcome.is_pass());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn auto_fails_closed_on_recursive_but_unsupported_induction_shape() {
+    let source = GENERAL_BOND_INDUCTION.replace("n - 1", "n + 1");
+    let outcome = &run_surf(&source, "auto")[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert!(outcome.induction_evidence.is_none());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn induction_rejects_non_structural_recursion_instead_of_assuming_it() {
+    let source = GENERAL_BOND_INDUCTION.replace("n - 1", "n + 1");
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert!(!outcome.is_pass());
+    assert!(outcome.induction_evidence.is_none());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn induction_never_dispatches_an_unchecked_parser_ast() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "discount * bond_value(n - 1, coupon, discount)",
+        "true * bond_value(n - 1, coupon, discount)",
+    );
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Error, "{outcomes:#?}");
+    assert!(
+        outcomes[0]
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("type-checked compiler AST"))
+    );
+    assert!(outcomes[0].induction_evidence.is_none());
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn induction_accepts_compiler_inlined_alias_recursion_soundly() {
+    let source = "module M
+def recur_alias(n: int32, coupon: f64, discount: f64) -> f64 =
+  bond_value(n, coupon, discount)
+def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+  if (n <= 0) then cast(1.0, f64)
+  else coupon + discount * recur_alias(n - 1, coupon, discount)
+@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
+  (bond_value(n, coupon, discount) >= cast(0.0, f64))
+";
+    let outcomes = run_surf(source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    let evidence = outcome.induction_evidence.as_ref().expect("evidence");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "proved");
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn literal_dead_exact_recursion_keeps_its_branch_in_the_solver_goal() {
+    let source = GENERAL_BOND_INDUCTION.replace(
+        "coupon + discount * bond_value(n - 1, coupon, discount)",
+        "if true then coupon else coupon + discount * bond_value(n - 1, coupon, discount)",
+    );
+    let outcomes = run_surf(&source, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:#?}");
+    let evidence = outcome.induction_evidence.as_ref().expect("evidence");
+    assert_eq!(evidence.base.status, "proved");
+    assert_eq!(evidence.step.status, "proved");
+    assert!(
+        format!("{:?}", evidence.step.goal.postcondition).contains("BoolLit(true)"),
+        "literal branch must remain in the dispatched goal: {evidence:#?}"
+    );
+}
+
 const NAMED_PROPERTY: &str = "module M
 def double(x: f32) -> f32 = x + x
 @property double_is_even forall(x: f32):
@@ -91,6 +256,244 @@ fn fuzz_counterexample_records_accepted_shrink_steps() {
             .and_then(|cx| cx["x"].as_f64()),
         Some(0.0),
         "zero is still a failing counterexample for x > 5.0: {outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+const INLINE_SCALAR_GRAD_PROPERTY: &str = "module M
+@property inline_grad_negative forall(d: f32, r: f32, g: f32)
+where d > 0.5, r > g, r < 9.5:
+  (grad(fn (dd: f32, rr: f32, gg: f32) ->
+    (dd / (rr - gg)), wrt=rr)(d, r, g) < 0.0)
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_inline_lambda_reaches_smt() {
+    let outcomes = run_surf(INLINE_SCALAR_GRAD_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.samples, 0, "{outcome:?}");
+    assert!(
+        !outcome.assumptions.is_empty()
+            && outcome.assumptions.iter().all(|assumption| {
+                assumption
+                    .non_vacuity
+                    .as_ref()
+                    .is_some_and(|record| record.status == NonVacuityStatus::Established)
+            }),
+        "the gradient proof must retain established non-vacuity: {outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_matches_closed_form_derivative() {
+    let outcomes = run_surf(
+        "module M
+@property quotient_grad_formula forall(d: f32, r: f32, g: f32)
+where r > g:
+  (grad(fn (dd: f32, rr: f32, gg: f32) ->
+    (dd / (rr - gg)), wrt=rr)(d, r, g)
+    == (0.0 - d) / ((r - g) * (r - g)))
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_reversed_claim_is_disproved_by_smt() {
+    let source = INLINE_SCALAR_GRAD_PROPERTY.replace("< 0.0)", "> 0.0)");
+    let outcomes = run_surf(&source, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(outcome.samples, 0, "{outcome:?}");
+    assert!(outcome.counterexample.is_some(), "{outcome:?}");
+}
+
+#[cfg(feature = "smt")]
+const NAMED_SCALAR_GRAD_PROPERTY: &str = "module M
+def gap(rr: f32, gg: f32) -> f32 = rr - gg
+def quotient_value(dd: f32, rr: f32, gg: f32) -> f32 = {
+  denominator = gap(rr, gg)
+  dd / denominator
+}
+@property named_grad_negative forall(d: f32, r: f32, g: f32)
+where d > 0.5, r > g, r < 9.5:
+  (grad(quotient_value, wrt=rr)(d, r, g) < 0.0)
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_named_function_handles_helpers_and_blocks() {
+    let outcomes = run_surf(NAMED_SCALAR_GRAD_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::ProvenModuloRealArithmetic,
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_cast_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+def cast_value(x: f32) -> f32 = cast(x * x, f32)
+@property cast_grad forall(x: f32):
+  (grad(cast_value, wrt=x)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support casts in differentiated bodies"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_conditional_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+def conditional_value(x: f32) -> f32 =
+  if x > 0.0 then x * x else 0.0 - x
+@property conditional_grad forall(x: f32):
+  (grad(conditional_value, wrt=x)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support conditionals"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_implicit_wrt_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+@property implicit_grad forall(x: f32):
+  (grad(fn (xx: f32) -> xx * xx)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert_eq!(
+        outcomes[0].reason.as_deref(),
+        Some("scalar grad SMT lowering requires exactly one explicit `wrt` parameter")
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_nested_transform_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+@property nested_grad forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert_eq!(
+        outcomes[0].reason.as_deref(),
+        Some("scalar grad SMT lowering does not support nested gradients")
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn scalar_grad_helper_depth_overflow_fails_closed_with_specific_reason() {
+    let outcomes = run_surf(
+        "module M
+def h4(x: f32) -> f32 = x * x
+def h3(x: f32) -> f32 = h4(x)
+def h2(x: f32) -> f32 = h3(x)
+def h1(x: f32) -> f32 = h2(x)
+@property deep_grad forall(x: f32):
+  (grad(h1, wrt=x)(x) >= 0.0)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PropertyStatus::Unsupported);
+    assert_eq!(
+        outcomes[0].reason.as_deref(),
+        Some("scalar grad SMT lowering exceeded the helper inlining depth")
+    );
+}
+
+#[cfg(feature = "smt")]
+const UNSUPPORTED_SCALAR_GRAD_PROPERTY: &str = "module M
+@property exp_grad_positive forall(x: f32)
+where x > 0.5, x < 9.5:
+  (grad(fn (xx: f32) -> exp(xx), wrt=xx)(x) > 0.0)
+";
+
+#[cfg(feature = "smt")]
+#[test]
+fn unsupported_scalar_grad_operation_has_specific_prompt_reason() {
+    let outcomes = run_surf(UNSUPPORTED_SCALAR_GRAD_PROPERTY, "smt-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(outcome.samples, 0, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support call `exp`"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn unsupported_scalar_grad_operation_still_falls_to_fuzz_under_auto() {
+    let outcomes = run_surf(UNSUPPORTED_SCALAR_GRAD_PROPERTY, "auto");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Fuzz, "{outcome:?}");
+    assert_eq!(
+        outcome.composite_verdict,
+        CompositeVerdict::FuzzValidatedEmpirical,
+        "{outcome:?}"
     );
 }
 
@@ -358,6 +761,23 @@ const DEEP_TRUE_PROPERTY: &str = r#"(module {}
 "#;
 
 #[test]
+fn stamped_deep_property_discovery_never_silently_returns_zero() {
+    let exprs = chelis_deep::parser::parse_and_stamp_file(DEEP_TRUE_PROPERTY)
+        .expect("canonical Deep property stamps");
+    assert!(
+        matches!(exprs.first(), Some(DeepExpr::Node(..))),
+        "the file ingress must exercise the stamped Node representation: {exprs:#?}"
+    );
+
+    let outcomes = run_deep(DEEP_TRUE_PROPERTY, "fuzz-only");
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "a stamped user property must produce one outcome, never a silent empty success"
+    );
+}
+
+#[test]
 fn f7_deep_fuzz_only_runs_the_fuzz_loop() {
     // `--tier fuzz-only` on a deep property runs the fuzz loop and passes a
     // true property with samples > 0.
@@ -371,6 +791,20 @@ fn f7_deep_fuzz_only_runs_the_fuzz_loop() {
     );
     assert!(outcomes[0].samples > 0, "fuzz-only collected samples");
     assert_eq!(outcomes[0].proof_tier, PropertyTier::Fuzz);
+}
+
+#[test]
+fn issue_978_deep_induction_only_is_terminal_without_sampling() {
+    let outcomes = run_deep(DEEP_TRUE_PROPERTY, "induction-only");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:#?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Induction);
+    assert_eq!(outcome.samples, 0);
+    assert_eq!(outcome.attempted_samples, 0);
+    assert_eq!(outcome.accepted_samples, 0);
+    assert!(outcome.sampling_method.is_none());
+    assert!(!outcome.is_pass());
 }
 
 #[test]
@@ -555,7 +989,7 @@ fn assert_assumptions_are_tiered(outcome: &PropertyOutcome) -> usize {
 /// `fuzz_precondition_assumptions` discharge site: the pass carries one
 /// `preconditions:*` assumption that must be tiered.
 const GREEN_FUZZ_PRECONDITION_PROPERTY: &str = "module M
-@property guarded forall(x: f32) where (x > 0.0):
+@property guarded forall(x: f32) where x > 0.0:
   (x + 1.0 > x)
 ";
 

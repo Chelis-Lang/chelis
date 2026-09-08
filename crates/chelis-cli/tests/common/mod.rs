@@ -9,19 +9,25 @@
 //! v0.2.7 release CI run measured 33m 42s on the integration step, with
 //! per-test publish overhead the dominant cost.
 //!
-//! `SharedReef` publishes chelis-std exactly once per test binary and
-//! also pre-warms the lazy archive-extraction cache (a check-then-act
-//! race surfaces at `--test-threads >= 8` without the warm pass — see
-//! `feedback_shared_test_fixtures.md`). Tests then call `make_app` to
-//! allocate a fresh per-test app shell pointing at the shared registry.
+//! `SharedReef` publishes chelis-std and pre-warms the lazy archive-extraction
+//! cache (a check-then-act race surfaces at `--test-threads >= 8` without the
+//! warm pass — see `feedback_shared_test_fixtures.md`). Local runs do this once
+//! per test binary in an isolated tempdir. CI sets
+//! `CHELIS_TEST_SHARED_REEF_HOME` to one absolute, job-scoped root; an atomic
+//! cross-process lock and versioned sentinel then prepare that root once across
+//! every integration-test binary. Tests call `make_app` to allocate a fresh
+//! per-test app shell pointing at the shared registry.
 //!
 //! ## Concurrency
 //!
-//! Per `crates/chelis-reef/src/lib.rs:353` (`load_package_graph_for_eval`)
-//! eval is read-only against `CHELIS_REEF_HOME`. Build/check write only
-//! the app's own `reef.lock`, which lives under the per-test app dir.
-//! After the cache pre-warm, intra-binary thread parallelism is safe at
-//! `--test-threads=8` and `--test-threads=16` (verified empirically).
+//! Eval, check, and build can populate content-addressed compiled-context and
+//! prepared-graph caches under the shared `CHELIS_REEF_HOME`. Those writers use
+//! per-process temporary files and atomic renames, while each app's `reef.lock`
+//! remains under its isolated per-test directory. The fixture pre-warm reduces
+//! cache contention, and the atomic writers make remaining intra- and
+//! cross-binary races safe. An empty, relative, partially initialized, or
+//! incompatible configured root fails loudly rather than falling back to a
+//! per-binary registry.
 //!
 //! ## Usage
 //!
@@ -49,10 +55,15 @@
 #![allow(dead_code)]
 
 use assert_cmd::Command;
-use std::fs;
+use std::env;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::LazyLock;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::{TempDir, tempdir};
 
 /// Pinned compiler version for fixture `reef.toml` files. Re-exported from
@@ -89,19 +100,159 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 pub struct SharedReef {
-    _dir: TempDir,
+    _dir: Option<TempDir>,
     pub reef_home: PathBuf,
 }
 
-pub static SHARED_REEF: LazyLock<SharedReef> = LazyLock::new(|| {
-    let dir = tempdir().expect("tempdir");
-    let reef_home = dir.path().join("reef-home");
-    let std_pkg = dir.path().join("chelis-std");
+pub const SHARED_REEF_READY_FILE: &str = ".chelis-test-shared-reef-ready-v1";
+const SHARED_REEF_LOCK_FILE: &str = ".chelis-test-shared-reef-prepare.lock";
+const SHARED_REEF_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+const SHARED_REEF_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn shared_reef_ready_contract() -> String {
+    format!("chelis-test-shared-reef-v1\ncompiler={COMPILER_VERSION}\nchelis-std=0.4.0\n")
+}
+
+pub fn resolve_configured_shared_reef_home(
+    value: Option<OsString>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err("CHELIS_TEST_SHARED_REEF_HOME must not be empty".to_owned());
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!(
+            "CHELIS_TEST_SHARED_REEF_HOME must be absolute, got {}",
+            path.display()
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn ready_state(root: &Path) -> Result<bool, String> {
+    let ready = root.join(SHARED_REEF_READY_FILE);
+    if !ready.exists() {
+        return Ok(false);
+    }
+    let actual = fs::read_to_string(&ready)
+        .map_err(|error| format!("read shared Reef sentinel {}: {error}", ready.display()))?;
+    let expected = shared_reef_ready_contract();
+    if actual != expected {
+        return Err(format!(
+            "shared Reef sentinel {} has an incompatible contract",
+            ready.display()
+        ));
+    }
+    Ok(true)
+}
+
+struct PrepareLock {
+    path: PathBuf,
+}
+
+impl Drop for PrepareLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub fn ensure_job_shared_reef_with<F>(root: &Path, prepare: F) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    if !root.is_absolute() {
+        return Err(format!(
+            "shared Reef root must be absolute: {}",
+            root.display()
+        ));
+    }
+    fs::create_dir_all(root)
+        .map_err(|error| format!("create shared Reef root {}: {error}", root.display()))?;
+    let lock_path = root.join(SHARED_REEF_LOCK_FILE);
+    let started = Instant::now();
+    let mut prepare = Some(prepare);
+    loop {
+        if ready_state(root)? {
+            return Ok(());
+        }
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(mut lock_file) => {
+                let _lock = PrepareLock {
+                    path: lock_path.clone(),
+                };
+                writeln!(lock_file, "pid={}", std::process::id()).map_err(|error| {
+                    format!("write shared Reef lock {}: {error}", lock_path.display())
+                })?;
+                if ready_state(root)? {
+                    return Ok(());
+                }
+                let unexpected = fs::read_dir(root)
+                    .map_err(|error| {
+                        format!("inspect shared Reef root {}: {error}", root.display())
+                    })?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path != &lock_path)
+                    .collect::<Vec<_>>();
+                if !unexpected.is_empty() {
+                    return Err(format!(
+                        "shared Reef root {} is not empty and has no valid sentinel: {:?}",
+                        root.display(),
+                        unexpected
+                    ));
+                }
+                prepare
+                    .take()
+                    .expect("initializer is consumed by only one lock owner")(root)?;
+                let ready = root.join(SHARED_REEF_READY_FILE);
+                let temporary = root.join(format!(
+                    ".chelis-test-shared-reef-ready-{}.tmp",
+                    std::process::id()
+                ));
+                fs::write(&temporary, shared_reef_ready_contract()).map_err(|error| {
+                    format!(
+                        "write shared Reef sentinel {}: {error}",
+                        temporary.display()
+                    )
+                })?;
+                fs::rename(&temporary, &ready).map_err(|error| {
+                    format!("publish shared Reef sentinel {}: {error}", ready.display())
+                })?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if started.elapsed() >= SHARED_REEF_WAIT_TIMEOUT {
+                    return Err(format!(
+                        "timed out waiting for shared Reef initializer lock {}",
+                        lock_path.display()
+                    ));
+                }
+                thread::sleep(SHARED_REEF_POLL_INTERVAL);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "create shared Reef initializer lock {}: {error}",
+                    lock_path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn prepare_shared_reef(reef_home: &Path, scratch: &Path) {
+    let std_pkg = scratch.join("chelis-std");
     copy_dir_recursive(&package_std(), &std_pkg);
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
+        .env("CHELIS_REEF_HOME", reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
         .success();
@@ -111,7 +262,7 @@ pub static SHARED_REEF: LazyLock<SharedReef> = LazyLock::new(|| {
     // into `reef_home/cache/<hash>/`. Without this serializing pass, threads
     // racing on the extract surfaced `failed to read .../reef.toml: No such
     // file or directory` at --test-threads=8.
-    let warm_app = dir.path().join("__cache_warm");
+    let warm_app = scratch.join("__cache_warm");
     fs::create_dir_all(warm_app.join("src")).expect("mkdir warm app");
     fs::write(
         warm_app.join("reef.toml"),
@@ -136,15 +287,36 @@ chelis-std = {{ version = "0.4.0" }}
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
+        .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(&warm_app)
         .args(["check", warm_app.join("src/main.ch").to_str().unwrap()])
         .assert()
         .success();
+}
 
-    SharedReef {
-        _dir: dir,
-        reef_home,
+pub static SHARED_REEF: LazyLock<SharedReef> = LazyLock::new(|| {
+    let configured =
+        resolve_configured_shared_reef_home(env::var_os("CHELIS_TEST_SHARED_REEF_HOME"))
+            .unwrap_or_else(|error| panic!("invalid shared Reef configuration: {error}"));
+    if let Some(reef_home) = configured {
+        ensure_job_shared_reef_with(&reef_home, |root| {
+            let scratch = tempdir().map_err(|error| error.to_string())?;
+            prepare_shared_reef(root, scratch.path());
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("prepare job-scoped shared Reef: {error}"));
+        SharedReef {
+            _dir: None,
+            reef_home,
+        }
+    } else {
+        let dir = tempdir().expect("tempdir");
+        let reef_home = dir.path().join("reef-home");
+        prepare_shared_reef(&reef_home, dir.path());
+        SharedReef {
+            _dir: Some(dir),
+            reef_home,
+        }
     }
 });
 
@@ -288,6 +460,44 @@ pub fn build_and_run(source: &str, name: &str) -> String {
     String::from_utf8(run_output.stdout).expect("utf-8 stdout")
 }
 
+/// Build a Reef-linked application to C, link the generated translation unit,
+/// run it, and return stdout. This is the package-aware counterpart to
+/// [`build_and_run`]: imports resolve through `reef_home`, and build output is
+/// kept inside the per-test application directory.
+pub fn build_and_run_app(reef_home: &Path, app_pkg: &Path, name: &str) -> String {
+    let out_dir = app_pkg.join(format!("{name}-out"));
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source_file = format!("{name}.c");
+    let status = link_generated(&out_dir, &source_file, name);
+    assert!(status.success(), "link failed: {status}");
+
+    let run_output = StdCommand::new(out_dir.join(name))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "binary failed: {}\nstderr: {}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr),
+    );
+    String::from_utf8(run_output.stdout).expect("utf-8 stdout")
+}
+
 // ---------------------------------------------------------------------------
 // WS-C packaging-orchestration fixtures
 //
@@ -339,36 +549,19 @@ pub fn stub_toolchain(home: &Path, ver: &str) {
 // rules requires editing dtype_semantics.md and chelis#729 in the same
 // change set (its §B1 protocol).
 //
-// Reading membership off PRINTED text has two documented consequences:
+// Reading membership off PRINTED text has one documented consequence:
 //
-// 1. PRINT-TRUNCATION SLACK - TEMPORARY BY CONSTRUCTION, RATCHETS TO 0.
-//    The compiled lane renders float payloads via `%.16g`, which
-//    truncates the widened value's decimal expansion at 16 significant
-//    digits (relative error < 1e-15). Membership for f32/f16/bf16
-//    therefore accepts a token whose f64 reading is within 1e-13
-//    RELATIVE of the widened nearest-at-width value. The classes stay
-//    cleanly separated: the smallest real violation this checker exists
-//    to catch is a skipped f32 rounding, whose relative distance to the
-//    nearest f32 is on the order of an f32 ulp (~6e-8), five orders of
-//    magnitude above the slack; f16/bf16 ulps are larger still.
-//    This slack is NOT a value tolerance and is NOT permanent: it exists
-//    only because today's C printer truncates. When chelis#732 Phase 2
-//    lands shortest-round-trip formatting in the compiled lane, every
-//    printed token parses back exactly and
-//    `DOMAIN_PRINT_TRUNCATION_SLACK` ratchets to 0 - flipping the
-//    constant is an item on #732 Phase 2's adoption checklist, not a
-//    judgment call left to a future reader.
-// 2. TEXT AMBIGUITY IS RESOLVED TOWARD NO-FALSE-POSITIVES. A token that
+// TEXT AMBIGUITY IS RESOLVED TOWARD NO-FALSE-POSITIVES. A token that
 //    is the shortest-round-trip rendering of an f32 at f32 width (for
 //    example `0.1`) is accepted, even though the same text could have
 //    been printed from an out-of-domain f64. Controls must never fail;
 //    a missed violation surfaces later through the exact-string rows.
 // ---------------------------------------------------------------------------
 
-/// Relative slack for `%.16g`-style print truncation (module note 1).
-/// TEMPORARY: ratchets to 0 when chelis#732 Phase 2 makes the compiled
-/// lane print shortest-round-trip tokens; do not treat as a tolerance.
-pub const DOMAIN_PRINT_TRUNCATION_SLACK: f64 = 1e-13;
+/// Retired `%.16g`-style print-truncation slack. chelis#732 Phase 2 made
+/// compiled rendering shortest-round-trip, so Phase 0's promised ratchet is
+/// now exact: near-but-distinct decimal tokens are domain violations.
+pub const DOMAIN_PRINT_TRUNCATION_SLACK: f64 = 0.0;
 
 /// Strip `List[...]` wrappers (the drivers pass return types like
 /// `List[int64]` for `to_list` rows) down to the element prim name.
@@ -435,22 +628,28 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
         "f16" => narrow_float_violation(
             t,
             "f16",
-            |d| half::f16::from_f64(d).to_f64(),
+            |d| chelis_types::f16_from_f64_rne(d).to_f64(),
             |t| {
-                t.parse::<f32>().is_ok_and(|v| {
-                    let w = half::f16::from_f32(v).to_f32();
-                    format!("{w:?}") == t
+                t.parse::<f64>().is_ok_and(|v| {
+                    let w = chelis_types::f16_from_f64_rne(v);
+                    chelis_types::observation::format_element(
+                        chelis_types::types::Prim::F16,
+                        chelis_types::observation::ElementRef::F16(w),
+                    ) == t
                 })
             },
         ),
         "bf16" => narrow_float_violation(
             t,
             "bf16",
-            |d| half::bf16::from_f64(d).to_f64(),
+            |d| chelis_types::bf16_from_f64_rne(d).to_f64(),
             |t| {
-                t.parse::<f32>().is_ok_and(|v| {
-                    let w = half::bf16::from_f32(v).to_f32();
-                    format!("{w:?}") == t
+                t.parse::<f64>().is_ok_and(|v| {
+                    let w = chelis_types::bf16_from_f64_rne(v);
+                    chelis_types::observation::format_element(
+                        chelis_types::types::Prim::Bf16,
+                        chelis_types::observation::ElementRef::Bf16(w),
+                    ) == t
                 })
             },
         ),
@@ -466,9 +665,13 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
     }
 }
 
-/// Shared narrow-float membership: exact widened rendering, own-width
-/// shortest rendering, or within print-truncation slack of the widened
-/// nearest-at-width value. See the module notes for why each branch exists.
+/// Shared narrow-float membership: exact widened rendering or own-width
+/// shortest rendering. The zero slack below is retained as the executable
+/// Phase 0 ratchet that rejects the retired `%.16g` accommodation.
+/// This verifier alone reconstructs a value from already-rendered text: it
+/// follows spec/05 §8.1 (`strtod`/f64, then one narrowing to the declared
+/// half width). Runtime values never pass through this helper; storage and
+/// transport remain at the value's declared dtype width.
 fn narrow_float_violation(
     t: &str,
     prim: &str,
@@ -500,7 +703,7 @@ fn narrow_float_violation(
     }
     Some(format!(
         "`{t}` is not representable in {prim}: nearest {prim} value is {h:?}, \
-         relative deviation {rel:e} exceeds the print-truncation slack \
+         relative deviation {rel:e} exceeds the exact domain slack \
          {DOMAIN_PRINT_TRUNCATION_SLACK:e}"
     ))
 }

@@ -36,7 +36,7 @@
 //!    unrolls to completion (~500 levels, near the 512 cap, which also
 //!    probes the Rust-stack headroom assumption in debug builds).
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
 use chelis_ir::dag::{DimInfo, NodeId, TensorType};
@@ -107,14 +107,14 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
     "#;
 
-    let mut program_defs = HashMap::new();
+    let mut program_defs = UnordMap::new();
     program_defs.insert("doubler".to_string(), parse_one(doubler_src));
     program_defs.insert("outer".to_string(), parse_one(outer_src));
 
-    let scoped = HashMap::from([("seed".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&parse_one(call_src), scoped, HashMap::new(), program_defs);
+    let scoped = UnordMap::from([("seed".to_string(), f32_vec(3))]);
+    let dag = lower_subexpr_program(&parse_one(call_src), scoped, UnordMap::new(), program_defs);
 
-    let inputs = HashMap::from([(
+    let inputs = UnordMap::from([(
         "seed".to_string(),
         TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
     )]);
@@ -131,10 +131,10 @@ fn nested_fn_param_call_lowers_via_substituted_callable() {
     let expected = [4.0, 8.0, 12.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (out.data[i] - want).abs() < 1e-6,
+            (out.to_f64_lossy_vec()[i] - want).abs() < 1e-6,
             "nested f(f(seed)) must equal 4*seed elementwise: index {i} \
              expected {want}, got {:?}",
-            out.data,
+            out.to_f64_lossy_vec(),
         );
     }
 }
@@ -166,12 +166,12 @@ fn true_self_recursion_errors_loudly_at_unroll_cap() {
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
     "#;
 
-    let mut program_defs = HashMap::new();
+    let mut program_defs = UnordMap::new();
     program_defs.insert("loop_self".to_string(), parse_one(loop_self_src));
 
-    let scoped = HashMap::from([("seed".to_string(), f32_vec(3))]);
+    let scoped = UnordMap::from([("seed".to_string(), f32_vec(3))]);
     let diagnostic =
-        try_lower_subexpr_program(&parse_one(call_src), scoped, HashMap::new(), program_defs)
+        try_lower_subexpr_program(&parse_one(call_src), scoped, UnordMap::new(), program_defs)
             .expect_err("unbounded self-recursion must be rejected, not silently dropped");
     let message = diagnostic.to_string();
     assert!(
@@ -224,13 +224,13 @@ fn static_base_case_recursion_unrolls_within_cap() {
           (cast {} (lit {} 0) int64))
     "#;
 
-    let mut program_defs = HashMap::new();
+    let mut program_defs = UnordMap::new();
     program_defs.insert("count_up".to_string(), parse_one(count_up_src));
 
-    let scoped = HashMap::from([("seed".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&parse_one(call_src), scoped, HashMap::new(), program_defs);
+    let scoped = UnordMap::from([("seed".to_string(), f32_vec(3))]);
+    let dag = lower_subexpr_program(&parse_one(call_src), scoped, UnordMap::new(), program_defs);
 
-    let inputs = HashMap::from([(
+    let inputs = UnordMap::from([(
         "seed".to_string(),
         TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
     )]);
@@ -241,7 +241,7 @@ fn static_base_case_recursion_unrolls_within_cap() {
     let out = &values[roots.last().unwrap()];
     assert_eq!(out.shape, vec![3]);
     assert_eq!(
-        out.data,
+        out.to_f64_lossy_vec(),
         vec![1.0, 2.0, 3.0],
         "count_up is the identity on its tensor argument after 500 pruned levels"
     );

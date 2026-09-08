@@ -136,9 +136,9 @@ fn structurally_distinct_adjoints_get_distinct_roots_sharing_one_gradient_dag_ha
     // The TWO_INPUT_LOSS fixture (mul(a,a) vs b) has STRUCTURALLY-DISTINCT
     // adjoints, so the compiler does not CSE-collapse them and each target gets
     // its OWN gradient root. Distinct roots is a property of THIS fixture, NOT
-    // an invariant the rail enforces; structurally-identical adjoints
-    // legitimately share one root (see
-    // `cse_collapsed_adjoints_share_one_root_soundly`). The shared property the
+    // an invariant the rail enforces. Even numerically equal adjoints may have
+    // distinct canonical accumulation roots (see
+    // `equal_adjoints_keep_distinct_exact_zero_roots`). The shared property the
     // rail DOES guarantee -- one gradient-DAG hash across the fan-out -- is
     // asserted below and holds either way.
     let goals =
@@ -173,7 +173,7 @@ fn structurally_distinct_adjoints_get_distinct_roots_sharing_one_gradient_dag_ha
         "the gradient artifact bytes are identical across the fan-out"
     );
 
-    // The serialized gradient artifact round-trips as a v1 WireDag, and each
+    // The serialized gradient artifact round-trips as an exact-version v6 WireDag, and each
     // goal's root index addresses a real root of it.
     let parsed: WireDag = serde_json::from_slice(&goals[0].extracted.wire_dag_bytes)
         .expect("the gradient bytes parse back as a WireDag");
@@ -190,14 +190,13 @@ fn structurally_distinct_adjoints_get_distinct_roots_sharing_one_gradient_dag_ha
 }
 
 #[test]
-fn cse_collapsed_adjoints_share_one_root_soundly() {
-    // d/dx and d/dy of mean(x + y) are BOTH the constant 1/4 -- structurally
-    // identical adjoints -- so the compiler's CSE legitimately collapses them to
-    // ONE gradient root. The two GradGoals then share root_index AND the one
-    // gradient-DAG hash, differing only by target name and output range. This is
-    // SOUND (both Greeks are genuinely equal, so one interval bounds both) and
-    // never aliases a forward node: the shared index is a gradient root. This
-    // pins the shared-root behavior as explicit + tested, not a surprise.
+fn equal_adjoints_keep_distinct_exact_zero_roots() {
+    // d/dx and d/dy of mean(x + y) are both 1/4 and share their contribution
+    // tail. spec/06 §2.4 nevertheless requires each forward value's canonical
+    // accumulation tree to begin with its own exact positive-zero base leaf.
+    // The two GradGoals therefore have distinct final Add roots while sharing
+    // the one gradient-DAG hash. This pins the semantic tree, not an incidental
+    // node count.
     let request = AdRailRequest {
         source: "x = (x : tensor[4, f32])\n\
                  y = (y : tensor[4, f32])\n\
@@ -210,9 +209,9 @@ fn cse_collapsed_adjoints_share_one_root_soundly() {
         target_ranges: vec![target_range("x", 0.0, 1.0), target_range("y", 0.0, 1.0)],
     };
     let goals = grad_goals_from_request(&request)
-        .expect("a two-target gradient with CSE-collapsed adjoints still fans out");
+        .expect("a two-target gradient with equal adjoints still fans out");
 
-    // Two goals -- one per target NAME -- even though the adjoints collapsed.
+    // Two goals -- one per target NAME -- even though the adjoints are equal.
     assert_eq!(goals.len(), 2, "still one goal per gradient target name");
     assert_eq!(
         goals.iter().map(|g| g.target.as_str()).collect::<Vec<_>>(),
@@ -220,7 +219,7 @@ fn cse_collapsed_adjoints_share_one_root_soundly() {
         "goals are still keyed by distinct target names"
     );
 
-    // SHARED root index: the CSE collapse maps both targets to the same root.
+    // DISTINCT canonical roots: each target owns its exact-zero accumulation.
     let x_root = goals[0]
         .extracted
         .goal
@@ -233,9 +232,9 @@ fn cse_collapsed_adjoints_share_one_root_soundly() {
         .ir
         .root_index()
         .expect("y root index");
-    assert_eq!(
+    assert_ne!(
         x_root, y_root,
-        "structurally-identical adjoints (both 1/4) collapse to ONE gradient root"
+        "equal adjoints retain distinct target-specific exact-zero roots"
     );
     // SHARED hash: still the one gradient-DAG artifact (lowered once).
     assert_eq!(
@@ -243,16 +242,47 @@ fn cse_collapsed_adjoints_share_one_root_soundly() {
         "both goals address the one gradient-DAG artifact"
     );
 
-    // The shared root is a real GRADIENT root of the DAG, never a forward node:
-    // the collapse is sound, not an aliasing bug.
+    // Both roots are real gradient roots with distinct exact-zero leaves and a
+    // shared contribution tail. This is the required canonical accumulation
+    // shape, not just a changed root count.
     let parsed: WireDag = serde_json::from_slice(&goals[0].extracted.wire_dag_bytes)
         .expect("the gradient bytes parse back as a WireDag");
+    let x_root = x_root as usize;
+    let y_root = y_root as usize;
     assert!(
-        parsed.roots.contains(&(x_root as usize)),
-        "the shared index is a real root of the gradient DAG"
+        parsed.roots.contains(&x_root),
+        "x root is in the gradient DAG"
+    );
+    assert!(
+        parsed.roots.contains(&y_root),
+        "y root is in the gradient DAG"
+    );
+    let x_node = &parsed.nodes[x_root];
+    let y_node = &parsed.nodes[y_root];
+    assert!(matches!(x_node.op, WireRiscOp::Add));
+    assert!(matches!(y_node.op, WireRiscOp::Add));
+    assert_eq!(x_node.inputs.len(), 2);
+    assert_eq!(y_node.inputs.len(), 2);
+    assert_ne!(
+        x_node.inputs[0], y_node.inputs[0],
+        "each target has its own exact-zero leaf"
+    );
+    for zero in [x_node.inputs[0], y_node.inputs[0]] {
+        let WireRiscOp::Const { value } = &parsed.nodes[zero].op else {
+            panic!("adjoint accumulation base must be a Const");
+        };
+        assert_eq!(
+            value.as_f64_lossy().to_bits(),
+            0.0f64.to_bits(),
+            "adjoint accumulation base must be exact positive zero"
+        );
+    }
+    assert_eq!(
+        x_node.inputs[1], y_node.inputs[1],
+        "equal adjoints share the contribution tail"
     );
 
-    // Still no in-tree fit: each CSE-shared goal is no-fit -> Unsupported, never
+    // Still no in-tree fit: each equal-adjoint goal is no-fit -> Unsupported, never
     // green. The collapse does not change the dispatch outcome.
     let registry = DischargeRegistry::with_builtin_engines();
     for (_, discharge) in dispatch_grad_goals(&registry, &goals, 1_000) {
@@ -550,7 +580,8 @@ fn non_finite_in_gradient_dag_is_rejected_at_the_producer_boundary() {
     // (the WI-3 finite-float guard applies via box_range_goal_from_wire_dag),
     // surfacing as GoalConstruction(NonFiniteValue), not a corrupted artifact.
     let grad = single_op_grad_result(WireRiscOp::Const {
-        value: f64::INFINITY,
+        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, f64::INFINITY)
+            .expect("float finalize is total"),
     });
     let err = fan_out_grad_goals(
         &grad,
@@ -570,7 +601,10 @@ fn non_finite_in_gradient_dag_is_rejected_at_the_producer_boundary() {
 #[test]
 fn finite_gradient_dag_passes_the_producer_boundary() {
     // The positive twin: a finite gradient DAG produces a populated goal.
-    let grad = single_op_grad_result(WireRiscOp::Const { value: 1.0 });
+    let grad = single_op_grad_result(WireRiscOp::Const {
+        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
+            .expect("finite f64"),
+    });
     let goals = fan_out_grad_goals(
         &grad,
         &input_box(&[("x", -1.0, 1.0)]),
@@ -586,7 +620,10 @@ fn finite_gradient_dag_passes_the_producer_boundary() {
 fn inverted_output_range_on_a_gradient_target_is_rejected_as_ill_formed() {
     // An inverted (lo > hi) range on a gradient target must surface as an
     // ill-formed goal, not a goal asserting an empty region.
-    let grad = single_op_grad_result(WireRiscOp::Const { value: 1.0 });
+    let grad = single_op_grad_result(WireRiscOp::Const {
+        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
+            .expect("finite f64"),
+    });
     let err = fan_out_grad_goals(
         &grad,
         &input_box(&[("x", -1.0, 1.0)]),
@@ -603,9 +640,12 @@ fn inverted_output_range_on_a_gradient_target_is_rejected_as_ill_formed() {
 }
 
 #[test]
-fn non_v1_gradient_dag_is_rejected_at_the_producer_boundary() {
+fn non_current_gradient_dag_is_rejected_at_the_producer_boundary() {
     // A future-version gradient DAG must be rejected, not silently hashed.
-    let mut grad = single_op_grad_result(WireRiscOp::Const { value: 1.0 });
+    let mut grad = single_op_grad_result(WireRiscOp::Const {
+        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
+            .expect("finite f64"),
+    });
     grad.dag.schema_version = WIRE_DAG_SCHEMA_VERSION + 1;
     let err = fan_out_grad_goals(
         &grad,
@@ -627,7 +667,10 @@ fn unknown_target_on_constructed_grad_result_fails_the_fan_out() {
     // The unknown-target guard is in the pure fan-out core, independent of
     // lowering: a target absent from grad_nodes_by_name fails with
     // UnknownGradTarget.
-    let grad = single_op_grad_result(WireRiscOp::Const { value: 1.0 });
+    let grad = single_op_grad_result(WireRiscOp::Const {
+        value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
+            .expect("finite f64"),
+    });
     let err = fan_out_grad_goals(
         &grad,
         &input_box(&[("x", -1.0, 1.0)]),

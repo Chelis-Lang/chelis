@@ -3,10 +3,15 @@
 //! Every Deep node is a 3-tuple: (tag {} children...)
 //! where {} is an inline metadata map.
 
-use std::collections::{HashMap, HashSet};
+use chelis_deep::{
+    Atom as DeepAtom, DTYPE_BOUNDS_KEY, DeepTag, DtypeFamily, LiteralFamilyFit, LiteralSource,
+    classify_literal_source, encode_dtype_bounds,
+};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
+use chelis_vocab::EffectKind;
 
 use crate::ast::*;
 
@@ -16,23 +21,84 @@ use crate::ast::*;
 
 pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
     let ctx = DesugarCtx::new(decls);
-    decls
+    let exprs: Vec<deep::Expr> = decls
         .iter()
         .flat_map(|decl| ctx.desugar_decl(decl))
-        .collect()
+        .collect();
+    // The desugar internally produces `Expr::Node` (proving structural
+    // correctness via `Node::new` validation). Normalize to `Expr::List`
+    // at the output boundary so downstream consumers work unchanged during
+    // the transition period (#908). Once all consumers handle Node
+    // directly, remove this normalization.
+    normalize_to_lists(&exprs)
 }
 
 pub fn desugar_decl_only(decl: &Decl) -> Vec<deep::Expr> {
-    DesugarCtx::default().desugar_decl(decl)
+    normalize_to_lists(&DesugarCtx::default().desugar_decl(decl))
 }
 
 pub fn desugar_expr_only(expr: &Expr) -> deep::Expr {
-    DesugarCtx::default().desugar_expr(expr)
+    normalize_single(&DesugarCtx::default().desugar_expr(expr))
+}
+
+fn normalize_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    exprs.iter().map(normalize_single).collect()
+}
+
+fn normalize_single(expr: &deep::Expr) -> deep::Expr {
+    match expr {
+        deep::Expr::Node(node, span) => {
+            let list = node.to_list(*span);
+            let elements = list.elements.iter().map(normalize_single).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::List(list, span) => {
+            let elements = list.elements.iter().map(normalize_single).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::BareList(elems, span) => {
+            let elements = elems.iter().map(normalize_single).collect();
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::Map(map, span) => {
+            let entries = map
+                .entries
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_single(v)))
+                .collect();
+            deep::Expr::Map(deep::MetaMap { entries }, *span)
+        }
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_single(v)))
+                    .collect(),
+                expr: Box::new(normalize_single(&meta.expr)),
+            },
+            *span,
+        ),
+        deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
+            head: data.head.clone(),
+            meta: deep::MetaMap {
+                entries: data
+                    .meta
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_single(v)))
+                    .collect(),
+            },
+            children: data.children.iter().map(normalize_single).collect(),
+            span: data.span,
+        })),
+        other => other.clone(),
+    }
 }
 
 #[derive(Default)]
 struct DesugarCtx {
-    top_level_fn_params: HashMap<String, Vec<String>>,
+    top_level_fn_params: UnordMap<String, Vec<String>>,
     /// Per-function tensor element types declared in the function's
     /// signature, indexed by parameter position. `None` for non-tensor
     /// parameters or parameters with no declared type.
@@ -42,7 +108,7 @@ struct DesugarCtx {
     /// position 2: the corresponding argument position of a call whose
     /// callee has a declared signature with a tensor parameter at that
     /// position.
-    top_level_fn_tensor_param_prec: HashMap<String, Vec<Option<String>>>,
+    top_level_fn_tensor_param_prec: UnordMap<String, Vec<Option<String>>>,
     /// Names that carry an explicit standalone `sig`/signature declaration
     /// (`Decl::Sig`). When a `def` of the same name also has inline
     /// annotations, `desugar_fun_def` would otherwise synthesize a second
@@ -53,7 +119,7 @@ struct DesugarCtx {
     /// body-vs-signature contract on the un-annotated positions
     /// (chelis#285). When an explicit sig exists, the synthesized one is
     /// strictly redundant and weaker, so we suppress it here.
-    explicit_sig_names: HashSet<String>,
+    explicit_sig_names: UnordSet<String>,
     /// Explicit effect clauses (`! { ... }`) declared on each `def`, keyed by
     /// name. The effect upper-bound check reads the declared effect set only
     /// from a `defsig`'s `t-fn` `eff` metadata
@@ -65,21 +131,48 @@ struct DesugarCtx {
     /// otherwise suppression would silently drop the def's effect contract
     /// (chelis#285). Stored even for an empty `! {}` (which declares "no
     /// effects" and is distinct from no annotation at all).
-    def_effects: HashMap<String, Vec<EffectExpr>>,
+    def_effects: UnordMap<String, Vec<EffectExpr>>,
+    /// Monotonic counter behind every `__chelis_tmpN` this context
+    /// synthesizes for destructuring `let` patterns (chelis#1200).
+    ///
+    /// It lives on the context, not on `desugar_let_bindings`, because a
+    /// per-call counter restarts at 0 for every nested block. Two
+    /// destructures in nested blocks then both mint `__chelis_tmp0..2`,
+    /// and the inner names SHADOW the outer ones in the linearity
+    /// checker's scope. Since a component is an alias of its temp, an
+    /// outer component's consume resolved to the inner block's temp
+    /// entry: it either blamed the wrong binding or, when the inner temp
+    /// was still `Live`, left the outer carrier unconsumed so a genuine
+    /// double consume was silently accepted. The names are internal, so
+    /// the fix is simply to never reuse one within a context.
+    ///
+    /// A `Cell` because the desugar walk takes `&self` throughout.
+    next_destructure_temp: std::cell::Cell<usize>,
+    /// Each declaration's inline or standalone-signature binders. `None`
+    /// marks a declared but unbounded binder, which cannot adopt a literal.
+    declared_type_binders: UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
+    /// Binder scope installed while one declaration body is desugared.
+    current_type_binders: std::cell::RefCell<UnordMap<String, Option<DtypeFamily>>>,
 }
 
 impl DesugarCtx {
+    fn current_type_binder(&self, name: &str) -> Option<Option<DtypeFamily>> {
+        self.current_type_binders.borrow().get(name).copied()
+    }
+
     fn new(decls: &[Decl]) -> Self {
-        let mut top_level_fn_params = HashMap::new();
-        let mut top_level_fn_tensor_param_prec = HashMap::new();
-        let mut explicit_sig_names = HashSet::new();
-        let mut def_effects = HashMap::new();
+        let mut top_level_fn_params = UnordMap::new();
+        let mut top_level_fn_tensor_param_prec = UnordMap::new();
+        let mut explicit_sig_names = UnordSet::new();
+        let mut def_effects = UnordMap::new();
+        let mut declared_type_binders = UnordMap::new();
         for decl in decls {
             for_each_decl(decl, &mut |d| {
                 collect_top_level_fn_params(d, &mut top_level_fn_params);
                 collect_top_level_fn_tensor_param_prec(d, &mut top_level_fn_tensor_param_prec);
                 collect_explicit_sig_names(d, &mut explicit_sig_names);
                 collect_def_effects(d, &mut def_effects);
+                collect_declared_type_binders(d, &mut declared_type_binders);
             });
         }
         Self {
@@ -87,6 +180,9 @@ impl DesugarCtx {
             top_level_fn_tensor_param_prec,
             explicit_sig_names,
             def_effects,
+            next_destructure_temp: std::cell::Cell::new(0),
+            declared_type_binders,
+            current_type_binders: std::cell::RefCell::new(UnordMap::new()),
         }
     }
 }
@@ -110,7 +206,7 @@ fn sp() -> Span {
 }
 
 fn sym(s: &str) -> deep::Expr {
-    deep::Expr::Atom(deep::Atom::Symbol(s.to_string()), sp())
+    deep::Expr::Atom(deep::Atom::Name(s.to_string()), sp())
 }
 
 fn int(n: i64) -> deep::Expr {
@@ -150,27 +246,172 @@ fn meta_with_type(ty: deep::Expr) -> deep::Expr {
     meta_with_entries(vec![("type".to_string(), ty)])
 }
 
+fn meta_with_integer_float_type(ty: deep::Expr, style: Option<&str>) -> deep::Expr {
+    let mut entries = vec![
+        ("type".to_string(), ty),
+        ("literal_source".to_string(), sym("integer")),
+    ];
+    if let Some(style) = style {
+        entries.push(("surf_literal_style".to_string(), string(style)));
+    }
+    meta_with_entries(entries)
+}
+
 fn meta_with_entries(entries: Vec<(String, deep::Expr)>) -> deep::Expr {
     deep::Expr::Map(deep::MetaMap { entries }, sp())
 }
 
-/// Build a 3-tuple Deep node: (tag {} children...)
-fn node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
+fn numeric_literal_meta(ty: deep::Expr, style: &str) -> deep::Expr {
+    meta_with_entries(vec![
+        ("type".to_string(), ty),
+        ("surf_literal_style".to_string(), string(style)),
+    ])
+}
+
+fn add_surface_marker(expr: deep::Expr, key: &str, value: &str) -> deep::Expr {
+    let entry = (key.to_string(), string(value));
+    match expr {
+        deep::Expr::Node(mut node, span) => {
+            let mut meta = node.meta().clone();
+            meta.entries.retain(|(existing, _)| existing != key);
+            meta.entries.push(entry);
+            node.try_replace_meta(meta)
+                .expect("surface metadata must preserve the stamped Node invariant");
+            deep::Expr::Node(node, span)
+        }
+        deep::Expr::List(list, span) => {
+            let mut elements = list.elements;
+            if elements.len() >= 2 {
+                let mut entries = match elements.remove(1) {
+                    deep::Expr::Map(map, _) => map.entries,
+                    _ => Vec::new(),
+                };
+                entries.retain(|(existing, _)| existing != key);
+                entries.push(entry);
+                elements.insert(1, meta_with_entries(entries));
+            }
+            deep::Expr::List(deep::List { elements }, span)
+        }
+        other => other,
+    }
+}
+
+fn has_metadata_key(expr: &deep::Expr, key: &str) -> bool {
+    match expr {
+        deep::Expr::Node(node, _) => node.meta().entries.iter().any(|(name, _)| name == key),
+        deep::Expr::List(list, _) => matches!(
+            list.elements.get(1),
+            Some(deep::Expr::Map(meta, _))
+                if meta.entries.iter().any(|(name, _)| name == key)
+        ),
+        _ => false,
+    }
+}
+
+/// Build a stamped Deep node. Decode-once (chelis#731 Phase 3): the
+/// desugarer is a typed producer, so the tag is validated at construction
+/// time via `Node::new`.
+fn node(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
+    deep::Expr::Node(
+        Box::new(chelis_deep::node::Node::new(
+            tag,
+            deep::MetaMap::default(),
+            children,
+        )),
+        sp(),
+    )
+}
+
+/// Build a compiler-internal pre-expansion node (`defmacro` /
+/// `macro-invoke`), whose tags are deliberately OUTSIDE the public
+/// 62-tag vocabulary (spec/03 macro boundary rule) and therefore stay
+/// symbol-headed. chelis-macros expands these away before any public
+/// consumer dispatches on tags; they are a recorded raw-string entry
+/// point per checker_totality.md §C1.2.
+fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
+    debug_assert!(
+        DeepTag::parse(tag).is_none(),
+        "vocabulary tags must go through the typed `node` constructor"
+    );
     let mut elements = vec![sym(tag), meta_empty()];
     elements.extend(children);
     deep::Expr::List(deep::List { elements }, sp())
 }
 
-/// Build a 3-tuple Deep node with custom metadata: (tag {meta} children...)
-fn node_meta(tag: &str, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Expr {
-    let mut elements = vec![sym(tag), meta];
-    elements.extend(children);
-    deep::Expr::List(deep::List { elements }, sp())
+/// Attach `dtype_bounds` metadata for every bounded binder in `binders`
+/// (`spec/03-deep-syntax.md` §1.1). A list with no bound leaves the node
+/// untouched, so canonical Deep for an unbounded declaration is unchanged.
+fn with_dtype_bounds(expr: deep::Expr, binders: &[TypeBinder]) -> deep::Expr {
+    let bounds: Vec<(String, DtypeFamily)> = binders
+        .iter()
+        .filter_map(|binder| binder.bound.map(|family| (binder.name.clone(), family)))
+        .collect();
+    if bounds.is_empty() {
+        return expr;
+    }
+    let deep::Expr::Node(mut node, span) = expr else {
+        panic!("dtype bounds attach to a stamped declaration node");
+    };
+    let mut meta = node.meta().clone();
+    meta.entries.push((
+        DTYPE_BOUNDS_KEY.to_string(),
+        encode_dtype_bounds(&bounds, sp()),
+    ));
+    node.try_replace_meta(meta)
+        .expect("dtype-bound metadata preserves the stamped Node invariant");
+    deep::Expr::Node(node, span)
+}
+
+/// Build a stamped Deep node with custom metadata. The `meta` argument
+/// must be an `Expr::Map(MetaMap { .. }, _)` — the MetaMap is extracted
+/// and passed to `Node::new`.
+fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Expr {
+    let meta_map = match meta {
+        deep::Expr::Map(m, _) => m,
+        _ => panic!("node_meta: expected Expr::Map for metadata, got {meta:?}"),
+    };
+    deep::Expr::Node(
+        Box::new(chelis_deep::node::Node::new(tag, meta_map, children)),
+        sp(),
+    )
+}
+
+/// Preserve a Surf type expression's byte range in the structural Deep span
+/// without changing canonical Deep metadata or printer output. Type-resolution
+/// diagnostics use this when no external `span` metadata is present.
+fn with_structural_span(expr: deep::Expr, span: Span) -> deep::Expr {
+    match expr {
+        deep::Expr::Atom(atom, _) => deep::Expr::Atom(atom, span),
+        deep::Expr::List(list, _) => deep::Expr::List(list, span),
+        deep::Expr::Map(map, _) => deep::Expr::Map(map, span),
+        deep::Expr::MetaExpr(meta, _) => deep::Expr::MetaExpr(meta, span),
+        deep::Expr::Node(node, _) => deep::Expr::Node(node, span),
+        deep::Expr::BareList(elems, _) => deep::Expr::BareList(elems, span),
+        deep::Expr::UnknownForm(data) => {
+            let mut d = *data;
+            d.span = span;
+            deep::Expr::UnknownForm(Box::new(d))
+        }
+    }
+}
+
+fn type_expr_span(ty: &TypeExpr) -> Span {
+    match ty {
+        TypeExpr::Named(_, span)
+        | TypeExpr::DimensionLiteral(_, span)
+        | TypeExpr::Tensor(_, _, span)
+        | TypeExpr::Arrow(_, _, span)
+        | TypeExpr::Ref(_, span)
+        | TypeExpr::App(_, _, span)
+        | TypeExpr::Tuple(_, span)
+        | TypeExpr::Infer(span)
+        | TypeExpr::RankSpread(_, span) => *span,
+    }
 }
 
 /// Variable reference: (var {} name)
 fn dvar(name: &str) -> deep::Expr {
-    node("var", vec![sym(name)])
+    node(DeepTag::Var, vec![sym(name)])
 }
 
 fn attach_span_metadata(expr: deep::Expr, span: Span) -> deep::Expr {
@@ -179,6 +420,14 @@ fn attach_span_metadata(expr: deep::Expr, span: Span) -> deep::Expr {
     };
 
     match expr {
+        deep::Expr::Node(mut node, node_span) => {
+            let mut meta = node.meta().clone();
+            meta.entries.retain(|(key, _)| key != "span");
+            meta.entries.push(entry);
+            node.try_replace_meta(meta)
+                .expect("span annotation must preserve the stamped Node invariant");
+            deep::Expr::Node(node, node_span)
+        }
         deep::Expr::List(list, list_span) => {
             let mut elements = list.elements;
             if let Some(deep::Expr::Map(map, _)) = elements.get_mut(1) {
@@ -199,6 +448,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::Apply(_, _, span)
         | Expr::List(_, span)
         | Expr::Record(_, _, span)
+        | Expr::RecordUpdate(_, _, span)
         | Expr::Access(_, _, span)
         | Expr::TupleGet(_, _, span)
         | Expr::Binary(_, _, _, span)
@@ -208,7 +458,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::Match(_, _, span)
         | Expr::Lambda(_, _, span)
         | Expr::Tuple(_, span)
-        | Expr::Cast(_, _, span)
+        | Expr::Cast(_, _, _, span)
         | Expr::Grad(_, _, span)
         | Expr::Vmap(_, _, span)
         | Expr::Jit(_, span)
@@ -218,6 +468,10 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
+        | Expr::Do(_, span)
+        | Expr::Quote(_, span)
+        | Expr::Unquote(_, span)
+        | Expr::Splice(_, span)
         | Expr::Annotate(_, _, span)
         | Expr::Block(_, _, span) => *span,
     }
@@ -225,7 +479,7 @@ fn expr_span(expr: &Expr) -> Span {
 
 /// Build a bare list (no tag/meta) for structural helpers like params, bind
 fn bare_list(elements: Vec<deep::Expr>) -> deep::Expr {
-    deep::Expr::List(deep::List { elements }, sp())
+    deep::Expr::BareList(elements, sp())
 }
 
 fn lower_module_path(path: &str) -> String {
@@ -233,11 +487,11 @@ fn lower_module_path(path: &str) -> String {
 }
 
 fn desugar_param(param: &Param) -> deep::Expr {
-    desugar_param_with_dims(param, &HashSet::new())
+    desugar_param_with_dims(param, &UnordSet::new())
 }
 
-fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::Expr {
-    desugar_param_with_scope(param, dim_vars, &HashSet::new())
+fn desugar_param_with_dims(param: &Param, dim_vars: &UnordSet<String>) -> deep::Expr {
+    desugar_param_with_scope(param, dim_vars, &UnordSet::new())
 }
 
 /// Desugar a parameter with both a declared dim-vars scope and a
@@ -251,8 +505,8 @@ fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::E
 /// from sigs to def parameter annotations.
 fn desugar_param_with_scope(
     param: &Param,
-    dim_vars: &HashSet<String>,
-    tvar_set: &HashSet<String>,
+    dim_vars: &UnordSet<String>,
+    tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
     match &param.ty {
         Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
@@ -348,6 +602,14 @@ fn typed_param_needs_meta_wrapper(name: &str) -> bool {
 /// Inject a type annotation into the metadata of a desugared expression.
 fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
     match expr {
+        deep::Expr::Node(mut node, span) => {
+            let mut meta = node.meta().clone();
+            meta.entries.retain(|(key, _)| key != "type");
+            meta.entries.push(("type".to_string(), ty));
+            node.try_replace_meta(meta)
+                .expect("type annotation must preserve the stamped Node invariant");
+            deep::Expr::Node(node, span)
+        }
         deep::Expr::List(list, span) => {
             let mut elements = list.elements;
             if elements.len() >= 2 {
@@ -365,7 +627,7 @@ fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
             deep::Expr::List(deep::List { elements }, span)
         }
         // For atoms, wrap in an annotated var node
-        other => node_meta("var", meta_with_type(ty), vec![other]),
+        other => node_meta(DeepTag::Var, meta_with_type(ty), vec![other]),
     }
 }
 
@@ -379,12 +641,12 @@ fn desugar_effect_set(effects: &[EffectExpr]) -> deep::Expr {
             EffectExpr::Io(_) => sym("io"),
             EffectExpr::Test(_) => sym("test"),
             EffectExpr::Resource(device, _) => node(
-                "resource",
+                DeepTag::Resource,
                 vec![deep::Expr::Atom(deep::Atom::Str(device.clone()), sp())],
             ),
         });
     }
-    node("effects", children)
+    node(DeepTag::Effects, children)
 }
 
 fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>) -> deep::Expr {
@@ -392,11 +654,21 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
         // An explicit `! { ... }` clause — even the empty `! {}` — must be preserved in
         // the Deep AST so the effect checker can distinguish "declared empty" from
         // "no annotation" when validating declared vs inferred effects.
+        (Some(effects), deep::Expr::Node(mut node, span)) => {
+            if node.tag() == DeepTag::TFn {
+                let mut meta = node.meta().clone();
+                meta.entries = vec![("eff".to_string(), desugar_effect_set(effects))];
+                node.try_replace_meta(meta)
+                    .expect("effect annotation must preserve the stamped Node invariant");
+            }
+            deep::Expr::Node(node, span)
+        }
         (Some(effects), deep::Expr::List(list, span)) => {
             let mut elements = list.elements;
-            if let Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) = elements.first()
-                && tag == "t-fn"
-            {
+            if matches!(
+                elements.first(),
+                Some(deep::Expr::Atom(deep::Atom::Tag(DeepTag::TFn), _))
+            ) {
                 elements[1] =
                     meta_with_entries(vec![("eff".to_string(), desugar_effect_set(effects))]);
             }
@@ -422,6 +694,48 @@ fn fresh_pipe_param_name(stage: &Expr) -> String {
     }
 }
 
+fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
+    let Expr::Lambda(params, body, _) = expr else {
+        return false;
+    };
+    let [param] = params.as_slice() else {
+        return false;
+    };
+    if param.ty.is_some() {
+        return false;
+    }
+    let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
+    match body.as_ref() {
+        Expr::Apply(_, arguments, _) => arguments.first().is_some_and(is_param),
+        Expr::Realize(argument, _) | Expr::Copy(argument, _) | Expr::Cast(argument, _, _, _) => {
+            is_param(argument)
+        }
+        _ => false,
+    }
+}
+
+fn mark_call_first_pipe_stage(expr: deep::Expr) -> deep::Expr {
+    let marker = ("surf_pipe_stage".to_string(), string("call-first"));
+    match expr {
+        deep::Expr::Node(mut node, span) => {
+            let mut meta = node.meta().clone();
+            meta.entries.retain(|(key, _)| key != "surf_pipe_stage");
+            meta.entries.push(marker);
+            node.try_replace_meta(meta)
+                .expect("pipe metadata must preserve the stamped Node invariant");
+            deep::Expr::Node(node, span)
+        }
+        deep::Expr::List(mut list, span) => {
+            if let Some(deep::Expr::Map(meta, _)) = list.elements.get_mut(1) {
+                meta.entries.retain(|(key, _)| key != "surf_pipe_stage");
+                meta.entries.push(marker);
+            }
+            deep::Expr::List(list, span)
+        }
+        other => other,
+    }
+}
+
 fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Lit(_, _) => false,
@@ -433,6 +747,12 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
         Expr::Record(_, fields, _) => fields
             .iter()
             .any(|(_, value)| expr_mentions_name(value, name)),
+        Expr::RecordUpdate(base, fields, _) => {
+            expr_mentions_name(base, name)
+                || fields
+                    .iter()
+                    .any(|(_, value)| expr_mentions_name(value, name))
+        }
         Expr::Access(base, field, _) => expr_mentions_name(base, name) || field == name,
         Expr::TupleGet(base, _, _) => expr_mentions_name(base, name),
         Expr::Binary(_, lhs, rhs, _) => {
@@ -478,10 +798,10 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
                         .is_some_and(|ty| type_mentions_name(ty, name))
             }) || expr_mentions_name(body, name)
         }
-        Expr::Tuple(items, _) | Expr::Par(items, _) => {
+        Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             items.iter().any(|item| expr_mentions_name(item, name))
         }
-        Expr::Cast(expr, precision, _) => expr_mentions_name(expr, name) || precision == name,
+        Expr::Cast(expr, precision, _, _) => expr_mentions_name(expr, name) || precision == name,
         Expr::Grad(expr, wrt, _) => {
             expr_mentions_name(expr, name)
                 || wrt
@@ -493,6 +813,9 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
         | Expr::Realize(expr, _)
         | Expr::Copy(expr, _)
         | Expr::Borrow(expr, _)
+        | Expr::Quote(expr, _)
+        | Expr::Unquote(expr, _)
+        | Expr::Splice(expr, _)
         | Expr::Annotate(expr, _, _) => expr_mentions_name(expr, name),
         Expr::WithSeed(seed, body, _) | Expr::WithDevice(seed, body, _) => {
             expr_mentions_name(seed, name) || expr_mentions_name(body, name)
@@ -531,6 +854,7 @@ fn pattern_mentions_name(pattern: &Pattern, name: &str) -> bool {
 fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
     match ty {
         TypeExpr::Named(found, _) => found == name,
+        TypeExpr::DimensionLiteral(_, _) => false,
         TypeExpr::RankSpread(found, _) => found == name,
         TypeExpr::Tensor(items, precision, _) => {
             precision == name || items.iter().any(|item| type_mentions_name(item, name))
@@ -560,21 +884,86 @@ const PRIMITIVES: &[&str] = &[
     "f32", "f64", "f16", "bf16", "int8", "int16", "int32", "int64", "bool", "string", "unit",
 ];
 
-/// Unsigned dtype names per `spec/04-type-system.md` §1.1.2. These are
-/// not in the active numeric primitive set, but they are well-known
-/// dtype identifiers that users (especially LLMs translating from
-/// numpy/PyTorch) reach for. Treat them as "intended-precision"
-/// identifiers in desugar so they reach the type-checker's §1.1.2
-/// rejection path with a precise diagnostic, NOT as candidate
-/// quantified type variables.
+/// The canonical primitive spelling for a type-position name, or `None` when
+/// the name is not a primitive at all.
 ///
-/// Mirrors `chelis_types::infer::is_unsigned_dtype_name`. Kept as a
+/// `spec/04-type-system.md` §5.8.1 lists the integer primitives by their SHORT
+/// spellings (`i8`..`i64`) while `spec/02-surf-syntax.md`'s grammar and
+/// `chelis_types::Prim::parse_name` spell them `int8`..`int64`. The short forms
+/// are accepted INPUT spellings that normalise here to the canonical long name,
+/// so canonical Deep carries one spelling per primitive and the
+/// implicit-quantifier collector never sees a primitive as a candidate.
+///
+/// Before this existed, `-> i64` failed the primitive test, fell through to the
+/// lexical case-split, and became an implicitly quantified `(t-var {} i64)`:
+/// `def ident(x: i64) -> i64 = x` accepted `ident(1.5f64)` and returned f64
+/// (chelis#1587).
+///
+/// `Prim::parse_name` deliberately gains no alias row. Deep is canonical, so a
+/// hand-written `(t-prim {} i64)` stays an unknown primitive and is rejected;
+/// the alias is a Surf input-spelling rule only. Whether one spelling should
+/// serve both the type and suffix roles is chelis#1592, not decided here.
+pub(crate) fn canonical_primitive_name(name: &str) -> Option<&'static str> {
+    match name {
+        "i8" => Some("int8"),
+        "i16" => Some("int16"),
+        "i32" => Some("int32"),
+        "i64" => Some("int64"),
+        _ => PRIMITIVES
+            .iter()
+            .copied()
+            .find(|primitive| *primitive == name),
+    }
+}
+
+/// Unsigned dtype names, deferred per `spec/04-type-system.md` §1.1.1
+/// (§1.1.2 names the `uint*` spellings canonical; the short `u*`
+/// spellings are not reserved). These are not in the active numeric
+/// primitive set, but they are well-known dtype identifiers that users
+/// (especially LLMs translating from numpy/PyTorch) reach for. Treat
+/// them as "intended-precision" identifiers in desugar so they reach
+/// the type-checker's §1.1.1 rejection path with a precise diagnostic,
+/// NOT as candidate quantified type variables.
+///
+/// Mirrors `chelis_types::deep_type::is_unsigned_dtype_name`. Kept as a
 /// parallel const here because chelis-surf does not depend on
 /// chelis-types and pulling in the dependency just for this list
 /// would invert the desugar / typecheck layering.
 const UNSIGNED_DTYPE_NAMES: &[&str] = &[
     "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
 ];
+
+/// The remaining reserved-but-deferred dtype names of
+/// `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because it is a
+/// real `Prim` variant and takes the `Prim::parse_name` path). Same
+/// treatment as the unsigned family above: these must reach the
+/// type-checker's §1.1.1 rejection path as `(t-prim {} <name>)`, not be
+/// quietly absorbed as candidate quantified type variables.
+///
+/// Mirrors `chelis_types::deep_type::is_deferred_dtype_name`.
+const DEFERRED_DTYPE_NAMES: &[&str] = &[
+    "f8e5m2",
+    "int4",
+    "uint4",
+    "complex64",
+    "complex128",
+    "decimal128",
+    "decimal256",
+];
+
+/// True if `name` is reserved under `spec/04-type-system.md` §1.1.1 and
+/// therefore names no type at all: the §1.1.2 unsigned spellings or one of the
+/// other reserved-but-deferred names.
+///
+/// A reserved spelling is not a candidate type variable and is not rebindable
+/// by an explicit quantifier list. §5.8.1 states the rule on the category, so
+/// this predicate is the category and every type-name decision below consults
+/// exactly it. Splitting the two lists across two decisions is what let
+/// `def f[u8](x: u8) -> u8 = x` keep scoring 1.0 after the first repair
+/// (chelis#1593).
+pub(crate) fn is_reserved_dtype_name(name: &str) -> bool {
+    UNSIGNED_DTYPE_NAMES.contains(&name) || DEFERRED_DTYPE_NAMES.contains(&name)
+}
 
 // ---------------------------------------------------------------------------
 // Declarations
@@ -595,7 +984,7 @@ fn for_each_decl(decl: &Decl, visit: &mut impl FnMut(&Decl)) {
     }
 }
 
-fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String>>) {
+fn collect_top_level_fn_params(decl: &Decl, out: &mut UnordMap<String, Vec<String>>) {
     if let Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } = decl {
         out.insert(
             name.clone(),
@@ -604,10 +993,45 @@ fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String
     }
 }
 
-/// Collect names that carry an explicit standalone `sig` declaration, so
-/// `desugar_fun_def` can suppress the redundant wildcard-filled `defsig` it
-/// would otherwise synthesize for a same-name annotated `def` (chelis#285).
-fn collect_explicit_sig_names(decl: &Decl, out: &mut HashSet<String>) {
+/// Merge inline and standalone-signature binders by declaration name.
+fn collect_declared_type_binders(
+    decl: &Decl,
+    out: &mut UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
+) {
+    let (name, type_binders, signature_type) = match decl {
+        Decl::FunDef {
+            name, type_binders, ..
+        } => (name, type_binders, None),
+        Decl::Sig {
+            name,
+            type_binders,
+            ty,
+            ..
+        } => (name, type_binders, Some(ty)),
+        _ => return,
+    };
+    let entry = out.entry(name.clone()).or_default();
+    for binder in type_binders {
+        let slot = entry.entry(binder.name.clone()).or_insert(None);
+        if slot.is_none() {
+            *slot = binder.bound;
+        }
+    }
+    if let Some(signature_type) = signature_type {
+        let mut implicit = UnordSet::new();
+        collect_sig_type_vars(signature_type, &mut implicit);
+        for name in implicit.to_sorted() {
+            entry.entry(name.clone()).or_insert(None);
+        }
+    }
+    if entry.is_empty() {
+        out.remove(name);
+    }
+}
+
+/// Collect names with a standalone `sig`, suppressing a synthesized duplicate
+/// `defsig` for the same annotated `def` (chelis#285).
+fn collect_explicit_sig_names(decl: &Decl, out: &mut UnordSet<String>) {
     if let Decl::Sig { name, .. } = decl {
         out.insert(name.clone());
     }
@@ -618,7 +1042,7 @@ fn collect_explicit_sig_names(decl: &Decl, out: &mut HashSet<String>) {
 /// sig declares no effects of its own (chelis#285 — see the `def_effects`
 /// field doc). An empty `! {}` is stored too: it declares "no effects" and
 /// must be distinguished from no annotation at all.
-fn collect_def_effects(decl: &Decl, out: &mut HashMap<String, Vec<EffectExpr>>) {
+fn collect_def_effects(decl: &Decl, out: &mut UnordMap<String, Vec<EffectExpr>>) {
     if let Decl::FunDef {
         name,
         effects: Some(effects),
@@ -638,7 +1062,7 @@ fn collect_def_effects(decl: &Decl, out: &mut HashMap<String, Vec<EffectExpr>>) 
 /// `sig f: tensor[3, f64] -> ...` followed by an untyped `def f` participates.
 fn collect_top_level_fn_tensor_param_prec(
     decl: &Decl,
-    out: &mut HashMap<String, Vec<Option<String>>>,
+    out: &mut UnordMap<String, Vec<Option<String>>>,
 ) {
     match decl {
         Decl::FunDef { name, params, .. } => {
@@ -675,7 +1099,9 @@ fn collect_top_level_fn_tensor_param_prec(
 /// Surf carry the precision as a `String` in `TypeExpr::Tensor`.
 fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
     match ty {
-        TypeExpr::Tensor(_, prec, _) => Some(prec.clone()),
+        TypeExpr::Tensor(_, prec, _) => {
+            Some(canonical_primitive_name(prec).unwrap_or(prec).to_owned())
+        }
         _ => None,
     }
 }
@@ -697,7 +1123,10 @@ impl DesugarCtx {
                     Box::new(Expr::Apply(func.clone(), applied_args, *span)),
                     *span,
                 );
-                self.desugar_expr_with_scope(&lambda, local_fn_params)
+                mark_call_first_pipe_stage(self.desugar_expr_with_scope(&lambda, local_fn_params))
+            }
+            Expr::Lambda(..) if is_first_argument_pipe_lambda(stage) => {
+                mark_call_first_pipe_stage(self.desugar_expr_with_scope(stage, local_fn_params))
             }
             _ => self.desugar_expr_with_scope(stage, local_fn_params),
         }
@@ -707,13 +1136,13 @@ impl DesugarCtx {
         match decl {
             Decl::FunDef {
                 name,
-                dim_params,
+                type_binders,
                 params,
                 ret_ty,
                 effects,
                 body,
                 ..
-            } => self.desugar_fun_def(name, dim_params, params, ret_ty, effects, body),
+            } => self.desugar_fun_def(name, type_binders, params, ret_ty, effects, body),
 
             Decl::Property {
                 name,
@@ -740,8 +1169,8 @@ impl DesugarCtx {
                     _ => self.desugar_expr(value),
                 };
                 vec![
-                    node("defsig", vec![sym(name), desugar_type(t)]),
-                    node("def", vec![sym(name), body]),
+                    node(DeepTag::Defsig, vec![sym(name), desugar_type(t)]),
+                    node(DeepTag::Def, vec![sym(name), body]),
                 ]
             }
 
@@ -751,14 +1180,20 @@ impl DesugarCtx {
                 value,
                 ..
             } => {
-                vec![node("def", vec![sym(name), self.desugar_expr(value)])]
+                vec![node(
+                    DeepTag::Def,
+                    vec![sym(name), self.desugar_expr(value)],
+                )]
             }
 
             Decl::MacroDef {
                 name, params, body, ..
             } => {
-                let params = node("params", params.iter().map(|param| sym(param)).collect());
-                vec![node(
+                let params = node(
+                    DeepTag::Params,
+                    params.iter().map(|param| sym(param)).collect(),
+                );
+                vec![internal_node(
                     "defmacro",
                     vec![sym(name), params, self.desugar_expr(body)],
                 )]
@@ -777,14 +1212,23 @@ impl DesugarCtx {
                 name, params, ty, ..
             } => {
                 let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
+                let explicit_params: UnordSet<String> = params.iter().cloned().collect();
                 vec![node(
-                    "typealias",
-                    vec![sym(name), param_list, desugar_type(ty)],
+                    DeepTag::Typealias,
+                    vec![
+                        sym(name),
+                        param_list,
+                        desugar_declaration_type(ty, &explicit_params),
+                    ],
                 )]
             }
 
             Decl::Sig {
-                name, ty, effects, ..
+                name,
+                type_binders,
+                ty,
+                effects,
+                ..
             } => {
                 // chelis#285: the synthesized `defsig` that used to carry a
                 // same-named `def`'s `! { ... }` clause is suppressed when this
@@ -797,22 +1241,47 @@ impl DesugarCtx {
                 let effects = effects
                     .clone()
                     .or_else(|| self.def_effects.get(name).cloned());
-                vec![node(
-                    "defsig",
-                    vec![
-                        sym(name),
-                        // WS-A5: standalone sigs use the contextual rule so a
-                        // lowercase non-primitive name in the precision slot
-                        // becomes a quantified type variable per
-                        // spec/04-type-system.md §5.8.
-                        apply_effect_metadata(desugar_sig_type(ty, &HashSet::new()), &effects),
-                    ],
+                // §P4c: the sig's `[..]` list is partial. Its names are
+                // authoritative, unkinded binders exactly as a def's are, and
+                // every other free name in the type stays implicitly
+                // quantified by WS-A5's contextual rule.
+                let declared: UnordSet<String> = type_binders
+                    .iter()
+                    .map(|binder| binder.name.clone())
+                    .collect();
+                vec![with_dtype_bounds(
+                    node(
+                        DeepTag::Defsig,
+                        vec![
+                            sym(name),
+                            // WS-A5: standalone sigs use the contextual rule so a
+                            // lowercase non-primitive name in the precision slot
+                            // becomes a quantified type variable per
+                            // spec/04-type-system.md §5.8.
+                            apply_effect_metadata(desugar_sig_type(ty, &declared), &effects),
+                        ],
+                    ),
+                    type_binders,
                 )]
             }
 
             Decl::Dim { names, .. } => names
                 .iter()
-                .map(|name| node("defdim", vec![sym(name)]))
+                .enumerate()
+                .map(|(index, name)| {
+                    if index == 0 {
+                        node_meta(
+                            DeepTag::Defdim,
+                            meta_with_entries(vec![(
+                                "surf_dim_group_size".to_string(),
+                                int(names.len() as i64),
+                            )]),
+                            vec![sym(name)],
+                        )
+                    } else {
+                        node(DeepTag::Defdim, vec![sym(name)])
+                    }
+                })
                 .collect(),
 
             Decl::Module { name, decls, .. } => {
@@ -820,22 +1289,32 @@ impl DesugarCtx {
                 for d in decls {
                     children.extend(self.desugar_decl(d));
                 }
-                vec![node("module", children)]
+                vec![node_meta(
+                    DeepTag::Module,
+                    meta_with_entries(vec![("surf_path".to_string(), string(name))]),
+                    children,
+                )]
             }
 
             Decl::Import { module, kind, .. } => match kind {
                 ImportKind::Names(ns) => {
                     let name_list = bare_list(ns.iter().map(|n| sym(n)).collect());
-                    vec![node(
-                        "import",
+                    vec![node_meta(
+                        DeepTag::Import,
+                        meta_with_entries(vec![("surf_path".to_string(), string(module))]),
                         vec![sym(&lower_module_path(module)), name_list],
                     )]
                 }
-                ImportKind::Qualified => vec![node(
-                    "import",
+                ImportKind::Qualified => vec![node_meta(
+                    DeepTag::Import,
+                    meta_with_entries(vec![("surf_path".to_string(), string(module))]),
                     vec![sym(&lower_module_path(module)), bare_list(vec![])],
                 )],
-                ImportKind::All => vec![node("import-all", vec![sym(&lower_module_path(module))])],
+                ImportKind::All => vec![node_meta(
+                    DeepTag::ImportAll,
+                    meta_with_entries(vec![("surf_path".to_string(), string(module))]),
+                    vec![sym(&lower_module_path(module))],
+                )],
             },
 
             Decl::Export { names, .. } => {
@@ -843,7 +1322,7 @@ impl DesugarCtx {
                 for n in names {
                     children.push(sym(n));
                 }
-                vec![node("export", children)]
+                vec![node(DeepTag::Export, children)]
             }
         }
     }
@@ -851,15 +1330,19 @@ impl DesugarCtx {
     fn desugar_fun_def(
         &self,
         name: &str,
-        dim_params: &[String],
+        type_binders: &[TypeBinder],
         params: &[Param],
         ret_ty: &Option<TypeExpr>,
         effects: &Option<Vec<EffectExpr>>,
         body: &Expr,
     ) -> Vec<deep::Expr> {
-        // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
+        // Function-level binders are polymorphic d-vars, NOT module-level defdim.
         // Build a set so desugar_type_with_scope treats them as d-var.
-        let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
+        let dim_set: UnordSet<String> = type_binders
+            .iter()
+            .map(|binder| binder.name.clone())
+            .collect();
+        let declares_bound = type_binders.iter().any(|binder| binder.bound.is_some());
 
         // WS-A6 (spec/02-surf-syntax.md §P4b): when a def declares an
         // explicit quantifier list `def f[..](...)`, names in that list
@@ -869,30 +1352,47 @@ impl DesugarCtx {
         // as a dim-var when it appears in a dim slot — the
         // dim/precision distinction is determined by position inside
         // the tensor type, not by per-name kind tracking. When
-        // `dim_params` is empty, the WS-A5 implicit collection on the
+        // `type_binders` is empty, the WS-A5 implicit collection on the
         // synthesized sig is preserved and parameter annotations keep
         // their pre-WS-A6 behavior (an unbound precision name surfaces
         // a diagnostic via `validate_tensor_precisions_in_program`).
-        let param_ann_tvar_set: HashSet<String> = dim_set.clone();
+        let param_ann_tvar_set: UnordSet<String> = dim_set.clone();
 
         let param_names: Vec<deep::Expr> = params
             .iter()
             .map(|param| desugar_param_with_scope(param, &dim_set, &param_ann_tvar_set))
             .collect();
-        let params_node = node("params", param_names);
+        let params_node = node(DeepTag::Params, param_names);
         let body_scope: Vec<String> = params.iter().map(|param| param.name.clone()).collect();
         // Position 3 (spec §P10b / §5.6): body expression of a function
         // whose declared return type is a tensor type and whose body is
         // itself a tensor literal. Narrow numeric literals in `body` to
         // the tensor element type.
+        // Binder scope controls `t-var` cast targets and literal adoption.
+        let restore_binders = self.current_type_binders.replace(
+            self.declared_type_binders
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        );
         let desugared_body = match (ret_ty.as_ref().and_then(tensor_element_prim_name), body) {
             (Some(prec), Expr::List(items, _)) => {
                 self.desugar_list_as_tensor_literal(items, &prec, &body_scope)
             }
             _ => self.desugar_expr_with_scope(body, &body_scope),
         };
-        let fn_node = node("fn", vec![params_node, desugared_body]);
-        let def_node = node("def", vec![sym(name), fn_node]);
+        self.current_type_binders.replace(restore_binders);
+        let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
+        let def_node = node(DeepTag::Def, vec![sym(name), fn_node]);
+        // A standalone `sig` owns this declaration's binders, so its `def`
+        // may not also bound them (`spec/04-type-system.md` §5.9). Carry the
+        // authored bound onto the `def` node so the checker rejects it by
+        // name instead of the desugarer silently discarding it.
+        let def_node = if declares_bound && self.explicit_sig_names.contains(name) {
+            with_dtype_bounds(def_node, type_binders)
+        } else {
+            def_node
+        };
 
         // chelis#285: when an explicit standalone `sig` already declares this
         // name, the signature synthesized below from inline annotations is
@@ -901,7 +1401,14 @@ impl DesugarCtx {
         // defsig binding) would overwrite the concrete explicit sig, dropping
         // the body-vs-signature contract on those positions. Suppress it and
         // let the explicit sig drive body validation.
-        if (params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some())
+        // A declared bound forces the synthesized signature even when nothing
+        // else would: the bound has no other carrier, and a `defsig` whose
+        // positions are all wildcards still reports a bound naming a binder
+        // the declaration never uses.
+        if (params.iter().any(|p| p.ty.is_some())
+            || ret_ty.is_some()
+            || effects.is_some()
+            || declares_bound)
             && !self.explicit_sig_names.contains(name)
         {
             // Tvar set for the synthesized sig:
@@ -916,10 +1423,10 @@ impl DesugarCtx {
             //   to the WS-A5 implicit collection over typed params and
             //   the return type (spec/04-type-system.md §5.8) so a
             //   bare `def f(x: tensor[3, p])` continues to work.
-            let tvar_set: HashSet<String> = if !dim_params.is_empty() {
-                dim_params.iter().cloned().collect()
+            let tvar_set: UnordSet<String> = if !type_binders.is_empty() {
+                dim_set.clone()
             } else {
-                let mut acc: HashSet<String> = HashSet::new();
+                let mut acc: UnordSet<String> = UnordSet::new();
                 for p in params {
                     if let Some(ty) = &p.ty {
                         collect_sig_type_vars(ty, &mut acc);
@@ -934,19 +1441,22 @@ impl DesugarCtx {
                 .iter()
                 .map(|p| match &p.ty {
                     Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
-                    None => node("t-var", vec![sym("_")]),
+                    None => node(DeepTag::TVar, vec![sym("_")]),
                 })
                 .collect();
             type_parts.push(match ret_ty {
                 Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
-                None => node("t-var", vec![sym("_")]),
+                None => node(DeepTag::TVar, vec![sym("_")]),
             });
-            let sig = node(
-                "defsig",
-                vec![
-                    sym(name),
-                    apply_effect_metadata(node("t-fn", type_parts), effects),
-                ],
+            let sig = with_dtype_bounds(
+                node(
+                    DeepTag::Defsig,
+                    vec![
+                        sym(name),
+                        apply_effect_metadata(node(DeepTag::TFn, type_parts), effects),
+                    ],
+                ),
+                type_binders,
             );
             vec![sig, def_node]
         } else {
@@ -967,9 +1477,9 @@ impl DesugarCtx {
             .map(|param| param.name.clone())
             .collect::<Vec<_>>();
         let param_nodes = params.iter().map(desugar_param).collect::<Vec<_>>();
-        let params_node = node("params", param_nodes.clone());
+        let params_node = node(DeepTag::Params, param_nodes.clone());
         let precondition_node = node(
-            "tuple",
+            DeepTag::Tuple,
             preconditions
                 .iter()
                 .map(|expr| self.desugar_expr_with_scope(expr, &param_scope))
@@ -1003,19 +1513,19 @@ impl DesugarCtx {
         if !contract_ids.is_empty() {
             meta_entries.push((
                 "property_contracts".to_string(),
-                node("tuple", contract_ids),
+                node(DeepTag::Tuple, contract_ids),
             ));
         }
 
         let fn_node = node(
-            "fn",
+            DeepTag::Fn,
             vec![
                 params_node,
                 self.desugar_expr_with_scope(body, &param_scope),
             ],
         );
         let def_node = node_meta(
-            "def",
+            DeepTag::Def,
             meta_with_entries(meta_entries),
             vec![sym(name), fn_node],
         );
@@ -1023,8 +1533,11 @@ impl DesugarCtx {
             .iter()
             .map(|param| desugar_type(param.ty.as_ref().expect("property params are typed")))
             .collect::<Vec<_>>();
-        type_parts.push(node("t-prim", vec![sym("bool")]));
-        let sig_node = node("defsig", vec![sym(name), node("t-fn", type_parts)]);
+        type_parts.push(node(DeepTag::TPrim, vec![sym("bool")]));
+        let sig_node = node(
+            DeepTag::Defsig,
+            vec![sym(name), node(DeepTag::TFn, type_parts)],
+        );
         vec![sig_node, def_node]
     }
 
@@ -1044,22 +1557,23 @@ impl DesugarCtx {
         invariant: Option<&TypeInvariant>,
     ) -> deep::Expr {
         let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
+        let explicit_params: UnordSet<String> = params.iter().cloned().collect();
         let mut children = vec![sym(name), param_list];
         for v in variants {
-            children.push(desugar_variant(v));
+            children.push(desugar_variant(v, &explicit_params));
         }
 
         if !opaque {
-            return node("deftype", children);
+            return node(DeepTag::Deftype, children);
         }
 
         let mut meta_entries = vec![("opaque".to_string(), bool_atom(true))];
         if let Some(inv) = invariant {
             // Predicate fn node: (fn {} (params {} <binder>) <body>).
             // The body is desugared with the binder in scope.
-            let params_node = node("params", vec![sym(&inv.binder)]);
+            let params_node = node(DeepTag::Params, vec![sym(&inv.binder)]);
             let body = self.desugar_expr_with_scope(&inv.body, std::slice::from_ref(&inv.binder));
-            let fn_node = node("fn", vec![params_node, body]);
+            let fn_node = node(DeepTag::Fn, vec![params_node, body]);
             let amenability = chelis_pred::classify_predicate(&fn_node);
             meta_entries.push(("invariant".to_string(), fn_node));
             meta_entries.push((
@@ -1068,25 +1582,31 @@ impl DesugarCtx {
             ));
         }
 
-        node_meta("deftype", meta_with_entries(meta_entries), children)
+        node_meta(DeepTag::Deftype, meta_with_entries(meta_entries), children)
     }
 }
 
-fn desugar_variant(variant: &Variant) -> deep::Expr {
+fn desugar_variant(variant: &Variant, explicit_params: &UnordSet<String>) -> deep::Expr {
     match &variant.fields {
         VariantFields::Positional(fields) => {
             let mut children = vec![sym(&variant.name)];
             for f in fields {
-                children.push(desugar_type(f));
+                children.push(desugar_declaration_type(f, explicit_params));
             }
-            node("variant", children)
+            node(DeepTag::Variant, children)
         }
         VariantFields::Record(fields) => {
             let mut children = vec![sym(&variant.name)];
             for (field_name, field_ty) in fields {
-                children.push(node("field", vec![sym(field_name), desugar_type(field_ty)]));
+                children.push(node(
+                    DeepTag::Field,
+                    vec![
+                        sym(field_name),
+                        desugar_declaration_type(field_ty, explicit_params),
+                    ],
+                ));
             }
-            node("variant", children)
+            node(DeepTag::Variant, children)
         }
     }
 }
@@ -1131,7 +1651,7 @@ impl DesugarCtx {
     ) -> deep::Expr {
         let desugared_fn = self.desugar_expr_with_scope(f, local_fn_params);
         let Some(wrt) = wrt else {
-            return node("grad", vec![desugared_fn]);
+            return node(DeepTag::Grad, vec![desugared_fn]);
         };
 
         let indices = self
@@ -1141,23 +1661,23 @@ impl DesugarCtx {
         let wrt_meta = if wrt.len() == 1 {
             dvar(&wrt[0])
         } else {
-            node("tuple", wrt.iter().map(|name| dvar(name)).collect())
+            node(DeepTag::Tuple, wrt.iter().map(|name| dvar(name)).collect())
         };
         let index_expr = if indices.len() == 1 {
             node_meta(
-                "lit",
-                meta_with_type(node("t-prim", vec![sym("int32")])),
+                DeepTag::Lit,
+                meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
                 vec![int(indices[0])],
             )
         } else {
             node(
-                "tuple",
+                DeepTag::Tuple,
                 indices
                     .into_iter()
                     .map(|index| {
                         node_meta(
-                            "lit",
-                            meta_with_type(node("t-prim", vec![sym("int32")])),
+                            DeepTag::Lit,
+                            meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
                             vec![int(index)],
                         )
                     })
@@ -1166,7 +1686,7 @@ impl DesugarCtx {
         };
 
         node_meta(
-            "grad",
+            DeepTag::Grad,
             meta_with_entries(vec![("wrt".to_string(), wrt_meta)]),
             vec![desugared_fn, index_expr],
         )
@@ -1184,34 +1704,45 @@ impl DesugarCtx {
                     .collect::<Vec<_>>(),
             ),
             Expr::Record(name, fields, _) => {
-                let mut fields = fields.clone();
-                fields.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut children = vec![sym(name)];
                 for (field, value) in fields {
                     children.push(node(
-                        "kv",
+                        DeepTag::Kv,
                         vec![
-                            sym(&field),
-                            self.desugar_expr_with_scope(&value, local_fn_params),
+                            sym(field),
+                            self.desugar_expr_with_scope(value, local_fn_params),
                         ],
                     ));
                 }
-                node("record", children)
+                node(DeepTag::Record, children)
+            }
+            Expr::RecordUpdate(base, fields, _) => {
+                let mut children = vec![self.desugar_expr_with_scope(base, local_fn_params)];
+                for (field, value) in fields {
+                    children.push(node(
+                        DeepTag::Kv,
+                        vec![
+                            sym(field),
+                            self.desugar_expr_with_scope(value, local_fn_params),
+                        ],
+                    ));
+                }
+                node(DeepTag::RecordUpdate, children)
             }
             Expr::Access(target, field, _) => node(
-                "access",
+                DeepTag::Access,
                 vec![
                     self.desugar_expr_with_scope(target, local_fn_params),
                     sym(field),
                 ],
             ),
             Expr::TupleGet(target, index, _) => node(
-                "tuple-get",
+                DeepTag::TupleGet,
                 vec![
                     self.desugar_expr_with_scope(target, local_fn_params),
                     node_meta(
-                        "lit",
-                        meta_with_type(node("t-prim", vec![sym("int32")])),
+                        DeepTag::Lit,
+                        meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
                         vec![deep::Expr::Atom(deep::Atom::Int(*index), sp())],
                     ),
                 ],
@@ -1220,26 +1751,28 @@ impl DesugarCtx {
             Expr::Apply(func, args, _) => self.desugar_apply(func, args, local_fn_params),
 
             Expr::Binary(op, lhs, rhs, _) => {
+                // Every operator keeps its authored operand order
+                // (spec/02-surf-syntax.md section 2): Deep application
+                // evaluates arguments left to right, so a swap here would
+                // reorder operand effects and traps (chelis#1180).
                 let op_name = binop_name(*op);
-                // a > b -> (app {} (var {} cmplt) b' a') -- swap operands
-                match op {
-                    BinOp::Gt => node(
-                        "app",
-                        vec![
-                            dvar(op_name),
-                            self.desugar_expr_with_scope(rhs, local_fn_params),
-                            self.desugar_expr_with_scope(lhs, local_fn_params),
-                        ],
-                    ),
-                    _ => node(
-                        "app",
-                        vec![
-                            dvar(op_name),
-                            self.desugar_expr_with_scope(lhs, local_fn_params),
-                            self.desugar_expr_with_scope(rhs, local_fn_params),
-                        ],
-                    ),
-                }
+                node(
+                    DeepTag::App,
+                    vec![
+                        dvar(op_name),
+                        self.desugar_expr_with_scope(lhs, local_fn_params),
+                        self.desugar_expr_with_scope(rhs, local_fn_params),
+                    ],
+                )
+            }
+
+            // P10 parses every negative spelling as unary minus. The one
+            // magnitude outside the positive i64 range is stored in the
+            // Surf AST as a signed-minimum sentinel; fold that sentinel back
+            // to the representable Deep literal instead of applying `neg`
+            // twice or overflowing in Rust.
+            Expr::Unary(UnaryOp::Neg, operand, _) if is_i64_min_magnitude_sentinel(operand) => {
+                self.desugar_expr_with_scope(operand, local_fn_params)
             }
 
             Expr::Unary(op, operand, _) => {
@@ -1248,7 +1781,7 @@ impl DesugarCtx {
                     UnaryOp::Not => "not",
                 };
                 node(
-                    "app",
+                    DeepTag::App,
                     vec![
                         dvar(op_name),
                         self.desugar_expr_with_scope(operand, local_fn_params),
@@ -1263,11 +1796,11 @@ impl DesugarCtx {
                         .iter()
                         .map(|expr| self.desugar_pipe_stage(expr, local_fn_params)),
                 );
-                node("pipe", children)
+                node(DeepTag::Pipe, children)
             }
 
             Expr::If(cond, then_e, else_e, _) => node(
-                "if",
+                DeepTag::If,
                 vec![
                     self.desugar_expr_with_scope(cond, local_fn_params),
                     self.desugar_expr_with_scope(then_e, local_fn_params),
@@ -1284,7 +1817,7 @@ impl DesugarCtx {
                         .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
                         .unwrap_or_else(|| bare_list(vec![]));
                     children.push(node(
-                        "arm",
+                        DeepTag::Arm,
                         vec![
                             desugar_pattern(&arm.pattern),
                             guard,
@@ -1292,18 +1825,18 @@ impl DesugarCtx {
                         ],
                     ));
                 }
-                node("match", children)
+                node(DeepTag::Match, children)
             }
 
             Expr::Lambda(params, body, _) => {
                 let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
-                let params_node = node("params", param_names);
+                let params_node = node(DeepTag::Params, param_names);
                 let lambda_params = params
                     .iter()
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>();
                 node(
-                    "fn",
+                    DeepTag::Fn,
                     vec![
                         params_node,
                         self.desugar_expr_with_scope(body, &lambda_params),
@@ -1312,19 +1845,22 @@ impl DesugarCtx {
             }
 
             Expr::Tuple(elems, _) if elems.is_empty() => node_meta(
-                "lit",
-                meta_with_type(node("t-unit", vec![])),
+                DeepTag::Lit,
+                meta_with_type(node(DeepTag::TUnit, vec![])),
                 vec![bare_list(vec![])],
             ),
             Expr::Tuple(elems, _) => node(
-                "tuple",
+                DeepTag::Tuple,
                 elems
                     .iter()
                     .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
                     .collect(),
             ),
 
-            Expr::Cast(e, prec, _) => {
+            Expr::Cast(e, prec, mode, _) => {
+                // Normalize before choosing literal adoption as well as the
+                // target node: both denote the same primitive under §P10a.
+                let prec = canonical_primitive_name(prec).unwrap_or(prec);
                 // Position 4 (spec §P10b / §5.6): first argument of a
                 // `cast(literal, p)` expression. When the inner is a
                 // bare list literal, narrow numeric entries to `p` and
@@ -1343,94 +1879,154 @@ impl DesugarCtx {
                 // literals (spec §5.5) keep their explicit suffix
                 // binding; `cast(1.1f32, f64)` still means "widen this
                 // f32 value". A float literal under an integer target
-                // keeps the default-then-truncate behavior because a
-                // decimal cannot bind at an integer type.
+                // keeps its default float source because a decimal cannot
+                // bind at an integer type; the checked cast then requires
+                // the value to be integral (spec/04 [04-NUM-14]).
+                //
+                // The [05-OP-6] truncating rung takes NONE of this: its
+                // target is an integer width and its source must stay a
+                // float, so adopting a literal at the target would turn
+                // `cast_trunc([1.9], int32)` into an int32 tensor and
+                // make the truncating cast a type error on its own
+                // argument.
+                let binder = self.current_type_binder(prec);
+                let binder_bound = binder.flatten();
                 let inner = match e.as_ref() {
+                    _ if *mode == CastMode::Trunc => {
+                        self.desugar_expr_with_scope(e, local_fn_params)
+                    }
                     Expr::List(items, _) => {
                         self.desugar_list_as_tensor_literal(items, prec, local_fn_params)
                     }
-                    Expr::Lit(lit, span) if scalar_literal_adopts_cast_target(lit, prec) => {
-                        attach_span_metadata(
-                            adopted_scalar_literal(lit, prec, /* negate = */ false),
-                            *span,
-                        )
+                    other => {
+                        let unsuffixed = is_unsuffixed_surf_numeric_literal(other);
+                        // A signed direct `lit` is the unambiguous carrier only
+                        // when the Surf syntax is eligible for adoption, or when
+                        // it proves the narrow literal-source rejection for an
+                        // unbounded binder. Ordinary suffixed casts keep their
+                        // authored unary-minus application shape.
+                        let needs_signed_literal = unsuffixed || matches!(binder, Some(None));
+                        let ordinary = needs_signed_literal
+                            .then(|| canonical_signed_cast_literal(other))
+                            .flatten()
+                            .map(|literal| attach_span_metadata(literal, expr_span(other)))
+                            .unwrap_or_else(|| {
+                                self.desugar_expr_with_scope(other, local_fn_params)
+                            });
+                        let adopted = classify_literal_source(&ordinary).and_then(|source| {
+                            if scalar_literal_source_adopts_binder_target(
+                                source,
+                                binder_bound,
+                                unsuffixed,
+                            ) {
+                                adopted_scalar_literal_source(source, prec, DeepTag::TVar)
+                            } else if scalar_literal_source_adopts_cast_target(
+                                source, prec, unsuffixed,
+                            ) {
+                                adopted_scalar_literal_source(source, prec, DeepTag::TPrim)
+                            } else {
+                                None
+                            }
+                        });
+                        adopted
+                            .map(|literal| attach_span_metadata(literal, expr_span(other)))
+                            .unwrap_or(ordinary)
                     }
-                    // Mirror of the RT-2 P2 sign-fold in
-                    // `desugar_tensor_literal_item`: the parser turns
-                    // `-1.1` into `Unary(Neg, Lit(Float(1.1)))`. Fold
-                    // the sign into the adopted literal so `cast(-1.1,
-                    // f64)` binds `-1.1` at f64.
-                    Expr::Unary(UnaryOp::Neg, neg_inner, span)
-                        if matches!(
-                            neg_inner.as_ref(),
-                            Expr::Lit(lit, _) if scalar_literal_adopts_cast_target(lit, prec)
-                        ) =>
-                    {
-                        let Expr::Lit(lit, _) = neg_inner.as_ref() else {
-                            unreachable!("guarded by the matches! above");
-                        };
-                        attach_span_metadata(
-                            adopted_scalar_literal(lit, prec, /* negate = */ true),
-                            *span,
-                        )
-                    }
-                    other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
-                node("cast", vec![inner, node("t-prim", vec![sym(prec)])])
+                // Every declared binder is a `t-var`; only a bound permits
+                // literal adoption. The checker rejects unbounded targets.
+                let target = if binder.is_some() {
+                    node(DeepTag::TVar, vec![sym(prec)])
+                } else {
+                    // A name that is not a primitive is passed through, so
+                    // the checker still surfaces its unknown-primitive
+                    // diagnostic rather than this arm inventing one.
+                    node(DeepTag::TPrim, vec![sym(prec)])
+                };
+                let mut children = vec![inner, target];
+                if let Some(selector) = mode.deep_selector() {
+                    children.push(sym(selector));
+                }
+                node(DeepTag::Cast, children)
             }
 
             Expr::Grad(f, wrt, _) => self.desugar_grad(f, wrt.as_deref(), local_fn_params),
 
             Expr::Vmap(f, axis, _) => {
                 let axis_node = node_meta(
-                    "lit",
-                    meta_with_type(node("t-prim", vec![sym("int32")])),
+                    DeepTag::Lit,
+                    meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
                     vec![deep::Expr::Atom(deep::Atom::Int(axis.unwrap_or(0)), sp())],
                 );
                 node(
-                    "vmap",
+                    DeepTag::Vmap,
                     vec![self.desugar_expr_with_scope(f, local_fn_params), axis_node],
                 )
             }
 
             Expr::Jit(f, _) => node(
-                "jit",
+                DeepTag::Jit,
                 vec![self.desugar_expr_with_scope(f, local_fn_params)],
             ),
             Expr::Realize(f, _) => node(
-                "realize",
+                DeepTag::Realize,
                 vec![self.desugar_expr_with_scope(f, local_fn_params)],
             ),
             Expr::Copy(f, _) => node(
-                "copy",
+                DeepTag::Copy,
                 vec![self.desugar_expr_with_scope(f, local_fn_params)],
             ),
             Expr::Borrow(f, _) => node(
-                "borrow",
+                DeepTag::Borrow,
                 vec![self.desugar_expr_with_scope(f, local_fn_params)],
             ),
             Expr::WithSeed(seed, body, _) => node_meta(
-                "handle-effect",
-                meta_with_entries(vec![("effect".to_string(), sym("random"))]),
+                DeepTag::HandleEffect,
+                meta_with_entries(vec![(
+                    "effect".to_string(),
+                    sym(EffectKind::Random.symbol()),
+                )]),
                 vec![
                     self.desugar_expr_with_scope(seed, local_fn_params),
                     self.desugar_expr_with_scope(body, local_fn_params),
                 ],
             ),
             Expr::WithDevice(device, body, _) => node_meta(
-                "handle-effect",
-                meta_with_entries(vec![("effect".to_string(), sym("resource"))]),
+                DeepTag::HandleEffect,
+                meta_with_entries(vec![(
+                    "effect".to_string(),
+                    sym(EffectKind::Resource.symbol()),
+                )]),
                 vec![
                     self.desugar_expr_with_scope(device, local_fn_params),
                     self.desugar_expr_with_scope(body, local_fn_params),
                 ],
             ),
             Expr::Par(exprs, _) => node(
-                "par",
+                DeepTag::Par,
                 exprs
                     .iter()
                     .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
                     .collect(),
+            ),
+            Expr::Do(exprs, _) => node(
+                DeepTag::Block,
+                exprs
+                    .iter()
+                    .map(|expr| self.desugar_expr_with_scope(expr, local_fn_params))
+                    .collect(),
+            ),
+            Expr::Quote(expr, _) => node(
+                DeepTag::Quote,
+                vec![self.desugar_expr_with_scope(expr, local_fn_params)],
+            ),
+            Expr::Unquote(expr, _) => node(
+                DeepTag::Unquote,
+                vec![self.desugar_expr_with_scope(expr, local_fn_params)],
+            ),
+            Expr::Splice(expr, _) => node(
+                DeepTag::Splice,
+                vec![self.desugar_expr_with_scope(expr, local_fn_params)],
             ),
 
             Expr::Annotate(e, ty, _) => {
@@ -1445,6 +2041,7 @@ impl DesugarCtx {
                 } else {
                     self.desugar_let_bindings(
                         bindings,
+                        final_expr,
                         self.desugar_expr_with_scope(final_expr, local_fn_params),
                     )
                 }
@@ -1456,12 +2053,12 @@ impl DesugarCtx {
 
 fn tuple_index_expr(target: deep::Expr, index: i64) -> deep::Expr {
     node(
-        "tuple-get",
+        DeepTag::TupleGet,
         vec![
             target,
             node_meta(
-                "lit",
-                meta_with_type(node("t-prim", vec![sym("int32")])),
+                DeepTag::Lit,
+                meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
                 vec![deep::Expr::Atom(deep::Atom::Int(index), sp())],
             ),
         ],
@@ -1469,35 +2066,40 @@ fn tuple_index_expr(target: deep::Expr, index: i64) -> deep::Expr {
 }
 
 fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
-    let bind_node = node("bind", vec![sym(name), value]);
-    node("let", vec![bind_node, body])
+    let bind_node = node(DeepTag::Bind, vec![sym(name), value]);
+    node(DeepTag::Let, vec![bind_node, body])
 }
 
 /// Synthesized destructure bind (Linearity-F2).  Marks the `bind`
 /// node with `destructure: true` in its meta-map so the linearity
-/// checker can distinguish synthesized-tmp scopes from regular
-/// `let` scopes.  Linearity-F2 W2 cascade (this PR) treats
-/// use-after-consume inside a destructure-marked scope as an
-/// error: implicit Copy insertion does not apply to destructured
-/// components because tuple-get produces a fresh owned value, not
-/// an aliased borrow.
+/// checker can distinguish destructure components (and the
+/// synthesized `__chelis_tmpN` intermediates that carry them) from
+/// regular `let` bindings.  Each such bind introduces exactly one
+/// name, and the checker marks that name as a destructured component
+/// (`LinearScope::mark_destructured`): use-after-consume on a
+/// component is an error because implicit Copy insertion does not
+/// apply to it — tuple-get produces a fresh owned value, not an
+/// aliased borrow.  Per chelis#1200 the marker scopes to the names
+/// it introduces, never to the enclosing block.
 fn bind_destructure_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
     let bind_node = node_meta(
-        "bind",
+        DeepTag::Bind,
         meta_with_entries(vec![(
             "destructure".to_string(),
             deep::Expr::Atom(deep::Atom::Bool(true), sp()),
         )]),
         vec![sym(name), value],
     );
-    node("let", vec![bind_node, body])
+    node(DeepTag::Let, vec![bind_node, body])
 }
 
 fn destructure_pattern(
     pattern: &LetPattern,
     source_name: &str,
     body: deep::Expr,
-    next_tmp: &mut usize,
+    next_tmp: &std::cell::Cell<usize>,
+    bindings: &[LetBinding],
+    authored_body: &Expr,
 ) -> deep::Expr {
     match pattern {
         LetPattern::Var(name, _) => bind_destructure_value(name, dvar(source_name), body),
@@ -1506,9 +2108,8 @@ fn destructure_pattern(
             let mut out = body;
             for (index, part) in parts.iter().enumerate().rev() {
                 let tuple_value = tuple_index_expr(dvar(source_name), index as i64);
-                let tmp_name = format!("__chelis_tmp{}", *next_tmp);
-                *next_tmp += 1;
-                out = destructure_pattern(part, &tmp_name, out, next_tmp);
+                let tmp_name = fresh_destructure_temp(bindings, authored_body, next_tmp);
+                out = destructure_pattern(part, &tmp_name, out, next_tmp, bindings, authored_body);
                 out = bind_destructure_value(&tmp_name, tuple_value, out);
             }
             out
@@ -1516,10 +2117,45 @@ fn destructure_pattern(
     }
 }
 
+/// Mint a `__chelis_tmpN` that has not been minted before by this
+/// `DesugarCtx` and that the authored source does not already mention.
+///
+/// `next_tmp` is the context-wide counter, read and written on every
+/// mint rather than snapshotted, because `desugar_let_bindings` recurses
+/// into nested blocks mid-loop: a snapshot would let the inner block
+/// re-mint names the outer block had already taken. See
+/// `DesugarCtx::next_destructure_temp` for what the collision cost.
+fn fresh_destructure_temp(
+    bindings: &[LetBinding],
+    body: &Expr,
+    next_tmp: &std::cell::Cell<usize>,
+) -> String {
+    loop {
+        let candidate = format!("__chelis_tmp{}", next_tmp.get());
+        next_tmp.set(next_tmp.get() + 1);
+        let mentioned = bindings.iter().any(|binding| {
+            let_pattern_mentions_name(&binding.pattern, &candidate)
+                || binding
+                    .ty
+                    .as_ref()
+                    .is_some_and(|ty| type_mentions_name(ty, &candidate))
+                || expr_mentions_name(&binding.value, &candidate)
+        }) || expr_mentions_name(body, &candidate);
+        if !mentioned {
+            return candidate;
+        }
+    }
+}
+
 impl DesugarCtx {
-    fn desugar_let_bindings(&self, bindings: &[LetBinding], body: deep::Expr) -> deep::Expr {
+    fn desugar_let_bindings(
+        &self,
+        bindings: &[LetBinding],
+        authored_body: &Expr,
+        body: deep::Expr,
+    ) -> deep::Expr {
         let mut out = body;
-        let mut next_tmp = 0usize;
+        let next_tmp = &self.next_destructure_temp;
         for binding in bindings.iter().rev() {
             match &binding.pattern {
                 LetPattern::Var(name, _) => {
@@ -1539,20 +2175,30 @@ impl DesugarCtx {
                         _ => self.desugar_expr(&binding.value),
                     };
                     if let Some(ty) = &binding.ty {
-                        out = bind_name_value(
-                            name,
-                            inject_type_metadata(value, desugar_type(ty)),
-                            out,
-                        );
+                        let value = inject_type_metadata(value, desugar_type(ty));
+                        out = bind_name_value(name, value, out);
                     } else {
+                        let value = if matches!(&binding.value, Expr::Annotate(..)) {
+                            add_surface_marker(value, "surf_binding_type", "explicit")
+                        } else if has_metadata_key(&value, "type") {
+                            add_surface_marker(value, "surf_binding_type", "inferred")
+                        } else {
+                            value
+                        };
                         out = bind_name_value(name, value, out);
                     }
                 }
                 pattern => {
-                    let temp_name = format!("__chelis_tmp{}", next_tmp);
-                    next_tmp += 1;
+                    let temp_name = fresh_destructure_temp(bindings, authored_body, next_tmp);
                     let value = self.desugar_expr(&binding.value);
-                    out = destructure_pattern(pattern, &temp_name, out, &mut next_tmp);
+                    out = destructure_pattern(
+                        pattern,
+                        &temp_name,
+                        out,
+                        next_tmp,
+                        bindings,
+                        authored_body,
+                    );
                     out = bind_destructure_value(&temp_name, value, out);
                 }
             }
@@ -1564,40 +2210,86 @@ impl DesugarCtx {
 fn desugar_literal(lit: &Literal) -> deep::Expr {
     match lit {
         Literal::Int(n) => node_meta(
-            "lit",
-            meta_with_type(node("t-prim", vec![sym("int32")])),
+            DeepTag::Lit,
+            meta_with_type(node(DeepTag::TPrim, vec![sym("int32")])),
             vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
         ),
         Literal::Float(f) => node_meta(
-            "lit",
-            meta_with_type(node("t-prim", vec![sym("f32")])),
+            DeepTag::Lit,
+            meta_with_type(node(DeepTag::TPrim, vec![sym("f32")])),
             vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
         ),
         // Typed-suffix literals (spec/02-surf-syntax.md §P10a /
         // spec/04-type-system.md §5.5): bind at exactly the suffix
         // precision with no inference, no widening, no narrowing. The
         // type metadata is the user-facing contract.
-        Literal::TypedInt(n, suffix) => node_meta(
-            "lit",
-            meta_with_type(node("t-prim", vec![sym(suffix.t_prim_name())])),
-            vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
-        ),
-        Literal::TypedFloat(f, suffix) => node_meta(
-            "lit",
-            meta_with_type(node("t-prim", vec![sym(suffix.t_prim_name())])),
-            vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
-        ),
+        Literal::TypedInt(n, suffix) => {
+            let prim = suffix.t_prim_name();
+            let float_typed = matches!(prim, "f32" | "f64" | "bf16" | "f16");
+            let ty = node(DeepTag::TPrim, vec![sym(prim)]);
+            let meta = if float_typed {
+                let style = (*suffix == LiteralSuffix::F32).then_some("explicit");
+                meta_with_integer_float_type(ty, style)
+            } else if *suffix == LiteralSuffix::I32 {
+                numeric_literal_meta(ty, "explicit")
+            } else {
+                meta_with_type(ty)
+            };
+            node_meta(
+                DeepTag::Lit,
+                meta,
+                vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
+            )
+        }
+        Literal::TypedFloat(f, suffix) => {
+            let ty = node(DeepTag::TPrim, vec![sym(suffix.t_prim_name())]);
+            let meta = if *suffix == LiteralSuffix::F32 {
+                numeric_literal_meta(ty, "explicit")
+            } else {
+                meta_with_type(ty)
+            };
+            node_meta(
+                DeepTag::Lit,
+                meta,
+                vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
+            )
+        }
         Literal::Bool(b) => node_meta(
-            "lit",
-            meta_with_type(node("t-prim", vec![sym("bool")])),
+            DeepTag::Lit,
+            meta_with_type(node(DeepTag::TPrim, vec![sym("bool")])),
             vec![deep::Expr::Atom(deep::Atom::Bool(*b), sp())],
         ),
         Literal::Str(s) => node_meta(
-            "lit",
-            meta_with_type(node("t-prim", vec![sym("string")])),
+            DeepTag::Lit,
+            meta_with_type(node(DeepTag::TPrim, vec![sym("string")])),
             vec![deep::Expr::Atom(deep::Atom::Str(s.clone()), sp())],
         ),
     }
+}
+
+fn canonical_signed_cast_literal(expr: &Expr) -> Option<deep::Expr> {
+    let Expr::Unary(UnaryOp::Neg, inner, _) = expr else {
+        return None;
+    };
+    let literal = match inner.as_ref() {
+        Expr::Lit(Literal::Int(value), _) => Literal::Int(fold_unary_minus_int(*value)),
+        Expr::Lit(Literal::Float(value), _) => Literal::Float(-*value),
+        Expr::Lit(Literal::TypedInt(value, suffix), _) => {
+            Literal::TypedInt(fold_unary_minus_int(*value), *suffix)
+        }
+        Expr::Lit(Literal::TypedFloat(value, suffix), _) => Literal::TypedFloat(-*value, *suffix),
+        _ => return None,
+    };
+    Some(desugar_literal(&literal))
+}
+
+fn is_unsuffixed_surf_numeric_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Lit(Literal::Int(_) | Literal::Float(_), _))
+        || matches!(
+            expr,
+            Expr::Unary(UnaryOp::Neg, inner, _)
+                if matches!(inner.as_ref(), Expr::Lit(Literal::Int(_) | Literal::Float(_), _))
+        )
 }
 
 /// Position 4 (spec §5.6 / §P10b) admission test for a bare scalar
@@ -1617,50 +2309,78 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
 /// suffixed literals bind at their suffix (§5.5), float→integer keeps
 /// truncation semantics, and bool/string targets are not numeric
 /// binding precisions.
-fn scalar_literal_adopts_cast_target(lit: &Literal, prec: &str) -> bool {
+/// [02-P10b] binder-target literal adoption. Float literals require `Float`
+/// or `Numeric`; integer literals also admit `Int`. Unbounded binders cannot
+/// adopt and remain checker-rejected cast targets under [04-DTYPE-2].
+fn scalar_literal_source_adopts_binder_target(
+    source: LiteralSource<'_>,
+    bound: Option<DtypeFamily>,
+    unsuffixed: bool,
+) -> bool {
+    unsuffixed
+        && bound.is_some_and(|family| {
+            matches!(
+                source.family_fit(family),
+                LiteralFamilyFit::Fits | LiteralFamilyFit::IntegerOutOfRange
+            )
+        })
+}
+
+fn scalar_literal_source_adopts_cast_target(
+    source: LiteralSource<'_>,
+    prec: &str,
+    unsuffixed: bool,
+) -> bool {
+    if !unsuffixed {
+        return false;
+    }
     let float_target = matches!(prec, "f32" | "f64" | "bf16" | "f16");
     let int_target = matches!(prec, "int8" | "int16" | "int32" | "int64");
-    match lit {
-        Literal::Float(_) => float_target,
-        Literal::Int(_) => float_target || int_target,
+    match source.numeric_atom() {
+        Some(DeepAtom::Float(_)) => float_target,
+        Some(DeepAtom::Int(_)) => float_target || int_target,
         _ => false,
     }
 }
 
 /// Build the adopted-literal Deep node for a scalar literal under
 /// `cast(literal, p)`. Mirrors `desugar_tensor_literal_item`'s lit
-/// construction (including the RT-2 P2 sign fold via `negate`). Only
-/// called for literals admitted by `scalar_literal_adopts_cast_target`.
-fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr {
-    let ty_meta = meta_with_type(node("t-prim", vec![sym(prec)]));
-    match lit {
-        Literal::Int(n) => {
-            let value = if negate { -*n } else { *n };
-            node_meta(
-                "lit",
-                ty_meta,
-                vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
-            )
+/// construction. Exact Surf unary syntax is already a signed direct `lit`.
+/// Only called for a syntactically adopting source; the checker diagnoses an
+/// integer that cannot fit every member of a family bound.
+fn adopted_scalar_literal_source(
+    source: LiteralSource<'_>,
+    prec: &str,
+    target_tag: DeepTag,
+) -> Option<deep::Expr> {
+    let ty = node(target_tag, vec![sym(prec)]);
+    match source.numeric_atom()? {
+        DeepAtom::Int(value) => {
+            let meta =
+                if target_tag == DeepTag::TPrim && matches!(prec, "f32" | "f64" | "bf16" | "f16") {
+                    meta_with_integer_float_type(ty, Some("unsuffixed"))
+                } else {
+                    numeric_literal_meta(ty, "unsuffixed")
+                };
+            Some(node_meta(
+                DeepTag::Lit,
+                meta,
+                vec![deep::Expr::Atom(DeepAtom::Int(*value), sp())],
+            ))
         }
-        Literal::Float(f) => {
-            let value = if negate { -*f } else { *f };
-            node_meta(
-                "lit",
-                ty_meta,
-                vec![deep::Expr::Atom(deep::Atom::Float(value), sp())],
-            )
-        }
-        other => unreachable!(
-            "adopted_scalar_literal called for non-numeric literal {other:?}; \
-             scalar_literal_adopts_cast_target must gate callers"
-        ),
+        DeepAtom::Float(value) => Some(node_meta(
+            DeepTag::Lit,
+            numeric_literal_meta(ty, "unsuffixed"),
+            vec![deep::Expr::Atom(DeepAtom::Float(*value), sp())],
+        )),
+        _ => None,
     }
 }
 
 fn desugar_list_literal(items: &[deep::Expr]) -> deep::Expr {
     let mut out = dvar("Nil");
     for item in items.iter().rev() {
-        out = node("app", vec![dvar("Cons"), item.clone(), out]);
+        out = node(DeepTag::App, vec![dvar("Cons"), item.clone(), out]);
     }
     out
 }
@@ -1721,7 +2441,7 @@ impl DesugarCtx {
             .map(|item| self.desugar_tensor_literal_item(item, prec_name, local_fn_params))
             .collect();
         let list = desugar_list_literal(&desugared_items);
-        node("app", vec![dvar("to_tensor"), list])
+        node(DeepTag::App, vec![dvar("to_tensor"), list])
     }
 
     /// Desugar a single entry of a contextual tensor literal. Numeric
@@ -1737,14 +2457,23 @@ impl DesugarCtx {
         local_fn_params: &[String],
     ) -> deep::Expr {
         match item {
-            Expr::Lit(Literal::Int(n), _) => node_meta(
-                "lit",
-                meta_with_type(node("t-prim", vec![sym(prec_name)])),
-                vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
-            ),
+            Expr::Lit(Literal::Int(n), _) => {
+                let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
+                let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
+                let meta = if float_typed {
+                    meta_with_integer_float_type(ty, Some("unsuffixed"))
+                } else {
+                    numeric_literal_meta(ty, "unsuffixed")
+                };
+                node_meta(
+                    DeepTag::Lit,
+                    meta,
+                    vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
+                )
+            }
             Expr::Lit(Literal::Float(f), _) => node_meta(
-                "lit",
-                meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                DeepTag::Lit,
+                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
                 vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
             ),
             // RT-2 fixup P2: the surface parser turns `-128` into
@@ -1755,14 +2484,24 @@ impl DesugarCtx {
             // raw inner literal (`128`, which overflows int8 max).
             // The same applies to negative float literals.
             Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
-                Expr::Lit(Literal::Int(n), _) => node_meta(
-                    "lit",
-                    meta_with_type(node("t-prim", vec![sym(prec_name)])),
-                    vec![deep::Expr::Atom(deep::Atom::Int(-*n), sp())],
-                ),
+                Expr::Lit(Literal::Int(n), _) => {
+                    let value = fold_unary_minus_int(*n);
+                    let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
+                    let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
+                    let meta = if float_typed {
+                        meta_with_integer_float_type(ty, Some("unsuffixed"))
+                    } else {
+                        numeric_literal_meta(ty, "unsuffixed")
+                    };
+                    node_meta(
+                        DeepTag::Lit,
+                        meta,
+                        vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
+                    )
+                }
                 Expr::Lit(Literal::Float(f), _) => node_meta(
-                    "lit",
-                    meta_with_type(node("t-prim", vec![sym(prec_name)])),
+                    DeepTag::Lit,
+                    numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
                     vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
                 ),
                 // Non-literal `neg` operand falls through to the
@@ -1791,18 +2530,20 @@ impl DesugarCtx {
     }
 }
 
+fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Lit(Literal::Int(i64::MIN), _)
+            | Expr::Lit(Literal::TypedInt(i64::MIN, LiteralSuffix::I64), _)
+    )
+}
+
+fn fold_unary_minus_int(value: i64) -> i64 {
+    value.checked_neg().unwrap_or(i64::MIN)
+}
+
 impl DesugarCtx {
     fn desugar_apply(&self, func: &Expr, args: &[Expr], local_fn_params: &[String]) -> deep::Expr {
-        // Flatten nested Apply chains. We collect the original surface
-        // arguments (not their pre-desugared forms) so the contextual
-        // tensor-literal rule (position 2, spec §P10b / §5.6) can inspect
-        // each argument against the callee's declared signature.
-        let mut surf_args: Vec<&Expr> = Vec::new();
-        let base_func = self.collect_apply_chain_surf(func, &mut surf_args);
-        for arg in args {
-            surf_args.push(arg);
-        }
-
         // Position 2 (spec §P10b / §5.6): if the callee is a top-level
         // function with a declared signature whose i-th parameter is a
         // tensor type with element prim P, and the i-th argument is a
@@ -1816,13 +2557,13 @@ impl DesugarCtx {
         // unification path; the contextual narrowing here is the
         // ergonomic affordance for the named-callee case.
         let callee_param_prec: Option<&Vec<Option<String>>> =
-            if let Expr::Var(callee_name, _) = base_func {
+            if let Expr::Var(callee_name, _) = func {
                 self.top_level_fn_tensor_param_prec.get(callee_name)
             } else {
                 None
             };
 
-        let desugared_args: Vec<deep::Expr> = surf_args
+        let desugared_args: Vec<deep::Expr> = args
             .iter()
             .enumerate()
             .map(|(i, arg)| {
@@ -1838,25 +2579,9 @@ impl DesugarCtx {
             })
             .collect();
 
-        let mut children = vec![self.desugar_expr_with_scope(base_func, local_fn_params)];
+        let mut children = vec![self.desugar_expr_with_scope(func, local_fn_params)];
         children.extend(desugared_args);
-        node("app", children)
-    }
-
-    /// Like `collect_apply_chain` but returns surface-level argument
-    /// references so contextual tensor-literal inference can inspect
-    /// the arg AST against the callee's signature before desugar.
-    fn collect_apply_chain_surf<'a>(&self, expr: &'a Expr, args: &mut Vec<&'a Expr>) -> &'a Expr {
-        match expr {
-            Expr::Apply(inner_func, inner_args, _) => {
-                let base = self.collect_apply_chain_surf(inner_func, args);
-                for arg in inner_args {
-                    args.push(arg);
-                }
-                base
-            }
-            other => other,
-        }
+        node(DeepTag::App, children)
     }
 }
 
@@ -1870,7 +2595,7 @@ fn binop_name(op: BinOp) -> &'static str {
         BinOp::Eq => "eq",
         BinOp::Ne => "neq",
         BinOp::Lt => "cmplt",
-        BinOp::Gt => "cmplt", // handled specially with swap
+        BinOp::Gt => "gt",
         BinOp::Le => "lte",
         BinOp::Ge => "gte",
         BinOp::And => "and",
@@ -1885,18 +2610,29 @@ fn binop_name(op: BinOp) -> &'static str {
 /// Desugar a type with no declared dim params or quantified type vars
 /// (module-level context).
 fn desugar_type(ty: &TypeExpr) -> deep::Expr {
-    desugar_type_with_scope(ty, &HashSet::new(), &HashSet::new())
+    desugar_type_with_scope(ty, &UnordSet::new(), &UnordSet::new())
+}
+
+/// Desugar a `deftype` field or `typealias` body against that declaration's
+/// exact explicit parameter list. Unlike a signature, a declaration does not
+/// implicitly quantify a single-letter dimension name: an unlisted name is a
+/// concrete symbolic axis (`d-name`), matching spec/02 §P15's zero-parameter
+/// alias examples. Listed names remain unkinded declaration binders and are
+/// emitted according to their position (`t-var`, `d-var`, or precision
+/// `t-var`).
+fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &UnordSet<String>) -> deep::Expr {
+    desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false)
 }
 
 /// True if `name` is a candidate quantified type variable per
 /// `spec/04-type-system.md` §5.8: lowercase, not a known active
-/// primitive, and not a §1.1.2 unsigned alias (those should reach the
-/// type-checker's rejection path as `(t-prim {} <name>)`, not be
-/// quietly absorbed as a quantifier).
+/// primitive, and not a §1.1.1 deferred dtype name (unsigned alias or
+/// reserved name - those should reach the type-checker's rejection path
+/// as `(t-prim {} <name>)`, not be quietly absorbed as a quantifier).
 fn is_candidate_tvar_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_lowercase())
-        && !PRIMITIVES.contains(&name)
-        && !UNSIGNED_DTYPE_NAMES.contains(&name)
+        && canonical_primitive_name(name).is_none()
+        && !is_reserved_dtype_name(name)
 }
 
 /// Compute the set of free, lowercase, non-primitive identifiers used
@@ -1912,16 +2648,18 @@ fn is_candidate_tvar_name(name: &str) -> bool {
 /// a quantified type variable. That is the load-bearing change WS-A5
 /// makes possible.
 ///
-/// Names listed in `UNSIGNED_DTYPE_NAMES` are EXCLUDED so the type
-/// checker still surfaces a `spec/04-type-system.md §1.1.2`-citing
-/// diagnostic for them via the `(t-prim {} u8)` path.
-fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
+/// Names listed in `UNSIGNED_DTYPE_NAMES` and `DEFERRED_DTYPE_NAMES`
+/// are EXCLUDED so the type checker still surfaces a
+/// `spec/04-type-system.md §1.1.1`-citing diagnostic for them via the
+/// `(t-prim {} u8)` path.
+fn collect_sig_type_vars(ty: &TypeExpr, out: &mut UnordSet<String>) {
     match ty {
         TypeExpr::Named(name, _) => {
             if is_candidate_tvar_name(name) {
                 out.insert(name.clone());
             }
         }
+        TypeExpr::DimensionLiteral(_, _) => {}
         // `..r` is a rank variable, not a type variable — it is collected
         // separately (the checker treats `(d-rank {} r)` as a bound rank var).
         TypeExpr::RankSpread(_, _) => {}
@@ -1967,10 +2705,16 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
 /// implicitly quantified type variables, and to `(t-prim {} <name>)`
 /// when it is a primitive. Outside a sig the same desugar is invoked
 /// with an empty quantifier set, so only primitive names are accepted.
-fn desugar_sig_type(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
-    let mut tvars = HashSet::new();
+fn desugar_sig_type(ty: &TypeExpr, declared: &UnordSet<String>) -> deep::Expr {
+    let mut tvars = UnordSet::new();
     collect_sig_type_vars(ty, &mut tvars);
-    desugar_type_with_scope(ty, dim_vars, &tvars)
+    // §P4c: a name the sig explicitly lists is a binder whatever its case, so
+    // a listed `P` is a type variable rather than a rigid ADT — the same
+    // override a def's `[..]` clause already applies.
+    for name in declared.to_sorted() {
+        tvars.insert(name.clone());
+    }
+    desugar_type_with_scope(ty, declared, &tvars)
 }
 
 /// Desugar a type with declared dimension parameters and a set of
@@ -1987,10 +2731,20 @@ fn desugar_sig_type(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
 ///   `Prim::parse_name` rejection path.
 fn desugar_type_with_scope(
     ty: &TypeExpr,
-    dim_vars: &HashSet<String>,
-    tvar_set: &HashSet<String>,
+    dim_vars: &UnordSet<String>,
+    tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
-    match ty {
+    desugar_type_with_scope_mode(ty, dim_vars, tvar_set, true)
+}
+
+fn desugar_type_with_scope_mode(
+    ty: &TypeExpr,
+    dim_vars: &UnordSet<String>,
+    tvar_set: &UnordSet<String>,
+    implicit_single_letter_dims: bool,
+) -> deep::Expr {
+    let desugared = match ty {
+        TypeExpr::DimensionLiteral(value, _) => node(DeepTag::DLit, vec![int(value.value())]),
         TypeExpr::Named(name, _) => {
             // The contextual rule for type-name positions:
             //
@@ -2008,52 +2762,91 @@ fn desugar_type_with_scope(
             //   call site (chelis#293). Without this, an uppercase
             //   quantifier name was misclassified as a rigid ADT and
             //   every call site failed with `type mismatch: P vs ..`.
+            // - A name reserved under §1.1.1 names no type at all and
+            //   stays `(t-prim {} <name>)` so the checker's rejection
+            //   fires. It outranks the quantifier set, exactly as the
+            //   primitive arm does (chelis#1593).
             // - Otherwise the lexical case-split applies: a PascalCase
             //   name is an ADT; a lowercase name is a free `t-var`
             //   whose binding the type checker resolves downstream.
-            if PRIMITIVES.contains(&name.as_str()) {
-                node("t-prim", vec![sym(name)])
+            if name == "unit" {
+                node(DeepTag::TUnit, vec![])
+            } else if let Some(canonical) = canonical_primitive_name(name) {
+                node(DeepTag::TPrim, vec![sym(canonical)])
+            } else if is_reserved_dtype_name(name) {
+                // chelis#1593. `is_candidate_tvar_name` already keeps these
+                // names out of the IMPLICIT quantifier set, which is only half
+                // of what `spec/04-type-system.md` §5.8.1 asks for: excluding a
+                // name from the set does nothing while a later arm quantifies
+                // it anyway. `def f(x: u8) -> u8 = x` therefore typed as
+                // `forall u8. u8 -> u8` and scored 1.0.
+                //
+                // Above `tvar_set` rather than below it, because §5.8.1 states
+                // the rule on the category: a reserved spelling names no type
+                // variable in any type position, and an explicit `[..]` clause
+                // does not rebind it. §P4b's clause overrides the
+                // PascalCase-vs-snake_case case-split, which is a different
+                // rule; the primitive arm above already outranks a binder for
+                // the same reason. Below `tvar_set`, `def f[u8](x: u8) -> u8`
+                // still scored 1.0.
+                //
+                // Mapped to NOTHING, unlike chelis#1587's `i8`..`i64` above:
+                // those are input spellings for active primitives and
+                // normalise, these name no primitive at all and
+                // `Prim::parse_name` must keep failing on them. Same class,
+                // opposite repair.
+                node(DeepTag::TPrim, vec![sym(name)])
             } else if tvar_set.contains(name.as_str()) {
-                node("t-var", vec![sym(name)])
+                node(DeepTag::TVar, vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
-                node("t-adt", vec![sym(name)])
+                node(DeepTag::TAdt, vec![sym(name)])
             } else {
-                node("t-var", vec![sym(name)])
+                node(DeepTag::TVar, vec![sym(name)])
             }
         }
 
         // A bare `..r` reaching here (outside a tensor dim list) is not a
         // valid standalone type, but desugar defensively to the rank node so
         // the match stays exhaustive; validation rejects the misuse upstream.
-        TypeExpr::RankSpread(name, _) => node("d-rank", vec![sym(name)]),
+        TypeExpr::RankSpread(name, _) => node(DeepTag::DRank, vec![sym(name)]),
         TypeExpr::Tensor(dims, precision, _) => {
             let mut children: Vec<deep::Expr> = dims
                 .iter()
                 .map(|d| match d {
-                    TypeExpr::Named(n, _) if n.parse::<i64>().is_ok() => {
-                        node("d-lit", vec![int(n.parse::<i64>().unwrap())])
+                    TypeExpr::DimensionLiteral(value, _) => {
+                        node(DeepTag::DLit, vec![int(value.value())])
                     }
-                    TypeExpr::Named(n, _) if n == "*" => node("d-name", vec![sym("*")]),
+                    TypeExpr::Named(n, _) if n.parse::<i64>().is_ok() => {
+                        node(DeepTag::DLit, vec![int(n.parse::<i64>().unwrap())])
+                    }
+                    TypeExpr::Named(n, _) if n == "*" => node(DeepTag::DName, vec![sym("*")]),
                     // Declared dim param → always d-var (polymorphic)
                     TypeExpr::Named(n, _) if dim_vars.contains(n.as_str()) => {
-                        node("d-var", vec![sym(n)])
+                        node(DeepTag::DVar, vec![sym(n)])
                     }
                     // Single lowercase letter → d-var (heuristic fallback)
                     TypeExpr::Named(n, _)
-                        if n.len() == 1 && n.starts_with(|c: char| c.is_lowercase()) =>
+                        if implicit_single_letter_dims
+                            && n.len() == 1
+                            && n.starts_with(|c: char| c.is_lowercase()) =>
                     {
-                        node("d-var", vec![sym(n)])
+                        node(DeepTag::DVar, vec![sym(n)])
                     }
                     // Everything else → d-name (concrete)
-                    TypeExpr::Named(n, _) => node("d-name", vec![sym(n)]),
+                    TypeExpr::Named(n, _) => node(DeepTag::DName, vec![sym(n)]),
                     // `..r` rank-variable spread → (d-rank {} r). May be
                     // interleaved with concrete anchors (Tier-3); a multi-letter
                     // anchor such as `seq` desugars to `d-name` above, which is
                     // what the name-preserving split matches on.
-                    TypeExpr::RankSpread(n, _) => node("d-rank", vec![sym(n)]),
+                    TypeExpr::RankSpread(n, _) => node(DeepTag::DRank, vec![sym(n)]),
                     _ => node(
-                        "d-var",
-                        vec![desugar_type_with_scope(d, dim_vars, tvar_set)],
+                        DeepTag::DVar,
+                        vec![desugar_type_with_scope_mode(
+                            d,
+                            dim_vars,
+                            tvar_set,
+                            implicit_single_letter_dims,
+                        )],
                     ),
                 })
                 .collect();
@@ -2062,51 +2855,75 @@ fn desugar_type_with_scope(
             // its name is in `tvar_set` (a sig-quantified type variable),
             // otherwise it stays as t-prim and the type checker validates
             // it against the closed primitive set via Prim::parse_name.
-            let prec_node = if tvar_set.contains(precision.as_str())
-                && !PRIMITIVES.contains(&precision.as_str())
-            {
-                node("t-var", vec![sym(precision)])
-            } else {
-                node("t-prim", vec![sym(precision)])
+            let prec_node = match canonical_primitive_name(precision) {
+                Some(canonical) => node(DeepTag::TPrim, vec![sym(canonical)]),
+                // A §1.1.1 reserved spelling outranks the quantifier set here
+                // for the reason it does in the scalar arm above: an explicit
+                // `[..]` clause does not rebind a name the language reserved.
+                // Without this row `def f[u8](x: tensor[3, u8])` scored 1.0
+                // even after the scalar arm was repaired (chelis#1593).
+                None if is_reserved_dtype_name(precision) => {
+                    node(DeepTag::TPrim, vec![sym(precision)])
+                }
+                None if tvar_set.contains(precision.as_str()) => {
+                    node(DeepTag::TVar, vec![sym(precision)])
+                }
+                // Not a primitive and not quantified: still `t-prim`, so the
+                // checker surfaces its unknown-primitive diagnostic.
+                None => node(DeepTag::TPrim, vec![sym(precision)]),
             };
             children.push(prec_node);
-            node("t-tensor", children)
+            node(DeepTag::TTensor, children)
         }
 
         TypeExpr::Arrow(params, ret, _) => {
             let mut children: Vec<deep::Expr> = params
                 .iter()
-                .map(|p| desugar_type_with_scope(p, dim_vars, tvar_set))
+                .map(|p| {
+                    desugar_type_with_scope_mode(p, dim_vars, tvar_set, implicit_single_letter_dims)
+                })
                 .collect();
-            children.push(desugar_type_with_scope(ret, dim_vars, tvar_set));
-            node("t-fn", children)
+            children.push(desugar_type_with_scope_mode(
+                ret,
+                dim_vars,
+                tvar_set,
+                implicit_single_letter_dims,
+            ));
+            node(DeepTag::TFn, children)
         }
 
         TypeExpr::Ref(inner, _) => node(
-            "t-ref",
-            vec![desugar_type_with_scope(inner, dim_vars, tvar_set)],
+            DeepTag::TRef,
+            vec![desugar_type_with_scope_mode(
+                inner,
+                dim_vars,
+                tvar_set,
+                implicit_single_letter_dims,
+            )],
         ),
 
         TypeExpr::App(name, args, _) => {
             let mut children = vec![sym(name)];
-            children.extend(
-                args.iter()
-                    .map(|a| desugar_type_with_scope(a, dim_vars, tvar_set)),
-            );
-            node("t-adt", children)
+            children.extend(args.iter().map(|a| {
+                desugar_type_with_scope_mode(a, dim_vars, tvar_set, implicit_single_letter_dims)
+            }));
+            node(DeepTag::TAdt, children)
         }
 
-        TypeExpr::Tuple(elems, _) if elems.is_empty() => node("t-unit", vec![]),
+        TypeExpr::Tuple(elems, _) if elems.is_empty() => node(DeepTag::TUnit, vec![]),
         TypeExpr::Tuple(elems, _) => node(
-            "t-tuple",
+            DeepTag::TTuple,
             elems
                 .iter()
-                .map(|e| desugar_type_with_scope(e, dim_vars, tvar_set))
+                .map(|e| {
+                    desugar_type_with_scope_mode(e, dim_vars, tvar_set, implicit_single_letter_dims)
+                })
                 .collect(),
         ),
 
-        TypeExpr::Infer(_) => node("t-var", vec![sym("_")]),
-    }
+        TypeExpr::Infer(_) => node(DeepTag::TVar, vec![sym("_")]),
+    };
+    with_structural_span(desugared, type_expr_span(ty))
 }
 
 // ---------------------------------------------------------------------------
@@ -2115,8 +2932,8 @@ fn desugar_type_with_scope(
 
 fn desugar_pattern(pat: &Pattern) -> deep::Expr {
     match pat {
-        Pattern::Wildcard(_) => node("pat-wild", vec![]),
-        Pattern::Var(name, _) => node("pat-var", vec![sym(name)]),
+        Pattern::Wildcard(_) => node(DeepTag::PatWild, vec![]),
+        Pattern::Var(name, _) => node(DeepTag::PatVar, vec![sym(name)]),
         Pattern::Lit(lit, _) => {
             // pat-lit contains the raw literal value, NOT a typed (lit ...) node.
             // Typed-suffix patterns desugar to the bare value: pattern matching
@@ -2132,27 +2949,30 @@ fn desugar_pattern(pat: &Pattern) -> deep::Expr {
                 Literal::Bool(b) => deep::Expr::Atom(deep::Atom::Bool(*b), sp()),
                 Literal::Str(s) => deep::Expr::Atom(deep::Atom::Str(s.clone()), sp()),
             };
-            node("pat-lit", vec![val])
+            node(DeepTag::PatLit, vec![val])
         }
         Pattern::Constructor(name, sub_pats, _) => {
             let mut children = vec![sym(name)];
             children.extend(sub_pats.iter().map(desugar_pattern));
-            node("pat-ctor", children)
+            node(DeepTag::PatCtor, children)
         }
-        Pattern::Tuple(pats, _) => node("pat-tuple", pats.iter().map(desugar_pattern).collect()),
+        Pattern::Tuple(pats, _) => node(
+            DeepTag::PatTuple,
+            pats.iter().map(desugar_pattern).collect(),
+        ),
         Pattern::Record(name, fields, _) => {
-            let mut fields = fields.clone();
-            fields.sort_by(|a, b| a.0.cmp(&b.0));
             let mut children = vec![sym(name)];
             for (field_name, field_pat) in fields {
                 children.push(node(
-                    "kv",
-                    vec![sym(&field_name), desugar_pattern(&field_pat)],
+                    DeepTag::Kv,
+                    vec![sym(field_name), desugar_pattern(field_pat)],
                 ));
             }
-            node("pat-record", children)
+            node(DeepTag::PatRecord, children)
         }
-        Pattern::As(name, inner, _) => node("pat-as", vec![sym(name), desugar_pattern(inner)]),
+        Pattern::As(name, inner, _) => {
+            node(DeepTag::PatAs, vec![sym(name), desugar_pattern(inner)])
+        }
     }
 }
 
@@ -2239,30 +3059,43 @@ mod tests {
         let contracts = deep
             .iter()
             .filter_map(|expr| match expr {
-                deep::Expr::List(list, _) => Some(list),
+                deep::Expr::Node(node, span) => Some(node.to_list(*span)),
+                deep::Expr::List(list, _) => Some(list.clone()),
                 _ => None,
             })
-            .find(|list| {
-                matches!(
-                    list.elements.first(),
-                    Some(deep::Expr::Atom(deep::Atom::Symbol(tag), _)) if tag == "def"
-                )
-            })
+            .find(|list| list.tag() == Some(DeepTag::Def))
             .and_then(|list| match list.elements.get(1) {
                 Some(deep::Expr::Map(meta, _)) => meta
                     .entries
                     .iter()
                     .find(|(name, _)| name == "property_contracts")
-                    .map(|(_, value)| value),
+                    .map(|(_, value)| value.clone()),
                 _ => None,
             })
             .and_then(|value| match value {
+                deep::Expr::Node(node, span) => {
+                    let list = node.to_list(span);
+                    Some(
+                        list.elements
+                            .iter()
+                            .skip(2)
+                            .filter_map(|expr| match expr {
+                                deep::Expr::Atom(deep::Atom::Str(value), _) => {
+                                    Some(value.as_str().to_string())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }
                 deep::Expr::List(list, _) => Some(
                     list.elements
                         .iter()
                         .skip(2)
                         .filter_map(|expr| match expr {
-                            deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.as_str()),
+                            deep::Expr::Atom(deep::Atom::Str(value), _) => {
+                                Some(value.as_str().to_string())
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>(),
@@ -2295,11 +3128,14 @@ mod tests {
     }
 
     #[test]
-    fn test_gt_swaps_operands() {
+    fn test_gt_keeps_authored_operand_order() {
+        // chelis#1180: `a > b` desugars to the `gt` builtin with the
+        // authored operand order. The old operand-swapped `cmplt(b, a)`
+        // form evaluated the right operand's effects and traps first.
         let expr = Expr::Binary(BinOp::Gt, Box::new(tvar("a")), Box::new(tvar("b")), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(app {} (var {} cmplt) (var {} b) (var {} a))"
+            "(app {} (var {} gt) (var {} a) (var {} b))"
         );
     }
 
@@ -2346,12 +3182,12 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_chain_flattening() {
+    fn test_grouped_apply_chain_preserves_call_result_application() {
         let inner = Expr::Apply(Box::new(tvar("f")), vec![tvar("x")], s());
         let outer = Expr::Apply(Box::new(inner), vec![tvar("y")], s());
         assert_eq!(
             print_expr(&desugar_expr(&outer)),
-            "(app {} (var {} f) (var {} x) (var {} y))"
+            "(app {} (app {} (var {} f) (var {} x)) (var {} y))"
         );
     }
 
@@ -2444,7 +3280,7 @@ mod tests {
         let result = print_expr(&desugar_expr(&expr));
         assert_eq!(
             result,
-            "(let {}\n  (bind {}\n    x\n    (lit {type: (t-prim {} int32)} 1))\n  (var {} x))"
+            "(let {}\n  (bind {}\n    x\n    (lit {surf_binding_type: \"inferred\", type: (t-prim {} int32)} 1))\n  (var {} x))"
         );
     }
 
@@ -2495,7 +3331,7 @@ mod tests {
     fn test_fun_def() {
         let decl = Decl::FunDef {
             name: "f".to_string(),
-            dim_params: vec![],
+            type_binders: vec![],
             params: vec![param("x", None)],
             ret_ty: None,
             effects: None,
@@ -2514,7 +3350,7 @@ mod tests {
         // def f(x: f32): f32 = x
         let decl = Decl::FunDef {
             name: "f".to_string(),
-            dim_params: vec![],
+            type_binders: vec![],
             params: vec![param("x", Some(named_ty("f32")))],
             ret_ty: Some(named_ty("f32")),
             effects: None,
@@ -2541,7 +3377,10 @@ mod tests {
         // batch and hidden should be d-var (polymorphic), NOT d-name
         let decl = Decl::FunDef {
             name: "transpose".to_string(),
-            dim_params: vec!["batch".to_string(), "hidden".to_string()],
+            type_binders: vec![
+                TypeBinder::unbounded("batch"),
+                TypeBinder::unbounded("hidden"),
+            ],
             params: vec![param(
                 "x",
                 Some(TypeExpr::Tensor(
@@ -2598,7 +3437,7 @@ mod tests {
         // ) -> tensor[n, f32] = add(x, f(x, inner_p))
         let decl = Decl::FunDef {
             name: "apply_resid".to_string(),
-            dim_params: vec!["n".to_string(), "P".to_string()],
+            type_binders: vec![TypeBinder::unbounded("n"), TypeBinder::unbounded("P")],
             params: vec![
                 param(
                     "x",
@@ -2673,7 +3512,7 @@ mod tests {
         // def run[n](x: tensor[n, f32], a: Activation) -> tensor[n, f32] = x
         let decl = Decl::FunDef {
             name: "run".to_string(),
-            dim_params: vec!["n".to_string()],
+            type_binders: vec![TypeBinder::unbounded("n")],
             params: vec![
                 param(
                     "x",
@@ -2769,13 +3608,11 @@ mod tests {
             s(),
         );
         let ctx = DesugarCtx {
-            top_level_fn_params: HashMap::from([(
+            top_level_fn_params: UnordMap::from([(
                 "loss".to_string(),
                 vec!["x".to_string(), "w".to_string(), "b".to_string()],
             )]),
-            top_level_fn_tensor_param_prec: HashMap::new(),
-            explicit_sig_names: HashSet::new(),
-            def_effects: HashMap::new(),
+            ..DesugarCtx::default()
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
             .split_whitespace()
@@ -2789,7 +3626,12 @@ mod tests {
 
     #[test]
     fn test_cast() {
-        let expr = Expr::Cast(Box::new(tvar("x")), "bf16".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(tvar("x")),
+            "bf16".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (var {} x) (t-prim {} bf16))"
@@ -2807,10 +3649,15 @@ mod tests {
 
     #[test]
     fn cast_of_float_literal_adopts_target_precision() {
-        let expr = Expr::Cast(Box::new(float_lit(1.1)), "f64".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(float_lit(1.1)),
+            "f64".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f64)} 1.1) (t-prim {} f64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 1.1)\n  (t-prim {} f64))"
         );
     }
 
@@ -2821,11 +3668,12 @@ mod tests {
         let expr = Expr::Cast(
             Box::new(Expr::Unary(UnaryOp::Neg, Box::new(float_lit(1.1)), s())),
             "f64".to_string(),
+            CastMode::Checked,
             s(),
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f64)} -1.1) (t-prim {} f64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} -1.1)\n  (t-prim {} f64))"
         );
     }
 
@@ -2834,19 +3682,29 @@ mod tests {
         // The documented §5.3 escape hatch for out-of-int32-range
         // literals: `cast(3000000000, int64)` must bind the literal at
         // int64 so `infer_lit` does not range-check it against int32.
-        let expr = Expr::Cast(Box::new(int_lit(3_000_000_000)), "int64".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(int_lit(3_000_000_000)),
+            "int64".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} int64)} 3000000000) (t-prim {} int64))"
+            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} int64)} 3000000000)\n  (t-prim {} int64))"
         );
     }
 
     #[test]
     fn cast_of_int_literal_adopts_float_target() {
-        let expr = Expr::Cast(Box::new(int_lit(5)), "f64".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(int_lit(5)),
+            "f64".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f64)} 5) (t-prim {} f64))"
+            "(cast {}\n  (lit {literal_source: integer, surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 5)\n  (t-prim {} f64))"
         );
     }
 
@@ -2854,8 +3712,13 @@ mod tests {
     fn cast_of_float_literal_to_integer_does_not_adopt() {
         // Negative parity: a float literal cannot "adopt" an integer
         // type — `cast(1.9, int32)` keeps the §5.3 f32 default on the
-        // literal and truncates at the cast, exactly as before.
-        let expr = Expr::Cast(Box::new(float_lit(1.9)), "int32".to_string(), s());
+        // literal, so the checked cast Domain-traps on the fractional value.
+        let expr = Expr::Cast(
+            Box::new(float_lit(1.9)),
+            "int32".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (lit {type: (t-prim {} f32)} 1.9) (t-prim {} int32))"
@@ -2870,11 +3733,12 @@ mod tests {
         let expr = Expr::Cast(
             Box::new(Expr::Lit(Literal::TypedFloat(1.1, LiteralSuffix::F32), s())),
             "f64".to_string(),
+            CastMode::Checked,
             s(),
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {} (lit {type: (t-prim {} f32)} 1.1) (t-prim {} f64))"
+            "(cast {}\n  (lit {surf_literal_style: \"explicit\", type: (t-prim {} f32)} 1.1)\n  (t-prim {} f64))"
         );
     }
 
@@ -2882,7 +3746,12 @@ mod tests {
     fn cast_of_literal_to_bool_does_not_adopt() {
         // Negative parity: bool is not a numeric binding precision for
         // a numeric literal; keep the default-typed literal + cast.
-        let expr = Expr::Cast(Box::new(int_lit(1)), "bool".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(int_lit(1)),
+            "bool".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} bool))"
@@ -2947,6 +3816,40 @@ mod tests {
         assert_eq!(
             print_expr(&desugar_type(&ty)),
             "(t-tensor {} (d-lit {} 32) (d-lit {} 784) (t-prim {} f32))"
+        );
+    }
+
+    #[test]
+    fn typealias_desugaring_uses_its_explicit_binder_scope() {
+        let declarations = crate::parser::parse_str("type Matrix[p, rows] = tensor[rows, p]")
+            .expect("typealias parses");
+        let deep = desugar_program(&declarations);
+        assert_eq!(
+            print_expr(&deep[0]),
+            "(typealias {} Matrix (p rows) (t-tensor {} (d-var {} rows) (t-var {} p)))"
+        );
+    }
+
+    #[test]
+    fn zero_parameter_typealias_dimension_is_symbolic_not_implicitly_bound() {
+        let declarations =
+            crate::parser::parse_str("type Weights = tensor[n, f32]").expect("alias parses");
+        let deep = desugar_program(&declarations);
+        assert_eq!(
+            print_expr(&deep[0]),
+            "(typealias {} Weights () (t-tensor {} (d-name {} n) (t-prim {} f32)))"
+        );
+    }
+
+    #[test]
+    fn deftype_desugaring_uses_multi_letter_dimension_binder_scope() {
+        let declarations =
+            crate::parser::parse_str("type Batch[rows] = | Batch { values: tensor[rows, f32] }")
+                .expect("deftype parses");
+        let deep = desugar_program(&declarations);
+        assert_eq!(
+            print_expr(&deep[0]),
+            "(deftype {}\n  Batch\n  (rows)\n  (variant {}\n    Batch\n    (field {} values (t-tensor {} (d-var {} rows) (t-prim {} f32)))))"
         );
     }
 
@@ -3084,7 +3987,7 @@ mod tests {
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(import-all {} foo)");
+        assert_eq!(nodes[0], "(import-all {surf_path: \"Foo\"} foo)");
     }
 
     #[test]
@@ -3096,7 +3999,7 @@ mod tests {
         };
         let nodes = desugar_decl_strs(&decl);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0], "(import {} foo (a b))");
+        assert_eq!(nodes[0], "(import {surf_path: \"Foo\"} foo (a b))");
     }
 
     // --- Record pattern ---
@@ -3113,7 +4016,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_pattern(&pat)),
-            "(pat-record {} Adam (kv {} eps (pat-var {} eps)) (kv {} lr (pat-var {} lr)))"
+            "(pat-record {} Adam (kv {} lr (pat-var {} lr)) (kv {} eps (pat-var {} eps)))"
         );
     }
 

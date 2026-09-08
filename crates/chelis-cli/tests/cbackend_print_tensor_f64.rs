@@ -16,8 +16,8 @@
 //!
 //! against `t->data` declared as `float *` in
 //! `crates/chelis-runtime/include/chelis_runtime.h` line 20.  For
-//! every tensor whose dtype has element size > 4 (`CHELIS_F64`,
-//! `CHELIS_I64`), the printer reads 4-byte chunks and widens; an
+//! every tensor whose dtype has element size > 4 (`CHELIS_DTYPE_F64`,
+//! `CHELIS_DTYPE_I64`), the printer reads 4-byte chunks and widens; an
 //! 8-byte element renders as two unrelated 4-byte halves and the
 //! tail of the buffer is dropped entirely.  The two dtype-ignoring
 //! bugs cancelled each other on small hand-authored examples (e.g.
@@ -106,7 +106,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             deps_dir.display()
         )));
     };
-    let tmp = canonical.with_extension("a.tmp");
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     fs::rename(&tmp, canonical)?;
     Ok(())
@@ -256,15 +261,13 @@ fn cbackend_print_tensor_int64() {
          result = tensor(shape=[4], data=[100000, 200000, 300000, 400000])",
         "eval ground truth changed; update fixture"
     );
-    // The compiled lane keeps its pre-contract float-formatted int64
-    // print until the chelis#732 Phase 2 generated printer, so the
-    // decode-correctness comparison is per-line at the VALUE level: the
-    // f64 lines are byte-identical, the int64 line agrees numerically.
+    // chelis#732 Phase 2: the generated printer renders int64 elements
+    // as exact integers ([05-OBS-2]), byte-identical to eval.
     assert_eq!(
         cbuild_out,
         "src = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
          mid = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
-         result = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])",
+         result = tensor(shape=[4], data=[100000, 200000, 300000, 400000])",
         "chelis build --target c print routine must decode int64 elements \
          at the correct stride (byte parity with eval returns at chelis#732 \
          Phase 2)"

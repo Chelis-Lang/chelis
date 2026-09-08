@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use chelis_tide::compiler;
 use chelis_tide::schema::{
     CheckRequest, CompileRequest, CompileTarget, DesugarRequest, Diagnostic, EvalRequest,
-    ExecutionValue, LowerRequest, SourceKind, TensorValue, WireDimInfo, WireRiscOp,
+    ExecutionValue, LowerRequest, SourceKind, TensorElements, TensorValue, WireDimInfo, WireRiscOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +171,13 @@ fn render_execution_value(value: &ExecutionValue) -> String {
         ExecutionValue::Tensor { value } => {
             format!("shape={:?} data={:?}", value.shape, value.data)
         }
+        ExecutionValue::Int8 { value } => value.to_string(),
+        ExecutionValue::Int16 { value } => value.to_string(),
+        ExecutionValue::Int32 { value } => value.to_string(),
         ExecutionValue::Int64 { value } => value.to_string(),
+        ExecutionValue::Float16 { value } => value.to_string(),
+        ExecutionValue::Bfloat16 { value } => value.to_string(),
+        ExecutionValue::Float32 { value } => value.to_string(),
         ExecutionValue::Float64 { value } => value.to_string(),
         ExecutionValue::Bool { value } => value.to_string(),
         ExecutionValue::String { value } => value.clone(),
@@ -238,6 +244,7 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
         let WireRiscOp::Load { name } = node.op else {
             continue;
         };
+        let precision = node.output_type.precision;
         let mut shape = Vec::new();
         for dim in node.output_type.dims {
             match dim {
@@ -257,12 +264,29 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
             name,
             TensorValue {
                 shape,
-                data: vec![0.0; len],
+                data: zero_elements(&precision, len)?,
             },
         );
     }
 
     Ok(bindings)
+}
+
+fn zero_elements(precision: &str, len: usize) -> Result<TensorElements, String> {
+    match precision {
+        "f64" => Ok(TensorElements::F64(vec![0.0; len])),
+        "f32" => Ok(TensorElements::F32(vec![0.0; len])),
+        "f16" => Ok(TensorElements::F16(vec![0.0; len])),
+        "bf16" => Ok(TensorElements::Bf16(vec![0.0; len])),
+        "int64" => Ok(TensorElements::Int64(vec![0; len])),
+        "int32" => Ok(TensorElements::Int32(vec![0; len])),
+        "int16" => Ok(TensorElements::Int16(vec![0; len])),
+        "int8" => Ok(TensorElements::Int8(vec![0; len])),
+        "bool" => Ok(TensorElements::Bool(vec![false; len])),
+        other => Err(format!(
+            "eval failed\n- cannot auto-evaluate non-runtime dtype `{other}`"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -271,7 +295,7 @@ mod tests {
 
     #[test]
     fn valid_program_reports_fitness_and_deep() {
-        let analysis = analyze("def f(x: tensor[n, f32]): tensor[n, f32] = x\n");
+        let analysis = analyze("def f(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
         assert_eq!(analysis.stage, LiveStage::Ready);
         assert_eq!(analysis.fitness, Some(1.0));
         assert!(
@@ -305,5 +329,22 @@ mod tests {
             eval_output("x = (x : tensor[2, 3, f32])\ny = (relu(x) : tensor[2, 3, f32])\n");
         assert!(output.contains("zero-filled named bindings"));
         assert!(output.contains("shape=[2, 3]"));
+    }
+
+    #[test]
+    fn zero_bindings_keep_the_declared_wire_dtype() {
+        assert!(matches!(
+            zero_elements("f32", 2).expect("f32 zeros"),
+            TensorElements::F32(values) if values == vec![0.0, 0.0]
+        ));
+        assert!(matches!(
+            zero_elements("int64", 2).expect("int64 zeros"),
+            TensorElements::Int64(values) if values == vec![0, 0]
+        ));
+        assert!(
+            zero_elements("f8e4m3", 1)
+                .expect_err("unsupported runtime dtype must fail loudly")
+                .contains("non-runtime dtype `f8e4m3`")
+        );
     }
 }

@@ -1,5 +1,5 @@
 //! chelis#722 - grad of a forward pass containing `abs`/`floor` on an
-//! integer tensor returns ALL-ZERO gradients in BOTH lanes.
+//! integer tensor returned ALL-ZERO gradients in BOTH lanes.
 //!
 //! This is #699's `Const { value: 0.0 }` placeholder
 //! (`lower_transcendental`, lower.rs:9834-9845) reached through grad's
@@ -84,11 +84,15 @@ fn c_first_line(program: &str, name: &str) -> Result<String, String> {
     let run = std::process::Command::new(out_dir.join(name))
         .output()
         .expect("compiled binary should run");
-    String::from_utf8_lossy(&run.stdout)
+    if !run.status.success() {
+        return Err(String::from_utf8_lossy(&run.stderr).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&run.stdout)
         .lines()
-        .find(|l| l.contains("tensor("))
-        .map(|l| l.trim().to_string())
-        .ok_or_else(|| "no tensor line".to_string())
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string())
 }
 
 /// The loss is sum(x * w) with w = OP(int64 weights) cast to f32; the
@@ -112,18 +116,11 @@ fn grad_program(weight_op: &str, print_form: bool) -> String {
 }
 
 // ===========================================================================
-// chelis#722 - the zero gradients (both lanes)
+// chelis#722 - evaluator support; the compiled half waits for Phase 3
 // ===========================================================================
 
-/// Observed today: `[0.0, 0.0, 0.0, 0.0]` from eval. The correct gradient is
-/// `w = abs(weights) = [100, 200, 300, 400]`.
+/// The correct gradient is `w = abs(weights) = [100, 200, 300, 400]`.
 #[test]
-#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
-            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
-            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in eval (the #699 \
-            placeholder poisons the grad-lowered forward pass); correct gradient is \
-            [100, 200, 300, 400]. Run with \
-            `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn eval_grad_through_int_abs_is_the_true_gradient() {
     let line = eval_first_line(&grad_program("abs", true)).expect("eval should run");
     assert!(
@@ -132,14 +129,8 @@ fn eval_grad_through_int_abs_is_the_true_gradient() {
     );
 }
 
-/// Observed today: `[0.0, 0.0, 0.0, 0.0]` from the compiled binary too -
-/// both lanes agree on the wrong answer, invisible to any cross-lane oracle.
+/// The compiled lane must match the evaluator reference for the #722 row.
 #[test]
-#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
-            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
-            better reason until chelis#729 lands integer abs/floor. Original finding: grad through abs(int64 tensor) returns zeros in the compiled lane \
-            as well; correct gradient is [100, 200, 300, 400]. Run with \
-            `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn c_grad_through_int_abs_is_the_true_gradient() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -151,15 +142,9 @@ fn c_grad_through_int_abs_is_the_true_gradient() {
     );
 }
 
-/// floor on an already-integral int64 tensor is the identity, so the true
-/// gradient is the raw weights. Observed today: zeros in eval.
+/// `floor` on an already-integral int64 tensor is the identity, so the true
+/// gradient is the raw weights.
 #[test]
-#[ignore = "chelis#722; since chelis#730 Phase 1 the placeholder is a LOUD lowering error \
-            in both lanes (see grad_through_int_abs_fails_loudly_not_zero) - red for a \
-            better reason until chelis#729 lands integer abs/floor. Original finding: grad through floor(int64 tensor) returns zeros in eval (same \
-            placeholder as abs, per #699's op list); correct gradient is \
-            [-100, 200, -300, 400]. Run with \
-            `cargo test -p chelis-cli --test grad_zero_placeholder_matrix -- --ignored`."]
 fn eval_grad_through_int_floor_is_the_true_gradient() {
     let line = eval_first_line(&grad_program("floor", true)).expect("eval should run");
     assert!(
@@ -168,28 +153,86 @@ fn eval_grad_through_int_floor_is_the_true_gradient() {
     );
 }
 
-// ===========================================================================
-// chelis#730 Phase 1 (census row 1's grad half): loud, not zero
-// ===========================================================================
-
-/// The conversion's parity row: grad through `abs`/`floor` on an int64
-/// tensor now fails LOUDLY in both lanes with the branded diagnostic -
-/// never plausible zero gradients. Flips to the value tests above when
-/// chelis#729 lands integer abs/floor support.
+/// `ceil` and `round` have the same exact identity semantics on integers as
+/// `floor`; neither may route through a float kernel or fabricate a gradient.
 #[test]
-fn grad_through_int_abs_fails_loudly_not_zero() {
-    let err = eval_first_line(&grad_program("abs", true))
-        .expect_err("chelis#722: grad through abs(int64) must fail loudly, not zero");
-    assert!(
-        err.contains("unsupported:"),
-        "the eval-lane failure must carry the branded diagnostic; got: {err}"
-    );
-    if c_toolchain_available() {
-        let err = c_first_line(&grad_program("abs", false), "grad_abs_int_loud")
-            .expect_err("the compiled lane must reject the same program");
+fn eval_grad_through_int_ceil_and_round_is_the_true_gradient() {
+    for op in ["ceil", "round"] {
+        let line = eval_first_line(&grad_program(op, true)).expect("eval should run");
         assert!(
-            err.contains("unsupported:"),
-            "the build-lane failure must carry the branded diagnostic; got: {err}"
+            line.contains("data=[-100.0, 200.0, -300.0, 400.0]"),
+            "grad of sum(x*{op}(w)) wrt x must be the exact integer weights; got: {line}"
+        );
+    }
+}
+
+/// Integer `abs` is not merely an identity rewrite: the minimum signed value
+/// has no positive representative and must retain the [04-NUM-9] trap.
+#[test]
+fn eval_int64_abs_min_traps_instead_of_rounding_or_wrapping() {
+    let program = "def int_abs(x: tensor[1, int64]) -> tensor[1, int64] = abs(x)\n\
+                   out = print(int_abs(to_tensor([add(neg(cast(9223372036854775807, int64)), \
+                   cast(-1, int64))])))\n";
+    let err = eval_first_line(program).expect_err("abs(int64::MIN) must trap");
+    assert!(
+        err.contains("numeric trap: overflow in abs at int64"),
+        "integer abs must preserve the exact overflow trap; got: {err}"
+    );
+}
+
+/// Every signed width uses its declared-width integer kernel in compiled C.
+#[test]
+fn c_tensor_abs_is_exact_at_every_integer_width() {
+    if !c_toolchain_available() {
+        return;
+    }
+    for (prim, magnitude) in [
+        ("int8", 7),
+        ("int16", 300),
+        ("int32", 70000),
+        ("int64", 9007199254740993_i64),
+    ] {
+        let program = format!(
+            "def int_abs(x: tensor[2, {prim}]) -> tensor[2, {prim}] = abs(x)\n\
+             out = print(int_abs(to_tensor([cast(-{magnitude}, {prim}), cast(5, {prim})])))\n"
+        );
+        let line = c_first_line(&program, &format!("c_abs_{prim}"))
+            .unwrap_or_else(|error| panic!("compiled {prim} abs must run: {error}"));
+        assert!(
+            line.contains(&format!("data=[{magnitude}, 5]")),
+            "compiled {prim} abs must preserve its exact integer values; got: {line}"
+        );
+    }
+}
+
+/// The minimum value at each signed width traps with the frozen C2 bytes.
+#[test]
+fn c_tensor_abs_min_traps_at_every_integer_width() {
+    if !c_toolchain_available() {
+        return;
+    }
+    for (prim, minimum) in [
+        ("int8", "-128.0"),
+        ("int16", "-32768.0"),
+        ("int32", "-2147483648.0"),
+        ("int64", "-9.223372036854776e18"),
+    ] {
+        let program = format!(
+            "def int_abs(x: tensor[1, {prim}]) -> tensor[1, {prim}] = abs(x)\n\
+             out = int_abs(cast(to_tensor([{minimum}]), {prim}))\n"
+        );
+        let error = c_first_line(&program, &format!("c_abs_min_{prim}"))
+            .expect_err("compiled minimum abs must trap");
+        let trap = error
+            .lines()
+            .find_map(|line| line.find("numeric trap:").map(|start| &line[start..]))
+            .unwrap_or_else(|| {
+                panic!("compiled {prim} abs failed without a numeric trap: {error}")
+            });
+        assert_eq!(
+            trap,
+            format!("numeric trap: overflow in abs at {prim}"),
+            "compiled abs trap bytes are frozen per C2"
         );
     }
 }
@@ -205,8 +248,8 @@ fn grad_through_int_abs_fails_loudly_not_zero() {
 /// lowers every tensor-signature def as a DAG root; the chelis#699
 /// placeholder zeroed it silently). Two honest halves now:
 /// the inline host-runtime forward computes 300.0, and the def-rooted
-/// program fails LOUDLY with the branded diagnostic instead of printing
-/// a correct first line above a fabricated zero root.
+/// def-rooted program must now compute the same value instead of fabricating
+/// a trailing zero root or failing during DAG lowering.
 #[test]
 fn forward_pass_without_grad_is_correct_in_eval() {
     let inline = "out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
@@ -222,11 +265,10 @@ fn forward_pass_without_grad_is_correct_in_eval() {
            sum(mul(copy(x), w), 0)\n\
          }\n\
          out = print(g(to_tensor([0.1, 0.2, 0.3, 0.4])))\n";
-    let err = eval_first_line(def_rooted)
-        .expect_err("the def-rooted program must fail loudly, never print a fabricated root");
-    assert!(
-        err.contains("unsupported:"),
-        "the failure must carry the branded diagnostic; got: {err}"
+    let line = eval_first_line(def_rooted).expect("the def-rooted program must evaluate");
+    assert_eq!(
+        line, "300.0",
+        "the def-rooted evaluator path must preserve integer abs; got: {line}"
     );
 }
 
@@ -258,4 +300,55 @@ fn grad_without_abs_is_correct_in_both_lanes() {
             "grad of sum(x*w) wrt x = w in the compiled lane; got: {line}"
         );
     }
+}
+
+// ===========================================================================
+// chelis#856 - the `fail` placeholder's MESSAGE must not reach numeric IR
+// ===========================================================================
+
+/// The `fail` lowering arm (chelis#616) plants a masked zero `Const` at the
+/// branch's rank and used to lower its own arguments for effect, discarding
+/// the results. Those arguments are STRINGS, so the discarded work pushed a
+/// `Prim::String` literal through `lower_lit`. That was harmless while a
+/// constant was a bare `f64` (it smuggled `Const { value: 0.0 }` typed
+/// `string` into the DAG); once chelis#856 sealed the payloads it reached
+/// `finalize_scalar`'s `Prim::String` arm, which is an
+/// unreachable-by-construction `panic!`, and every `grad`/`vmap` over a
+/// `fail`-guarded function died with the bare panic string
+/// "finalize_scalar: string is not a numeric dtype ...". The message is
+/// host-lane data and is no longer lowered at all.
+///
+/// `sum` has gradient 1 everywhere; the 4-element input does not take the
+/// guard.
+#[test]
+fn issue_856_grad_through_fail_guarded_branch_lowers() {
+    let program = "def loss(x: tensor[4, f32]) -> f32 = \
+         if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64)) \
+         then fail(\"kernel exceeds input length\") \
+         else tensor_to_scalar(sum(x, cast(0, int32)))\n\
+         out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), \
+         cast(3.0, f32), cast(4.0, f32)]))\n";
+    let line =
+        eval_first_line(program).expect("grad over a `fail`-guarded body must lower (chelis#856)");
+    assert!(
+        line.contains("data=[1.0, 1.0, 1.0, 1.0]"),
+        "grad of sum(x) wrt x is 1 everywhere; got: {line}"
+    );
+}
+
+/// Negative parity for the row above: dropping the message from the DAG
+/// lane must not drop it from the program. When the guard IS taken the
+/// host lane still owns `fail` and still reports the exact message.
+#[test]
+fn issue_856_fail_message_survives_when_the_guard_is_taken() {
+    let program = "def loss(x: tensor[1, f32]) -> f32 = \
+         if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64)) \
+         then fail(\"kernel exceeds input length\") \
+         else tensor_to_scalar(sum(x, cast(0, int32)))\n\
+         out = loss(to_tensor([cast(1.0, f32)]))\n";
+    let err = eval_first_line(program).expect_err("the taken `fail` branch must abort");
+    assert!(
+        err.contains("kernel exceeds input length"),
+        "the taken `fail` must report its own message; got: {err}"
+    );
 }

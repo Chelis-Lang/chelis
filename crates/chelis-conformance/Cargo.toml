@@ -9,8 +9,16 @@ repository.workspace = true
 [dependencies]
 chelis-version = { path = "../chelis-version" }
 sha2 = "0.10"
+# The `[conform]` control surface in a shell's reef.toml is read STRUCTURALLY,
+# not line-wise (chelis#1262). Two review rounds produced six bypass spellings of
+# a hand-rolled line scan; a parsed document makes spelling-independence hold by
+# construction. Same version chelis-reef/chelis-cli/chelisup already use.
+toml = "0.8"
 
 [build-dependencies]
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

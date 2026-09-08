@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::span::Span;
+use crate::tag::DeepTag;
 
 /// A Deep expression — the core AST node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8,17 +9,69 @@ pub enum Expr {
     /// An atomic value (symbol, number, string, keyword, bool).
     Atom(Atom, Span),
     /// A parenthesized list `(tag {} children...)`.
+    ///
+    /// **DEPRECATED**: No producer creates this variant anymore. All paths
+    /// produce `Expr::Node`, `Expr::BareList`, or `Expr::UnknownForm`.
+    /// The match arms on this variant are dead code awaiting removal.
+    /// See chelis#1028.
+    /// Legacy list representation — no producer creates this variant.
+    /// Retained during migration; will be deleted when all consumers are migrated.
     List(List, Span),
     /// An inline metadata map `{key: value, ...}` or `{}`.
     Map(MetaMap, Span),
     /// A metadata-annotated expression `^{k1 v1 ...} expr` (legacy, kept for compat).
     MetaExpr(MetaExpr, Span),
+    /// A stamped vocabulary node produced by `stamp_to_typed`. The `Node`
+    /// is role-gated: construction validates arity and rejects Name atoms
+    /// at RuntimeExpr positions.
+    Node(Box<crate::node::Node>, Span),
+    /// A structural bare list (no vocabulary head decode). Produced at
+    /// Syntax/Binder/Selector positions by `stamp_to_typed`.
+    BareList(Vec<Expr>, Span),
+    /// A list whose head symbol did not decode into the closed vocabulary
+    /// at a position where decode was attempted. Preserves the head
+    /// string, metadata, and recursively stamped children for downstream
+    /// diagnostics.
+    UnknownForm(Box<UnknownFormData>),
+}
+
+/// Data for an `Expr::UnknownForm` — boxed to keep the `Expr` enum small.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnknownFormData {
+    pub head: String,
+    pub meta: MetaMap,
+    pub children: Vec<Expr>,
+    pub span: Span,
 }
 
 impl Expr {
+    /// Construct a canonical tagged node `(tag {meta} children...)` with a
+    /// decoded tag. This is the typed producer entry point (decode-once,
+    /// chelis#731 Phase 3): programmatic Deep construction goes through
+    /// here (or stamps `Atom::Tag` directly) so the in-memory tree never
+    /// carries a vocabulary tag as a string.
+    pub fn node(tag: DeepTag, meta: MetaMap, children: Vec<Expr>, span: Span) -> Expr {
+        Expr::Node(Box::new(crate::node::Node::new(tag, meta, children)), span)
+    }
+
+    /// The decoded tag when this expression is a stamped vocabulary node.
+    pub fn tag(&self) -> Option<DeepTag> {
+        match self {
+            Expr::List(list, _) => list.tag(),
+            Expr::Node(node, _) => Some(node.tag()),
+            _ => None,
+        }
+    }
+
     pub fn span(&self) -> Span {
         match self {
-            Expr::Atom(_, s) | Expr::List(_, s) | Expr::Map(_, s) | Expr::MetaExpr(_, s) => *s,
+            Expr::Atom(_, s)
+            | Expr::List(_, s)
+            | Expr::Map(_, s)
+            | Expr::MetaExpr(_, s)
+            | Expr::Node(_, s)
+            | Expr::BareList(_, s) => *s,
+            Expr::UnknownForm(data) => data.span,
         }
     }
 
@@ -32,26 +85,25 @@ impl Expr {
     /// an external producer (e.g., Octant's LaTeX-to-Deep translator).
     ///
     /// Returns `Some(id)` when:
-    /// - the node is an `Expr::List` with at least two elements,
-    /// - element 1 is an `Expr::Map`,
-    /// - that map contains a `span` entry whose value is a string literal
+    /// - the node is an `Expr::Node`,
+    /// - its metadata map contains a `span` entry whose value is a string literal
     ///   (`Expr::Atom(Atom::Str(_), _)`).
     ///
     /// The empty string is a valid (though unusual) span ID and is returned
     /// as `Some("")`. Lock this convention in tests; do not silently coerce
     /// `Some("")` to `None`.
     ///
-    /// Returns `None` for atoms, bare maps, legacy `MetaExpr` nodes, lists
-    /// without a metadata map at index 1, lists whose metadata map has no
-    /// `span` key, or `span` values that are not string literals (those are
-    /// shape errors callers handle separately, not a missing span).
+    /// Returns `None` for atoms, bare maps, legacy `MetaExpr` nodes,
+    /// nodes whose metadata map has no `span` key, or `span` values that
+    /// are not string literals (those are shape errors callers handle
+    /// separately, not a missing span).
     pub fn span_id(&self) -> Option<&str> {
-        let list = match self {
-            Expr::List(list, _) => list,
-            _ => return None,
-        };
-        let meta = match list.elements.get(1)? {
-            Expr::Map(m, _) => m,
+        let meta = match self {
+            Expr::List(list, _) => match list.elements.get(1)? {
+                Expr::Map(m, _) => m,
+                _ => return None,
+            },
+            Expr::Node(node, _) => node.meta(),
             _ => return None,
         };
         for (key, value) in &meta.entries {
@@ -68,22 +120,110 @@ impl Expr {
 /// An atomic (leaf) value in the AST.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
-    Symbol(String),
+    Name(String),
+    /// A decoded closed-vocabulary Deep tag at a node's tag position
+    /// (element 0). Stamped once by the parser or a typed constructor
+    /// (decode-once, chelis#731 Phase 3): after parsing, the tag string
+    /// does not exist in the in-memory tree, so no consumer can dispatch
+    /// on it; printers and serializers regenerate the string via
+    /// [`DeepTag::as_str`] at the serialization boundary only.
+    Tag(DeepTag),
     Int(i64),
     Float(f64),
     Str(String),
-    /// Keyword without the leading `:`, e.g. `":axis"` → `"axis"`.
-    Keyword(String),
     Bool(bool),
 }
 
-/// A parenthesized list of expressions.
+/// A flat list view of an expression's elements.
+///
+/// **DEPRECATED**: This struct only exists because `Expr::List` has not yet
+/// been fully removed. New code should use `Expr::Node` (via
+/// `crate::node::Node`) instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct List {
-    /// All elements of the list. In canonical 3-tuple form:
-    /// elements[0] is the tag, elements[1] is a Map (metadata),
-    /// elements[2..] are children.
     pub elements: Vec<Expr>,
+}
+
+impl List {
+    pub fn tag(&self) -> Option<DeepTag> {
+        match self.elements.first() {
+            Some(Expr::Atom(Atom::Tag(tag), _)) => Some(*tag),
+            _ => None,
+        }
+    }
+
+    pub fn unknown_tag_symbol(&self) -> Option<&str> {
+        match self.elements.first() {
+            Some(Expr::Atom(Atom::Name(symbol), _)) => Some(symbol.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Which rung of the chelis#759 cast ladder a `cast` node selects.
+///
+/// The rung lives in the node's optional third child (a bare selector
+/// symbol, read exactly like `grad`'s index selector) rather than in the
+/// metadata map, because [`strip_metadata`] empties every metadata map on
+/// the canonical-display path: a mode parked there would silently turn a
+/// truncating cast back into the checked default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CastMode {
+    /// `(cast {} expr target-type)`: the [04-NUM-14] checked default. A
+    /// fractional or non-finite float into an integer target traps
+    /// `Domain`.
+    #[default]
+    Checked,
+    /// `(cast {} expr target-type trunc)`: the [05-OP-6] named truncating
+    /// float-to-integer cast. Truncates toward zero; traps `Overflow` out
+    /// of range and `Domain` on a non-finite source.
+    Trunc,
+}
+
+impl CastMode {
+    /// The Surf keyword that selects this mode.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            CastMode::Checked => "cast",
+            CastMode::Trunc => "cast_trunc",
+        }
+    }
+
+    /// The Deep mode selector symbol, or `None` for the default rung
+    /// (spelled as the plain two-child `cast` form).
+    pub fn deep_selector(self) -> Option<&'static str> {
+        match self {
+            CastMode::Checked => None,
+            CastMode::Trunc => Some("trunc"),
+        }
+    }
+
+    /// Read a Deep mode selector symbol back. An unrecognized symbol is
+    /// `None` so the caller can reject it loudly rather than defaulting
+    /// to the checked rung.
+    pub fn from_deep_selector(symbol: &str) -> Option<Self> {
+        match symbol {
+            "trunc" => Some(CastMode::Trunc),
+            _ => None,
+        }
+    }
+}
+
+/// The rung selected by a `cast` node's children.
+///
+/// `Ok(mode)` for the two-child checked form and for a recognized
+/// selector; `Err(spelling)` for an unrecognized or non-symbol third
+/// child, which every caller rejects rather than silently treating as
+/// checked.
+pub fn cast_mode_of(children: &[Expr]) -> Result<CastMode, String> {
+    let Some(selector) = children.get(2) else {
+        return Ok(CastMode::Checked);
+    };
+    let symbol = match selector {
+        Expr::Atom(Atom::Name(symbol), _) => symbol.as_str(),
+        other => return Err(crate::printer::print_expr_flat(other)),
+    };
+    CastMode::from_deep_selector(symbol).ok_or_else(|| symbol.to_string())
 }
 
 /// Inline metadata map: `{key: value, ...}` or `{}`.
@@ -123,9 +263,6 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                 .iter()
                 .enumerate()
                 .map(|(index, element)| {
-                    // Element 1 of a canonical 3-tuple is the metadata map; empty
-                    // it rather than recursing (its entries are metadata values,
-                    // not children). Everything else recurses.
                     if index == 1 && matches!(element, Expr::Map(..)) {
                         Expr::Map(MetaMap::default(), element.span())
                     } else {
@@ -135,6 +272,39 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                 .collect();
             Expr::List(List { elements }, *span)
         }
+        Expr::Node(node, span) => {
+            use crate::node::Node;
+            let children: Vec<Expr> = node
+                .children_iter()
+                .map(|child_ref| match child_ref {
+                    crate::node::ChildRef::Expr(e)
+                    | crate::node::ChildRef::Syntax(e)
+                    | crate::node::ChildRef::Type(e)
+                    | crate::node::ChildRef::EffectHandler(e)
+                    | crate::node::ChildRef::Bypass(e) => strip_metadata(e),
+                    crate::node::ChildRef::Binder(s) => {
+                        Expr::Atom(Atom::Name(s.to_string()), *span)
+                    }
+                    crate::node::ChildRef::Selector(s) => {
+                        Expr::Atom(Atom::Name(s.to_string()), *span)
+                    }
+                })
+                .collect();
+            Expr::Node(
+                Box::new(Node::new(node.tag(), MetaMap::default(), children)),
+                *span,
+            )
+        }
+        Expr::BareList(elems, span) => {
+            let stripped = elems.iter().map(strip_metadata).collect();
+            Expr::BareList(stripped, *span)
+        }
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(UnknownFormData {
+            head: data.head.clone(),
+            meta: MetaMap::default(),
+            children: data.children.iter().map(strip_metadata).collect(),
+            span: data.span,
+        })),
     }
 }
 

@@ -116,16 +116,16 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
 
 const AVGPOOL_FWD: &str = "module Repro.AvgFwd\n\
 def pool(x: tensor[4, f32]) -> tensor[2, f32] = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(2, int32)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int32), cast(4, int32)]]), [cast(1, int64), cast(2, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
   mean(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
 }\n\
 out = pool(to_tensor([cast(2.0, f32), cast(4.0, f32), cast(6.0, f32), cast(8.0, f32)]))\n";
 
 const AVGPOOL_GRAD: &str = "module Repro.AvgGrad\n\
 def pool(x: tensor[4, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(2, int32)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int32), cast(4, int32)]]), [cast(1, int64), cast(2, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
   pooled = mean(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
   sum(pooled, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
@@ -162,8 +162,8 @@ fn issue_368_avgpool_grad_is_inverse_window_size() {
 
 const MAXPOOL_GRAD: &str = "module Repro.MaxGrad\n\
 def pool(x: tensor[4, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(2, int32)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int32), cast(4, int32)]]), [cast(1, int64), cast(2, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
   pooled = max_reduce(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
   sum(pooled, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
@@ -192,9 +192,9 @@ fn issue_368_maxpool_grad_is_onehot_to_max_element() {
 
 const CONCAT3_GRAD: &str = "module Repro.Concat3\n\
 def f(x: tensor[3, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int32), cast(1, int32)]]), [cast(1, int64), cast(1, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(1, int32), cast(2, int32)]]), [cast(1, int64), cast(1, int64)])\n\
-  r2 = reshape(shrink(&x, [[cast(2, int32), cast(3, int32)]]), [cast(1, int64), cast(1, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, int64), cast(1, int64)]]), [cast(1, int64), cast(1, int64)])\n\
+  r1 = reshape(shrink(&x, [[cast(1, int64), cast(2, int64)]]), [cast(1, int64), cast(1, int64)])\n\
+  r2 = reshape(shrink(&x, [[cast(2, int64), cast(3, int64)]]), [cast(1, int64), cast(1, int64)])\n\
   rows = [r0, r1, r2]\n\
   stacked = concat(rows, cast(0, int32))\n\
   sum(sum(stacked, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
@@ -395,9 +395,9 @@ def avgpool1d(x) = {\n\
   }\n\
 }\n\
 def window_row[n](x: &tensor[n, f32], m: int64, k: int64) -> tensor[u, m, f32] = {\n\
-  start = cast(k, int32)\n\
-  extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int32)\n\
-  reshape(stride(shrink(x, [[start, extent]]), cast(2, int32)), [cast(1, int64), m])\n\
+  start = cast(k, int64)\n\
+  extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int64)\n\
+  reshape(stride(shrink(x, [[start, extent]]), cast(2, int64)), [cast(1, int64), m])\n\
 }";
 
     // Forward parity: the pooled means themselves.
@@ -448,13 +448,22 @@ out = loss(to_tensor([{literal}]))\n"
             .trim()
             .lines()
             .last()
-            .and_then(|l| l.trim().parse().ok())
+            .and_then(|l| {
+                let trimmed = l.trim();
+                // [05-OBS-6]: strip `name = ` prefix if present.
+                let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+                value_str.parse().ok()
+            })
             .expect("scalar loss");
         let lm: f64 = eval_ok(&loss_source(&xm), "symoraclefd")
             .trim()
             .lines()
             .last()
-            .and_then(|l| l.trim().parse().ok())
+            .and_then(|l| {
+                let trimmed = l.trim();
+                let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+                value_str.parse().ok()
+            })
             .expect("scalar loss");
         let fd = (lp - lm) / (2.0 * h);
         assert!(

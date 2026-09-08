@@ -34,7 +34,7 @@
 //! `SparseSummaryAttempt` enum for BLAS, these assertions will need to
 //! be updated (and the §5 register entry can be marked closed).
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::host::{
     HostTensorInput, SparseSummaryAttempt, try_summarize_sparse_helper_for_test,
 };
@@ -74,7 +74,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(prim, 8, 16, 4),
@@ -83,7 +83,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(prim, 8, 16, 4),
@@ -273,7 +273,7 @@ fn const_operand_helper_silently_misses_blas_summary() {
     );
     // Inline constant as the rhs (16x4).
     let b = dag.add_node(
-        RiscOp::Const { value: 2.0 },
+        RiscOp::synth_const(mat(Prim::F32, 16, 4).precision, 2.0),
         vec![],
         mat(Prim::F32, 16, 4),
         None,
@@ -281,7 +281,7 @@ fn const_operand_helper_silently_misses_blas_summary() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -290,7 +290,7 @@ fn const_operand_helper_silently_misses_blas_summary() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),

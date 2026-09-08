@@ -14,8 +14,14 @@
 //!
 //! Mirrors the DAG-side coverage in `span_comments.rs`.
 
-use chelis_backend_c::host_emit::emit_host_program;
-use chelis_ir::host::{HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostType};
+mod support;
+use chelis_ir::ConcreteHostType as HostType;
+use chelis_ir::host::{
+    ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+    ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+    ConcreteHostProgram as HostProgram,
+};
+use support::emit_host_program;
 
 fn make_program(body: HostExpr) -> HostProgram {
     HostProgram {
@@ -30,6 +36,7 @@ fn make_program(body: HostExpr) -> HostProgram {
             ret_ty: HostType::Float64,
             body,
             tensor_helpers: Vec::new(),
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],

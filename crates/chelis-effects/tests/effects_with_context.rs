@@ -78,8 +78,15 @@ def caller(y: int64) -> int64 = emit(y)
 
     let (typeenv, lib_checked) = build_library_pair(library);
     let new_checked = build_new_code_checked(&typeenv, snippet);
+    let expected_type_env = new_checked.type_env().clone();
+    let expected_signatures = new_checked.signature_inference().clone();
+    let expected_linearity = new_checked.linearity().clone();
     let new_with_effects = check_effects_with_context(&lib_checked, &new_checked)
         .expect("io-inheriting snippet must pass");
+
+    assert_eq!(new_with_effects.type_env(), &expected_type_env);
+    assert_eq!(new_with_effects.signature_inference(), &expected_signatures);
+    assert_eq!(new_with_effects.linearity(), &expected_linearity);
 
     // Verify the snippet's caller def does carry `effects` metadata
     // referencing io. The annotated decl list is the snippet's only.
@@ -269,7 +276,7 @@ def my_loader(p: string) -> string ! {} = lib_load(p)
 #[test]
 fn new_code_inherits_test_via_library_wrapper() {
     let library = r#"
-def lib_assert_eq(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, "lib_assert_eq")
+def lib_assert_eq(a: int64, b: int64) -> unit = test_assert_eq(a, b, "lib_assert_eq")
 "#;
     let snippet = r#"
 def my_check(x: int64) -> unit = lib_assert_eq(x, cast(1, int64))
@@ -358,16 +365,24 @@ def call_b(z: int64) -> int64 = lib_id(z)
         "snippet B's call_b must NOT inherit any test effect, got:\n{b_text}"
     );
 
-    // Stronger probe: a snippet C with `def stamp() -> unit ! {} = lib_id(...)`
-    // — same name as snippet A's stamp, but pure body and `! {}` declared.
-    // If snippet A's `! {Test}` row leaked into lib_checked, the stamp
-    // entry would still be `{Test}` and validate_declared_vs_inferred
-    // would reject. Library is unchanged — must accept.
+    // Stronger probe: a snippet C that re-defines `stamp` (same name as
+    // snippet A's `stamp`), pure body, `! {}` declared. If snippet A's
+    // `! {Test}` row leaked into lib_checked, the stamp entry would still be
+    // `{Test}` and validate_declared_vs_inferred would reject. Library is
+    // unchanged -- must accept.
+    //
+    // chelis#756 / chelis#731 Phase 2: the previous body was
+    // `{ _u = lib_id(cast(1, int64)); cast((), unit) }`, where `cast((), unit)`
+    // coerced a value to the `unit` return type. Casting to `unit` (a
+    // non-primitive) is not a spec-defined cast; on the pre-Phase-2 tree it
+    // returned a SILENT `Type::Error` that unified permissively with the
+    // declared `-> unit`, so the def type-checked only via that hole. The hole
+    // is now closed (the cast is rejected at check), so this probe uses a pure,
+    // validly-typed `int64` body instead -- the effect-leak isolation it
+    // exercises is unchanged (a pure new-code `stamp` declared `! {}` must be
+    // accepted against the unmutated library).
     let snippet_c = r#"
-def stamp() -> unit ! {} = {
-  _u = lib_id(cast(1, int64))
-  cast((), unit)
-}
+def stamp() -> int64 ! {} = lib_id(cast(1, int64))
 "#;
     let c_checked = build_new_code_checked(&typeenv, snippet_c);
     check_effects_with_context(&lib_checked, &c_checked).expect(
@@ -474,7 +489,7 @@ def caller(y: int64) -> int64 = emit(y)
 fn snippet_composing_two_library_helpers_picks_up_both_effects() {
     let library = r#"
 def lib_emit(x: int64) -> int64 = debug(x)
-def lib_assert(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, "lib_assert")
+def lib_assert(a: int64, b: int64) -> unit = test_assert_eq(a, b, "lib_assert")
 "#;
     let snippet = r#"
 def my_op(x: int64) -> unit ! {IO, Test} = {

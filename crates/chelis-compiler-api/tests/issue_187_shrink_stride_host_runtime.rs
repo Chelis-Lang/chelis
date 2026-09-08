@@ -42,10 +42,10 @@ fn root_tensor<'a>(
 // IR-evaluator-equivalent output.
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `shrink(&x, [[0, 1], [1, 3]])` on a rank-2 input
-///   x = [[0, 1, 2, 3],
-///        [4, 5, 6, 7]]
-/// returns the axis-0 row 0 sub-block at columns 1..3, i.e. shape [1, 2]
+/// EXPECT: `shrink(&x, [[0i64, 1i64], [1i64, 3i64]])` on a rank-2 input
+///   x = [[0i64, 1i64, 2i64, 3i64],
+///        [4i64, 5i64, 6i64, 7i64]]
+/// returns the axis-0 row 0 sub-block at columns 1..3, i.e. shape [1i64, 2i64]
 /// data [1.0, 2.0]. Before the fix, no callable form existed so this
 /// either failed type-check (parameterized form) or hit
 /// `unsupported builtin in host runtime` (bare form).
@@ -53,15 +53,15 @@ fn root_tensor<'a>(
 fn issue187_shrink_parameterized_runs_and_matches_ir_eval() {
     let src = r#"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
-windowed = shrink(&make, [[0, 1], [1, 3]])
+windowed = shrink(&make, [[0i64, 1i64], [1i64, 3i64]])
 "#;
     let result = eval_surf(src);
     let win = root_tensor(&result, "windowed");
     assert_eq!(win.shape, vec![1, 2], "windowed shape");
-    assert_eq!(win.data, vec![1.0, 2.0], "windowed data");
+    assert_eq!(win.data.to_f64_lossy_vec(), vec![1.0, 2.0], "windowed data");
 }
 
-/// EXPECT: `stride(&x, 1, 2)` on the same 2x4 input returns shape [2, 2]
+/// EXPECT: `stride(&x, 1i64, 2i64)` on the same 2x4 input returns shape [2i64, 2i64]
 /// with every other element along axis 1:
 ///   row 0: [0.0, 2.0]
 ///   row 1: [4.0, 6.0]
@@ -69,12 +69,16 @@ windowed = shrink(&make, [[0, 1], [1, 3]])
 fn issue187_stride_parameterized_runs_and_matches_ir_eval() {
     let src = r#"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
-strided = stride(&make, 1, 2)
+strided = stride(&make, 1i64, 2i64)
 "#;
     let result = eval_surf(src);
     let s = root_tensor(&result, "strided");
     assert_eq!(s.shape, vec![2, 2], "strided shape");
-    assert_eq!(s.data, vec![0.0, 2.0, 4.0, 6.0], "strided data");
+    assert_eq!(
+        s.data.to_f64_lossy_vec(),
+        vec![0.0, 2.0, 4.0, 6.0],
+        "strided data"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +93,7 @@ strided = stride(&make, 1, 2)
 fn issue187_shrink_out_of_range_bounds_fails_loud() {
     let src = r#"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
-bad = shrink(&make, [[0, 5], [1, 3]])
+bad = shrink(&make, [[0i64, 5i64], [1i64, 3i64]])
 "#;
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
@@ -109,7 +113,7 @@ bad = shrink(&make, [[0, 5], [1, 3]])
 fn issue187_stride_zero_step_fails_loud() {
     let src = r#"
 make = pad_sequences([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], 0.0)
-bad = stride(&make, 0, 2)
+bad = stride(&make, 0i64, 2i64)
 "#;
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,

@@ -1,18 +1,21 @@
-//! chelis#734 - `to_string` on a tensor or list compiles to the literal
+//! chelis#734 - `to_string` on a tensor or list compiled to the literal
 //! placeholder string `"<value>"` while eval stringifies the value
 //! properly. Root: `host_emit.rs:2236`'s catch-all arm (`_ =>
 //! chelis_string_from_cstr("<value>")`) - the same
 //! catch-all-returning-a-value shape as #682's stub, one page away from
 //! it, substituting a string instead of a zero.
+//! The site now rejects loudly; chelis#1059 owns implementing compiled
+//! tensor/list stringification.
 //!
 //! This settled census row 3 of `spec/design/loud_unsupported.md`
 //! (previously "unknown - probe"): LIVE. The fix arrives via that plan's
 //! Phase 1 (the arm becomes Err through the emitter failure channel).
 //!
-//! Controls: to_string of int64/f64/bool scalars is correct in both
-//! lanes, and to_string(cast(1.5, f16)) prints 1.5 in both lanes (the
-//! f16 scalar resolves through the f64 formatter arm here, so #714's
-//! Unknown path does not compound).
+//! Controls: to_string of scalar values is correct in both lanes. The former
+//! f16 "control" passed only because the C host silently widened through the
+//! Unknown/f64 path; Phase 2 replaced that accidental green with an explicit
+//! ABI rejection. Chelis#729 Phase 3 supplies exact reduced-float storage and
+//! returns f16/bf16 to the positive, own-width observation corpus below.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -84,11 +87,13 @@ fn c_first_line(program: &str, name: &str) -> String {
         .to_string()
 }
 
-/// Observed today: the compiled binary prints the literal `<value>`.
+/// Historical bug: the compiled binary printed the literal `<value>`.
+/// Phase 1 now rejects this unsupported container conversion loudly; the
+/// ignored positive row remains the support contract.
 #[test]
-#[ignore = "chelis#734: to_string(tensor) is now REJECTED loudly at build per the \
-            chelis#730 plan (was the silent '<value>' placeholder); real tensor \
-            rendering arrives with chelis#732's formatter and un-ignores this value \
+#[ignore = "chelis#1059: to_string(tensor) is now REJECTED loudly at build per the \
+            chelis#730 plan (was chelis#734's silent '<value>' placeholder); real tensor \
+            rendering un-ignores this value \
             test. Run with \
             `cargo test -p chelis-cli --test issue_734_tostring_placeholder -- --ignored`."]
 fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
@@ -107,11 +112,12 @@ fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
     );
 }
 
-/// Observed today: `<value>` for lists as well.
+/// Historical bug: lists also produced `<value>`. The current compiled lane
+/// rejects this unsupported container conversion loudly.
 #[test]
-#[ignore = "chelis#734: to_string(List) is now REJECTED loudly at build per the \
-            chelis#730 plan (was the silent '<value>' placeholder); real list rendering \
-            arrives with chelis#732's formatter and un-ignores this value test. Run with \
+#[ignore = "chelis#1059: to_string(List) is now REJECTED loudly at build per the \
+            chelis#730 plan (was chelis#734's silent '<value>' placeholder); real list rendering \
+            un-ignores this value test. Run with \
             `cargo test -p chelis-cli --test issue_734_tostring_placeholder -- --ignored`."]
 fn to_string_of_a_list_stringifies_in_the_compiled_lane() {
     if !c_toolchain_available() {
@@ -138,7 +144,6 @@ fn to_string_scalar_arms_agree_across_lanes() {
         ("to_string(cast(7, int64))", "7"),
         ("to_string(cast(1.5, f64))", "1.5"),
         ("to_string(true)", "true"),
-        ("to_string(cast(1.5, f16))", "1.5"),
     ];
     let have_cc = c_toolchain_available();
     for (i, (expr, expected)) in rows.iter().enumerate() {
@@ -155,5 +160,26 @@ fn to_string_scalar_arms_agree_across_lanes() {
                 "{expr}"
             );
         }
+    }
+}
+
+/// Reduced-float scalar `to_string` used to appear green only because the C
+/// host widened the value through its old unknown/f64 representation. Phase 3
+/// gives both dtypes exact host storage, so this exit must now preserve their
+/// own-width shortest strings and agree with eval.
+#[test]
+fn to_string_reduced_float_scalars_agree_across_lanes() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for (dtype, value, expected) in [("f16", "0.3333", "0.3333"), ("bf16", "0.334", "0.334")] {
+        let program = format!(
+            "module M.Main\ndef render() -> string = to_string(cast({value}, {dtype}))\n\
+             out = print(render())\n"
+        );
+        let eval = eval_first_line(&program).expect("eval lane");
+        let compiled = c_first_line(&program, &format!("to_string_{dtype}"));
+        assert_eq!(eval, expected, "{dtype}: eval own-width rendering drift");
+        assert_eq!(compiled, eval, "{dtype}: to_string lane divergence");
     }
 }

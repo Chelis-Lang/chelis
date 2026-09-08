@@ -1,0 +1,20 @@
+typed_nodes = 6
+total_nodes = 8
+diagnostics = 2
+
+[0] kind = PrecisionMismatch
+    message = precision mismatch: expected f32, got int32
+    severity = 0.8
+    expected = None
+    got = None
+    span_offset = Some(63)
+    span_id = Some("surf:63..74")
+    hint = Insert explicit cast
+[1] kind = PrecisionMismatch
+    message = div on integer operand precision `int32` is not admitted per spec/05-risc-primitives.md §2.1: `div` is float-only (IEEE-754). Use `floor_div` (round toward -inf) or `trunc_div` (round toward zero) for integers.
+    severity = 0.8
+    expected = None
+    got = None
+    span_offset = None
+    span_id = None
+    hint = spec/05-risc-primitives.md §2.1: integer division uses `floor_div` or `trunc_div`; `div` requires float operands.

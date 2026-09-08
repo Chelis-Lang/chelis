@@ -1,10 +1,10 @@
 //! chelis#616 step 3b: forward eval-vs-C parity for runtime (node-valued)
 //! RESHAPE target extents — the windowed `reshape(stride(shrink(x, ...)),
-//! [1, m])` form of the avgpool oracle's `window_row`, with the window count
+//! [1i64, m])` form of the avgpool oracle's `window_row`, with the window count
 //! `m` computed from `shape()` arithmetic at run time.
 //!
 //! The reshape target `m` lowers to a rank-0 integer scalar node the op
-//! references as `RtDim::Node` (exactly like a movement bound); the C lane
+//! references as `chelis_ir::dag::RtDim::Node` (exactly like a movement bound); the C lane
 //! declares `int m = <scalar>` at the reshape behind negativity + numel
 //! abort guards, and the eval lane resolves the scalar and enforces the
 //! numel invariant with a clean error. One compiled binary handles every
@@ -22,8 +22,8 @@ use tempfile::{TempDir, tempdir};
 /// `[1, 3, 5, ...]` (`m` odd values).
 const WINDOW_BODY: &str = "\
   m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int32)\n\
-  reshape(stride(shrink(x, [[cast(0, int32), extent]]), cast(2, int32)), [cast(1, int64), m])";
+  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
+  reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])";
 
 fn window_source(out_line: &str) -> String {
     format!(
@@ -198,11 +198,12 @@ fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
         .iter()
         .map(|n| {
             format!(
-                "    {{ int shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
-                 for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
-                 chelis_tensor* w = out(x); \
-                 for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", w->data[i]); \
-                 printf(\"---\\n\"); }}"
+                "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32); \
+                 chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
+                 for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
+                 chelis_tensor* w = out(x); chelis_read_view w_view = chelis_tensor_read_view(w); \
+                 for (int64_t i = 0; i < w_view.count; i++) printf(\"%.6f\\n\", ((const float *)w_view.data)[i]); \
+                 printf(\"---\\n\"); chelis_tensor_release(w); chelis_tensor_release(x); }}"
             )
         })
         .collect::<Vec<_>>()
@@ -253,8 +254,8 @@ int main(void) {{
 fn issue_616_runtime_window_grad_eval_matches_c() {
     let source = "module Repro.RtWindowGrad\nsig f: tensor[4, f32] -> f32\ndef f(x) = {\n\
   m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int32)\n\
-  w = reshape(stride(shrink(x, [[cast(0, int32), extent]]), cast(2, int32)), [cast(1, int64), m])\n\
+  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
+  w = reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])\n\
   sum(sum(w, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\nout = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
 

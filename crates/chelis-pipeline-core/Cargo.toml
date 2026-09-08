@@ -1,0 +1,18 @@
+[package]
+name = "chelis-pipeline-core"
+description = "Typed semantic transitions over owned expanded Deep programs"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chelis-unord.workspace = true
+chelis-deep.workspace = true
+chelis-types.workspace = true
+chelis-effects.workspace = true
+chelis-ir.workspace = true
+
+[lints]
+workspace = true

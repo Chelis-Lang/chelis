@@ -39,12 +39,100 @@ Rules:
 - Numeric suffixes in property names have no harness semantics.
 
 Contract options are part of Tier B lowering, not only report metadata. A
-contract-bound call to the certified implementation is replaced by a fresh SMT
+contract-bound call to the trusted implementation is replaced by a fresh SMT
 symbol and the contract assumptions needed for that symbol. The prover must
 check that the call resolves to the implementation named by the discharge
 record before applying the abstraction. For `std.normal_cdf.reflection`, the
 lowering recognizes syntactic `normal_cdf(x)` / `normal_cdf(-x)` pairs and
 asserts the reflection coupling between their fresh symbols.
+
+For `std.quantile.monotonicity`, the trusted implementation is the resolved
+Reef dependency declaration for `Nautilus.Stats.quantile_vec`, whose linker
+symbol is `pkg__nautilus__Nautilus__Stats__quantile_vec`. Trust comes from the
+linker's dependency-owned declaration partition, not from parsing source names
+or accepting a root-package lookalike. Lowering intercepts the call before the
+generic scalar-argument pass: the tensor operand stays as compiler AST
+identity, while the scalar quantile level lowers to SMT. Only two calls over
+the same dataset identity receive the relational monotonicity assumption.
+Missing trusted calls, different-dataset pairs, and the not-yet-bridged range
+or boundary contracts return `unsupported` under `smt-only`.
+
+The chelis#979 acceptance oracle is:
+
+```sh
+cargo test -p chelis-cli --features smt --test issue_979_nautilus_quantile
+```
+
+### General-n structural induction
+
+`--tier induction-only` is a Surf-only, fail-closed deductive lane. The prover
+selects an `int*` induction binder from the checked compiler AST, never from a
+caller classification. The v1 accepted shape has an explicit `n >= 0` domain,
+one scalar model call in the proposition, and one directly recursive model:
+`if n <= 0 then base else step`, where `step` contains exactly one
+`f(n - 1, unchanged_args...)` call. Contract abstractions, non-transparent
+mutual or non-structural recursion, multiple model calls, uninterpreted
+residual calls, and other shapes are `unsupported`; this lane never falls
+through to sampling.
+
+“Direct” is measured after the compiler's ordinary bounded helper inlining, so
+a type-checked transparent alias may expose the same exact recurrence. This is
+intentional: argument substitution and symbol ownership come from the compiler
+AST, and the resulting base/step goals are identical to the unaliased form.
+A syntactically exact decreasing call under a literal-dead branch is also
+accepted. The classifier does not erase that branch: the full `if` remains in
+the dispatched goal, so the solver proves its unreachability and no dead call
+can manufacture an induction hypothesis or a green case.
+
+The prover constructs a concrete `P(0)` obligation from a full one-step model
+unfolding and a symbolic `P(k) => P(k + 1)` obligation whose induction
+hypothesis replaces only the exact `f(k, unchanged_args...)` subproblem. Both
+goals, including their branch conditions and non-vacuity checks, are dispatched
+separately to the existing SMT engine. A green result requires both discharges.
+Machine records use `proof_tier:"induction"`, `arith_model:"real"`, and
+`induction:{variable,base:{status,arith_model},step:{status,arith_model}}`.
+`ASSUMED`, missing, sampled, unknown, timed-out, or vacuous cases cannot produce
+a pass. The executable acceptance oracle is:
+
+```sh
+cargo test -p chelis-cli --features smt --test issue_978_induction
+```
+
+The default `--tier auto` ordering is induction, then the existing Tier B SMT
+and Tier C fuzz lanes. Auto enters induction only when the checked Surf AST
+shows that the property reaches a recursive model. An accepted induction plan
+is terminal whether its base/step proves, disproves, times out, or errors; an
+unsupported recursive structure is likewise terminal and reports
+`proof_tier:"induction"` with zero samples. This prevents recursive general-n
+claims from reaching finite sampling or overflowing the evaluator stack.
+Properties that do not reach a recursive model retain the existing Tier B then
+Tier C behavior. No auto-induction result may contain `ASSUMED` evidence or a
+sampling record.
+
+### Scalar gradient goals in Tier B
+
+Tier B lowers an applied scalar gradient into the same real-arithmetic
+obligation language as an ordinary scalar property. The supported v1 shape is
+`grad(f, wrt=x)(args...)`, with exactly one explicit `wrt`, where `f` is an
+inline lambda or pure top-level function whose parameters and result are
+`f32`/`f64`. The differentiated body may contain scalar literals and variables,
+negation, `+`, `-`, `*`, `/`, named scalar block bindings, and recursively
+inlined pure scalar helpers with `f32`/`f64` results within the normal Tier B
+inlining-depth bound. Argument substitutions are resolved in the caller's
+scope before differentiation.
+
+This is a prover-owned symbolic dual lowering; it must agree with Chelis scalar
+AD semantics but does not replace the compiler's `grad` transform. Its SMT
+verdict retains the `real_arithmetic` qualifier. Multi-target or implicit
+`wrt`, tensor/ADT gradients, non-floating results, conditionals, casts in
+differentiated bodies, effects, recursion, nested transforms, helper-inlining
+depth overflow, unsupported intrinsics, and malformed calls do not silently sample under
+`smt-only`: they return
+`status:"unsupported"` with a reason naming the scalar-gradient capability
+boundary. Under `auto`, the same boundary may continue to Tier C fuzz
+validation. In particular, conditionals remain outside this prover-owned
+subset until the compiler's scalar AD transform can build the same programs.
+Float casts in differentiated bodies follow the same executable-parity rule.
 
 ## Deep Representation
 
@@ -116,6 +204,41 @@ Default samples are `100`; `with samples` and `--samples` override it. Default
 seed is `0`; `with seed` and `--seed` override it. Runs with the same seed and
 inputs must produce the same sample sequence.
 
+For a guarded property whose binders are all `f32`/`f64`, Tier C derives a
+sampling domain from conjunctions of scalar interval and binder-order
+comparisons (`<`, `<=`, `>`, `>=`). Constant bounds propagate through binder
+orders before sampling, so narrow guards such as
+`0.99 < alpha1 < alpha2 < 1.0` are generated in-domain rather than discovered
+by rejection from `[-10, 10]`. Explicit bounds are not clipped to that legacy
+uniform range; negative literals and reversed comparison spellings are
+equivalent interval bounds. Strict spacing is computed with the binders'
+actual IEEE `f32`/`f64` successor and predecessor values. Non-strict order
+edges permit equality and reserve no strict spacing, while strict chains
+reserve enough representable values for their remaining successors. The
+construction and its random choices are seed-deterministic. A one-sided finite
+interval chooses its missing endpoint within the binder dtype's finite range;
+the synthesis clamps at `f32::MAX`/`f64::MAX` rather than overflowing near an
+IEEE extremum. An empty interval,
+an interval with too few representable values for its strict order chain,
+cyclic ordering, disjunction, equality, arithmetic operand other than unary
+literal negation, function predicate, or other unsupported guard shape is
+`status:"unsupported"` (exit `2`) under `fuzz-only`; it cannot fall through to
+a green empirical verdict. Non-scalar guarded properties retain their existing
+typed generator and rejection behavior.
+
+The shared Tier-C runner is enabled in every normal CLI build, including a
+build without the `smt` feature, and is also the Tide implementation. Solver
+availability may change `auto` dispatch into Tier B, but it never changes
+`fuzz-only` generation or its machine record.
+
+The authoritative chelis#977 acceptance oracle is:
+
+```sh
+cargo test -p chelis-cli --test issue_977_constraint_fuzz
+cargo test -p chelis-tide --test mcp issue_977_tide_and_cli_match
+cargo test -p chelis-cli --features smt --test issue_977_constraint_fuzz
+```
+
 V1 reports the first deterministic counterexample. Shrinking is deferred.
 
 ## CLI Contract
@@ -168,11 +291,49 @@ that the module type-checked and every obligation was discharged.
 summary record.
 
 ```json
-{"kind":"property","name":"call_price_non_negative","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz_base"],"assumptions":[],"samples":100,"seed":0}
+{"kind":"property","name":"confidence_tail_order","status":"passed","composite_verdict":"fuzz_validated","qualifiers":["fuzz","fuzz_base"],"assumptions":[{"name":"preconditions:confidence_tail_order","discharge":{"method":"fuzz","evidence":{"status":"validated","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}},"non_vacuity":{"status":"established","evidence":{"method":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0}}}],"proof_tier":"fuzz","sampling_method":"constraint_directed","accepted_samples":100,"attempted_samples":100,"rejected_samples":0,"samples":100,"seed":0}
 {"kind":"property","name":"req_PRC_001","status":"failed","composite_verdict":"failed","assumptions":[],"samples":1,"seed":0,"source":{"kind":"bridge:c-earchin","spans":"references/pricing_rules.spans.json"}}
-{"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"reason":"symbolic tensor dimensions are not supported in L2 v1"}
-{"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0}
+{"kind":"property","name":"tensor_symbolic_shape","status":"unsupported","composite_verdict":"unsupported","assumptions":[],"proof_tier":"none","reason":"symbolic tensor dimensions are not supported in L2 v1"}
+{"kind":"summary","total":3,"passed":1,"failed":1,"unsupported":1,"errors":0,"dependency_graph":{"status":"complete","declarations":[{"id":"decl:…","name":"call_price","kind":"function","package":"pricing","module":"Pricing.BlackScholes","source":{"file":"src/black_scholes.ch","span":{"offset":42,"len":180}}}],"edges":[{"from":"decl:…property","to":"decl:…"}]}}
 ```
+
+The summary's `dependency_graph` is the compiler-owned declaration ownership
+wire (chelis#922):
+
+- `status:"complete"` means linker analysis ran. Empty `declarations` and
+  `edges` arrays are a complete empty result, not missing analysis.
+- `status:"unavailable"` carries a `reason` and never carries a guessed partial
+  graph. Bare Surf files have no stable Reef package/module identity, and Deep
+  inputs do not carry compiler-owned source-file ownership, so both are
+  unavailable.
+- A declaration `id` is the deterministic
+  `(package,module,kind,author-facing-name)` identity. Body and span edits keep
+  the ID stable; a rename changes it. Every node also carries the package,
+  module, declaration kind, and package-relative source file plus byte span.
+- Edges are stable-ID `from`/`to` pairs derived from Reef's linker-resolved Surf
+  AST. Consumers must not reconstruct ownership by parsing source. The graph
+  covers functions, values, properties, types, constructors, aliases, macros,
+  and each module-level dimension declaration; type/invariant/macro references
+  participate alongside value references.
+- Every root-package declaration is present, including unused declarations.
+  Referenced dependency-package declarations are included transitively. Linker
+  identity preserves same-name declarations, lexical shadowing, imports, and
+  cycles without name guessing.
+- A multi-input summary is `unavailable` if any selected input lacks complete
+  attribution; Chelis does not present a partial union as complete.
+
+Every Tier-C property record additively reports `sampling_method`,
+`accepted_samples`, `attempted_samples`, and `rejected_samples`. Guarded
+properties repeat those counts and the method in their precondition discharge
+and non-vacuity evidence, so a consumer can distinguish empirical evidence
+from an exhausted or unsupported generator without reconstructing it from
+source. CLI and Tide user-property records rendered by the shared runner always
+carry `proof_tier`; terminal outcomes report the explicit value `none` rather
+than encoding it as field absence.
+
+The legacy name-only `dependency_edges` array remains additive and deprecated
+for at least one published release after `dependency_graph` is introduced.
+New consumers use only `dependency_graph`.
 
 Every `{kind:"property"}` and `{kind:"obligation"}` result record carries:
 
@@ -299,6 +460,15 @@ that quote the composed opaque-invariant guarantee inherit the disclosure
 from the verdict. Tier C (`proof_tier:"fuzz"`) validates concrete float
 samples and renders `fuzz_validated` (or, for a fuzz contract under an SMT
 base, contributes the `fuzz` qualifier); it carries no `arith_model` field.
+
+The real-arithmetic model does not license cvc5's partial operations outside
+their mathematical domains. In particular, Tier B lowers `sqrt(a)` only after
+an auxiliary obligation proves every exact argument `a >= 0` from independent,
+sqrt-free total-algebraic conjuncts in the user's preconditions. The derived
+domain facts are redundant assertions in the main query, never added user
+assumptions. If an argument is not proved non-negative, or the proof times out,
+is unknown, or lies outside that conservative fragment, Tier B returns a loud
+unsupported result and `auto` routes to Tier C (chelis#1475).
 
 ## Relationship To `chelis test`
 

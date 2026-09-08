@@ -17,7 +17,7 @@
 //
 // The single-file reproducers here exercise the same fork: two ADTs
 // declared in one module, each with an `IntCol` variant. Pre-fix,
-// the call dispatched to whichever variant the registry's HashMap
+// the call dispatched to whichever variant the registry's UnordMap
 // iteration yielded first; post-fix, dispatch is shape-preferred and
 // candidate ordering is sorted for determinism.
 
@@ -72,18 +72,16 @@ fn positional_ctor_call_resolves_to_positional_variant_when_record_collides() {
     // Headline case for the fix: two ADTs declare same-named `IntCol`,
     // one positional, one record. A positional call `IntCol(xs, mask)`
     // must dispatch to the positional variant — pre-fix this dispatched
-    // to whichever the HashMap iteration returned first and fired the
+    // to whichever the UnordMap iteration returned first and fired the
     // "must use named fields" error on the record half.
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("ctor_collision.ch");
     write_file(
         &fixture,
         "module CtorCollision\n\
-         type RecordIntCol = | IntCol { values: tensor[n, int64] }\n\
+         type RecordIntCol[n] = | IntCol { values: tensor[n, int64] }\n\
          type PositionalIntCol[n] = | IntCol(tensor[n, int64], tensor[n, bool])\n\
-         def make_positional[n](xs: tensor[n, int64], mask: tensor[n, bool]) -> PositionalIntCol[n] = {\n\
-           IntCol(xs, mask)\n\
-         }\n",
+         def make_positional[n](xs: tensor[n, int64], mask: tensor[n, bool]) -> PositionalIntCol[n] = IntCol(xs, mask)\n",
     );
     fmt_inplace(&fixture);
 
@@ -112,9 +110,7 @@ fn record_ctor_call_resolves_to_record_variant_when_positional_collides() {
         "module CtorCollisionRecord\n\
          type RecordIntCol[n] = | IntCol { values: tensor[n, int64] }\n\
          type PositionalIntCol[n] = | IntCol(tensor[n, int64], tensor[n, bool])\n\
-         def make_record[n](xs: tensor[n, int64]) -> RecordIntCol[n] = {\n\
-           IntCol { values: xs }\n\
-         }\n",
+         def make_record[n](xs: tensor[n, int64]) -> RecordIntCol[n] = IntCol { values: xs }\n",
     );
     fmt_inplace(&fixture);
 
@@ -139,9 +135,7 @@ fn record_only_ctor_still_errors_when_called_positionally() {
         &fixture,
         "module RecordOnly\n\
          type WrapperRecord = | Wrapper { value: int64 }\n\
-         def make() -> WrapperRecord = {\n\
-           Wrapper(cast(7, int64))\n\
-         }\n",
+         def make() -> WrapperRecord = Wrapper(cast(7, int64))\n",
     );
     fmt_inplace(&fixture);
 
@@ -178,9 +172,7 @@ fn two_positional_same_name_emits_no_shape_error() {
         "module TwoPositional\n\
          type AaaCol[n] = | IntCol(tensor[n, int64])\n\
          type BbbCol[n] = | IntCol(tensor[n, int64])\n\
-         def make_aaa[n](xs: tensor[n, int64]) -> AaaCol[n] = {\n\
-           IntCol(xs)\n\
-         }\n",
+         def make_aaa[n](xs: tensor[n, int64]) -> AaaCol[n] = IntCol(xs)\n",
     );
     fmt_inplace(&fixture);
 

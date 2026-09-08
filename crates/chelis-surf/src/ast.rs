@@ -1,5 +1,47 @@
-use chelis_deep::Span;
+use chelis_deep::{DtypeFamily, Span};
 use serde::{Deserialize, Serialize};
+
+/// One entry of a declaration's bracketed binder list
+/// (`spec/02-surf-syntax.md` §P4b/§P4c).
+///
+/// The list is unkinded: a listed name resolves to a dimension variable, a
+/// tensor-precision type variable, or a general type variable according to
+/// where it occurs. A `bound` narrows the binder to one dtype family
+/// (`spec/04-type-system.md` §5.9), which makes it a type binder only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeBinder {
+    /// The declared binder name.
+    pub name: String,
+    /// The declared dtype family, when the binder carries a bound.
+    pub bound: Option<DtypeFamily>,
+}
+
+impl TypeBinder {
+    /// An unbounded binder, the form every `[a, b]` entry had before
+    /// dtype-family bounds existed.
+    pub fn unbounded(name: impl Into<String>) -> TypeBinder {
+        TypeBinder {
+            name: name.into(),
+            bound: None,
+        }
+    }
+
+    /// A binder bounded by `family`.
+    pub fn bounded(name: impl Into<String>, family: DtypeFamily) -> TypeBinder {
+        TypeBinder {
+            name: name.into(),
+            bound: Some(family),
+        }
+    }
+
+    /// The canonical Surf spelling: `name` or `name: Family`.
+    pub fn render(&self) -> String {
+        match self.bound {
+            Some(family) => format!("{}: {}", self.name, family.surf_name()),
+            None => self.name.clone(),
+        }
+    }
+}
 
 // ===== Declarations =====
 
@@ -17,6 +59,10 @@ pub enum Decl {
     },
     Sig {
         name: String,
+        /// `[..]` binder list. Partial for a sig: it declares bounds for the
+        /// names it lists, and every other free name in `ty` stays implicitly
+        /// quantified (`spec/02-surf-syntax.md` §P4c).
+        type_binders: Vec<TypeBinder>,
         ty: TypeExpr,
         effects: Option<Vec<EffectExpr>>,
         span: Span,
@@ -44,7 +90,8 @@ pub enum Decl {
     },
     FunDef {
         name: String,
-        dim_params: Vec<String>, // [a, b] dimension parameters
+        /// `[a, b]` binder list; unkinded, optionally dtype-family bounded.
+        type_binders: Vec<TypeBinder>,
         params: Vec<Param>,
         ret_ty: Option<TypeExpr>,
         effects: Option<Vec<EffectExpr>>,
@@ -158,6 +205,10 @@ pub struct Param {
 
 // ===== Expressions =====
 
+/// The cast-ladder rung selector. Defined in `chelis-deep` (the Deep
+/// node shape owns it) and re-exported so Surf consumers see one type.
+pub use chelis_deep::CastMode;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Lit(Literal, Span),
@@ -166,6 +217,7 @@ pub enum Expr {
     Apply(Box<Expr>, Vec<Expr>, Span), // f(x, y) or f x
     List(Vec<Expr>, Span),
     Record(String, Vec<(String, Expr)>, Span),
+    RecordUpdate(Box<Expr>, Vec<(String, Expr)>, Span),
     Access(Box<Expr>, String, Span),
     TupleGet(Box<Expr>, i64, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
@@ -175,7 +227,7 @@ pub enum Expr {
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Lambda(Vec<Param>, Box<Expr>, Span), // fn (x, y) -> body
     Tuple(Vec<Expr>, Span),
-    Cast(Box<Expr>, String, Span), // cast(x, f64)
+    Cast(Box<Expr>, String, CastMode, Span), // cast(x, f64) / cast_trunc(x, int32)
     Grad(Box<Expr>, Option<Vec<String>>, Span),
     Vmap(Box<Expr>, Option<i64>, Span),
     Jit(Box<Expr>, Span),
@@ -185,6 +237,10 @@ pub enum Expr {
     WithSeed(Box<Expr>, Box<Expr>, Span),
     WithDevice(Box<Expr>, Box<Expr>, Span),
     Par(Vec<Expr>, Span),                    // par { e1; e2; ... }
+    Do(Vec<Expr>, Span),                     // do { e1; e2; ... }
+    Quote(Box<Expr>, Span),                  // quote(e)
+    Unquote(Box<Expr>, Span),                // unquote(e)
+    Splice(Box<Expr>, Span),                 // splice(e)
     Annotate(Box<Expr>, TypeExpr, Span),     // expr : Type
     Block(Vec<LetBinding>, Box<Expr>, Span), // { x = ...; expr }
 }
@@ -269,9 +325,34 @@ pub enum Pattern {
 
 // ===== Type Expressions =====
 
+/// A concrete dimension literal in a nominal type application.
+///
+/// The numeric carrier is private so an integer cannot be manufactured as an
+/// ordinary type expression by downstream crates. The parser is the sole
+/// source of this node; consumers may render it through [`Display`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DimensionLiteral(i64);
+
+impl DimensionLiteral {
+    pub(crate) fn new(value: i64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn value(self) -> i64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DimensionLiteral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeExpr {
     Named(String, Span),                       // f32, bool, MyType
+    DimensionLiteral(DimensionLiteral, Span),  // integer only in Name[...]
     Tensor(Vec<TypeExpr>, String, Span),       // tensor[batch, hidden, f32]
     Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span), // A -> B -> C (flat)
     Ref(Box<TypeExpr>, Span),                  // &T

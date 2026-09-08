@@ -82,9 +82,17 @@ fn assert_close(actual: f64, expected: f64, tol: f64, label: &str) {
 /// given `shape`. Each scalar leaf becomes `cast(<value>, f32)`. The list
 /// nesting depth equals `shape.len()`.
 fn nested_list_literal(shape: &[usize], data: &[f32]) -> String {
+    fn canonical_f32(value: f32) -> String {
+        let mut text = value.to_string();
+        if !text.contains(['.', 'e', 'E']) {
+            text.push_str(".0");
+        }
+        text
+    }
+
     fn recurse(shape: &[usize], data: &[f32]) -> String {
         if shape.is_empty() {
-            return format!("cast({:.8}, f32)", data[0]);
+            return format!("cast({}, f32)", canonical_f32(data[0]));
         }
         let head = shape[0];
         let tail = &shape[1..];
@@ -213,8 +221,8 @@ fn hydronnx_h3_maxpool_2x2_stride2_no_padding_matches_ir_eval() {
     let input_literal = nested_list_literal(&[1, 4, 8, 8], &input);
 
     // Note: `stride(_, step_0, step_1, ..., step_n_minus_1)` takes one
-    // positive int32 stride per axis (rank-4 input -> 4 strides).
-    // `shrink(_, bounds)` takes (tensor, List[List[int32]]). The chain
+    // positive int64 stride per axis (rank-4 input -> 4 strides).
+    // `shrink(_, bounds)` takes (tensor, List[List[int64]]). The chain
     // below builds (top-left, top-right, bottom-left, bottom-right)
     // sub-views from the same 4D input, each `[1, 4, 4, 4]`, then
     // concats them on a new last axis and `max_reduce`s along that
@@ -222,13 +230,13 @@ fn hydronnx_h3_maxpool_2x2_stride2_no_padding_matches_ir_eval() {
     let src = format!(
         r#"
 x = to_tensor({input_literal})
-shifted_col = shrink(&x, [[0, 1], [0, 4], [0, 8], [1, 8]])
-shifted_row = shrink(&x, [[0, 1], [0, 4], [1, 8], [0, 8]])
-shifted_both = shrink(&x, [[0, 1], [0, 4], [1, 8], [1, 8]])
-tl = stride(&x, 1, 1, 2, 2)
-tr = stride(&shifted_col, 1, 1, 2, 2)
-bl = stride(&shifted_row, 1, 1, 2, 2)
-br = stride(&shifted_both, 1, 1, 2, 2)
+shifted_col = shrink(&x, [[0i64, 1i64], [0i64, 4i64], [0i64, 8i64], [1i64, 8i64]])
+shifted_row = shrink(&x, [[0i64, 1i64], [0i64, 4i64], [1i64, 8i64], [0i64, 8i64]])
+shifted_both = shrink(&x, [[0i64, 1i64], [0i64, 4i64], [1i64, 8i64], [1i64, 8i64]])
+tl = stride(&x, 1i64, 1i64, 2i64, 2i64)
+tr = stride(&shifted_col, 1i64, 1i64, 2i64, 2i64)
+bl = stride(&shifted_row, 1i64, 1i64, 2i64, 2i64)
+br = stride(&shifted_both, 1i64, 1i64, 2i64, 2i64)
 tl5 = reshape(&tl, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
 tr5 = reshape(&tr, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
 bl5 = reshape(&bl, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
@@ -246,7 +254,12 @@ out = max_reduce(&stacked, 4)
         "maxpool element count mismatch"
     );
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want as f64, 1e-5, &format!("maxpool[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want as f64,
+            1e-5,
+            &format!("maxpool[{i}]"),
+        );
     }
 }
 
@@ -291,7 +304,12 @@ out = layer_norm(&x, &g, &b)
         }
     }
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want, 1e-5, &format!("layer_norm[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want,
+            1e-5,
+            &format!("layer_norm[{i}]"),
+        );
     }
 }
 
@@ -345,7 +363,12 @@ out = run_conv2d(make_x(), make_k())
     // accumulators and values in roughly [-1.5, 1.5], 1e-4 absolute
     // tolerance comfortably covers the worst-case rounding noise.
     for (i, &want) in expected.iter().enumerate() {
-        assert_close(out.data[i], want as f64, 1e-4, &format!("conv2d[{i}]"));
+        assert_close(
+            out.data.element_as_f64_lossy(i),
+            want as f64,
+            1e-4,
+            &format!("conv2d[{i}]"),
+        );
     }
 
     // Hand-computed lock for the top-left output pixel of output channel 0:
@@ -367,7 +390,7 @@ out = run_conv2d(make_x(), make_k())
         }
     }
     assert_close(
-        out.data[0],
+        out.data.element_as_f64_lossy(0),
         hand,
         1e-4,
         "conv2d hand-computed out[0, 0, 0, 0]",

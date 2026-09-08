@@ -226,10 +226,9 @@ clarabel = { version = "0.11", optional = true, features = ["sdp-openblas"] }
 clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }
 ```
 
-Linux links OpenBLAS (the CI clarabel lane installs `libopenblas-dev`; without
-it, `openblas-src` falls back to building OpenBLAS from source, which also
-works but is slower on a cold cache); macOS uses the OS-bundled Accelerate
-framework. The Clarabel float proposer (`propose.rs`) is itself gated to
+Linux builds and statically links the OpenBLAS source selected by
+`openblas-src`; macOS uses the OS-bundled Accelerate framework. The Clarabel
+float proposer (`propose.rs`) is itself gated to
 `cfg(any(target_os = "linux", target_os = "macos"))` -- the targets with a
 backend wired; on any other target the exact core and the `UnwiredProposer`
 engine still build. Because `clarabel` is opt-in and the shipped release binary

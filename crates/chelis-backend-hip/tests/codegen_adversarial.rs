@@ -2,9 +2,12 @@
 //!
 //! These probe edge cases not covered by S1-S13 structural tests.
 
-use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_backend_hip::HipCodegenResult;
+mod support;
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
+use support::codegen_hip;
 
 fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()
@@ -17,10 +20,57 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
+fn vec_f64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::F64,
+    }
+}
+
 fn vec_bool(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: Prim::Bool,
+    }
+}
+
+fn vec_i64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int64,
+    }
+}
+
+fn assert_hip_dtype_rejection(error: Unsupported, dtype: &str, issue: u32) {
+    assert_eq!(
+        error.what,
+        UnsupportedKind::Dtype(dtype.to_string()),
+        "the rejection must carry the exact typed dtype"
+    );
+    assert_eq!(
+        error.stage,
+        Stage::Codegen("hip"),
+        "the rejection must identify the HIP codegen stage"
+    );
+    assert_eq!(
+        error.authority.kind(),
+        RejectionAuthorityKind::Unimplemented,
+        "the target capability gap must remain typed as unimplemented"
+    );
+    assert_eq!(
+        error.authority.issue().map(|issue| issue.number()),
+        Some(issue),
+        "the rejection must carry the exact implementation owner"
+    );
+}
+
+fn expect_hip_codegen_rejection(
+    result: Result<HipCodegenResult, Unsupported>,
+    message: &str,
+) -> Unsupported {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("{message}"),
     }
 }
 
@@ -57,7 +107,12 @@ fn rt1_load_permute_add_sum_chain() {
         mat_f32(4, 3),
         None,
     );
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(4, 3), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(mat_f32(4, 3).precision, 1.0),
+        vec![],
+        mat_f32(4, 3),
+        None,
+    );
     let a = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(4, 3), None);
     let s = dag.add_node(
         RiscOp::Sum {
@@ -139,8 +194,18 @@ fn rt2_two_loads_store() {
 #[test]
 fn rt3_scalar_only_dag() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Const { value: 3.125 }, vec![], scalar_f32(), None);
-    let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 3.125),
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(scalar_f32().precision, 2.0),
+        vec![],
+        scalar_f32(),
+        None,
+    );
     let c = dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_scalar").unwrap();
@@ -165,7 +230,12 @@ fn rt3_scalar_only_dag() {
 #[test]
 fn rt4_fanout_same_input_two_ops() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let a = dag.add_node(RiscOp::Add, vec![x, x], vec_f32(4), None);
     let b = dag.add_node(RiscOp::Mul, vec![x, a], vec_f32(4), None);
     dag.add_root(b);
@@ -209,7 +279,7 @@ fn rt5_stride_op_multiplies_strides() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let _s = dag.add_node(
         RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
+            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
         vec![x],
         vec_f32(3),
@@ -233,8 +303,18 @@ fn rt5_stride_op_multiplies_strides() {
 #[test]
 fn rt6_multiple_stores() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store_a = dag.add_node(
         RiscOp::Store {
@@ -274,7 +354,12 @@ fn rt6_multiple_stores() {
 #[test]
 fn rt7_different_reductions_different_kernels() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let sum_ax0 = dag.add_node(
         RiscOp::Sum {
             axis: 0,
@@ -321,7 +406,12 @@ fn rt8_load_as_output_with_store() {
     // tensor because host callers free every output slot.
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
     let store = dag.add_node(
         RiscOp::Store {
@@ -362,11 +452,16 @@ fn rt8_load_as_output_with_store() {
 #[test]
 fn rt9_expand_sets_stride_zero() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(3).precision, 1.0),
+        vec![],
+        vec_f32(3),
+        None,
+    );
     let e = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![x],
         mat_f32(4, 3),
@@ -390,10 +485,15 @@ fn rt9_expand_sets_stride_zero() {
 #[test]
 fn rt10_reshape_view_correct() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
     let r = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(6)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
         },
         vec![x],
         vec_f32(6),
@@ -419,8 +519,18 @@ fn rt10_reshape_view_correct() {
 #[test]
 fn rt11_store_no_double_free() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store = dag.add_node(
         RiscOp::Store { name: "out".into() },
@@ -451,7 +561,47 @@ fn rt11_store_no_double_free() {
 #[test]
 fn rt12_cast_emits_kernel() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let c = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::F64,
+        },
+        vec![x],
+        vec_f64(4),
+        None,
+    );
+    dag.add_root(c);
+    let result = codegen_hip(&dag, "test_cast").unwrap();
+    assert!(
+        result.c_source.contains("kernel_cast"),
+        "Cast must emit a kernel"
+    );
+}
+
+// ===========================================================================
+// RT12b: Cast to bool rejects rather than emitting a four-byte kernel
+// ===========================================================================
+
+/// chelis#1360. This case used to be RT12 itself, asserting only that
+/// `kernel_cast` appeared in the output. It did appear - as `kernel_cast_f32`,
+/// writing `N * 4` bytes into the `N * 1` byte allocation that chelis#1308's
+/// tagged carrier now sizes for `CHELIS_DTYPE_BOOL`. The assertion was true
+/// and the emitted program overran its device heap by `3N` bytes, so the test
+/// now pins the rejection instead of the kernel name.
+#[test]
+fn rt12b_cast_to_bool_is_rejected_not_emitted_as_f32() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let c = dag.add_node(
         RiscOp::Cast {
             new_precision: Prim::Bool,
@@ -461,10 +611,126 @@ fn rt12_cast_emits_kernel() {
         None,
     );
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_cast").unwrap();
+    let error = match codegen_hip(&dag, "test_cast_bool") {
+        Err(error) => error,
+        Ok(_) => panic!("a bool result has no HIP kernel family (chelis#1364)"),
+    };
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// chelis#1364 owns the reverse direction too: a real Bool8 family must read
+/// one-byte inputs and produce the requested destination representation.
+#[test]
+fn rt12b_cast_from_bool_carries_the_bool_family_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let c = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::F32,
+        },
+        vec![x],
+        vec_f32(4),
+        None,
+    );
+    dag.add_root(c);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_cast_from_bool"),
+        "cast from bool requires the chelis#1364 HIP Bool8 family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// Copy materializes its input through the cast template, so Bool8 support is
+/// part of the same chelis#1364 family rather than the generic chelis#689
+/// fallback class.
+#[test]
+fn rt12b_copy_bool_carries_the_bool_family_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let copy = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
+    dag.add_root(copy);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_copy_bool"),
+        "copying bool requires the chelis#1364 HIP Bool8 family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// Realize also materializes through the cast template and therefore has the
+/// same exact Bool8 capability owner as casts and copies.
+#[test]
+fn rt12b_realize_bool_carries_the_bool_family_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
+    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_bool(4), None);
+    dag.add_root(realize);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_realize_bool"),
+        "realizing bool requires the chelis#1364 HIP Bool8 family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// The chelis#1364 authority is operation-aware, not a blanket replacement
+/// for every bool rejection. A generic float-family op still belongs to the
+/// chelis#689 no-typed-kernel fallback class.
+#[test]
+fn rt12b_unrelated_bool_numeric_op_retains_generic_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let neg = dag.add_node(RiscOp::Neg, vec![x], vec_bool(4), None);
+    dag.add_root(neg);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_neg_bool"),
+        "bool negation has no generic HIP arithmetic family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 689);
+}
+
+/// The operation-aware bool path must not disturb the non-bool fallback that
+/// chelis#689 actually owns.
+#[test]
+fn rt12b_non_bool_materialization_retains_generic_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
+    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_i64(4), None);
+    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_i64(4), None);
+    dag.add_root(realize);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_realize_i64"),
+        "int64 realize has no generic HIP arithmetic family",
+    );
+    assert_hip_dtype_rejection(error, "int64", 689);
+}
+
+/// chelis#1360 companion: `cmplt` is the other producer of a bool tensor, and
+/// it reached `kernel_cmplt_f32` the same way. Reproducible from two lines of
+/// Surf (`x < y`), so this is the shape that mattered most in practice.
+#[test]
+fn rt12c_cmplt_to_bool_is_rejected_not_emitted_as_f32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_bool(4), None);
+    dag.add_root(c);
+    let error = match codegen_hip(&dag, "test_cmplt_bool") {
+        Err(error) => error,
+        Ok(_) => panic!("a bool result has no HIP kernel family (chelis#1364)"),
+    };
     assert!(
-        result.c_source.contains("kernel_cast"),
-        "Cast must emit a kernel"
+        format!("{error:?}").contains("bool"),
+        "the rejection must name the offending dtype; got: {error:?}"
     );
 }
 
@@ -487,7 +753,12 @@ fn rt13_zero_size_grid() {
 #[test]
 fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024), None);
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(1024).precision, 1.0),
+        vec![],
+        vec_f32(1024),
+        None,
+    );
     let sum = dag.add_node(
         RiscOp::Sum {
             axis: 0,
@@ -516,12 +787,22 @@ fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
 #[test]
 fn rt15_matmul_specialization_respects_contiguity() {
     let mut contiguous = Dag::new();
-    let a = contiguous.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
-    let b = contiguous.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let a = contiguous.add_node(
+        RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+        vec![],
+        mat_f32(2, 3),
+        None,
+    );
+    let b = contiguous.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let ea = contiguous.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -530,7 +811,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
     let eb = contiguous.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -556,18 +837,28 @@ fn rt15_matmul_specialization_respects_contiguity() {
     );
 
     let mut fallback = Dag::new();
-    let base_a = fallback.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 2), None);
+    let base_a = fallback.add_node(
+        RiscOp::synth_const(mat_f32(3, 2).precision, 1.0),
+        vec![],
+        mat_f32(3, 2),
+        None,
+    );
     let a_perm = fallback.add_node(
         RiscOp::Permute { axes: vec![1, 0] },
         vec![base_a],
         mat_f32(2, 3),
         None,
     );
-    let b = fallback.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+    let b = fallback.add_node(
+        RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+        vec![],
+        mat_f32(3, 4),
+        None,
+    );
     let ea = fallback.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a_perm],
         tensor3_f32(2, 3, 4),
@@ -576,7 +867,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
     let eb = fallback.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),

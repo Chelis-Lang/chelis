@@ -1,8 +1,8 @@
 use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
-use chelis_deep::Span;
-use std::collections::HashSet;
+use chelis_deep::{DtypeFamily, Span};
+use chelis_unord::UnordSet;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -17,6 +17,16 @@ pub enum ParseError {
         found: String,
         offset: usize,
     },
+    #[error(
+        "`{keyword}` is a reserved word that introduces {role}; to bind a value, \
+         rename it (for example `{suggestion}`) at byte {offset}"
+    )]
+    ReservedWordBinding {
+        keyword: &'static str,
+        role: &'static str,
+        suggestion: &'static str,
+        offset: usize,
+    },
     #[error("non-associative operator chained at byte {offset}")]
     NonAssocChain { offset: usize },
     #[error(
@@ -24,12 +34,45 @@ pub enum ParseError {
          bind the value with `_ = <expr>` or move it to tail position (byte {offset})"
     )]
     BareStatementInBlock { offset: usize },
+    /// A `;` used where a canonical binding block wants a newline.
+    ///
+    /// The generic `Expected` shape used to render this as
+    /// `expected separator (`;` or newline), found Semicolon`, which named the
+    /// token it had just refused as one of the two acceptable spellings
+    /// (chelis#1267). `par`, `do`, and the v0.18 compatibility grammar do take
+    /// `;`, so the wording names canonical Surf v0.19 rather than claiming `;`
+    /// is never a block separator.
+    #[error(
+        "expected a newline separator, found `;`: `;` is not a block separator in canonical \
+         Surf v0.19; replace it with a newline, or run `chelis migrate surf --from 0.18` to \
+         rewrite v0.18 source (byte {offset})"
+    )]
+    SemicolonBlockSeparator { offset: usize },
+    #[error("literal `{found}` is not an accepted spelling at byte {offset}; write `{expected}`")]
+    NonCanonicalLiteral {
+        found: String,
+        expected: String,
+        offset: usize,
+    },
+    #[error("non-finite numeric literal `{found}` is not representable in Surf at byte {offset}")]
+    NonFiniteLiteral { found: String, offset: usize },
+    #[error(
+        "integer magnitude `{found}` is only valid after unary `-`; write `-{found}` at byte {offset}"
+    )]
+    SignedMinimumMagnitudeRequiresNegation { found: String, offset: usize },
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     module_allowed: bool,
+    mode: ParseMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseMode {
+    Canonical,
+    LegacyV018,
 }
 
 // ---------------------------------------------------------------------------
@@ -37,10 +80,21 @@ struct Parser {
 // ---------------------------------------------------------------------------
 
 pub fn parse(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
+    parse_with_mode(tokens, ParseMode::Canonical)
+}
+
+/// Parse the v0.18 compatibility grammar for the explicit migration path.
+/// Normal compiler, formatter, and CLI entry points must use [`parse`].
+pub fn parse_legacy_v018(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
+    parse_with_mode(tokens, ParseMode::LegacyV018)
+}
+
+fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, ParseError> {
     let mut p = Parser {
         tokens: tokens.to_vec(),
         pos: 0,
         module_allowed: true,
+        mode,
     };
     let decls = p.parse_program()?;
     validate_property_names(&decls)?;
@@ -49,12 +103,117 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
 
 pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {
     let tokens = lexer::lex(source)?;
-    parse(&tokens)
+    parse_canonical_source_tokens(source, &tokens)
+}
+
+/// Parse a token stream while validating source-sensitive literal semantics.
+/// Harmless lexical aliases are accepted here and normalized only by the
+/// printer; meaning-changing suffix/adoption forms and non-finite values stay
+/// rejected.
+pub fn parse_canonical_source_tokens(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Vec<Decl>, ParseError> {
+    validate_literal_spellings(source, tokens)?;
+    parse(tokens)
+}
+
+pub fn parse_str_legacy_v018(source: &str) -> Result<Vec<Decl>, ParseError> {
+    let tokens = lexer::lex(source)?;
+    parse_legacy_v018_source_tokens(source, &tokens)
+}
+
+pub fn parse_legacy_v018_source_tokens(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Vec<Decl>, ParseError> {
+    validate_finite_literals(source, tokens)?;
+    parse_legacy_v018(tokens)
+}
+
+fn validate_literal_spellings(source: &str, tokens: &[Token]) -> Result<(), ParseError> {
+    validate_finite_literals(source, tokens)?;
+    for token in tokens {
+        let found = source
+            .get(token.span.offset..token.span.end())
+            .unwrap_or_default();
+        let expected = match &token.kind {
+            TokenKind::Int(value) => Some(value.to_string()),
+            TokenKind::Float(value) => Some(crate::format::canonical_float(*value)),
+            TokenKind::TypedInt(value, suffix) if suffix.is_float() => Some(format!(
+                "{}{}",
+                crate::format::canonical_float(*value as f64),
+                suffix.as_str()
+            )),
+            TokenKind::TypedInt(value, suffix) => Some(format!("{value}{}", suffix.as_str())),
+            TokenKind::TypedFloat(value, suffix) => Some(format!(
+                "{}{}",
+                crate::format::canonical_float(*value),
+                suffix.as_str()
+            )),
+            TokenKind::IntMinMagnitude(suffix) => Some(format!(
+                "9223372036854775808{}",
+                suffix.as_ref().map_or("", |suffix| (*suffix).as_str())
+            )),
+            TokenKind::Str(value) => Some(crate::format::canonical_string(value)),
+            _ => None,
+        };
+        let Some(expected) = expected else {
+            continue;
+        };
+        if !accepted_literal_alias(found, &expected, &token.kind) {
+            return Err(ParseError::NonCanonicalLiteral {
+                found: found.to_string(),
+                expected,
+                offset: token.span.offset,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite_literals(source: &str, tokens: &[Token]) -> Result<(), ParseError> {
+    for token in tokens {
+        if matches!(
+            &token.kind,
+            TokenKind::Float(value) | TokenKind::TypedFloat(value, _) if !value.is_finite()
+        ) {
+            let found = source
+                .get(token.span.offset..token.span.end())
+                .unwrap_or_default();
+            return Err(ParseError::NonFiniteLiteral {
+                found: found.to_string(),
+                offset: token.span.offset,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn accepted_literal_alias(found: &str, expected: &str, kind: &TokenKind) -> bool {
+    match kind {
+        TokenKind::Str(_) => true,
+        TokenKind::TypedInt(_, suffix) if suffix.is_float() => found == expected,
+        TokenKind::Int(_) | TokenKind::TypedInt(_, _) | TokenKind::IntMinMagnitude(_) => {
+            let lower = found.to_ascii_lowercase();
+            lower.starts_with("0x") || lower.starts_with("0b") || found.replace('_', "") == expected
+        }
+        TokenKind::Float(_) | TokenKind::TypedFloat(_, _) => {
+            let core = found
+                .strip_suffix("bf16")
+                .or_else(|| found.strip_suffix("f16"))
+                .or_else(|| found.strip_suffix("f32"))
+                .or_else(|| found.strip_suffix("f64"))
+                .unwrap_or(found);
+            core.contains(['e', 'E']) || found.replace('_', "") == expected
+        }
+        _ => true,
+    }
 }
 
 fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
-    let mut value_names = HashSet::new();
-    let mut property_names = HashSet::new();
+    let mut value_names = UnordSet::new();
+    let mut property_names = UnordSet::new();
     for decl in decls {
         match decl {
             Decl::Property { name, span, .. }
@@ -97,6 +256,13 @@ enum BareUnaryBuiltinKind {
     Copy,
 }
 
+#[derive(Copy, Clone)]
+enum DeepSurfaceMetaForm {
+    Quote,
+    Unquote,
+    Splice,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -125,6 +291,39 @@ impl Parser {
 
     fn at_eof(&self) -> bool {
         matches!(self.peek(), TokenKind::Eof)
+    }
+
+    /// Return the `n`th significant token after the current significant
+    /// token. Newlines are layout and do not participate in look-ahead.
+    fn peek_significant_after(&self, n: usize) -> Option<&TokenKind> {
+        self.tokens
+            .iter()
+            .skip(self.pos)
+            .filter(|token| !matches!(token.kind, TokenKind::Newline))
+            .nth(n)
+            .map(|token| &token.kind)
+    }
+
+    fn find_top_level_token(&self, wanted: TokenKind) -> Option<usize> {
+        let mut paren = 0usize;
+        let mut bracket = 0usize;
+        let mut brace = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.pos) {
+            if paren == 0 && bracket == 0 && brace == 0 && token.kind == wanted {
+                return Some(index);
+            }
+            match token.kind {
+                TokenKind::LParen => paren += 1,
+                TokenKind::RParen if paren > 0 => paren -= 1,
+                TokenKind::LBracket => bracket += 1,
+                TokenKind::RBracket if bracket > 0 => bracket -= 1,
+                TokenKind::LBrace => brace += 1,
+                TokenKind::RBrace if brace > 0 => brace -= 1,
+                TokenKind::Eof => break,
+                _ => {}
+            }
+        }
+        None
     }
 
     /// True when the next two significant tokens are `.` followed by a
@@ -185,11 +384,43 @@ impl Parser {
 
     fn consume_block_separators(&mut self) -> usize {
         let mut consumed = 0;
-        while matches!(self.raw_peek(), TokenKind::Semicolon | TokenKind::Newline) {
+        while matches!(self.raw_peek(), TokenKind::Newline)
+            || (self.mode == ParseMode::LegacyV018
+                && matches!(self.raw_peek(), TokenKind::Semicolon))
+        {
             self.advance_raw();
             consumed += 1;
         }
         consumed
+    }
+
+    /// Reject a `;` left standing at a canonical binding-block separator
+    /// boundary (chelis#1267).
+    ///
+    /// `consume_block_separators` takes `;` only in `LegacyV018`, so in
+    /// canonical Surf v0.19 one survives wherever that function is called
+    /// inside a binding block. There are four such positions, three in
+    /// `parse_block_inner` (before the first binding, between bindings, and
+    /// after the tail) and one in `parse_block_let_binding` (between a
+    /// binding's `=` and its value, the legal v0.18 spelling `a = ; 1i64`).
+    /// Each used to surface a different wrong diagnostic, none of which named
+    /// the rule. Call this immediately after every `consume_block_separators`
+    /// so they all report the same thing; adding a fifth call site without a
+    /// matching guard reopens this defect.
+    ///
+    /// The two `consume_block_separators` calls in `parse_property_decl` are
+    /// deliberately unguarded: they sit in a top-level declaration arm whose
+    /// own diagnostic already carries a real offset.
+    ///
+    /// `par` and `do` genuinely require `;` (spec/02-surf-syntax.md §P5) and
+    /// parse through their own functions, so they never reach this.
+    fn reject_canonical_semicolon_separator(&self) -> Result<(), ParseError> {
+        if self.mode == ParseMode::Canonical && matches!(self.raw_peek(), TokenKind::Semicolon) {
+            return Err(ParseError::SemicolonBlockSeparator {
+                offset: self.current_offset(),
+            });
+        }
+        Ok(())
     }
 
     fn expect(&mut self, kind: &TokenKind) -> Result<Token, ParseError> {
@@ -204,6 +435,26 @@ impl Parser {
         }
     }
 
+    /// Exact newline continuations for a block sequencing expression.
+    ///
+    /// chelis#849. A top-level newline inside a sequencing context ends the
+    /// expression being parsed unless the next significant token is one of these:
+    ///
+    /// * `|>` -- an infix pipeline stage has no meaning at the head of a statement.
+    /// * `then` / `else` -- an `if` is not a legal expression without both, so
+    ///   neither can begin one.
+    ///
+    /// Each member is safe because it cannot head an expression, but that is a
+    /// necessary condition rather than the membership rule: other infix tokens
+    /// (`+`, `*`, `==`, `&&`, ...) remain outside this deliberately closed set.
+    /// A token that CAN head an expression (`with`, `match`, an identifier) must
+    /// not be added: after a newline it is genuinely ambiguous between a
+    /// continuation and a new statement, and admitting it would re-open the
+    /// juxtaposition defect chelis#706 closed.
+    fn is_block_expression_continuation(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::Pipe | TokenKind::Then | TokenKind::Else)
+    }
+
     fn block_expr_end(&self) -> usize {
         let mut pos = self.pos;
         let mut paren_depth = 0usize;
@@ -214,13 +465,34 @@ impl Parser {
                 TokenKind::Newline | TokenKind::Semicolon
                     if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
                 {
+                    // A top-level newline does not end the expression when
+                    // the next significant token is in P12's exact closed set
+                    // (chelis#849): `|>` is an infix continuation, and `then` /
+                    // `else` are the mandatory continuations of an `if`. None
+                    // can head a statement, so each selected continuation is
+                    // unambiguous; that safety property does not admit every
+                    // other infix token.
+                    //
+                    // This helper is the only one of the three boundary
+                    // rules that is CLOSED. `decl_expr_end` and
+                    // `property_expr_end` are permissive -- they end only at
+                    // a declaration start (and, for a property predicate, at
+                    // `with`), so a leading `then` or `else` already
+                    // continued there and neither ever showed this defect.
+                    // `block_expr_end` broke instead, which is the 0.17
+                    // regression. spec/02 P12 states all three.
+                    //
+                    // The set is deliberately closed to tokens that can only
+                    // continue. `with {` is NOT admitted: it heads an
+                    // expression, so a leading `with` after a newline is
+                    // genuinely ambiguous and is left to its own decision.
                     if matches!(token.kind, TokenKind::Newline)
                         && self
                             .tokens
                             .iter()
                             .skip(pos + 1)
                             .find(|next| !matches!(next.kind, TokenKind::Newline))
-                            .is_some_and(|next| matches!(next.kind, TokenKind::Pipe))
+                            .is_some_and(|next| Self::is_block_expression_continuation(&next.kind))
                     {
                         pos += 1;
                         continue;
@@ -416,6 +688,7 @@ impl Parser {
             tokens: expr_tokens,
             pos: 0,
             module_allowed: false,
+            mode: self.mode,
         };
         let expr = nested.parse_expr(0)?;
         if !nested.at_eof() {
@@ -427,6 +700,36 @@ impl Parser {
         }
         self.pos = end;
         Ok(expr)
+    }
+
+    /// Diagnose a reserved declaration keyword used as a value-binding name.
+    ///
+    /// `sig = 0.2f64` is a natural thing to write (`sig` for volatility), but
+    /// `sig` heads a signature declaration, so `parse_decl` dispatches into
+    /// `parse_sig_decl` and the failure surfaces one token later, at the `=`,
+    /// as `expected identifier, found Eq` (chelis#915). By then the reserved
+    /// word has already been consumed, so the *found* token is never the
+    /// keyword — a special case keyed on the found token would not fire on
+    /// this form at all.
+    ///
+    /// Call this immediately after the keyword is consumed. When the next
+    /// token is `=` the user's intent is unambiguously a value binding, so
+    /// name the reserved word and point at the keyword rather than the `=`.
+    /// Any other following token is a genuine malformed declaration and falls
+    /// through to the ordinary `expected …, found …` path.
+    fn reserved_word_binding_error(
+        &self,
+        keyword: &'static str,
+        role: &'static str,
+        suggestion: &'static str,
+        keyword_span: Span,
+    ) -> Option<ParseError> {
+        (*self.peek() == TokenKind::Eq).then_some(ParseError::ReservedWordBinding {
+            keyword,
+            role,
+            suggestion,
+            offset: keyword_span.offset,
+        })
     }
 
     fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
@@ -522,7 +825,7 @@ impl Parser {
         names.push(name);
         while *self.peek() == TokenKind::Comma {
             self.advance();
-            if *self.peek() == terminator {
+            if self.comma_terminates_list(&terminator, names.len(), false)? {
                 break;
             }
             let (name, _) = self.expect_ident_or_type_ident()?;
@@ -531,11 +834,92 @@ impl Parser {
         Ok(names)
     }
 
+    fn comma_terminates_list(
+        &self,
+        terminator: &TokenKind,
+        _item_count: usize,
+        _singleton_tuple: bool,
+    ) -> Result<bool, ParseError> {
+        if self.peek() != terminator {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn consume_trailing_comma_before(&mut self, terminator: &TokenKind) -> bool {
+        if *self.peek() == TokenKind::Comma && self.peek_significant_after(1) == Some(terminator) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
     fn parse_name_bracket_list(&mut self) -> Result<Vec<String>, ParseError> {
-        self.expect(&TokenKind::LBracket)?;
+        let start = self.expect(&TokenKind::LBracket)?.span;
         let names = self.parse_ident_list(TokenKind::RBracket)?;
         self.expect(&TokenKind::RBracket)?;
+        if names.is_empty() && self.mode == ParseMode::Canonical {
+            return Err(ParseError::Expected {
+                expected: "omit empty `[]`".into(),
+                found: "empty parameter list".into(),
+                offset: start.offset,
+            });
+        }
         Ok(names)
+    }
+
+    /// Parse a declaration's `[..]` binder list (`spec/02-surf-syntax.md`
+    /// §P4b/§P4c). Shared by `def` and `sig`; a `type` declaration's
+    /// parameter list keeps [`Self::parse_name_bracket_list`], which has no
+    /// bound production.
+    fn parse_type_binder_list(&mut self) -> Result<Vec<TypeBinder>, ParseError> {
+        let start = self.expect(&TokenKind::LBracket)?.span;
+        let mut binders: Vec<TypeBinder> = Vec::new();
+        if *self.peek() != TokenKind::RBracket {
+            loop {
+                binders.push(self.parse_type_binder()?);
+                if *self.peek() != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.comma_terminates_list(&TokenKind::RBracket, binders.len(), false)? {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RBracket)?;
+        if binders.is_empty() && self.mode == ParseMode::Canonical {
+            return Err(ParseError::Expected {
+                expected: "omit empty `[]`".into(),
+                found: "empty parameter list".into(),
+                offset: start.offset,
+            });
+        }
+        Ok(binders)
+    }
+
+    /// One binder: `name`, or `name: Family` for a dtype-family bound.
+    ///
+    /// The bound position admits only the three closed family names, so an
+    /// ADT name written there is a parse error rather than a silently
+    /// accepted bound.
+    fn parse_type_binder(&mut self) -> Result<TypeBinder, ParseError> {
+        let (name, _) = self.expect_ident_or_type_ident()?;
+        if *self.peek() != TokenKind::Colon {
+            return Ok(TypeBinder::unbounded(name));
+        }
+        self.advance();
+        let offset = self.current_offset();
+        let (family, _) = self.expect_ident_or_type_ident()?;
+        match DtypeFamily::from_surf_name(&family) {
+            Some(family) => Ok(TypeBinder::bounded(name, family)),
+            None => Err(ParseError::Expected {
+                expected: "a dtype family `Float`, `Int`, or `Numeric`".into(),
+                found: family,
+                offset,
+            }),
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -732,11 +1116,14 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let (binder, _) = self.expect_ident()?;
         if *self.peek() == TokenKind::Comma {
-            return Err(ParseError::Expected {
-                expected: "exactly one invariant binder".into(),
-                found: "multiple binders".into(),
-                offset: self.current_offset(),
-            });
+            self.advance();
+            if *self.peek() != TokenKind::RParen {
+                return Err(ParseError::Expected {
+                    expected: "exactly one invariant binder".into(),
+                    found: "multiple binders".into(),
+                    offset: self.current_offset(),
+                });
+            }
         }
         self.expect(&TokenKind::RParen)?;
 
@@ -804,9 +1191,24 @@ impl Parser {
                 break;
             }
             let end = self.find_property_clause_end()?;
-            exprs.push(self.parse_expr_in_range(end, "`,` or `:` in property where clause")?);
+            let redundant_group_offset = self.redundant_property_group_offset(end);
+            let expr = self.parse_expr_in_range(end, "`,` or `:` in property where clause")?;
+            if self.mode == ParseMode::Canonical
+                && redundant_group_offset.is_some()
+                && !matches!(expr, Expr::Tuple(..))
+            {
+                return Err(ParseError::Expected {
+                    expected: "property precondition without redundant outer grouping".into(),
+                    found: "parenthesized property precondition".into(),
+                    offset: redundant_group_offset.unwrap_or_default(),
+                });
+            }
+            exprs.push(expr);
             if *self.peek() == TokenKind::Comma {
                 self.advance();
+                if *self.peek() == TokenKind::Colon {
+                    break;
+                }
                 continue;
             }
             if *self.peek() == TokenKind::Colon {
@@ -819,6 +1221,38 @@ impl Parser {
             });
         }
         Ok(exprs)
+    }
+
+    /// Return the opening-parenthesis offset when one grouping pair encloses
+    /// the complete property precondition. Tuple/unit delimiters are filtered
+    /// after parsing; a pair that closes before the clause end is meaningful
+    /// operand or callee grouping and is therefore not reported here.
+    fn redundant_property_group_offset(&self, end: usize) -> Option<usize> {
+        let significant = self.tokens[self.pos..end]
+            .iter()
+            .filter(|token| !matches!(token.kind, TokenKind::Newline))
+            .collect::<Vec<_>>();
+        let first = significant.first()?;
+        if !matches!(first.kind, TokenKind::LParen)
+            || !matches!(significant.last()?.kind, TokenKind::RParen)
+        {
+            return None;
+        }
+
+        let mut depth = 0usize;
+        for (index, token) in significant.iter().enumerate() {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 && index + 1 != significant.len() {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        (depth == 0).then_some(first.span.offset)
     }
 
     fn find_property_clause_end(&self) -> Result<usize, ParseError> {
@@ -881,9 +1315,9 @@ impl Parser {
         let start = self.advance().span; // consume Def
         let (name, _) = self.expect_ident()?;
 
-        // Optional dimension parameters: def f[a, b](...)
-        let dim_params = if *self.peek() == TokenKind::LBracket {
-            self.parse_name_bracket_list()?
+        // Optional binder list: def f[a, b](...) / def f[p: Float](...)
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
         } else {
             Vec::new()
         };
@@ -893,11 +1327,19 @@ impl Parser {
             let params = self.parse_params()?;
             self.expect(&TokenKind::RParen)?;
             params
+        } else if self.mode == ParseMode::Canonical {
+            return Err(ParseError::Expected {
+                expected: "function parameter list `()`".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
         } else {
             Vec::new()
         };
 
-        let ret_ty = if matches!(self.peek(), TokenKind::Colon | TokenKind::Arrow) {
+        let ret_ty = if *self.peek() == TokenKind::Arrow
+            || (*self.peek() == TokenKind::Colon && self.mode == ParseMode::LegacyV018)
+        {
             self.advance();
             Some(self.parse_type()?)
         } else {
@@ -928,7 +1370,7 @@ impl Parser {
 
         Ok(Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -939,7 +1381,19 @@ impl Parser {
 
     fn parse_sig_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Sig
+        if let Some(err) =
+            self.reserved_word_binding_error("sig", "a signature declaration", "sigma", start)
+        {
+            return Err(err);
+        }
         let (name, _) = self.expect_ident()?;
+        // Optional binder list: sig f[p: Float]: ... (§P4c). It sits in the
+        // same position it occupies on a `def`, immediately after the name.
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
+        } else {
+            Vec::new()
+        };
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
         let effects = self.parse_optional_effects()?;
@@ -951,6 +1405,7 @@ impl Parser {
         let span = start.merge(end);
         Ok(Decl::Sig {
             name,
+            type_binders,
             ty,
             effects,
             span,
@@ -959,6 +1414,11 @@ impl Parser {
 
     fn parse_dim_decl(&mut self) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Dim
+        if let Some(err) =
+            self.reserved_word_binding_error("dim", "a dimension declaration", "d", start)
+        {
+            return Err(err);
+        }
         let names = self.parse_ident_list(TokenKind::Eof)?;
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::Dim {
@@ -975,6 +1435,9 @@ impl Parser {
         params.push(self.parse_param()?);
         while *self.peek() == TokenKind::Comma {
             self.advance();
+            if *self.peek() == TokenKind::RParen {
+                break;
+            }
             params.push(self.parse_param()?);
         }
         Ok(params)
@@ -1005,6 +1468,9 @@ impl Parser {
         params.push(name);
         while *self.peek() == TokenKind::Comma {
             self.advance();
+            if *self.peek() == TokenKind::RParen {
+                break;
+            }
             let (name, _) = self.expect_ident()?;
             params.push(name);
         }
@@ -1053,6 +1519,11 @@ impl Parser {
 
     fn parse_type_decl_with_opaque(&mut self, opaque: bool) -> Result<Decl, ParseError> {
         let start = self.advance().span; // consume Type
+        if let Some(err) =
+            self.reserved_word_binding_error("type", "a type declaration", "ty", start)
+        {
+            return Err(err);
+        }
         let (name, _) = self.expect_type_ident()?;
         let params = if *self.peek() == TokenKind::LBracket {
             self.parse_name_bracket_list()?
@@ -1102,13 +1573,20 @@ impl Parser {
                 fields.push(self.parse_record_field()?);
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
-                    if *self.peek() == TokenKind::RBrace {
+                    if self.comma_terminates_list(&TokenKind::RBrace, fields.len(), false)? {
                         break;
                     }
                     fields.push(self.parse_record_field()?);
                 }
             }
             let end = self.expect(&TokenKind::RBrace)?;
+            if fields.is_empty() && self.mode == ParseMode::Canonical {
+                return Err(ParseError::Expected {
+                    expected: format!("bare zero-field variant `{name}`"),
+                    found: format!("`{name} {{}}`"),
+                    offset: start.offset,
+                });
+            }
             Ok(Variant {
                 name,
                 fields: VariantFields::Record(fields),
@@ -1121,13 +1599,20 @@ impl Parser {
                 fields.push(self.parse_type()?);
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
-                    if *self.peek() == TokenKind::RParen {
+                    if self.comma_terminates_list(&TokenKind::RParen, fields.len(), false)? {
                         break;
                     }
                     fields.push(self.parse_type()?);
                 }
             }
             let end = self.expect(&TokenKind::RParen)?;
+            if self.mode == ParseMode::Canonical && fields.is_empty() {
+                return Err(ParseError::Expected {
+                    expected: format!("bare zero-argument constructor `{name}`"),
+                    found: format!("`{name}()`"),
+                    offset: start.offset,
+                });
+            }
             Ok(Variant {
                 name,
                 fields: VariantFields::Positional(fields),
@@ -1179,7 +1664,19 @@ impl Parser {
                 self.advance();
                 ImportKind::All
             } else {
-                ImportKind::Names(self.parse_ident_list(TokenKind::RParen)?)
+                let names = self.parse_ident_list(TokenKind::RParen)?;
+                if names.is_empty() {
+                    if self.mode == ParseMode::Canonical {
+                        return Err(ParseError::Expected {
+                            expected: "qualified import without empty `()`".into(),
+                            found: "empty import list".into(),
+                            offset: self.current_offset(),
+                        });
+                    }
+                    ImportKind::Qualified
+                } else {
+                    ImportKind::Names(names)
+                }
             };
             let end = self.expect(&TokenKind::RParen)?;
             (kind, end.span)
@@ -1198,6 +1695,13 @@ impl Parser {
         let start = self.advance().span; // consume Export
         self.expect(&TokenKind::LParen)?;
         let names = self.parse_ident_list(TokenKind::RParen)?;
+        if names.is_empty() {
+            return Err(ParseError::Expected {
+                expected: "at least one exported name".into(),
+                found: "empty export list".into(),
+                offset: self.current_offset(),
+            });
+        }
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Decl::Export {
             names,
@@ -1210,6 +1714,19 @@ impl Parser {
     // ---------------------------------------------------------------------------
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        if self.mode == ParseMode::Canonical
+            && min_bp > 0
+            && matches!(
+                self.peek(),
+                TokenKind::If | TokenKind::Match | TokenKind::Fn
+            )
+        {
+            return Err(ParseError::Expected {
+                expected: "parenthesized low-precedence expression as an operator operand".into(),
+                found: format!("{:?}", self.peek()),
+                offset: self.current_offset(),
+            });
+        }
         let mut lhs = self.parse_prefix()?;
 
         loop {
@@ -1273,7 +1790,31 @@ impl Parser {
                     let args = self.parse_expr_list(TokenKind::RParen)?;
                     let end = self.expect(&TokenKind::RParen)?;
                     lhs = Expr::Apply(Box::new(lhs), args, start.merge(end.span));
+                    if self.mode == ParseMode::Canonical {
+                        break;
+                    }
                 }
+                continue;
+            }
+
+            if *self.peek() == TokenKind::With
+                && self.peek_significant_after(1) == Some(&TokenKind::LBrace)
+            {
+                let start = expr_span(&lhs);
+                self.advance();
+                let fields = self.parse_record_fields()?;
+                let end = self.tokens[self.pos - 1].span;
+                if fields.is_empty() {
+                    if self.mode == ParseMode::Canonical {
+                        return Err(ParseError::Expected {
+                            expected: "at least one record-update field".into(),
+                            found: "empty record update".into(),
+                            offset: start.offset,
+                        });
+                    }
+                    continue;
+                }
+                lhs = Expr::RecordUpdate(Box::new(lhs), fields, start.merge(end));
                 continue;
             }
 
@@ -1397,10 +1938,13 @@ impl Parser {
         // desugarer's existing pipe-stage handling produces the
         // canonical Deep shape. Anything else (including the two-arg
         // form `cast(value, type)`) falls through to `parse_prefix`.
-        if matches!(self.peek(), TokenKind::Cast)
-            && let Some(precision) = self.peek_one_arg_cast_precision()
+        if let Some(mode) = match self.peek() {
+            TokenKind::Cast => Some(CastMode::Checked),
+            TokenKind::CastTrunc => Some(CastMode::Trunc),
+            _ => None,
+        } && let Some(precision) = self.peek_one_arg_cast_precision()
         {
-            let cast_tok = self.advance(); // consume Cast
+            let cast_tok = self.advance(); // consume Cast / CastTrunc
             let span = cast_tok.span;
             self.advance(); // consume LParen
             self.advance(); // consume Ident
@@ -1409,6 +1953,7 @@ impl Parser {
             let body = Expr::Cast(
                 Box::new(Expr::Var(pipe_param.clone(), span)),
                 precision,
+                mode,
                 span.merge(close.span),
             );
             return Ok(Expr::Lambda(
@@ -1426,7 +1971,19 @@ impl Parser {
         // `parse_realize` / `parse_copy` themselves (H1/H2 of the
         // pipe-autofix-extras workstream), so the pipe-stage path falls
         // through to `parse_prefix`.
-        self.parse_prefix()
+        let explicit_lambda = matches!(self.peek(), TokenKind::Fn);
+        let stage = self.parse_prefix()?;
+        if self.mode == ParseMode::Canonical
+            && explicit_lambda
+            && is_first_argument_pipe_lambda(&stage)
+        {
+            return Err(ParseError::Expected {
+                expected: "canonical call-stage sugar (`f(args)`, `realize`, `copy`, or `cast(type)`); explicit first-argument lambdas are a v0.18 alias".into(),
+                found: "first-argument pipe lambda".into(),
+                offset: expr_span(&stage).offset,
+            });
+        }
+        Ok(stage)
     }
 
     /// If the next four tokens are `Cast LParen Ident RParen`, return
@@ -1446,8 +2003,11 @@ impl Parser {
         ) {
             pos += 1;
         }
-        // Step over `Cast`.
-        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Cast)) {
+        // Step over `Cast` / `CastTrunc`.
+        if !matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Cast | TokenKind::CastTrunc)
+        ) {
             return None;
         }
         pos += 1;
@@ -1523,6 +2083,16 @@ impl Parser {
                 let tok = self.advance();
                 Expr::Lit(Literal::TypedFloat(f, suffix), tok.span)
             }
+            TokenKind::IntMinMagnitude(suffix) => {
+                let found = format!(
+                    "9223372036854775808{}",
+                    suffix.as_ref().map_or("", |suffix| suffix.as_str())
+                );
+                return Err(ParseError::SignedMinimumMagnitudeRequiresNegation {
+                    found,
+                    offset: self.current_offset(),
+                });
+            }
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Expr::Lit(Literal::Str(s), tok.span)
@@ -1549,6 +2119,25 @@ impl Parser {
             }
             TokenKind::Minus => {
                 let tok = self.advance();
+                if let TokenKind::IntMinMagnitude(suffix) = self.peek().clone() {
+                    let magnitude = self.advance();
+                    // The positive magnitude 2^63 cannot fit in the signed
+                    // payload carried by `Literal`. Keep the signed minimum
+                    // only as an internal magnitude sentinel, but preserve
+                    // P10's user-visible parse shape: the expression is
+                    // still unary minus, never a negative literal node.
+                    let literal = match suffix {
+                        None => Literal::Int(i64::MIN),
+                        Some(LiteralSuffix::I64) => Literal::TypedInt(i64::MIN, LiteralSuffix::I64),
+                        Some(_) => unreachable!("lexer admits only an i64 suffix here"),
+                    };
+                    let operand = Expr::Lit(literal, magnitude.span);
+                    return Ok(Expr::Unary(
+                        UnaryOp::Neg,
+                        Box::new(operand),
+                        tok.span.merge(magnitude.span),
+                    ));
+                }
                 let operand = self.parse_expr(13)?;
                 let span = tok.span.merge(expr_span(&operand));
                 return Ok(Expr::Unary(UnaryOp::Neg, Box::new(operand), span));
@@ -1577,7 +2166,7 @@ impl Parser {
                         let mut elems = vec![first];
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
-                            if *self.peek() == TokenKind::RParen {
+                            if self.comma_terminates_list(&TokenKind::RParen, elems.len(), true)? {
                                 break;
                             }
                             elems.push(self.parse_expr(0)?);
@@ -1600,7 +2189,8 @@ impl Parser {
             TokenKind::If => self.parse_if()?,
             TokenKind::Match => self.parse_match()?,
             TokenKind::Fn => self.parse_lambda()?,
-            TokenKind::Cast => self.parse_cast()?,
+            TokenKind::Cast => self.parse_cast(CastMode::Checked)?,
+            TokenKind::CastTrunc => self.parse_cast(CastMode::Trunc)?,
             TokenKind::Grad => self.parse_grad()?,
             TokenKind::Vmap => self.parse_vmap()?,
             TokenKind::Jit => self.parse_jit()?,
@@ -1608,6 +2198,10 @@ impl Parser {
             TokenKind::Copy => self.parse_copy()?,
             TokenKind::With => self.parse_with_handler()?,
             TokenKind::Par => self.parse_par()?,
+            TokenKind::Do => self.parse_do()?,
+            TokenKind::Quote => self.parse_meta_form(DeepSurfaceMetaForm::Quote)?,
+            TokenKind::Unquote => self.parse_meta_form(DeepSurfaceMetaForm::Unquote)?,
+            TokenKind::Splice => self.parse_meta_form(DeepSurfaceMetaForm::Splice)?,
             TokenKind::LBrace => self.parse_block()?,
             _ => {
                 return Err(ParseError::Expected {
@@ -1641,13 +2235,24 @@ impl Parser {
     }
 
     fn parse_juxtaposition_args(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
-        loop {
+        if self.mode == ParseMode::Canonical {
             if *self.peek() == TokenKind::LParen {
                 let start = expr_span(&expr);
                 self.advance();
                 let args = self.parse_expr_list(TokenKind::RParen)?;
                 let end = self.expect(&TokenKind::RParen)?;
                 expr = Expr::Apply(Box::new(expr), args, start.merge(end.span));
+            }
+            return Ok(expr);
+        }
+
+        loop {
+            if *self.peek() == TokenKind::LParen {
+                let start = expr_span(&expr);
+                self.advance();
+                let args = self.parse_expr_list(TokenKind::RParen)?;
+                let end = self.expect(&TokenKind::RParen)?;
+                expr = extend_legacy_application(expr, args, start.merge(end.span));
                 continue;
             }
 
@@ -1658,7 +2263,7 @@ impl Parser {
                 let arg = self.parse_primary_atom()?;
                 let start = expr_span(&expr);
                 let end = expr_span(&arg);
-                expr = Expr::Apply(Box::new(expr), vec![arg], start.merge(end));
+                expr = extend_legacy_application(expr, vec![arg], start.merge(end));
                 continue;
             }
 
@@ -1732,7 +2337,7 @@ impl Parser {
                     let mut elems = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, elems.len(), true)? {
                             break;
                         }
                         elems.push(self.parse_expr(0)?);
@@ -1774,7 +2379,7 @@ impl Parser {
         exprs.push(self.parse_expr(0)?);
         while *self.peek() == TokenKind::Comma {
             self.advance();
-            if *self.peek() == terminator {
+            if self.comma_terminates_list(&terminator, exprs.len(), false)? {
                 break;
             }
             exprs.push(self.parse_expr(0)?);
@@ -1800,7 +2405,14 @@ impl Parser {
 
     fn parse_match(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume Match
-        let scrutinee = self.parse_expr(0)?;
+        let with_pos =
+            self.find_top_level_token(TokenKind::With)
+                .ok_or_else(|| ParseError::Expected {
+                    expected: "match ... with { | pattern => expr }".into(),
+                    found: format!("{:?}", self.peek()),
+                    offset: self.current_offset(),
+                })?;
+        let scrutinee = self.parse_expr_in_range(with_pos, "`with` after match scrutinee")?;
         if *self.peek() != TokenKind::With {
             return Err(ParseError::Expected {
                 expected: "match ... with { | pattern => expr }".into(),
@@ -1861,21 +2473,29 @@ impl Parser {
         Ok(Expr::Lambda(params, Box::new(body), span))
     }
 
-    fn parse_cast(&mut self) -> Result<Expr, ParseError> {
-        let start = self.advance().span; // consume Cast
+    fn parse_cast(&mut self, mode: CastMode) -> Result<Expr, ParseError> {
+        let start = self.advance().span; // consume Cast / CastTrunc
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;
         let (precision, _) = self.expect_ident()?;
+        self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
-        Ok(Expr::Cast(Box::new(expr), precision, start.merge(end.span)))
+        Ok(Expr::Cast(
+            Box::new(expr),
+            precision,
+            mode,
+            start.merge(end.span),
+        ))
     }
 
     fn parse_grad(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume Grad
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
-        let wrt = if *self.peek() == TokenKind::Comma {
+        let wrt = if self.consume_trailing_comma_before(&TokenKind::RParen) {
+            None
+        } else if *self.peek() == TokenKind::Comma {
             self.advance();
             let (kw, kw_span) = self.expect_ident()?;
             if kw != "wrt" {
@@ -1886,7 +2506,9 @@ impl Parser {
                 });
             }
             self.expect(&TokenKind::Eq)?;
-            Some(self.parse_grad_wrt_targets()?)
+            let targets = self.parse_grad_wrt_targets()?;
+            self.consume_trailing_comma_before(&TokenKind::RParen);
+            Some(targets)
         } else {
             None
         };
@@ -1902,12 +2524,22 @@ impl Parser {
                 let (name, _) = self.expect_ident()?;
                 names.push(name);
                 if *self.peek() == TokenKind::Comma {
+                    if self.consume_trailing_comma_before(&TokenKind::RParen) {
+                        break;
+                    }
                     self.advance();
                     continue;
                 }
                 break;
             }
             self.expect(&TokenKind::RParen)?;
+            if self.mode == ParseMode::Canonical && names.len() == 1 {
+                return Err(ParseError::Expected {
+                    expected: "bare singleton `wrt=name`".into(),
+                    found: "parenthesized singleton".into(),
+                    offset: self.current_offset(),
+                });
+            }
             Ok(names)
         } else {
             let (name, _) = self.expect_ident()?;
@@ -1919,7 +2551,9 @@ impl Parser {
         let start = self.advance().span; // consume Vmap
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
-        let axis = if *self.peek() == TokenKind::Comma {
+        let axis = if self.consume_trailing_comma_before(&TokenKind::RParen) {
+            None
+        } else if *self.peek() == TokenKind::Comma {
             self.advance();
             match self.peek().clone() {
                 TokenKind::Ident(kw) if kw == "axis" => {
@@ -1927,6 +2561,13 @@ impl Parser {
                     self.expect(&TokenKind::Eq)?;
                     match self.peek().clone() {
                         TokenKind::Int(n) => {
+                            if self.mode == ParseMode::Canonical && n == 0 {
+                                return Err(ParseError::Expected {
+                                    expected: "`vmap(f)` for the default zero axis".into(),
+                                    found: "redundant `axis=0`".into(),
+                                    offset: self.current_offset(),
+                                });
+                            }
                             self.advance();
                             Some(n)
                         }
@@ -1940,6 +2581,13 @@ impl Parser {
                     }
                 }
                 TokenKind::Int(n) => {
+                    if self.mode == ParseMode::Canonical {
+                        return Err(ParseError::Expected {
+                            expected: "named axis argument `axis=<integer>`".into(),
+                            found: n.to_string(),
+                            offset: self.current_offset(),
+                        });
+                    }
                     self.advance();
                     Some(n)
                 }
@@ -1954,6 +2602,7 @@ impl Parser {
         } else {
             None
         };
+        self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Vmap(Box::new(expr), axis, start.merge(end.span)))
     }
@@ -1962,6 +2611,7 @@ impl Parser {
         let start = self.advance().span; // consume Jit
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
+        self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Jit(Box::new(expr), start.merge(end.span)))
     }
@@ -1979,6 +2629,7 @@ impl Parser {
         }
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
+        self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Realize(Box::new(expr), start.merge(end.span)))
     }
@@ -1991,6 +2642,7 @@ impl Parser {
         }
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
+        self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Copy(Box::new(expr), start.merge(end.span)))
     }
@@ -2018,8 +2670,9 @@ impl Parser {
         let (handler_name, _) = self.expect_ident()?;
         self.expect(&TokenKind::LParen)?;
         let arg = self.parse_expr(0)?;
+        self.consume_trailing_comma_before(&TokenKind::RParen);
         self.expect(&TokenKind::RParen)?;
-        let body = self.parse_block()?;
+        let body = self.parse_block_inner(true)?;
         let span = start.merge(expr_span(&body));
         match handler_name.as_str() {
             "seed" => Ok(Expr::WithSeed(Box::new(arg), Box::new(body), span)),
@@ -2041,8 +2694,11 @@ impl Parser {
             self.advance_raw();
         }
         if *self.peek() == TokenKind::RBrace {
-            let end = self.expect(&TokenKind::RBrace)?;
-            return Ok(Expr::Par(exprs, start.merge(end.span)));
+            return Err(ParseError::Expected {
+                expected: "at least one expression in `par`".into(),
+                found: "RBrace".into(),
+                offset: self.current_offset(),
+            });
         }
         // chelis#706 family: par items are Sep-bounded, so a bare
         // `par { f(x)\n g(y) }` no longer cross-newline-juxtaposes into a
@@ -2076,16 +2732,87 @@ impl Parser {
         Ok(Expr::Par(exprs, start.merge(end.span)))
     }
 
+    fn parse_do(&mut self) -> Result<Expr, ParseError> {
+        let start = self.advance().span;
+        self.expect(&TokenKind::LBrace)?;
+        while matches!(self.raw_peek(), TokenKind::Newline) {
+            self.advance_raw();
+        }
+        if *self.peek() == TokenKind::RBrace {
+            return Err(ParseError::Expected {
+                expected: "at least one expression in `do`".into(),
+                found: "RBrace".into(),
+                offset: self.current_offset(),
+            });
+        }
+        let mut exprs = vec![self.parse_expr_until_block_separator()?];
+        loop {
+            while matches!(self.raw_peek(), TokenKind::Newline) {
+                self.advance_raw();
+            }
+            if *self.peek() == TokenKind::RBrace {
+                break;
+            }
+            self.expect(&TokenKind::Semicolon)?;
+            while matches!(self.raw_peek(), TokenKind::Newline) {
+                self.advance_raw();
+            }
+            if *self.peek() == TokenKind::RBrace {
+                break;
+            }
+            exprs.push(self.parse_expr_until_block_separator()?);
+        }
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(Expr::Do(exprs, start.merge(end.span)))
+    }
+
+    fn parse_meta_form(&mut self, form: DeepSurfaceMetaForm) -> Result<Expr, ParseError> {
+        let start = self.advance().span;
+        self.expect(&TokenKind::LParen)?;
+        let value = self.parse_expr(0)?;
+        self.consume_trailing_comma_before(&TokenKind::RParen);
+        let end = self.expect(&TokenKind::RParen)?;
+        let span = start.merge(end.span);
+        Ok(match form {
+            DeepSurfaceMetaForm::Quote => Expr::Quote(Box::new(value), span),
+            DeepSurfaceMetaForm::Unquote => Expr::Unquote(Box::new(value), span),
+            DeepSurfaceMetaForm::Splice => Expr::Splice(Box::new(value), span),
+        })
+    }
+
     fn parse_block(&mut self) -> Result<Expr, ParseError> {
+        self.parse_block_inner(false)
+    }
+
+    /// Parse a brace-delimited binding block. Effect handlers provide a
+    /// lexical scope of their own, so their body may contain one bare tail;
+    /// an ordinary `{ expr }` remains a rejected alias.
+    fn parse_block_inner(&mut self, allow_unbound_tail: bool) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
+        // Separator position 1 of 4: before the first binding.
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         while !self.at_eof() && self.is_short_block_binding_start() {
             bindings.push(self.parse_block_let_binding()?);
+            // Separator position 2 of 4: between bindings. This runs before
+            // the `sep_count` check below, so a `;` here reports the rule
+            // whether or not a newline preceded it.
             let sep_count = self.consume_block_separators();
+            self.reject_canonical_semicolon_separator()?;
             if *self.peek() != TokenKind::RBrace && sep_count == 0 {
                 return Err(ParseError::Expected {
-                    expected: "separator (`;` or newline)".into(),
+                    // A `;` never reaches here: canonical mode rejected it
+                    // just above, and LegacyV018 consumed it as a separator.
+                    // Any other stray token is a plain missing separator, so
+                    // keep the generic shape and list only what this mode's
+                    // grammar actually accepts (spec/02 §P5: canonical
+                    // binding blocks separate on newlines alone).
+                    expected: if self.mode == ParseMode::Canonical {
+                        "separator (newline)".into()
+                    } else {
+                        "separator (`;` or newline)".into()
+                    },
                     found: format!("{:?}", self.raw_peek()),
                     offset: self.current_offset(),
                 });
@@ -2093,8 +2820,9 @@ impl Parser {
         }
         // The tail is Sep-bounded exactly like a binding value
         // (`BlockBody <- (BlockBinding Sep)* Expr`, spec/02 §BlockBody):
-        // a top-level newline/`;` ends it unless the next line begins `|>`
-        // or the break is inside ()/[]/{}. An empty tail keeps today's
+        // a top-level newline/`;` ends it unless the next line begins a
+        // continuation (`|>`, `then`, `else`; spec/02 §P12) or the break is
+        // inside ()/[]/{}. An empty tail keeps today's
         // "expected expression" shape — routing `{ x = 1 }` (RBrace here)
         // through the nested parser would report Eof and disturb the
         // pinned message, so guard it explicitly first.
@@ -2106,7 +2834,14 @@ impl Parser {
             });
         }
         let expr = self.parse_expr_until_block_separator()?;
+        // Separator position 3 of 4: after the tail. spec/02-surf-syntax.md
+        // §P5 rejects a trailing `;` by name, but it used to arrive here and
+        // be reported as a bare statement, which is false twice over for
+        // `{ a = 1i64\n add(a, 1i64); }`: that expression IS the tail, and
+        // there is no unbound statement. Following that advice (`_ = ...;`)
+        // only moved the failure onto the `;` message anyway (chelis#1267).
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         if *self.peek() != TokenKind::RBrace {
             // A second top-level expression after the tail: bare non-tail
             // statements silently juxtaposed into an application before
@@ -2117,6 +2852,13 @@ impl Parser {
             });
         }
         let end = self.expect(&TokenKind::RBrace)?;
+        if self.mode == ParseMode::Canonical && bindings.is_empty() && !allow_unbound_tail {
+            return Err(ParseError::Expected {
+                expected: "binding before the tail expression; use `do` for sequencing".into(),
+                found: "one-expression block".into(),
+                offset: start.offset,
+            });
+        }
         Ok(Expr::Block(bindings, Box::new(expr), start.merge(end.span)))
     }
 
@@ -2125,6 +2867,7 @@ impl Parser {
             tokens: self.tokens.clone(),
             pos: self.pos,
             module_allowed: false,
+            mode: self.mode,
         };
         let Ok(pattern) = probe.parse_let_pattern() else {
             return false;
@@ -2147,7 +2890,13 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Eq)?;
+        // Separator position 4 of 4: between a binding's `=` and its value.
+        // `a = ; 1i64` is a legal v0.18 spelling that the migrator rewrites to
+        // `a = 1i64`, so migrated-era source reaches this. Unguarded it left
+        // the value's token range empty and bottomed out in an offsetless
+        // "unexpected end of input" (chelis#1267).
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         let value = self.parse_expr_until_block_separator()?;
         Ok(LetBinding { pattern, ty, value })
     }
@@ -2172,6 +2921,10 @@ impl Parser {
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(LetPattern::Tuple(Vec::new(), start.merge(end)));
+                }
                 let first = self.parse_let_pattern()?;
                 if *self.peek() != TokenKind::Comma {
                     return Err(ParseError::Expected {
@@ -2183,7 +2936,7 @@ impl Parser {
                 let mut pats = vec![first];
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
-                    if *self.peek() == TokenKind::RParen {
+                    if self.comma_terminates_list(&TokenKind::RParen, pats.len(), true)? {
                         break;
                     }
                     pats.push(self.parse_let_pattern()?);
@@ -2200,29 +2953,46 @@ impl Parser {
     }
 
     fn parse_record_expr(&mut self, name: String, start: Span) -> Result<Expr, ParseError> {
+        let fields = self.parse_record_fields()?;
+        let end = self.tokens[self.pos - 1].span;
+        Ok(Expr::Record(name, fields, start.merge(end)))
+    }
+
+    fn parse_record_fields(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
         self.expect(&TokenKind::LBrace)?;
         let mut fields = Vec::new();
         if *self.peek() != TokenKind::RBrace {
             loop {
                 let (field, field_span) = self.expect_ident()?;
-                let value = if *self.peek() == TokenKind::Colon {
+                let explicit = *self.peek() == TokenKind::Colon;
+                let value = if explicit {
                     self.advance();
                     self.parse_expr(0)?
                 } else {
                     Expr::Var(field.clone(), field_span)
                 };
+                if self.mode == ParseMode::Canonical
+                    && explicit
+                    && matches!(&value, Expr::Var(name, _) if name == &field)
+                {
+                    return Err(ParseError::Expected {
+                        expected: format!("record pun `{field}`"),
+                        found: format!("`{field}: {field}`"),
+                        offset: field_span.offset,
+                    });
+                }
                 fields.push((field, value));
                 if *self.peek() != TokenKind::Comma {
                     break;
                 }
                 self.advance();
-                if *self.peek() == TokenKind::RBrace {
+                if self.comma_terminates_list(&TokenKind::RBrace, fields.len(), false)? {
                     break;
                 }
             }
         }
-        let end = self.expect(&TokenKind::RBrace)?;
-        Ok(Expr::Record(name, fields, start.merge(end.span)))
+        self.expect(&TokenKind::RBrace)?;
+        Ok(fields)
     }
 
     // ---------------------------------------------------------------------------
@@ -2251,8 +3021,16 @@ impl Parser {
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
         match self.peek().clone() {
             TokenKind::Int(n) => {
-                let tok = self.advance();
-                Ok(TypeExpr::Named(n.to_string(), tok.span))
+                // spec/02-surf-syntax.md: `IntLit` has exactly one type-position
+                // production, the `DimExpr` inside a tensor shape. Everywhere
+                // else an integer is not a type; accepting one here silently
+                // manufactured `(t-var {} <digits>)` (chelis#1179).
+                Err(ParseError::Expected {
+                    expected: "a type; integer literals are only dimensions inside `tensor[...]`"
+                        .into(),
+                    found: format!("integer literal `{n}`"),
+                    offset: self.current_offset(),
+                })
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
@@ -2287,17 +3065,33 @@ impl Parser {
                     self.advance();
                     let mut args = Vec::new();
                     if *self.peek() != TokenKind::RBracket {
-                        args.push(self.parse_type()?);
+                        args.push(self.parse_type_arg()?);
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
-                            if *self.peek() == TokenKind::RBracket {
+                            if self.comma_terminates_list(
+                                &TokenKind::RBracket,
+                                args.len(),
+                                false,
+                            )? {
                                 break;
                             }
-                            args.push(self.parse_type()?);
+                            args.push(self.parse_type_arg()?);
                         }
                     }
                     let end = self.expect(&TokenKind::RBracket)?;
-                    Ok(TypeExpr::App(name, args, tok_span.merge(end.span)))
+                    let span = tok_span.merge(end.span);
+                    if args.is_empty() {
+                        if self.mode == ParseMode::Canonical {
+                            return Err(ParseError::Expected {
+                                expected: format!("bare unapplied type `{name}`"),
+                                found: format!("`{name}[]`"),
+                                offset: tok_span.offset,
+                            });
+                        }
+                        Ok(TypeExpr::Named(name, span))
+                    } else {
+                        Ok(TypeExpr::App(name, args, span))
+                    }
                 } else {
                     Ok(TypeExpr::Named(name, tok_span))
                 }
@@ -2319,10 +3113,13 @@ impl Parser {
                 self.expect(&TokenKind::LBracket)?;
                 // Parse dims (all but last are dims, last is precision ident)
                 let mut items = Vec::new();
-                items.push(self.parse_type_atom()?);
+                items.push(self.parse_tensor_item()?);
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
-                    items.push(self.parse_type_atom()?);
+                    if *self.peek() == TokenKind::RBracket {
+                        break;
+                    }
+                    items.push(self.parse_tensor_item()?);
                 }
                 let end = self.expect(&TokenKind::RBracket)?;
                 // Last item should be the precision (a Named ident)
@@ -2374,6 +3171,13 @@ impl Parser {
                 let start = self.advance().span;
                 if *self.peek() == TokenKind::RParen {
                     let end = self.advance().span;
+                    if self.mode == ParseMode::Canonical {
+                        return Err(ParseError::Expected {
+                            expected: "unit type `unit`".into(),
+                            found: "()".into(),
+                            offset: start.offset,
+                        });
+                    }
                     return Ok(TypeExpr::Tuple(Vec::new(), start.merge(end)));
                 }
                 let first = self.parse_type()?;
@@ -2381,7 +3185,7 @@ impl Parser {
                     let mut types = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, types.len(), true)? {
                             break;
                         }
                         types.push(self.parse_type()?);
@@ -2403,6 +3207,36 @@ impl Parser {
                 offset: self.current_offset(),
             }),
         }
+    }
+
+    /// One bracketed `tensor[...]` item: a dimension or the trailing
+    /// precision name. Dimension positions have an integer production
+    /// (`DimExpr <- IntLit / Ident / '*' / '..' Ident`,
+    /// spec/02-surf-syntax.md), so the literal-dimension arm lives here
+    /// rather than in `parse_type_atom` (chelis#1179).
+    fn parse_tensor_item(&mut self) -> Result<TypeExpr, ParseError> {
+        if let TokenKind::Int(n) = self.peek().clone() {
+            let tok = self.advance();
+            return Ok(TypeExpr::Named(n.to_string(), tok.span));
+        }
+        self.parse_type_atom()
+    }
+
+    /// One bracketed type-application argument (`Name[...]`). An integer
+    /// literal here is a concrete dimension argument to a
+    /// dimension-parameterized ADT (`Frame[2]`, the chelis#940 shape,
+    /// `TypeArg <- TypeExpr / IntLit`); every other argument is an
+    /// ordinary type expression. Bare-type positions reject integers in
+    /// `parse_type_atom` (chelis#1179).
+    fn parse_type_arg(&mut self) -> Result<TypeExpr, ParseError> {
+        if let TokenKind::Int(n) = self.peek().clone() {
+            let tok = self.advance();
+            return Ok(TypeExpr::DimensionLiteral(
+                crate::ast::DimensionLiteral::new(n),
+                tok.span,
+            ));
+        }
+        self.parse_type()
     }
 
     // ---------------------------------------------------------------------------
@@ -2437,12 +3271,27 @@ impl Parser {
             }
             TokenKind::TypedInt(n, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedInt(n, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Int(n), tok.span))
             }
             TokenKind::TypedFloat(f, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedFloat(f, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Float(f), tok.span))
             }
+            TokenKind::Minus => self.parse_negative_pattern_literal(),
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Str(s), tok.span))
@@ -2497,15 +3346,33 @@ impl Parser {
                                 });
                             }
                         };
-                        let field_pat = if *self.peek() == TokenKind::Colon {
+                        let explicit = *self.peek() == TokenKind::Colon;
+                        let field_pat = if explicit {
                             self.advance();
                             self.parse_pattern()?
                         } else {
                             Pattern::Var(field_name.clone(), field_span)
                         };
+                        if self.mode == ParseMode::Canonical
+                            && explicit
+                            && matches!(&field_pat, Pattern::Var(name, _) if name == &field_name)
+                        {
+                            return Err(ParseError::Expected {
+                                expected: format!("record-pattern pun `{field_name}`"),
+                                found: format!("`{field_name}: {field_name}`"),
+                                offset: field_span.offset,
+                            });
+                        }
                         fields.push((field_name, field_pat));
                         if *self.peek() == TokenKind::Comma {
                             self.advance();
+                            if self.comma_terminates_list(
+                                &TokenKind::RBrace,
+                                fields.len(),
+                                false,
+                            )? {
+                                break;
+                            }
                         } else {
                             break;
                         }
@@ -2519,19 +3386,33 @@ impl Parser {
                         sub_pats.push(self.parse_pattern()?);
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
-                            if *self.peek() == TokenKind::RParen {
+                            if self.comma_terminates_list(
+                                &TokenKind::RParen,
+                                sub_pats.len(),
+                                false,
+                            )? {
                                 break;
                             }
                             sub_pats.push(self.parse_pattern()?);
                         }
                     }
                     let end = self.expect(&TokenKind::RParen)?;
+                    if self.mode == ParseMode::Canonical && sub_pats.is_empty() {
+                        return Err(ParseError::Expected {
+                            expected: format!("bare zero-argument constructor `{name}`"),
+                            found: format!("`{name}()`"),
+                            offset: tok_span.offset,
+                        });
+                    }
                     Ok(Pattern::Constructor(
                         name,
                         sub_pats,
                         tok_span.merge(end.span),
                     ))
                 } else {
+                    if self.mode == ParseMode::Canonical {
+                        return Ok(Pattern::Constructor(name, vec![], tok_span));
+                    }
                     let mut sub_pats = Vec::new();
                     while self.is_pattern_arg_start() {
                         sub_pats.push(self.parse_pattern_atom()?);
@@ -2546,12 +3427,16 @@ impl Parser {
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(Pattern::Tuple(Vec::new(), start.merge(end)));
+                }
                 let first = self.parse_pattern()?;
                 if *self.peek() == TokenKind::Comma {
                     let mut pats = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, pats.len(), true)? {
                             break;
                         }
                         pats.push(self.parse_pattern()?);
@@ -2592,12 +3477,27 @@ impl Parser {
             }
             TokenKind::TypedInt(n, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedInt(n, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Int(n), tok.span))
             }
             TokenKind::TypedFloat(f, suffix) => {
                 let tok = self.advance();
-                Ok(Pattern::Lit(Literal::TypedFloat(f, suffix), tok.span))
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: tok.span.offset,
+                    });
+                }
+                Ok(Pattern::Lit(Literal::Float(f), tok.span))
             }
+            TokenKind::Minus => self.parse_negative_pattern_literal(),
             TokenKind::Str(s) => {
                 let tok = self.advance();
                 Ok(Pattern::Lit(Literal::Str(s), tok.span))
@@ -2612,12 +3512,16 @@ impl Parser {
             }
             TokenKind::LParen => {
                 let start = self.advance().span;
+                if *self.peek() == TokenKind::RParen {
+                    let end = self.advance().span;
+                    return Ok(Pattern::Tuple(Vec::new(), start.merge(end)));
+                }
                 let first = self.parse_pattern()?;
                 if *self.peek() == TokenKind::Comma {
                     let mut pats = vec![first];
                     while *self.peek() == TokenKind::Comma {
                         self.advance();
-                        if *self.peek() == TokenKind::RParen {
+                        if self.comma_terminates_list(&TokenKind::RParen, pats.len(), true)? {
                             break;
                         }
                         pats.push(self.parse_pattern()?);
@@ -2637,6 +3541,61 @@ impl Parser {
         }
     }
 
+    fn parse_negative_pattern_literal(&mut self) -> Result<Pattern, ParseError> {
+        let minus = self.advance().span;
+        let token = self.advance();
+        let literal = match token.kind {
+            TokenKind::Int(0) if self.mode == ParseMode::Canonical => {
+                return Err(ParseError::Expected {
+                    expected: "integer zero pattern `0`".into(),
+                    found: "negative integer zero pattern `-0`".into(),
+                    offset: minus.offset,
+                });
+            }
+            TokenKind::Int(value) => Literal::Int(-value),
+            TokenKind::IntMinMagnitude(None) => Literal::Int(i64::MIN),
+            TokenKind::IntMinMagnitude(Some(suffix)) => {
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: token.span.offset,
+                    });
+                }
+                Literal::Int(i64::MIN)
+            }
+            TokenKind::Float(value) => Literal::Float(-value),
+            TokenKind::TypedInt(value, suffix) => {
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: token.span.offset,
+                    });
+                }
+                Literal::Int(-value)
+            }
+            TokenKind::TypedFloat(value, suffix) => {
+                if self.mode == ParseMode::Canonical {
+                    return Err(ParseError::Expected {
+                        expected: "unsuffixed numeric literal pattern".into(),
+                        found: format!("numeric pattern with `{}` suffix", suffix.as_str()),
+                        offset: token.span.offset,
+                    });
+                }
+                Literal::Float(-value)
+            }
+            found => {
+                return Err(ParseError::Expected {
+                    expected: "numeric literal after `-` in a pattern".into(),
+                    found: format!("{found:?}"),
+                    offset: token.span.offset,
+                });
+            }
+        };
+        Ok(Pattern::Lit(literal, minus.merge(token.span)))
+    }
+
     fn is_pattern_arg_start(&self) -> bool {
         matches!(
             self.peek(),
@@ -2646,6 +3605,7 @@ impl Parser {
                 | TokenKind::Float(_)
                 | TokenKind::TypedInt(_, _)
                 | TokenKind::TypedFloat(_, _)
+                | TokenKind::Minus
                 | TokenKind::Str(_)
                 | TokenKind::True
                 | TokenKind::False
@@ -2664,7 +3624,7 @@ impl Parser {
             effects.push(self.parse_effect_expr()?);
             while *self.peek() == TokenKind::Comma {
                 self.advance();
-                if *self.peek() == TokenKind::RBrace {
+                if self.comma_terminates_list(&TokenKind::RBrace, effects.len(), false)? {
                     break;
                 }
                 effects.push(self.parse_effect_expr()?);
@@ -2679,11 +3639,15 @@ impl Parser {
             TokenKind::Ident(name) => {
                 let tok = self.advance();
                 match name.as_str() {
-                    "Diff" | "diff" => Ok(EffectExpr::Diff(tok.span)),
-                    "Random" | "random" => Ok(EffectExpr::Random(tok.span)),
-                    "Accum" | "accum" => Ok(EffectExpr::Accum(tok.span)),
-                    "IO" | "io" => Ok(EffectExpr::Io(tok.span)),
-                    "Test" | "test" => Ok(EffectExpr::Test(tok.span)),
+                    "diff" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Diff(tok.span)),
+                    "random" if self.mode == ParseMode::LegacyV018 => {
+                        Ok(EffectExpr::Random(tok.span))
+                    }
+                    "accum" if self.mode == ParseMode::LegacyV018 => {
+                        Ok(EffectExpr::Accum(tok.span))
+                    }
+                    "io" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Io(tok.span)),
+                    "test" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Test(tok.span)),
                     _ => Err(ParseError::Expected {
                         expected: "effect name".into(),
                         found: name,
@@ -2714,6 +3678,7 @@ impl Parser {
                                 });
                             }
                         };
+                        self.consume_trailing_comma_before(&TokenKind::RParen);
                         let end = self.expect(&TokenKind::RParen)?;
                         Ok(EffectExpr::Resource(device, tok.span.merge(end.span)))
                     }
@@ -2741,9 +3706,39 @@ impl Parser {
 /// …). The value-binding case-split override (chelis#437) is limited to
 /// single-letter names so multi-letter PascalCase stays unambiguously a
 /// type or constructor name (§1.1, §3.1).
+fn extend_legacy_application(expr: Expr, args: Vec<Expr>, span: Span) -> Expr {
+    match expr {
+        Expr::Apply(function, mut existing, _) => {
+            existing.extend(args);
+            Expr::Apply(function, existing, span)
+        }
+        other => Expr::Apply(Box::new(other), args, span),
+    }
+}
+
 fn is_single_letter_upper(name: &str) -> bool {
     let mut chars = name.chars();
     matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_uppercase())
+}
+
+fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
+    let Expr::Lambda(params, body, _) = expr else {
+        return false;
+    };
+    let [param] = params.as_slice() else {
+        return false;
+    };
+    if param.ty.is_some() {
+        return false;
+    }
+    let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
+    match body.as_ref() {
+        Expr::Apply(_, arguments, _) => arguments.first().is_some_and(is_param),
+        Expr::Realize(argument, _) | Expr::Copy(argument, _) | Expr::Cast(argument, _, _, _) => {
+            is_param(argument)
+        }
+        _ => false,
+    }
 }
 
 fn expr_span(e: &Expr) -> Span {
@@ -2754,6 +3749,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Apply(_, _, s) => *s,
         Expr::List(_, s) => *s,
         Expr::Record(_, _, s) => *s,
+        Expr::RecordUpdate(_, _, s) => *s,
         Expr::Access(_, _, s) => *s,
         Expr::TupleGet(_, _, s) => *s,
         Expr::Binary(_, _, _, s) => *s,
@@ -2763,7 +3759,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Match(_, _, s) => *s,
         Expr::Lambda(_, _, s) => *s,
         Expr::Tuple(_, s) => *s,
-        Expr::Cast(_, _, s) => *s,
+        Expr::Cast(_, _, _, s) => *s,
         Expr::Grad(_, _, s) => *s,
         Expr::Vmap(_, _, s) => *s,
         Expr::Jit(_, s) => *s,
@@ -2773,6 +3769,10 @@ fn expr_span(e: &Expr) -> Span {
         Expr::WithSeed(_, _, s) => *s,
         Expr::WithDevice(_, _, s) => *s,
         Expr::Par(_, s) => *s,
+        Expr::Do(_, s) => *s,
+        Expr::Quote(_, s) => *s,
+        Expr::Unquote(_, s) => *s,
+        Expr::Splice(_, s) => *s,
         Expr::Annotate(_, _, s) => *s,
         Expr::Block(_, _, s) => *s,
     }
@@ -2781,6 +3781,7 @@ fn expr_span(e: &Expr) -> Span {
 fn type_span(t: &TypeExpr) -> Span {
     match t {
         TypeExpr::Named(_, s) => *s,
+        TypeExpr::DimensionLiteral(_, s) => *s,
         TypeExpr::RankSpread(_, s) => *s,
         TypeExpr::Tensor(_, _, s) => *s,
         TypeExpr::Arrow(_, _, s) => *s,
@@ -2836,11 +3837,11 @@ mod tests {
     use super::*;
 
     fn p(s: &str) -> Vec<Decl> {
-        parse_str(s).unwrap()
+        parse_str_legacy_v018(s).unwrap()
     }
 
     fn p_err(s: &str) -> ParseError {
-        parse_str(s).unwrap_err()
+        parse_str_legacy_v018(s).unwrap_err()
     }
 
     // Convenience: parse a single def, extract body expression.
@@ -3388,8 +4389,9 @@ mod tests {
     // ===== chelis#706: bounded block tail + bare-statement diagnostic =====
     //
     // The tail expression, like a binding value, is Sep-bounded: a
-    // top-level newline/`;` ends it unless the next line begins `|>` or
-    // the break is inside ()/[]/{}. A second top-level expression after
+    // top-level newline/`;` ends it unless the next line begins a
+    // continuation (`|>`, `then`, `else`; spec/02 §P12) or the break is
+    // inside ()/[]/{}. A second top-level expression after
     // the tail is rejected (previously it silently cross-newline
     // juxtaposed into an application).
 
@@ -3652,6 +4654,261 @@ mod tests {
     }
 
     #[test]
+    fn block_semicolon_separator_is_rejected_without_offering_semicolon() {
+        // Negative #14 (chelis#1267): canonical Surf v0.19 rejects `;` as a
+        // block separator (spec/02-surf-syntax.md §P5, §P12), so the
+        // diagnostic must not list `;` among the acceptable spellings. The
+        // issue's reproducer spelled the values `cast(1, int64)`; the suffix
+        // form fails identically and keeps the fixture free of type sugar.
+        let src = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }";
+        let err = parse_str(src).unwrap_err();
+        let offset = match err {
+            ParseError::SemicolonBlockSeparator { offset } => offset,
+            ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
+        };
+        // Points at the first `;`, the one just after `1i64`.
+        assert_eq!(offset, src.find(';').unwrap());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expected a newline separator, found `;`"),
+            "message must name the newline as the expectation: {msg}"
+        );
+        assert!(
+            msg.contains("not a block separator in canonical Surf v0.19"),
+            "message must state the v0.19 rule: {msg}"
+        );
+        assert!(
+            msg.contains("chelis migrate surf --from 0.18"),
+            "message must name the migrator: {msg}"
+        );
+        // The contradiction the issue reported: the old wording offered `;`
+        // as one of two acceptable separators while refusing that exact token.
+        assert!(
+            !msg.contains("separator (`;`"),
+            "message must not offer `;` as an acceptable separator: {msg}"
+        );
+    }
+
+    #[test]
+    fn block_missing_separator_non_semicolon_keeps_generic_message() {
+        // Negative #15 (chelis#1267 parity): a stray non-`;` token at a block
+        // separator boundary keeps the generic separator diagnostic rather
+        // than being rewritten into a `;` lecture. In canonical mode the
+        // generic wording names only the newline, because that is the only
+        // separator the grammar accepts here.
+        let src = "def f() -> int64 = { a = 1i64";
+        let err = parse_str(src).unwrap_err();
+        match err {
+            ParseError::Expected {
+                ref expected,
+                ref found,
+                offset,
+            } => {
+                assert_eq!(expected, "separator (newline)", "got {err:?}");
+                assert_eq!(found, "Eof", "got {err:?}");
+                // Deliberate: the synthetic Eof token carries the opening
+                // `{`'s offset, so an unterminated block points at the
+                // construct that was never closed rather than at end of
+                // input. Pinned so a future offset change is a decision.
+                assert_eq!(offset, src.find('{').unwrap(), "got {err:?}");
+            }
+            ref other => panic!("expected generic separator error, got {other:?}"),
+        }
+    }
+
+    /// Every canonical `;`-in-a-block shape must reach the one rule message,
+    /// pointing at the `;` the reader actually typed.
+    fn assert_semicolon_rule_at(src: &str, semicolon_index: usize) {
+        let err = parse_str(src).unwrap_err();
+        let offset = match err {
+            ParseError::SemicolonBlockSeparator { offset } => offset,
+            ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
+        };
+        let expected = src
+            .match_indices(';')
+            .nth(semicolon_index)
+            .expect("fixture has that many semicolons")
+            .0;
+        assert_eq!(offset, expected, "wrong `;` blamed: {err}");
+    }
+
+    #[test]
+    fn block_trailing_semicolon_after_tail_names_the_semicolon_rule() {
+        // Negative #17 (chelis#1267): spec/02-surf-syntax.md §P5 rejects a
+        // trailing `;` by name. It used to report "expression statement must
+        // be bound ... move it to tail position", which is false twice for
+        // this input: `add(a, 1i64)` IS the tail, and nothing is unbound.
+        // Taking that advice (`_ = add(a, 1i64);`) just landed on the `;`.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_on_its_own_line_after_tail_names_the_semicolon_rule() {
+        // Negative #18: same defect with the `;` on its own line, where the
+        // preceding newline is consumed first and the old code still fell
+        // through to the bare-statement message.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n  ;\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn canonical_two_statements_separated_by_semicolon_report_the_semicolon() {
+        // Negative #19: `{ f(x); g(y) }` has two faults at once, a bare
+        // non-tail statement and a `;`. Canonical mode now reports the `;`,
+        // which is the lexically first one and the only one whose remedy is
+        // not itself rejected: `_ = f(x); g(y)` still fails on the `;`.
+        //
+        // What makes this a reclassification rather than a lost diagnostic:
+        // v0.18 reads that `;` as a real separator, so the bare statement is
+        // the genuine fault there and #706's message still fires. That half
+        // is already pinned by `block_bare_second_statement_semicolon_is_rejected`
+        // on byte-identical source, so it is not restated here.
+        assert_semicolon_rule_at("def f(x, y) -> unit = { f(x); g(y) }\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_between_binding_eq_and_value_names_the_semicolon_rule() {
+        // Negative #23 (chelis#1267): the fourth separator position, in
+        // `parse_block_let_binding` between `=` and the value. `a = ; 1i64`
+        // is a legal v0.18 spelling the migrator rewrites to `a = 1i64`, so
+        // migrated-era source reaches it. Unguarded it left the value's token
+        // range empty and reported an offsetless "unexpected end of input".
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_on_its_own_line_before_a_binding_value_names_the_semicolon_rule() {
+        // Negative #24: the same position reached across newlines, where the
+        // separator count is already nonzero.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a =\n  ;\n  1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_after_a_typed_binder_names_the_semicolon_rule() {
+        // Negative #25: the type annotation moves the `=` but not the rule.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a: int64 = ;1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn legacy_v018_still_parses_a_semicolon_before_a_binding_value() {
+        // Positive parity for #23: `a = ; 1i64` is the v0.18 spelling the
+        // migrator accepts and rewrites, so the guard must stay canonical
+        // only or the migration path stops working on real source.
+        let decls = parse_str_legacy_v018("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n")
+            .expect("v0.18 accepts a `;` before a binding value");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn block_semicolon_after_a_newline_between_bindings_names_the_semicolon_rule() {
+        // Negative #20 (chelis#1267): when a newline precedes the `;` the
+        // separator count is already nonzero, so the between-bindings arm was
+        // skipped, `is_short_block_binding_start` was false at `;`, and the
+        // tail parse got an empty range. That surfaced as a bare "unexpected
+        // end of input" with no offset at all, which the LSP then rendered
+        // past the end of the file.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn block_semicolon_leading_a_binding_line_names_the_semicolon_rule() {
+        // Negative #21: the same shape with the next binding on the `;` line.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  ; b = 2i64\n  add(a, b)\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn block_containing_only_a_semicolon_names_the_semicolon_rule() {
+        // Negative #22: `;` at the leading separator position, before any
+        // binding exists. Also previously "unexpected end of input".
+        assert_semicolon_rule_at("def f() -> int64 = { ; }\n", 0);
+    }
+
+    #[test]
+    fn canonical_newline_separated_block_parses() {
+        // Positive control: the whole pre-existing block bank runs through
+        // the v0.18 helpers, so nothing pinned that a canonical block parses
+        // at all. Without this, every negative above could pass on a parser
+        // that rejected every block.
+        let decls = parse_str("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
+            .expect("a newline-separated canonical block parses");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn the_migrator_hint_in_the_semicolon_message_is_true() {
+        // The message tells the reader to run `chelis migrate surf --from
+        // 0.18`. Nothing pinned that the migrator actually resolves the shape
+        // being diagnosed, so a migrator regression would silently turn this
+        // diagnostic into the chelis#1267 defect reborn inside its own fix:
+        // advice that does not work. `migrate_source_v018` is the library
+        // path behind that CLI command (`cmd_migrate` in chelis-cli).
+        let repro = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }\n";
+        parse_str(repro).expect_err("the reproducer must not parse canonically");
+        let migrated = crate::format::migrate_source_v018(repro)
+            .expect("the migrator rewrites the `;` block the diagnostic points at");
+        assert!(
+            !migrated.contains(';'),
+            "migration should remove the block separators: {migrated}"
+        );
+        parse_str(&migrated).expect("migrator output must parse under canonical Surf v0.19");
+    }
+
+    #[test]
+    fn legacy_v018_missing_separator_still_offers_semicolon() {
+        // Parity for #15: the generic wording is mode-dependent because the
+        // two grammars accept different separators. `;` is genuinely one of
+        // v0.18's, so dropping it from the legacy message would be the
+        // chelis#1267 defect pointed the other way.
+        let err = parse_str_legacy_v018("def f() -> int64 = { a = 1i64").unwrap_err();
+        match err {
+            ParseError::Expected {
+                ref expected,
+                ref found,
+                ..
+            } => {
+                assert_eq!(expected, "separator (`;` or newline)", "got {err:?}");
+                assert_eq!(found, "Eof", "got {err:?}");
+            }
+            ref other => panic!("expected generic separator error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_v018_block_still_accepts_semicolon_separators() {
+        // Positive parity for #14: the v0.18 compatibility grammar behind
+        // `chelis migrate surf --from 0.18` still reads `;` as a block
+        // separator, so the new wording is scoped to canonical Surf v0.19
+        // rather than claiming `;` is never a block separator.
+        let decls = parse_str_legacy_v018("def main() -> int64 = { a = 1i64; add(a, 2i64) }")
+            .expect("v0.18 blocks accept `;` separators");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn par_separator_message_still_names_semicolon() {
+        // Negative control for #14: `par` and `do` genuinely require `;`
+        // (spec/02-surf-syntax.md §P5), so their separator diagnostic must
+        // keep offering it. Naming the newline there would be the same
+        // defect in the opposite direction.
+        let src = "def f(x, y) -> unit = par {\n    g(x)\n    h(y)\n}";
+        let err = parse_str(src).unwrap_err();
+        match err {
+            ParseError::Expected { ref expected, .. } => {
+                assert_eq!(expected, "separator (`;`)", "got {err:?}");
+            }
+            ref other => panic!("expected par separator error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn with_seed_handler_expr() {
         let e = body("def f() = with seed(42) { dropout(x, 0.5) }");
         match e {
@@ -3661,6 +4918,16 @@ mod tests {
             }
             _ => panic!("expected WithSeed, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn int64_minimum_keeps_the_normative_unary_minus_ast() {
+        let expression = body("def result() = -9223372036854775808i64");
+
+        assert!(
+            matches!(expression, Expr::Unary(UnaryOp::Neg, _, _)),
+            "spec/02 P10 requires every negative literal to parse as unary minus: {expression:?}"
+        );
     }
 
     #[test]
@@ -3943,7 +5210,7 @@ mod tests {
     fn cast_expr() {
         let e = body("x = cast(y, f64)");
         match e {
-            Expr::Cast(_, prec, _) => assert_eq!(prec, "f64"),
+            Expr::Cast(_, prec, _, _) => assert_eq!(prec, "f64"),
             _ => panic!("expected Cast, got {e:?}"),
         }
     }
@@ -4169,21 +5436,16 @@ mod tests {
     }
 
     #[test]
-    fn juxtaposition_two_args() {
-        // f x y → Apply(Apply(f, [x]), [y])
+    fn juxtaposition_two_args_flattens_during_v018_migration() {
+        // The legacy ungrouped chain was the v0.18 spelling of a flat call.
+        // Canonical v0.19 prints the resulting node as f(x, y).
         let e = body("x = f x y");
         match &e {
-            Expr::Apply(inner, args2, _) => {
-                assert_eq!(args2.len(), 1);
-                assert!(matches!(&args2[0], Expr::Var(n, _) if n == "y"));
-                match inner.as_ref() {
-                    Expr::Apply(func, args1, _) => {
-                        assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
-                        assert_eq!(args1.len(), 1);
-                        assert!(matches!(&args1[0], Expr::Var(n, _) if n == "x"));
-                    }
-                    _ => panic!("expected inner Apply"),
-                }
+            Expr::Apply(func, args, _) => {
+                assert!(matches!(func.as_ref(), Expr::Var(n, _) if n == "f"));
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], Expr::Var(n, _) if n == "x"));
+                assert!(matches!(&args[1], Expr::Var(n, _) if n == "y"));
             }
             _ => panic!("expected Apply, got {e:?}"),
         }
@@ -4842,6 +6104,196 @@ mod tests {
             },
             other => panic!("expected Apply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn block_if_with_else_on_a_later_line_parses() {
+        // chelis#849: inside a `{ }` block, `block_expr_end` ended the
+        // statement at the newline after the `then` branch, so `parse_if`
+        // reached Eof before its mandatory `else` and reported
+        // `expected Else, found Eof`. The `else` is present -- only its line
+        // placement differs. `|>` already had this continuation carve-out.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n  else lte(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "block + newline before `else` must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    #[test]
+    fn block_if_else_on_one_line_still_parses() {
+        // Positive control for the sibling form, so the fix cannot be a
+        // regression that only moves which layout works.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true else lte(a, b)\n}";
+        assert!(parse_str(src).is_ok(), "same-line form must keep parsing");
+    }
+
+    #[test]
+    fn block_if_with_a_missing_else_is_still_rejected() {
+        // Negative parity: the continuation must not make `else` optional.
+        // Pin the REASON, not merely that something failed -- an unrelated
+        // rejection would otherwise keep this green (review of PR #1369).
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n}";
+        match parse_str(src) {
+            Err(ParseError::Expected {
+                expected, found, ..
+            }) => {
+                assert_eq!(expected, "Else", "the missing `else` is the reason");
+                assert_eq!(found, "Eof", "the block ended before the `else`");
+            }
+            other => panic!("expected a missing-`else` rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_if_with_a_missing_then_is_still_rejected() {
+        // The `then` half of the same parity: admitting `then` as a
+        // continuation must not make it optional either.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n}";
+        match parse_str(src) {
+            Err(ParseError::Expected { expected, .. }) => {
+                assert_eq!(expected, "Then", "the missing `then` is the reason");
+            }
+            other => panic!("expected a missing-`then` rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_if_with_then_on_a_later_line_parses() {
+        // chelis#849 review: the same defect exists one token earlier. A
+        // newline between the condition and `then` failed with
+        // `expected Then, found Eof` for the identical reason.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n  then true\n  else lte(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a newline before `then` must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    #[test]
+    fn a_multiline_else_if_chain_parses() {
+        // The shape that motivated admitting `then`: each arm of a chained
+        // `else if` puts its own `then` and `else` on later lines.
+        let src = "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else if lt(a, b)\n  then b\n  else mul(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a multiline `else if` chain must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    /// chelis#849 review: the corrected spec/02 P12 states that a
+    /// declaration body and a property predicate bound PERMISSIVELY -- they
+    /// end at a declaration start (and, for a predicate, at `with`), so any
+    /// other token continues them across a top-level newline.
+    ///
+    /// The earlier revision of P12 claimed the closed `|>`/`then`/`else` set
+    /// governed declaration bodies too, which is false: a newline-led `with`
+    /// continues one. Asserting it here keeps the numbered spec honest, and
+    /// keeps this PR from silently narrowing a boundary it does not own.
+    #[test]
+    fn the_permissive_boundaries_are_not_governed_by_the_closed_set() {
+        let declaration_body = concat!(
+            "type Point = | Point { x: f32 }\n",
+            "def update(p: Point) -> Point = p\n",
+            "  with { x: 1.0f32 }\n",
+        );
+        assert!(
+            parse_str(declaration_body).is_ok(),
+            "a newline-led `with` must continue a declaration body: {:?}",
+            parse_str(declaration_body).err()
+        );
+
+        // The `where` precondition routes through `property_expr_end`, the
+        // third boundary rule. It is not the property-OPTION path covered
+        // above; confusing the two is what left that consumer untested.
+        let property_predicate =
+            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true";
+        assert!(
+            parse_str(property_predicate).is_ok(),
+            "a split `if` must survive a property predicate: {:?}",
+            parse_str(property_predicate).err()
+        );
+    }
+
+    /// chelis#849 review: `block_expr_end` is shared by seven call sites
+    /// across five constructs -- block bindings, block tails, `do` items,
+    /// `par` items, and property option values. The continuation rule applies
+    /// to all of them, so each is covered rather than assumed.
+    ///
+    /// The property-option case reaches `block_expr_end` through
+    /// `parse_property_option`, which needs a real `with <name> = <expr>`
+    /// option. A `where` precondition looks similar and is NOT this path: it
+    /// routes through `property_expr_end`, a different and permissive rule.
+    /// The `where` form is covered separately below, precisely because
+    /// mistaking one for the other is what left this consumer untested.
+    #[test]
+    fn the_continuation_rule_holds_for_every_block_expr_end_consumer() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "block binding value",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  d = if c\n  then a\n  else b\n  d\n}",
+            ),
+            (
+                "block tail",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else b\n}",
+            ),
+            (
+                "do item",
+                "def f(a: f32, b: f32) -> f32 ! { IO } = {\n  c = neq(a, a)\n  g = do {\n    if c\n    then print(\"y\")\n    else print(\"n\")\n  }\n  a\n}",
+            ),
+            (
+                "property option value",
+                "@property p forall(x: f32): true\n  with tolerance = if lte(x, 1.0f32)\n  then 1e-6f32\n  else 1e-3f32",
+            ),
+            (
+                "par item",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  g = par {\n    if c\n    then a\n    else b\n  }\n  g\n}",
+            ),
+        ];
+        for (label, src) in cases {
+            assert!(
+                parse_str(src).is_ok(),
+                "{label}: the continuation rule must hold here too: {:?}",
+                parse_str(src).err()
+            );
+        }
+    }
+
+    #[test]
+    fn block_expression_continuation_set_is_exact() {
+        // P12 selects exactly three safe continuations. Tokens that can head
+        // an expression stay out, and so do non-selected infix operators: the
+        // inability to begin an expression is necessary but not sufficient.
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Pipe));
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Then));
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Else));
+        for excluded in [
+            TokenKind::With,
+            TokenKind::Match,
+            TokenKind::If,
+            TokenKind::Plus,
+            TokenKind::Star,
+            TokenKind::EqEq,
+            TokenKind::AmpAmp,
+            TokenKind::PipePipe,
+        ] {
+            assert!(!Parser::is_block_expression_continuation(&excluded));
+        }
+    }
+
+    #[test]
+    fn block_statement_after_an_if_else_is_not_swallowed() {
+        // The continuation extends the statement only across the newline that
+        // precedes `else`. A following binding must remain its own statement.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  d = if c then true\n  else lte(a, b)\n  d\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a statement after the if/else must still parse: {:?}",
+            parse_str(src).err()
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //!
 //! Fix (`extract_reshape_dim_list` in `chelis-ir/src/lower.rs`): a
 //! `shape(operand, axis)`-derived reshape target dim (directly or through the
-//! `let k = shape(x, 0); reshape(&x, [k, 1])` indirection) is resolved to the
+//! `let k = shape(x, 0); reshape(&x, [k, 1i64])` indirection) is resolved to the
 //! operand's declaring source dim and recorded as a `shape_dep` — folding to a
 //! concrete `Lit` when the operand axis is static and to a Load-carried
 //! `Named` when symbolic. Either way the dim traces to a declaring input, so
@@ -63,7 +63,12 @@ fn eval_scalar(forward_body: &str, input_literal: &str) -> f64 {
         .trim()
         .lines()
         .last()
-        .and_then(|l| l.trim().parse::<f64>().ok())
+        .and_then(|l| {
+            let trimmed = l.trim();
+            // [05-OBS-6]: strip `name = ` prefix if present.
+            let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+            value_str.parse::<f64>().ok()
+        })
         .unwrap_or_else(|| panic!("no scalar in forward output: {stdout}"))
 }
 
@@ -128,12 +133,12 @@ fn finite_difference(forward_body: &str, base: &[f64]) -> Vec<f64> {
     fd
 }
 
-// Linear loss: sum(reshape(x, [shape(x,0), 1])) = sum(x). grad == 1 everywhere.
+// Linear loss: sum(reshape(x, [shape(x,0), 1i64])) = sum(x). grad == 1 everywhere.
 const LINEAR_BODY: &str = "  k = cast(shape(x, cast(0, int32)), int64)\n\
   r = reshape(&x, [k, cast(1, int64)])\n\
   sum(sum(r, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
 
-// Nonlinear loss: sum(square(reshape(x, [shape(x,0), 1]))) = sum(x^2).
+// Nonlinear loss: sum(square(reshape(x, [shape(x,0), 1i64]))) = sum(x^2).
 // grad == 2 x.
 const NONLINEAR_BODY: &str = "  k = cast(shape(x, cast(0, int32)), int64)\n\
   r = reshape(&x, [k, cast(1, int64)])\n\
@@ -270,13 +275,19 @@ out = grad(f)\n";
 #include "chelis_runtime.h"
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
-    int shape[1] = {4};
-    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
+    int64_t shape[1] = {4};
+    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    memcpy(x->data, xd, sizeof(xd));
+    chelis_tensor_write* x_guard = chelis_tensor_begin_write(x);
+    chelis_write_view x_view = chelis_tensor_write_view(x_guard);
+    memcpy(x_view.data, xd, sizeof(xd));
+    chelis_tensor_end_write(x_guard);
     chelis_tensor* g = out(x);
-    if (g->size != 4) { printf("FAIL_SIZE %d\n", g->size); return 1; }
-    for (int i = 0; i < 4; i++) printf("%.6f\n", g->data[i]);
+    chelis_read_view g_view = chelis_tensor_read_view(g);
+    if (g_view.count != 4) { printf("FAIL_SIZE %lld\n", (long long)g_view.count); return 1; }
+    for (int i = 0; i < 4; i++) printf("%.6f\n", ((const float *)g_view.data)[i]);
+    chelis_tensor_release(g);
+    chelis_tensor_release(x);
     return 0;
 }
 "#;

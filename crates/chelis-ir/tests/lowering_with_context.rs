@@ -9,7 +9,7 @@
 //! 4. Node-ID disjointness — library-max + 1 ≤ min(new-code-node IDs).
 //! 5. Library DAG is not mutated (`&context_dag` is `&` only).
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
 use chelis_ir::dag::{Dag, NodeId};
@@ -54,7 +54,7 @@ fn check_monolithic(combined_src: &str) -> CheckedProgram {
     check_linearity(&checked).expect("monolithic linearity clean")
 }
 
-fn eval_dag_root_values(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+fn eval_dag_root_values(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let values = eval_tensor_roots_with(dag, &roots, |name| inputs.get(name).cloned())
         .expect("eval succeeds");
@@ -71,9 +71,9 @@ fn eval_dag_root_values(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec
 
 fn eval_named_roots(
     dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
+    inputs: &UnordMap<String, TensorValue>,
     interesting: &[&str],
-) -> HashMap<String, TensorValue> {
+) -> UnordMap<String, TensorValue> {
     // Collect the (single) root index per requested name. For a library
     // `(def {} foo body)` the root is the body's NodeId. For tuple-decomposed
     // defs the roots are Store nodes whose `name` is `foo.N`. We iterate roots
@@ -86,7 +86,7 @@ fn eval_named_roots(
     let values = eval_tensor_roots_with(dag, roots, |name| inputs.get(name).cloned())
         .expect("eval succeeds");
 
-    let mut out = HashMap::new();
+    let mut out = UnordMap::new();
     for &root in roots {
         if let Some(node) = dag.get(root)
             && let RiscOp::Store { name } = &node.op
@@ -183,14 +183,14 @@ fn parity_monolithic_vs_composed_for_library_snippet_pairs() {
         // Monolithic baseline.
         let mono_checked = check_monolithic(&combined_src);
         let mono_dag = lower_program(&mono_checked);
-        let mono_roots = eval_dag_root_values(&mono_dag, &HashMap::new());
+        let mono_roots = eval_dag_root_values(&mono_dag, &UnordMap::new());
 
         // Composed.
         let (_lib_exprs, ctx, lib_checked) = check_lib(case.library_src);
         let library: LoweredLibrary = lower_program_to_library(&lib_checked);
         let new_checked = check_with_ctx(&ctx, case.new_src);
         let composed_dag = lower_program_with_context(&library, &new_checked);
-        let composed_roots = eval_dag_root_values(&composed_dag, &HashMap::new());
+        let composed_roots = eval_dag_root_values(&composed_dag, &UnordMap::new());
 
         // The new-code root must be present in BOTH and agree.
         let mono_root = mono_roots
@@ -207,15 +207,19 @@ fn parity_monolithic_vs_composed_for_library_snippet_pairs() {
             case.label,
         );
         assert_eq!(
-            mono_root.data, composed_root.data,
+            mono_root.to_f64_lossy_vec(),
+            composed_root.to_f64_lossy_vec(),
             "[{}] root value must agree byte-for-byte: mono={:?} composed={:?}",
-            case.label, mono_root.data, composed_root.data,
+            case.label,
+            mono_root.to_f64_lossy_vec(),
+            composed_root.to_f64_lossy_vec(),
         );
         // Spot-check the actual numeric expectation so that an
         // evaluator-side bug masking BOTH paths into wrongness doesn't
         // slip past.
         assert_eq!(
-            composed_root.data, case.expected,
+            composed_root.to_f64_lossy_vec(),
+            case.expected,
             "[{}] composed root value must equal the spot-checked expectation",
             case.label,
         );
@@ -244,7 +248,7 @@ fn node_id_disjointness_new_code_above_library_max() {
     let (_, ctx, lib_checked) = check_lib(library_src);
     let library = lower_program_to_library(&lib_checked);
     let library_max_id = library
-        .dag
+        .dag()
         .nodes()
         .iter()
         .map(|node| node.id.0)
@@ -255,7 +259,7 @@ fn node_id_disjointness_new_code_above_library_max() {
     let composed_dag = lower_program_with_context(&library, &new_checked);
 
     // All library NodeIds appear unchanged in the composed DAG.
-    for lib_node in library.dag.nodes() {
+    for lib_node in library.dag().nodes() {
         let in_composed = composed_dag.get(lib_node.id).expect("library node present");
         assert_eq!(
             in_composed.op, lib_node.op,
@@ -286,7 +290,7 @@ fn node_id_disjointness_new_code_above_library_max() {
     let new_code_min_id = composed_dag
         .nodes()
         .iter()
-        .skip(library.dag.len())
+        .skip(library.dag().len())
         .map(|node| node.id.0)
         .min()
         .expect("composed has new-code nodes beyond library");
@@ -317,10 +321,10 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     let (_, ctx, lib_checked) = check_lib(library_src);
     let library = lower_program_to_library(&lib_checked);
 
-    let library_len_before = library.dag.len();
-    let library_roots_before = library.dag.roots().to_vec();
+    let library_len_before = library.dag().len();
+    let library_roots_before = library.dag().roots().to_vec();
     let library_node_ops_before: Vec<_> = library
-        .dag
+        .dag()
         .nodes()
         .iter()
         .map(|n| (n.id, n.op.clone(), n.inputs.clone()))
@@ -330,10 +334,10 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     let _composed_dag = lower_program_with_context(&library, &new_checked);
 
     // Library carrier must be untouched after composition.
-    assert_eq!(library.dag.len(), library_len_before);
-    assert_eq!(library.dag.roots(), &library_roots_before[..]);
+    assert_eq!(library.dag().len(), library_len_before);
+    assert_eq!(library.dag().roots(), &library_roots_before[..]);
     let after: Vec<_> = library
-        .dag
+        .dag()
         .nodes()
         .iter()
         .map(|n| (n.id, n.op.clone(), n.inputs.clone()))
@@ -343,11 +347,11 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     // And the composed call is repeatable (no hidden state) — running again
     // must produce the same result.
     let again = lower_program_with_context(&library, &new_checked);
-    let evaled_a = eval_dag_root_values(&_composed_dag, &HashMap::new());
-    let evaled_b = eval_dag_root_values(&again, &HashMap::new());
+    let evaled_a = eval_dag_root_values(&_composed_dag, &UnordMap::new());
+    let evaled_b = eval_dag_root_values(&again, &UnordMap::new());
     assert_eq!(
-        evaled_a.last().map(|v| v.data.clone()),
-        evaled_b.last().map(|v| v.data.clone()),
+        evaled_a.last().map(|v| v.to_f64_lossy_vec().clone()),
+        evaled_b.last().map(|v| v.to_f64_lossy_vec().clone()),
         "repeated composed lowering must be deterministic",
     );
 }
@@ -378,7 +382,7 @@ fn library_value_def_is_referenced_not_duplicated() {
     let (_, ctx, lib_checked) = check_lib(library_src);
     let library = lower_program_to_library(&lib_checked);
     let lib_v_id = *library
-        .symbol_table
+        .symbol_table()
         .get("lib_v")
         .expect("library symbol_table holds top-level def `lib_v`");
 
@@ -387,7 +391,7 @@ fn library_value_def_is_referenced_not_duplicated() {
 
     // `lib_v` occupies the same NodeId in the composed DAG as in the library.
     let lib_v_in_composed = composed_dag.get(lib_v_id).expect("lib_v present");
-    let lib_v_in_library = library.dag.get(lib_v_id).expect("lib_v in library");
+    let lib_v_in_library = library.dag().get(lib_v_id).expect("lib_v in library");
     assert_eq!(lib_v_in_composed.op, lib_v_in_library.op);
 
     // At least one new-code node has `lib_v_id` as an input — i.e. the
@@ -396,7 +400,7 @@ fn library_value_def_is_referenced_not_duplicated() {
     let referenced = composed_dag
         .nodes()
         .iter()
-        .skip(library.dag.len())
+        .skip(library.dag().len())
         .any(|node| node.inputs.contains(&lib_v_id));
     assert!(
         referenced,
@@ -405,7 +409,7 @@ fn library_value_def_is_referenced_not_duplicated() {
         composed_dag
             .nodes()
             .iter()
-            .skip(library.dag.len())
+            .skip(library.dag().len())
             .map(|n| (n.id, n.op.clone(), n.inputs.clone()))
             .collect::<Vec<_>>(),
     );
@@ -431,9 +435,9 @@ fn lowered_library_dag_matches_lower_program() {
     let (_, _, lib_checked) = check_lib(library_src);
     let dag_a = lower_program(&lib_checked);
     let library = lower_program_to_library(&lib_checked);
-    assert_eq!(dag_a.len(), library.dag.len());
-    assert_eq!(dag_a.roots(), library.dag.roots());
-    for (na, nb) in dag_a.nodes().iter().zip(library.dag.nodes().iter()) {
+    assert_eq!(dag_a.len(), library.dag().len());
+    assert_eq!(dag_a.roots(), library.dag().roots());
+    for (na, nb) in dag_a.nodes().iter().zip(library.dag().nodes().iter()) {
         assert_eq!(na.id, nb.id);
         assert_eq!(na.op, nb.op);
         assert_eq!(na.inputs, nb.inputs);

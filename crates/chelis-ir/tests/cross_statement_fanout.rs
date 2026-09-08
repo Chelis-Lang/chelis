@@ -32,7 +32,7 @@
 //! rejected as `UseAfterConsume`. See
 //! `docs/investigations/var_rhs_aliased_fanout_v2_diagnosis.md`.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::analysis::analyze_function_copy_cost;
 use chelis_ir::dag::{Dag, NodeId, RiscOp};
@@ -86,17 +86,14 @@ fn copy_count(dag: &Dag, root: NodeId) -> usize {
 
 /// Convenience: lift a 3-element f64 list into a `TensorValue`.
 fn tv_3(data: [f64; 3]) -> TensorValue {
-    TensorValue {
-        data: data.to_vec(),
-        shape: vec![3],
-    }
+    TensorValue::from_vec(vec![3], data.to_vec())
 }
 
 /// Run the forward DAG for `fanout(input_name = value)` and return the
 /// resulting tensor. `input_name` is the surf-level parameter name (e.g.
 /// `"x"` or `"w"`), which the lowering pass uses as the `Load` op's name.
 fn eval_fanout(dag: &Dag, root: NodeId, input_name: &str, input_value: TensorValue) -> TensorValue {
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(input_name.to_string(), input_value);
     let values =
         eval_tensor_with(dag, |name| inputs.get(name).cloned()).expect("forward eval succeeds");
@@ -137,9 +134,9 @@ def fanout(w: tensor[3, f32]) -> tensor[3, f32] = {
     let expected = [2.0_f64, 4.0, 6.0];
     for (i, want) in expected.iter().enumerate() {
         assert!(
-            (out.data[i] - *want).abs() < 1e-6,
+            (out.to_f64_lossy_vec()[i] - *want).abs() < 1e-6,
             "control forward[{i}]: expected {want}, got {}",
-            out.data[i]
+            out.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -197,12 +194,12 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_fwd = eval_fanout(&dag, root, "x", x.clone());
     let workaround_fwd = eval_fanout(&workaround_dag, workaround_root, "x", x.clone());
     assert_eq!(target_fwd.shape, workaround_fwd.shape);
-    for i in 0..target_fwd.data.len() {
+    for i in 0..target_fwd.len() {
         assert!(
-            (target_fwd.data[i] - workaround_fwd.data[i]).abs() < 1e-6,
+            (target_fwd.to_f64_lossy_vec()[i] - workaround_fwd.to_f64_lossy_vec()[i]).abs() < 1e-6,
             "forward parity fail at [{i}]: target={} workaround={}",
-            target_fwd.data[i],
-            workaround_fwd.data[i]
+            target_fwd.to_f64_lossy_vec()[i],
+            workaround_fwd.to_f64_lossy_vec()[i]
         );
     }
 
@@ -225,7 +222,7 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_grad_node = target_grad.grad_nodes[&target_x_load];
     let workaround_grad_node = workaround_grad.grad_nodes[&workaround_x_load];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert("x".to_string(), x);
     let target_vals = eval_tensor_with(&target_grad.dag, |n| inputs.get(n).cloned())
         .expect("target backward eval");
@@ -235,12 +232,12 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_dx = &target_vals[&target_grad_node];
     let workaround_dx = &workaround_vals[&workaround_grad_node];
     assert_eq!(target_dx.shape, workaround_dx.shape);
-    for i in 0..target_dx.data.len() {
+    for i in 0..target_dx.len() {
         assert!(
-            (target_dx.data[i] - workaround_dx.data[i]).abs() < 1e-6,
+            (target_dx.to_f64_lossy_vec()[i] - workaround_dx.to_f64_lossy_vec()[i]).abs() < 1e-6,
             "AD parity fail at [{i}]: target={} workaround={}",
-            target_dx.data[i],
-            workaround_dx.data[i]
+            target_dx.to_f64_lossy_vec()[i],
+            workaround_dx.to_f64_lossy_vec()[i]
         );
     }
 }
@@ -265,7 +262,7 @@ fn top_level_no_module_var_rhs_aliased_fan_out_passes_linearity() {
     // `UseAfterConsume`.
     //
     // After the fix, `check_top_level` recognizes the var-body
-    // `def name = x` shape as an aliasing binding and uses a
+    // `def name() = x` shape as an aliasing binding and uses a
     // `"binding `name` at offset N"` consume site, mirroring
     // `check_let`. The borrow-read path then routes through the
     // existing PR #29 tolerance and the program passes linearity.
@@ -356,12 +353,12 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_fwd = eval_fanout(&dag, root, "x", x.clone());
     let workaround_fwd = eval_fanout(&workaround_dag, workaround_root, "x", x.clone());
     assert_eq!(target_fwd.shape, workaround_fwd.shape);
-    for i in 0..target_fwd.data.len() {
+    for i in 0..target_fwd.len() {
         assert!(
-            (target_fwd.data[i] - workaround_fwd.data[i]).abs() < 1e-6,
+            (target_fwd.to_f64_lossy_vec()[i] - workaround_fwd.to_f64_lossy_vec()[i]).abs() < 1e-6,
             "forward parity fail at [{i}]: target={} workaround={}",
-            target_fwd.data[i],
-            workaround_fwd.data[i]
+            target_fwd.to_f64_lossy_vec()[i],
+            workaround_fwd.to_f64_lossy_vec()[i]
         );
     }
 
@@ -382,7 +379,7 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_grad_node = target_grad.grad_nodes[&target_x_load];
     let workaround_grad_node = workaround_grad.grad_nodes[&workaround_x_load];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert("x".to_string(), x);
     let target_vals = eval_tensor_with(&target_grad.dag, |n| inputs.get(n).cloned())
         .expect("target backward eval");
@@ -392,12 +389,12 @@ def fanout(x: tensor[3, f32]) -> tensor[3, f32] = {
     let target_dx = &target_vals[&target_grad_node];
     let workaround_dx = &workaround_vals[&workaround_grad_node];
     assert_eq!(target_dx.shape, workaround_dx.shape);
-    for i in 0..target_dx.data.len() {
+    for i in 0..target_dx.len() {
         assert!(
-            (target_dx.data[i] - workaround_dx.data[i]).abs() < 1e-6,
+            (target_dx.to_f64_lossy_vec()[i] - workaround_dx.to_f64_lossy_vec()[i]).abs() < 1e-6,
             "AD parity fail at [{i}]: target={} workaround={}",
-            target_dx.data[i],
-            workaround_dx.data[i]
+            target_dx.to_f64_lossy_vec()[i],
+            workaround_dx.to_f64_lossy_vec()[i]
         );
     }
 }

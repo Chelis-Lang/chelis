@@ -8,6 +8,29 @@ repository.workspace = true
 [lib]
 crate-type = ["staticlib", "rlib"]
 
+[features]
+# chelis#1286 Phase 0: private, test-only allocation telemetry. Normal
+# runtime artifacts do not enable this feature and retain the published ABI.
+ownership-ledger = ["dep:chelis-unord"]
+
 [dependencies]
+chelis-unord = { workspace = true, optional = true }
+chelis-vocab.workspace = true
+# chelis#732 Phase 2: exact f16/bf16 widening and correctly rounded
+# narrowing for the shortest-round-trip formatter and the per-dtype
+# to_list / tensor-render reads. Same crate the checker-side reference
+# formatter uses, so the two lanes share one narrowing definition.
+half = { workspace = true }
 libc.workspace = true
 memmap2 = "0.9"
+num-bigint = "0.4"
+
+[dev-dependencies]
+# Test-only: the byte-equality lock against the reference renderer
+# (`chelis_types::observation::format_element`). The production staticlib
+# keeps zero checker dependencies; this edge exists only for
+# `tests/format_shortest_matches_reference.rs`.
+chelis-types = { workspace = true }
+
+[lints]
+workspace = true

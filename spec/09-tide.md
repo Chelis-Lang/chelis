@@ -127,6 +127,17 @@ proof. Admission policies that quote the composed opaque-invariant
 guarantee quote this gap. See `spec/design/chelis_property_spec.md`
 (Derived obligation records / Tier B SMT note) for the record schema.
 
+**Induction is green only after two real discharges.** For the conservative
+Surf recurrence shape specified in `design/chelis_property_spec.md`,
+`tier:"induction-only"` dispatches a concrete base and symbolic step to the
+same sound SMT engine used by the CLI. Tide reports `proof_tier:"induction"`,
+`arith_model:"real"`, and the two case statuses in `induction`. Unsupported,
+missing, vacuous, timed-out, sampled, or `ASSUMED` evidence cannot become a
+proof. The legacy caller-classified Tier-D scaffold remains disconnected and
+fail-closed.
+Deep input under `tier:"induction-only"` is `unsupported` with zero samples;
+Tide must not reinterpret the request as a fuzz run.
+
 ### `chelis tide lsp`
 
 Launch the Tide LSP server on stdio.
@@ -146,6 +157,14 @@ centered on Surf.
 
 Evaluate a single expression through the evaluator fast path.
 No C emission or external compiler process is involved.
+
+`chelis eval --timeout N` sets an optional wall-clock budget of `N` seconds
+for either the expression or file form. Exceeding the budget MUST produce a
+non-zero exit and a timeout diagnostic; it MUST NOT return a partial or
+otherwise successful evaluation result. Without `--timeout`, evaluation has
+no CLI-imposed deadline. Interactive interruption and embedding-surface
+cancellation use the same cooperative mechanism but preserve their native
+signal or exception behavior.
 
 ### `chelis deep file.ch`
 

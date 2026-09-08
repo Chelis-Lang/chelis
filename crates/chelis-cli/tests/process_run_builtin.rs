@@ -184,14 +184,22 @@ fn build_rejects_process_run_program_with_clear_message() {
         .get_output()
         .clone();
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // Branded per section C2 (spec/design/loud_unsupported.md): the shared
+    // eval-only gate (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`) rejects
+    // through `Unsupported`, so shells can match the structured prefix.
     assert!(
-        stderr.contains("process_run is an eval/test-only builtin"),
-        "build must reject process_run with the eval/test-only message, got stderr={stderr}"
+        stderr.contains("unsupported: builtin `process_run`"),
+        "build must reject process_run with the branded eval-only diagnostic, \
+         got stderr={stderr}"
     );
     assert!(
-        stderr.contains("not available in compiled targets"),
+        stderr.contains("compiled targets (the host interpreter's eval/test lanes only)"),
         "build rejection must explain process_run is unavailable in compiled targets, \
          got stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("run the program with `chelis eval` or `chelis test`"),
+        "build rejection must name the eval-lane remedy, got stderr={stderr}"
     );
     // The rejection must fire BEFORE any C artifact is written.
     assert!(

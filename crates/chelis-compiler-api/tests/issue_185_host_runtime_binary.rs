@@ -1,9 +1,9 @@
-//! Issue #185 host-runtime acceptance (Group C — Binary Tier 2).
+//! Issue #185 host-runtime acceptance for direct Tier-1 extrema identities.
 //!
-//! `BUILTIN_NAMES` accepts `max_elem` and `min_elem` but the host
-//! runtime evaluator did not dispatch them. Each is an element-wise
-//! binary op; the host runtime must agree with the IR evaluator's
-//! `binary_map(.., f64::max)` / `binary_map(.., f64::min)` behavior.
+//! `BUILTIN_NAMES` accepts `max_elem` and `min_elem`, but the host runtime
+//! evaluator originally did not dispatch them. Each is a direct element-wise
+//! selector; the host runtime must agree with the
+//! exact stored-operand selection required by [05-OP-40].
 //!
 //! Spec source of truth: `spec/05-risc-primitives.md` §3.4.
 
@@ -49,7 +49,11 @@ out = max_elem(&a, &b)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "max_elem shape");
-    assert_eq!(out.data, vec![3.0, 4.0, 6.0, 5.0], "max_elem data");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![3.0, 4.0, 6.0, 5.0],
+        "max_elem data"
+    );
 }
 
 #[test]
@@ -63,7 +67,11 @@ out = min_elem(&a, &b)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![4], "min_elem shape");
-    assert_eq!(out.data, vec![1.0, 1.0, 2.0, 0.5], "min_elem data");
+    assert_eq!(
+        out.data.to_f64_lossy_vec(),
+        vec![1.0, 1.0, 2.0, 0.5],
+        "min_elem data"
+    );
 }
 
 #[test]

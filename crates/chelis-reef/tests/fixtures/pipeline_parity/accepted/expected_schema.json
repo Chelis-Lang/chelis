@@ -1,0 +1,56 @@
+{
+  "package": {
+    "name": "pipeline-parity",
+    "version": "1.2.3"
+  },
+  "compiler": "=0.18.6",
+  "modules": [
+    {
+      "module": "PipelineParity.Main",
+      "functions": [
+        {
+          "name": "Left",
+          "type_repr": null,
+          "effects": [],
+          "has_body": false
+        },
+        {
+          "name": "Right",
+          "type_repr": null,
+          "effects": [],
+          "has_body": false
+        },
+        {
+          "name": "choose",
+          "type_repr": "(t-fn {}\n  (t-prim {} int32)\n  (t-adt {} Pkg__pipeline__parity__PipelineParity__Main__Choice))",
+          "effects": [],
+          "has_body": true
+        },
+        {
+          "name": "identity",
+          "type_repr": "(t-fn {}\n  (t-tensor {} (d-var {} d43) (t-prim {} f32))\n  (t-tensor {} (d-var {} d43) (t-prim {} f32)))",
+          "effects": [],
+          "has_body": true
+        }
+      ],
+      "types": [
+        {
+          "name": "Choice",
+          "opaque": false,
+          "constructors": [
+            {
+              "name": "Left",
+              "kind": "total",
+              "type_repr": null
+            },
+            {
+              "name": "Right",
+              "kind": "total",
+              "type_repr": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

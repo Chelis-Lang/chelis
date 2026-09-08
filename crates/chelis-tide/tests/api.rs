@@ -83,12 +83,8 @@ async fn parse_endpoint_returns_ast_and_parse_errors() {
 async fn desugar_endpoint_returns_deep_and_rejects_bad_surf() {
     let (_, ok) = post_json(router(), "/desugar", json!({"source":HELLO_TENSOR})).await;
     assert!(ok["ok"].as_bool().unwrap());
-    assert!(
-        ok["result"]["deep_text"]
-            .as_str()
-            .unwrap()
-            .contains("(module {}")
-    );
+    let deep_text = ok["result"]["deep_text"].as_str().unwrap();
+    assert!(deep_text.contains("(module {surf_path:"), "{deep_text}");
 
     let (_, bad) = post_json(
         router(),
@@ -247,7 +243,7 @@ async fn compile_endpoint_returns_generated_files_and_backend_errors() {
         "/compile",
         json!({
             "source_kind":"surf",
-            "source":"def f(xs: tensor[batch, features, f32]): tensor[batch, features, f32] = xs\n",
+            "source":"def f(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs\n",
             "target":"hip"
         }),
     )
@@ -264,7 +260,7 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
         json!({
             "source_kind":"surf",
             "source":LOSS_PROGRAM,
-            "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
         }),
     )
     .await;
@@ -276,7 +272,7 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
         .find(|root| root["name"] == "loss")
         .expect("loss root");
     assert_eq!(loss_root["value"]["type"], "tensor");
-    assert_eq!(loss_root["value"]["value"]["data"][0], 2.5);
+    assert_eq!(loss_root["value"]["value"]["data"]["values"][0], 2.5);
 
     let (_, bad) = post_json(
         router(),
@@ -371,7 +367,7 @@ items = to_list(x)
         json!({
             "source_kind":"surf",
             "source":source,
-            "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
         }),
     )
     .await;
@@ -383,8 +379,16 @@ items = to_list(x)
         .find(|root| root["name"] == "items")
         .expect("items root");
     assert_eq!(items["value"]["type"], "list");
-    assert_eq!(items["value"]["value"][0]["type"], "float64");
-    assert_eq!(items["value"]["value"][3]["value"], 4.0);
+    let values = items["value"]["value"].as_array().expect("list values");
+    assert_eq!(values.len(), 4);
+    assert!(values.iter().all(|value| value["type"] == "float32"));
+    assert_eq!(
+        values
+            .iter()
+            .map(|value| value["value"].as_f64().expect("float32 value"))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0, 4.0]
+    );
 }
 
 #[tokio::test]
@@ -908,7 +912,7 @@ async fn router_handles_concurrent_requests() {
         json!({
             "source_kind":"surf",
             "source":LOSS_PROGRAM,
-            "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
         }),
     ));
     let (first, second) = tokio::join!(first, second);

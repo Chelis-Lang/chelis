@@ -9,13 +9,16 @@
 //! grep alone is insufficient because malformed comment emission could pass
 //! the grep but break the C source.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
+
+mod common;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -68,7 +71,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     // exec-style tests in parallel; they all materialize the same
     // canonical path) do not race on a shared tmp filename and trip
     // ENOENT on rename when a peer renames it away first.
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),
@@ -99,13 +107,14 @@ fn runtime_lib_path() -> PathBuf {
 /// Compile generated C source standalone (no harness). Returns Ok(()) on
 /// successful compile, Err(stderr) otherwise.
 fn compile_kernel_only(test_name: &str, c_source: &str) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("chelis_s4c_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("s4c_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
 
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",

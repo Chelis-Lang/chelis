@@ -42,6 +42,31 @@ cvc5-rs = { version = "0.3", optional = true }
 Default builds (`cargo build`) do NOT pull cvc5. Only `cargo build --features smt`
 triggers the cvc5 source build (~2-5 minutes on first compile, cached thereafter).
 
+### Carcara audit gate
+
+The optional `carcara` feature re-checks cvc5 Alethe proofs. The pinned
+Carcara dependency enables only Rug's integer and rational support, so this
+gate needs GMP but not MPFR or MPC. Cargo builds the GMP version locked by
+`gmp-mpfr-sys`; do not install or configure a distribution GMP for this gate.
+The source build needs a C toolchain, `m4`, and `make`.
+
+Run the complete suite serially. A nightly parallel process exited with
+SIGSEGV after tests, while the same unit, integration, and doctest set passed
+with one test thread. Serialization contains that nondeterministic failure
+without narrowing the corpus; it does not establish the upstream root cause:
+
+```bash
+cargo test -p chelis-prove --features carcara -- --test-threads=1
+```
+
+`CVC5_DIR` reuses the durable local cvc5 artifacts when that cache has already
+been populated:
+
+```bash
+CVC5_DIR="${HOME}/.cache/chelis-cvc5/darwin-arm64" \
+cargo test -p chelis-prove --features carcara -- --test-threads=1
+```
+
 ## CI Configuration
 
 The required `smt-build` job in `.github/workflows/ci.yml` keeps the branch
@@ -169,14 +194,18 @@ caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete
 on error); manual dispatch is dry-run unless `apply` is set.
 `scripts/test_ci_cache_prune.py` covers the deletion policy.
 
-Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
-container) and `smt-build-darwin-arm64` (`macos-latest`), build
+Two companion prove-in-CI lanes, `smt-build-glibc231` (a digest-pinned
+Python 3.11 Bullseye container) and `smt-build-darwin-arm64` (`macos-latest`), build
 `chelis-cli --features smt` on the other two release targets and run
 the post-build verifier. They prove cvc5 builds on those toolchains
 before `release.yml` ships the feature there (chelis#422). The
-`debian:11` lane additionally installs `python3-pip` and `pip install
-tomli`, because cvc5's build-time TOML codegen imports `tomli` on
-Python < 3.11 and `python3-tomli` is not in the main bullseye suite.
+Bullseye lane uses the same pinned container digest in `ci.yml`,
+`build-cvc5.yml`, and `release.yml`; the image supplies Python, git, curl,
+and CA certificates before checkout. After checkout, `ci_apt_get.py
+--debian-bullseye-snapshot` replaces every moving apt source with the
+immutable `20260901T000000Z` Debian and Debian Security snapshots before
+installing build dependencies. Python 3.11 also lets cvc5 use `tomllib`
+without a separate moving PyPI bootstrap.
 
 ## Release builds (chelis#422)
 
@@ -186,9 +215,10 @@ chelis-cli --features smt`, so the shipped `chelis` binary discharges
 property obligations through cvc5 instead of degrading to the
 solver-free fuzz path. Each release job:
 
-- installs the cvc5 build prerequisites for its platform (the
-  `debian:11` job adds `tomli` as above; macOS relies on the image's
-  CMake/Python/Xcode CLT plus an idempotent `brew install cmake`), and
+- installs the cvc5 build prerequisites for its platform (the glibc 2.31 job
+  uses the pinned Python 3.11 Bullseye container and immutable Debian snapshot
+  described above, with no separate PyPI bootstrap; macOS relies on the
+  image's CMake/Python/Xcode CLT plus an idempotent `brew install cmake`), and
 - runs `.github/scripts/verify_release_smt.py` against the freshly
   built binary, which proves a known producer obligation discharges
   via cvc5 (`proof_tier=smt`, `discharge_tier.engine=cvc5`). A binary
@@ -211,6 +241,33 @@ INDEPENDENT, license-safe proof of the exact recipe rather than trusting an
 asset produced by `build-cvc5.yml`. A `build-cvc5.yml` bug therefore can never
 silently reach a shipped artifact. Treat a `release.yml` cvc5 failure as real
 even when the per-PR SMT lanes are green off the asset.
+
+### The cold build's fetch is retried; its compile is not (chelis#1004)
+
+Building cvc5 cold begins by pulling the cvc5 source and its dependencies
+over the network, so the release jobs are the only lanes exposed to a
+transient GitHub refusal there. Because `publish-release` has `needs:` on all
+three build jobs, one such failure skips the publish and leaves a pushed tag
+with no GitHub Release: the v0.18.0 release (run 30673030685) needed three
+attempts, failing at `cvc5-sys` `build.rs:231` (dependency downloads, HTTP
+403) and then at `build.rs:276` (the source clone) with no change to the tree.
+
+Each `Build chelis-cli (release, smt)` step therefore runs through
+`scripts/ci_cvc5_build.py`, which retries **only** when the failing attempt's
+output carried a transient-fetch signature. This does not weaken anything
+above: no prebuilt is linked, no compile is skipped, and a compile, CMake
+configure, or link failure is **not** retried at all -- it fails on the first
+attempt exactly as before. "Treat a `release.yml` cvc5 failure as real" still
+holds, because the only failures the wrapper absorbs are ones that never
+reached the compiler. A sustained outage still fails the job once the bounded
+attempts are exhausted.
+
+The signature list is deliberately narrow, and
+`scripts/test_ci_cvc5_build.py` pins both directions: the observed 403 and
+clone-failure lines classify as transient, while an `error[E0308]`, a
+`CMake Error`, a linker failure, and a bare `build.rs` panic with no fetch
+diagnostic above it do not. Widening that list is a decision to retry
+something new; make it deliberately.
 
 ## Downstream Impact
 

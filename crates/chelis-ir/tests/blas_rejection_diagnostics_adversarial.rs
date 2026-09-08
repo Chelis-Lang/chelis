@@ -31,7 +31,7 @@
 //! `HelperSummaryRejection::rejection_class`, and the structured
 //! `SummaryRejectionDetail` variant.
 
-use chelis_ir::dag::{Dag, DimExpr, RiscOp, RtDim};
+use chelis_ir::dag::{Dag, DimExpr, RiscOp};
 use chelis_ir::host::{
     BlasDimRole, BlasSummaryAttempt, HelperSummaryRejection, HostBlasMatmulSummary,
     HostTensorInput, SummaryRejectionClass, SummaryRejectionDetail,
@@ -109,7 +109,7 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -118,7 +118,7 @@ fn blas_multiple_roots_one_matmul_near_one_elementwise_emits_structured_rejectio
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -251,7 +251,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -260,7 +260,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -279,7 +279,7 @@ fn root_reshape_wrapping_matmul_returns_not_eligible() {
     // Wrap the matmul in a Reshape (flatten 8x4 → 32).
     let reshape = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(32)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(32)],
         },
         vec![sum],
         TensorType {
@@ -545,7 +545,7 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -554,7 +554,7 @@ fn blas_not_matmul_pattern_wrong_sum_axis_emits_structured_rejection_tail_op_sum
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -673,7 +673,7 @@ fn near_miss_sum_of_mul_of_expand_and_load_returns_not_eligible() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -719,7 +719,7 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 8, 16, 4),
@@ -728,7 +728,7 @@ fn near_miss_sum_of_add_of_expands_returns_not_eligible() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F32, 8, 16, 4),
@@ -794,7 +794,7 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F64, 8, 16, 4),
@@ -803,7 +803,7 @@ fn near_match_sum_of_mul_of_expand_of_expand_is_blas_near() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(Prim::F64, 8, 16, 4),

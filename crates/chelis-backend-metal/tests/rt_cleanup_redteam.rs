@@ -13,10 +13,11 @@
 //!     `host_sizeof_expr` agree on host-safe typing for every active
 //!     Metal dtype
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_backend_metal::dtype;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_prec(n: usize, prec: Prim) -> TensorType {
     TensorType {
@@ -27,7 +28,12 @@ fn vec_prec(n: usize, prec: Prim) -> TensorType {
 
 fn build_const_root_dag(prec: Prim, value: f64) -> Dag {
     let mut dag = Dag::new();
-    let c = dag.add_node(RiscOp::Const { value }, vec![], vec_prec(4, prec), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(prec, value),
+        vec![],
+        vec_prec(4, prec),
+        None,
+    );
     let stored = dag.add_node(
         RiscOp::Store { name: "out".into() },
         vec![c],

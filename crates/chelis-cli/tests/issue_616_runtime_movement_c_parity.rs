@@ -10,8 +10,8 @@
 //! the same bound scalars the eval lane resolves, so one compiled binary
 //! handles every input length and the two lanes must agree exactly.
 //!
-//! The verb: `shrink(x, [[1, n-1]])` keeps `[2, ..., n-1]` for input
-//! `[1, 2, ..., n]` (with `n = shape(x, 0)` read at run time); `stride(_, 2)`
+//! The verb: `shrink(x, [[1i64, n - 1]])` keeps `[2, ..., n-1]` for input
+//! `[1, 2, ..., n]` (with `n = shape(x, 0)` read at run time); `stride(_, 2i64)`
 //! then keeps every other element: `[2, 4, 6, ...]`.
 
 use std::fs;
@@ -23,15 +23,15 @@ use tempfile::{TempDir, tempdir};
 
 /// Runtime-shrink-only verb; its single movement output dim is the sig's `u`.
 const SHRINK_BODY: &str = "\
-  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
-  shrink(x, [[cast(1, int32), extent]])";
+  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
+  shrink(x, [[cast(1, int64), extent]])";
 
 /// The full runtime shrink -> stride chain, anchored by a static reshape so
 /// each movement output keeps its own (anonymous) dim. This is the
 //  movement-op shape of the chelis#616 avgpool oracle's `window_row`.
 const CHAIN_ANCHORED_BODY: &str = "\
-  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
-  w = stride(shrink(x, [[cast(1, int32), extent]]), cast(2, int32))\n\
+  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
+  w = stride(shrink(x, [[cast(1, int64), extent]]), cast(2, int64))\n\
   reshape(w, [cast(2, int64)])";
 
 fn f32_literal(values: &[f64]) -> String {
@@ -199,11 +199,12 @@ fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
         .iter()
         .map(|n| {
             format!(
-                "    {{ int shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
-                 for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
-                 chelis_tensor* w = out(x); \
-                 for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", w->data[i]); \
-                 printf(\"---\\n\"); }}"
+                "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32); \
+                 chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
+                 for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
+                 chelis_tensor* w = out(x); chelis_read_view w_view = chelis_tensor_read_view(w); \
+                 for (int64_t i = 0; i < w_view.count; i++) printf(\"%.6f\\n\", ((const float *)w_view.data)[i]); \
+                 printf(\"---\\n\"); chelis_tensor_release(w); chelis_tensor_release(x); }}"
             )
         })
         .collect::<Vec<_>>()
@@ -266,8 +267,8 @@ int main(void) {{
 fn issue_632_direct_return_movement_chain_eval_matches_c() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
     let body = "\
-  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
-  stride(shrink(x, [[cast(1, int32), extent]]), cast(2, int32))";
+  extent = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
+  stride(shrink(x, [[cast(1, int64), extent]]), cast(2, int64))";
     let source = format!(
         "module Repro.RtDegenerate\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&input)
@@ -304,7 +305,7 @@ fn issue_632_direct_return_movement_chain_eval_matches_c() {
 fn issue_632_literal_stride_under_sig_symbols_matches_c() {
     let input: Vec<f64> = (1..=6).map(|v| v as f64).collect();
     let source = format!(
-        "module Repro.LitStrideSig\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = stride(x, cast(2, int32))\nout = f(to_tensor([{}]))\n",
+        "module Repro.LitStrideSig\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = stride(x, cast(2, int64))\nout = f(to_tensor([{}]))\n",
         f32_literal(&input)
     );
 
@@ -342,8 +343,8 @@ fn issue_616_multi_axis_runtime_shrink_matches_c() {
     let source = "module Repro.MatSlice\n\
 sig f: tensor[rows, 5, f32] -> tensor[rows, 3, f32]\n\
 def f(x) = {\n\
-  rows = cast(shape(x, cast(0, int32)), int32)\n\
-  shrink(x, [[cast(0, int32), rows], [cast(1, int32), cast(4, int32)]])\n\
+  rows = cast(shape(x, cast(0, int32)), int64)\n\
+  shrink(x, [[cast(0, int64), rows], [cast(1, int64), cast(4, int64)]])\n\
 }\n\
 out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)], [cast(6.0, f32), cast(7.0, f32), cast(8.0, f32), cast(9.0, f32), cast(10.0, f32)]]))\n";
 
@@ -383,8 +384,8 @@ fn issue_616_multi_axis_runtime_pad_matches_c() {
     let source = "module Repro.MatPad\n\
 sig f: tensor[rows, 3, f32] -> tensor[u, 5, f32]\n\
 def f(x) = {\n\
-  k = cast(shape(x, cast(0, int32)), int32)\n\
-  pad(x, [[cast(0, int32), k], [cast(1, int32), cast(1, int32)]], cast(0.0, f32))\n\
+  k = cast(shape(x, cast(0, int32)), int64)\n\
+  pad(x, [[cast(0, int64), k], [cast(1, int64), cast(1, int64)]], cast(0.0, f32))\n\
 }\n\
 out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]]))\n";
 
@@ -423,8 +424,8 @@ fn issue_616_literal_axis_still_checked_beside_runtime_axis() {
     let source = "module Repro.MatSliceBad\n\
 sig f: tensor[rows, 5, f32] -> tensor[rows, 3, f32]\n\
 def f(x) = {\n\
-  rows = cast(shape(x, cast(0, int32)), int32)\n\
-  shrink(x, [[cast(0, int32), rows], [cast(1, int32), cast(9, int32)]])\n\
+  rows = cast(shape(x, cast(0, int32)), int64)\n\
+  shrink(x, [[cast(0, int64), rows], [cast(1, int64), cast(9, int64)]])\n\
 }\n\
 out = f(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)], [cast(6.0, f32), cast(7.0, f32), cast(8.0, f32), cast(9.0, f32), cast(10.0, f32)]]))\n";
     let output = run_eval(source, "matslicebad");
@@ -452,8 +453,8 @@ fn issue_616_runtime_shrink_grad_through_reduction_matches_c() {
     let source = "module Repro.RtShrinkGrad\n\
 sig f: tensor[5, f32] -> f32\n\
 def f(x) = {\n\
-  e = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
-  w = shrink(x, [[cast(1, int32), e]])\n\
+  e = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
+  w = shrink(x, [[cast(1, int64), e]])\n\
   sum(w, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)]))\n";
@@ -489,8 +490,8 @@ out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.
 fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
     // k = n - 4 == 0 for the 4-element input: bounds [0, 0).
     let body = "\
-  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(4, int64)), int32)\n\
-  shrink(x, [[cast(0, int32), k]])";
+  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(4, int64)), int64)\n\
+  shrink(x, [[cast(0, int64), k]])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
         "module Repro.RtZeroSize\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
@@ -531,8 +532,8 @@ fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
 fn issue_616_runtime_shrink_overshoot_errs_in_both_lanes() {
     // end = n + 1 > n: out of range for every input.
     let body = "\
-  extent = cast(add(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int32)\n\
-  shrink(x, [[cast(1, int32), extent]])";
+  extent = cast(add(cast(shape(x, cast(0, int32)), int64), cast(1, int64)), int64)\n\
+  shrink(x, [[cast(1, int64), extent]])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
         "module Repro.RtOvershoot\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"

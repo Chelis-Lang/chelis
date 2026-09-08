@@ -4,8 +4,9 @@
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
+use chelis_types::ElementRef;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -18,7 +19,7 @@ fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
-fn eval_dag(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+fn eval_dag(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let vals = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
         .expect("evaluation should succeed");
@@ -29,7 +30,12 @@ fn assert_close(a: &[TensorValue], b: &[TensorValue], tol: f64, label: &str) {
     assert_eq!(a.len(), b.len(), "{label}: different number of outputs");
     for (i, (va, vb)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(va.shape, vb.shape, "{label} output {i}: shapes differ");
-        for (j, (xa, xb)) in va.data.iter().zip(vb.data.iter()).enumerate() {
+        for (j, (xa, xb)) in va
+            .to_f64_lossy_vec()
+            .iter()
+            .zip(vb.to_f64_lossy_vec().iter())
+            .enumerate()
+        {
             assert!(
                 (xa - xb).abs() < tol,
                 "{label} output {i} element {j}: {xa} vs {xb} (diff {})",
@@ -46,7 +52,12 @@ fn assert_close(a: &[TensorValue], b: &[TensorValue], tol: f64, label: &str) {
 fn adv1_long_chain_5_ops() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::Const { value: 0.1 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.1),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
     let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
     let e = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
@@ -56,7 +67,7 @@ fn adv1_long_chain_5_ops() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -94,7 +105,7 @@ fn adv2_mixed_unary_binary_chain() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 4.0, 9.0, 16.0]),
@@ -123,7 +134,12 @@ fn adv2_mixed_unary_binary_chain() {
 fn adv3_external_input_used_by_multiple_steps() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+    let c = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     // add(x, c) → mul(result, c)
     // Both steps use 'c' as an external input
     let a = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
@@ -132,7 +148,7 @@ fn adv3_external_input_used_by_multiple_steps() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -171,7 +187,7 @@ fn adv4_fused_and_unfused_feed_same_output() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -207,7 +223,7 @@ fn adv5_intermediate_multi_consumer_splits_chain() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -245,7 +261,7 @@ fn adv6_entire_dag_is_fusible() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -292,7 +308,7 @@ fn adv7_store_in_middle_of_chain() {
     let fused = fuse(&dag);
 
     // Store is NOT fusible, so Neg→Exp should NOT fuse (Store adds a consumer to 'a')
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -325,7 +341,7 @@ fn adv8_cast_not_fusible() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -341,20 +357,30 @@ fn adv8_cast_not_fusible() {
 }
 
 // ============================================================================
-// ADV-9: CmpLt inside a fused chain produces float, not int
+// ADV-9: CmpLt inside a fused chain preserves sealed bool storage
 // ============================================================================
 #[test]
-fn adv9_cmplt_in_fused_chain_produces_float() {
+fn adv9_cmplt_in_fused_chain_produces_bool() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
-    let cmp = dag.add_node(RiscOp::CmpLt, vec![x, y], vec_f32(4), None);
-    let result = dag.add_node(RiscOp::Neg, vec![cmp], vec_f32(4), None);
+    let bool_ty = TensorType {
+        dims: vec![DimInfo::Lit(4)],
+        precision: Prim::Bool,
+    };
+    let cmp = dag.add_node(RiscOp::CmpLt, vec![x, y], bool_ty.clone(), None);
+    let false_value = dag.add_node(
+        RiscOp::synth_const(Prim::Bool, 0.0),
+        vec![],
+        bool_ty.clone(),
+        None,
+    );
+    let result = dag.add_node(RiscOp::MaxElem, vec![cmp, false_value], bool_ty, None);
     dag.add_root(result);
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 5.0, 3.0, 7.0]),
@@ -369,24 +395,30 @@ fn adv9_cmplt_in_fused_chain_produces_float() {
 
     let orig = eval_dag(&dag, &inputs);
     let fuse_out = eval_dag(&fused, &inputs);
-    assert_close(&orig, &fuse_out, 1e-6, "ADV-9: cmplt→neg");
+    assert_close(&orig, &fuse_out, 1e-6, "ADV-9: cmplt→bool-or");
 
-    // Check exact values: x<y = [1,0,1,1], neg = [-1,0,-1,-1]
+    // Check exact values: x<y = [true,false,true,true], and OR false
+    // preserves them without reopening a float representation.
     assert_eq!(
-        fuse_out[0].data,
-        vec![-1.0, 0.0, -1.0, -1.0],
-        "CmpLt in fused chain should produce 1.0/0.0 floats, not bools"
+        fuse_out[0].storage().to_i64_exact_vec(),
+        Some(vec![1, 0, 1, 1]),
+        "CmpLt in a fused chain must preserve sealed bool storage"
     );
 }
 
 // ============================================================================
-// ADV-10: MaxElem in fused chain uses fmaxf
+// ADV-10: MaxElem in fused chain preserves exact selected-operand semantics
 // ============================================================================
 #[test]
 fn adv10_maxelem_in_fused_chain() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
-    let zero = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], vec_f32(4), None);
+    let zero = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 0.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
     // relu = max(x, 0)
     let relu = dag.add_node(RiscOp::MaxElem, vec![x, zero], vec_f32(4), None);
     let result = dag.add_node(RiscOp::Neg, vec![relu], vec_f32(4), None);
@@ -394,9 +426,9 @@ fn adv10_maxelem_in_fused_chain() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
-        TensorValue::from_vec(vec![4], vec![-1.0, 2.0, -3.0, 4.0]),
+        TensorValue::from_vec(vec![4], vec![-0.0, 2.0, -3.0, 4.0]),
     )]
     .into_iter()
     .collect();
@@ -405,9 +437,19 @@ fn adv10_maxelem_in_fused_chain() {
     let fuse_out = eval_dag(&fused, &inputs);
     assert_close(&orig, &fuse_out, 1e-6, "ADV-10: maxelem→neg");
 
-    // relu(-1)=0, relu(2)=2, relu(-3)=0, relu(4)=4
-    // neg: [0, -2, 0, -4]
-    assert_eq!(fuse_out[0].data, vec![0.0, -2.0, 0.0, -4.0]);
+    let stored_f32_bits = |value: &TensorValue| {
+        (0..value.len())
+            .map(|index| match value.storage().element_ref(index) {
+                ElementRef::F32(element) => element.to_bits(),
+                other => panic!("ADV-10 expected f32 storage, got {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    // The left operand wins the -0/+0 tie. Negating the selected -0 yields
+    // +0; an fmaxf-style surrogate would choose/re-encode +0 and yield -0.
+    let expected = vec![0x0000_0000, 0xc000_0000, 0x8000_0000, 0xc080_0000];
+    assert_eq!(stored_f32_bits(&orig[0]), expected);
+    assert_eq!(stored_f32_bits(&fuse_out[0]), expected);
 }
 
 fn main() {}

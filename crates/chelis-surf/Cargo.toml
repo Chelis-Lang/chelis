@@ -7,11 +7,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-pred.workspace = true
+chelis-vocab.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 miette.workspace = true
+ryu.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -11,12 +11,14 @@
 //! through tide is identical to the CLI on the same module (the parity
 //! the cross-surface test locks).
 
+use chelis_deep::DeepTag;
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_types::types::{Prim, Type};
+use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
 
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
@@ -405,20 +407,32 @@ pub fn run_surf_source_obligations(
 
 /// Run obligations directly from Deep module SOURCE (`.dp` text). This is
 /// the Deep sibling of [`run_surf_source_obligations`]: it is the entry the
-/// chelis-tide MCP tool calls for a `source_kind:"deep"` module so a prove
-/// through tide is identical to the CLI `chelis prove foo.dp` path
-/// (`run_deep_obligations`). A `.dp` is already Deep, so it is parsed but NOT
-/// desugared; the checker then runs for inferred return types (a type-broken
-/// module surfaces a `CheckFailed`, never a silent zero-obligation pass --
-/// RT3-F2 parity), and the SAME `run_module_obligations` the Surf source
-/// entry reaches verifies each obligation. Returns `Err` if the source does
-/// not parse; `Ok(CheckFailed)` if it does not type-check; `Ok(Ran(..))`
-/// otherwise.
+/// chelis-tide MCP tool calls for a `source_kind:"deep"` module. A `.dp` is
+/// already Deep, so it is parsed but NOT desugared; the checker then runs for
+/// inferred return types (a type-broken module surfaces a `CheckFailed`, never
+/// a silent zero-obligation pass -- RT3-F2 parity), and the SAME
+/// `run_module_obligations` the Surf source entry reaches verifies each
+/// obligation. Returns `Err` if the source does not parse; `Ok(CheckFailed)`
+/// if it does not type-check; `Ok(Ran(..))` otherwise.
+///
+/// This entry and the CLI's `chelis prove foo.dp` path (`run_deep_obligations`)
+/// reach the same engine but do NOT hand it the same representation, and this
+/// comment used to claim they were the identical path (chelis#1125 PP7): the
+/// route below normalizes through `deep_compat::parse_file_to_lists`, so the
+/// engine sees `Expr::List`, while the CLI passes `parse_and_stamp_file`
+/// output straight through, so the engine sees `Expr::Node`. That difference
+/// used to change the answer -- the engine's readers decoded only the list
+/// carrier, so the CLI's obligation could not lower and fell through to Tier
+/// C while tide's proved at Tier B. Those readers now decode both carriers
+/// ([04-TOT-5]), so the two routes agree on the outcome; they are still two
+/// routes, and neither this comment nor a reader in the engine may assume
+/// which carrier arrives.
 pub fn run_deep_source_obligations(
     source: &str,
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
-    let exprs = chelis_deep::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
+    let exprs = crate::deep_compat::parse_file_to_lists(source)
+        .map_err(|error| format!("parse: {error}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -742,7 +756,7 @@ fn run_tier_c(
     for t in arg_types {
         match t {
             Type::Prim(p) => kinds.push(ArgKind::Scalar(prim_name(p))),
-            Type::Tensor(dims, _) => {
+            Type::Tensor(dims, precision) => {
                 // Fixed-shape numeric tensor input.
                 let lit_dims: Option<Vec<usize>> = dims
                     .iter()
@@ -751,8 +765,18 @@ fn run_tier_c(
                         _ => None,
                     })
                     .collect();
+                let Some(precision) = precision.as_concrete() else {
+                    return unsupported(
+                        ob,
+                        seed,
+                        "producer has an unresolved tensor dtype (Tier C V1)",
+                    );
+                };
                 match lit_dims {
-                    Some(d) => kinds.push(ArgKind::Tensor(d)),
+                    Some(d) => kinds.push(ArgKind::Tensor {
+                        dims: d,
+                        precision: prim_name(&precision),
+                    }),
                     None => {
                         return unsupported(
                             ob,
@@ -799,21 +823,19 @@ fn run_tier_c(
         for (name, kind) in names.iter().zip(&kinds) {
             match kind {
                 ArgKind::Scalar(prim) => {
-                    let v = sample_scalar(prim, &mut rng);
+                    let value = sample_scalar(prim, &mut rng);
                     arg_values.push(ArgValue {
-                        expr: scalar_lit(prim, v),
-                        json: serde_json::json!(v),
+                        expr: scalar_lit(prim, value),
+                        json: scalar_json(value),
                         name: name.clone(),
                     });
                 }
-                ArgKind::Tensor(dims) => {
+                ArgKind::Tensor { dims, precision } => {
                     let count: usize = dims.iter().product::<usize>().max(1);
-                    let vals: Vec<f64> = (0..count).map(|_| rng.next_f64(-10.0, 10.0)).collect();
-                    arg_values.push(ArgValue {
-                        expr: crate::opaque::tensor_value_expr_pub(dims, "f32", &vals),
-                        json: serde_json::json!(vals),
-                        name: name.clone(),
-                    });
+                    let values = (0..count)
+                        .map(|_| sample_scalar(precision, &mut rng))
+                        .collect::<Vec<_>>();
+                    arg_values.push(obligation_tensor_arg(name, dims, precision, &values));
                 }
                 ArgKind::Opaque(input_inv) => {
                     let mut grng = crate::opaque::GenRng::new(rng.next_u64());
@@ -828,8 +850,7 @@ fn run_tier_c(
                         gen_budget,
                     ) {
                         Ok(binder) => {
-                            let json = serde_json::to_value(&binder.env)
-                                .unwrap_or(serde_json::json!(null));
+                            let json = crate::opaque::generated_env_json(&binder.env);
                             arg_values.push(ArgValue {
                                 expr: binder.value_expr,
                                 json,
@@ -912,7 +933,7 @@ fn run_tier_c(
 #[derive(Clone)]
 enum ArgKind {
     Scalar(String),
-    Tensor(Vec<usize>),
+    Tensor { dims: Vec<usize>, precision: String },
     Opaque(OpaqueInvariant),
 }
 
@@ -983,7 +1004,11 @@ fn obligation_shrink_candidates(value: &ArgValue, kind: &ArgKind) -> Vec<ArgValu
             .or_else(|| value.json.as_f64().map(|current| current != 0.0))
             .and_then(|current| {
                 current.then(|| ArgValue {
-                    expr: scalar_lit(prim, 0.0),
+                    expr: scalar_lit(
+                        prim,
+                        scalar_from_i64("prove-shrink", Prim::Bool, 0)
+                            .expect("false is a valid bool"),
+                    ),
                     json: serde_json::json!(false),
                     name: value.name.clone(),
                 })
@@ -992,9 +1017,8 @@ fn obligation_shrink_candidates(value: &ArgValue, kind: &ArgKind) -> Vec<ArgValu
             .collect(),
         ArgKind::Scalar(prim) if crate::opaque::is_int_width(prim) => value
             .json
-            .as_f64()
+            .as_i64()
             .map(|current| {
-                let current = current as i64;
                 let mut candidates = Vec::new();
                 push_unique_obligation_int_candidate(&mut candidates, value, prim, current, 0);
                 push_unique_obligation_int_candidate(
@@ -1030,33 +1054,50 @@ fn obligation_shrink_candidates(value: &ArgValue, kind: &ArgKind) -> Vec<ArgValu
                 candidates
             })
             .unwrap_or_default(),
-        ArgKind::Tensor(dims) => value
-            .json
-            .as_array()
-            .map(|items| {
-                let data = items
-                    .iter()
-                    .filter_map(serde_json::Value::as_f64)
-                    .collect::<Vec<_>>();
+        ArgKind::Tensor { dims, precision } => tensor_values_from_json(precision, &value.json)
+            .map_or_else(Vec::new, |data| {
                 if data.len() != dims.iter().product::<usize>().max(1) {
                     return Vec::new();
                 }
                 let mut candidates = Vec::new();
-                if data.iter().any(|value| value.abs() > f64::EPSILON) {
-                    let zeros = vec![0.0; data.len()];
-                    candidates.push(obligation_tensor_arg(&value.name, dims, &zeros));
+                let prim =
+                    Prim::parse_name(precision).expect("tensor argument dtype is classified");
+                let zero = if precision == "bool" {
+                    scalar_from_i64("prove-shrink", Prim::Bool, 0)
+                } else if crate::opaque::is_int_width(precision) {
+                    scalar_from_i64("prove-shrink", prim, 0)
+                } else {
+                    scalar_from_f64("prove-shrink", prim, 0.0)
                 }
-                let halves = data.iter().map(|value| value / 2.0).collect::<Vec<_>>();
-                if halves
-                    .iter()
-                    .zip(&data)
-                    .any(|(candidate, current)| (candidate - current).abs() > f64::EPSILON)
-                {
-                    candidates.push(obligation_tensor_arg(&value.name, dims, &halves));
+                .expect("zero is representable at every active dtype");
+                if data.iter().any(|current| *current != zero) {
+                    let zeros = vec![zero; data.len()];
+                    candidates.push(obligation_tensor_arg(&value.name, dims, precision, &zeros));
+                }
+                if precision != "bool" {
+                    let halves = data
+                        .iter()
+                        .copied()
+                        .map(|current| {
+                            if let Some(current) = current.as_i64_exact() {
+                                scalar_from_i64("prove-shrink", prim, current / 2)
+                            } else {
+                                scalar_from_f64("prove-shrink", prim, current.as_f64_lossy() / 2.0)
+                            }
+                            .expect("halving stays representable at the same dtype")
+                        })
+                        .collect::<Vec<_>>();
+                    if halves != data {
+                        candidates.push(obligation_tensor_arg(
+                            &value.name,
+                            dims,
+                            precision,
+                            &halves,
+                        ));
+                    }
                 }
                 candidates
-            })
-            .unwrap_or_default(),
+            }),
         ArgKind::Opaque(_) => Vec::new(),
     }
 }
@@ -1077,13 +1118,21 @@ fn push_unique_obligation_int_candidate(
     let candidate = candidate.clamp(lo, hi);
     if candidates
         .iter()
-        .any(|arg| arg.json.as_f64() == Some(candidate as f64))
+        .any(|arg| arg.json.as_i64() == Some(candidate))
     {
         return;
     }
     candidates.push(ArgValue {
-        expr: scalar_lit(prim, candidate as f64),
-        json: serde_json::json!(candidate as f64),
+        expr: scalar_lit(
+            prim,
+            scalar_from_i64(
+                "prove-shrink",
+                Prim::parse_name(prim).expect("integer candidate has an integer Prim"),
+                candidate,
+            )
+            .expect("shrink candidate is clamped to its dtype"),
+        ),
+        json: serde_json::json!(candidate),
         name: value.name.clone(),
     });
 }
@@ -1105,18 +1154,48 @@ fn push_unique_obligation_float_candidate(
         return;
     }
     candidates.push(ArgValue {
-        expr: scalar_lit(prim, candidate),
+        expr: scalar_lit(
+            prim,
+            scalar_from_f64(
+                "prove-shrink",
+                Prim::parse_name(prim).expect("float shrink dtype is classified"),
+                candidate,
+            )
+            .expect("float shrink candidate is valid at its dtype"),
+        ),
         json: serde_json::json!(candidate),
         name: value.name.clone(),
     });
 }
 
-fn obligation_tensor_arg(name: &str, dims: &[usize], values: &[f64]) -> ArgValue {
+fn obligation_tensor_arg(
+    name: &str,
+    dims: &[usize],
+    precision: &str,
+    values: &[ScalarValue],
+) -> ArgValue {
     ArgValue {
-        expr: crate::opaque::tensor_value_expr_pub(dims, "f32", values),
-        json: serde_json::json!(values),
+        expr: crate::opaque::tensor_value_expr_typed(dims, precision, values),
+        json: crate::opaque::scalar_values_json(values),
         name: name.to_string(),
     }
+}
+
+fn tensor_values_from_json(precision: &str, json: &serde_json::Value) -> Option<Vec<ScalarValue>> {
+    let prim = Prim::parse_name(precision)?;
+    json.as_array()?
+        .iter()
+        .map(|value| {
+            if precision == "bool" {
+                scalar_from_i64("prove-shrink", Prim::Bool, i64::from(value.as_bool()?))
+            } else if crate::opaque::is_int_width(precision) {
+                scalar_from_i64("prove-shrink", prim, value.as_i64()?)
+            } else {
+                scalar_from_f64("prove-shrink", prim, value.as_f64()?)
+            }
+            .ok()
+        })
+        .collect()
 }
 
 fn unsupported(ob: &ObligationProperty, seed: u64, reason: &str) -> ObligationOutcome {
@@ -1260,7 +1339,7 @@ fn generation_producers(
         for a in args {
             match a {
                 Type::Prim(p) => kinds.push(GenParamKind::Scalar(prim_name(p))),
-                Type::Tensor(dims, _) => {
+                Type::Tensor(dims, precision) => {
                     let lit: Option<Vec<usize>> = dims
                         .iter()
                         .map(|d| match d {
@@ -1268,12 +1347,16 @@ fn generation_producers(
                             _ => None,
                         })
                         .collect();
-                    match lit {
-                        Some(d) => kinds.push(GenParamKind::Tensor {
+                    match (lit, precision.as_concrete()) {
+                        (Some(d), Some(precision)) => kinds.push(GenParamKind::Tensor {
                             dims: d,
-                            precision: "f32".to_string(),
+                            precision: prim_name(&precision),
                         }),
-                        None => {
+                        (None, _) => {
+                            raw_ok = false;
+                            break;
+                        }
+                        (Some(_), None) => {
                             raw_ok = false;
                             break;
                         }
@@ -1453,11 +1536,11 @@ fn resolve_module_constants(exprs: &[Expr], invariants: &[OpaqueInvariant]) -> C
 fn module_zero_arg_scalar_defs(exprs: &[Expr]) -> Vec<String> {
     fn walk(exprs: &[Expr], out: &mut Vec<String>) {
         for expr in exprs {
-            if list_tag(expr) == Some("def")
+            if list_tag(expr) == Some(DeepTag::Def)
                 && let Some(name) = node_children(expr).first().and_then(sym_text)
                 && let Some(body) = node_children(expr).get(1)
             {
-                let is_zero_arg = if list_tag(body) == Some("fn") {
+                let is_zero_arg = if list_tag(body) == Some(DeepTag::Fn) {
                     // A fn with an empty params node.
                     node_children(body)
                         .first()
@@ -1485,7 +1568,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     // An in-module constant may be a value binding (`(var name)`) or a
     // zero-argument constant function (`(app (var name))`, the desugaring
     // of `def eps() -> f32 = 0.01`).
-    let exprs: Vec<Expr> = chelis_deep::parser::parse_str(source)
+    let exprs: Vec<Expr> = crate::deep_compat::parse_file_to_lists(source)
         .ok()?
         .iter()
         .map(strip_invariant_meta)
@@ -1518,7 +1601,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
             && value.shape.is_empty()
             && value.data.len() == 1
         {
-            return Some(value.data[0]);
+            return Some(value.data.element_as_f64_lossy(0));
         }
     }
     None
@@ -1535,7 +1618,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
             Expr::Atom(Atom::Float(v), _) => Some(*v),
             Expr::Atom(Atom::Int(v), _) => Some(*v as f64),
             _ => {
-                if list_tag(expr) == Some("lit") {
+                if list_tag(expr) == Some(DeepTag::Lit) {
                     match node_children(expr).first() {
                         Some(Expr::Atom(Atom::Float(v), _)) => Some(*v),
                         Some(Expr::Atom(Atom::Int(v), _)) => Some(*v as f64),
@@ -1549,7 +1632,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
     }
     fn find(exprs: &[Expr], name: &str) -> Option<f64> {
         for expr in exprs {
-            if list_tag(expr) == Some("def")
+            if list_tag(expr) == Some(DeepTag::Def)
                 && node_children(expr).first().and_then(sym_text) == Some(name)
                 && let Some(body) = node_children(expr).get(1)
             {
@@ -1558,7 +1641,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
                     return Some(v);
                 }
                 // Zero-arg constant fn: `(fn (params) <lit>)`.
-                if list_tag(body) == Some("fn") {
+                if list_tag(body) == Some(DeepTag::Fn) {
                     let kids = node_children(body);
                     if kids
                         .first()
@@ -1588,7 +1671,7 @@ fn inject_const_probe(exprs: &[Expr], def: Expr) -> Vec<Expr> {
     let mut injected = false;
     for expr in exprs {
         if !injected
-            && list_tag(expr) == Some("module")
+            && list_tag(expr) == Some(DeepTag::Module)
             && let Expr::List(l, span) = expr
         {
             let mut elements = l.elements.clone();
@@ -1633,7 +1716,7 @@ fn eval_constant_obligation(
 /// top level.
 fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Expr>) -> Vec<Expr> {
     fn module_defines(expr: &Expr, type_name: &str) -> bool {
-        if list_tag(expr) == Some("deftype")
+        if list_tag(expr) == Some(DeepTag::Deftype)
             && node_children(expr).first().and_then(sym_text) == Some(type_name)
         {
             return true;
@@ -1647,7 +1730,7 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
     let mut injected = false;
     for expr in exprs {
         if !injected
-            && list_tag(expr) == Some("module")
+            && list_tag(expr) == Some(DeepTag::Module)
             && module_defines(expr, type_name)
             && let Expr::List(l, span) = expr
         {
@@ -1791,14 +1874,15 @@ fn validate_value(
     }
 }
 
-/// Flatten an opaque record [`ExecutionValue`] (`Adt{ctor, fields}` in the
-/// type's declared field order) into the dotted-path env the lowered
-/// predicate reads. A NaN scalar/element is kept as-is so the strict
-/// invariant comparison fails on it (CR-4/CR-6 fail-closed).
+/// Lossily flatten an opaque record [`ExecutionValue`] (`Adt{ctor, fields}`
+/// in the type's declared field order) into the legacy f64 dotted-path env
+/// the lowered predicate reads. A NaN scalar/element is kept as-is so the
+/// strict invariant comparison fails on it (CR-4/CR-6 fail-closed). The
+/// sealed-value env replacement remains chelis#688 / #729 Phase 2 work.
 fn opaque_record_env(
     value: &ExecutionValue,
     inv: &OpaqueInvariant,
-) -> Result<BTreeMap<String, f64>, String> {
+) -> Result<BTreeMap<String, ScalarValue>, String> {
     let ExecutionValue::Adt { ctor, fields } = value else {
         return Err(format!(
             "expected an opaque record value at a Direct position, got {value:?}"
@@ -1836,10 +1920,10 @@ fn flatten_field_value(
     value: &ExecutionValue,
     fty: &crate::opaque::FieldType,
     field_path: &str,
-    env: &mut BTreeMap<String, f64>,
+    env: &mut BTreeMap<String, ScalarValue>,
 ) -> Result<(), String> {
     match fty {
-        crate::opaque::FieldType::Tensor { dims, .. } => {
+        crate::opaque::FieldType::Tensor { dims, precision } => {
             let ExecutionValue::Tensor { value } = value else {
                 return Err("tensor field is not a tensor value".to_string());
             };
@@ -1847,27 +1931,78 @@ fn flatten_field_value(
             if value.data.len() != count {
                 return Err("tensor field shape mismatch".to_string());
             }
-            for (i, v) in value.data.iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), *v);
+            let expected = Prim::parse_name(precision)
+                .ok_or_else(|| format!("unknown tensor field precision `{precision}`"))?;
+            for i in 0..count {
+                let scalar = crate::opaque::tensor_element_scalar(&value.data, i)
+                    .ok_or_else(|| "tensor field element is not representable".to_string())?;
+                if scalar.prim() != expected {
+                    return Err(format!(
+                        "tensor field dtype mismatch: declared {} but produced {}",
+                        expected.name(),
+                        scalar.prim().name()
+                    ));
+                }
+                env.insert(format!("{field_path}.{i}"), scalar);
             }
         }
-        crate::opaque::FieldType::Scalar(_) => {
-            let v = match value {
-                ExecutionValue::Float64 { value } => *value,
-                ExecutionValue::Int64 { value } => *value as f64,
-                ExecutionValue::Bool { value } => {
-                    if *value {
-                        1.0
-                    } else {
-                        0.0
-                    }
+        crate::opaque::FieldType::Scalar(prim_name) => {
+            let prim = Prim::parse_name(prim_name)
+                .ok_or_else(|| format!("unknown scalar field precision `{prim_name}`"))?;
+            let scalar = match value {
+                ExecutionValue::Float16 { value } if prim == Prim::F16 => {
+                    scalar_from_f64("prove-produced-field", prim, *value)
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Bfloat16 { value } if prim == Prim::Bf16 => {
+                    scalar_from_f64("prove-produced-field", prim, *value)
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Float32 { value } if prim == Prim::F32 => {
+                    scalar_from_f64("prove-produced-field", prim, f64::from(*value))
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Float64 { value } if prim == Prim::F64 => {
+                    scalar_from_f64("prove-produced-field", prim, *value)
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Int8 { value } if prim == Prim::Int8 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Int16 { value } if prim == Prim::Int16 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Int32 { value } if prim == Prim::Int32 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Int64 { value } if prim == Prim::Int64 => {
+                    scalar_from_i64("prove-produced-field", prim, *value)
+                        .map_err(|trap| trap.to_string())?
+                }
+                ExecutionValue::Bool { value } if prim == Prim::Bool => {
+                    scalar_from_i64("prove-produced-field", Prim::Bool, i64::from(*value))
+                        .map_err(|trap| trap.to_string())?
                 }
                 // A 1-element tensor is a legitimate scalar carrier. A
                 // MULTI-element tensor is a declared-vs-produced shape drift:
                 // FAIL-CLOSED naming the mismatch rather than silently using
                 // `data[0]` and dropping the rest (which could hide a NaN or
                 // out-of-band remaining element that is never checked).
-                ExecutionValue::Tensor { value } if value.data.len() == 1 => value.data[0],
+                ExecutionValue::Tensor { value } if value.data.len() == 1 => {
+                    let scalar = crate::opaque::tensor_element_scalar(&value.data, 0)
+                        .ok_or_else(|| "scalar tensor element is not representable".to_string())?;
+                    if scalar.prim() != prim {
+                        return Err(format!(
+                            "scalar field dtype mismatch: declared {} but produced {}",
+                            prim.name(),
+                            scalar.prim().name()
+                        ));
+                    }
+                    scalar
+                }
                 ExecutionValue::Tensor { value } => {
                     return Err(format!(
                         "scalar field shape mismatch: declared Scalar but produced a tensor with {} elements",
@@ -1876,7 +2011,7 @@ fn flatten_field_value(
                 }
                 other => return Err(format!("scalar field is not a scalar value: {other:?}")),
             };
-            env.insert(field_path.to_string(), v);
+            env.insert(field_path.to_string(), scalar);
         }
         crate::opaque::FieldType::Record(inner_fields) => {
             // A nested record value: Adt{fields} in declared order.
@@ -1921,8 +2056,7 @@ fn validate_produced_env(
     if crate::opaque::any_non_finite(env.values().copied()) {
         return Ok(false);
     }
-    let hash: std::collections::HashMap<String, f64> =
-        env.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let hash = env.iter().map(|(k, v)| (k.clone(), *v)).collect();
     // STRICT validation (CR-2 / CR-5 / CR-10): the produced value's
     // invariant is checked with exact `==`/`!=`, never the fuzz tolerance.
     Ok(crate::concrete_eval::eval_bool_strict(predicate, &hash))
@@ -1939,8 +2073,8 @@ fn inject_into_module_stripped(
     type_name: &str,
     defs: Vec<Expr>,
 ) -> Result<Vec<Expr>, String> {
-    let exprs = chelis_deep::parser::parse_str(module_source)
-        .map_err(|e| format!("reparse module: {e}"))?;
+    let exprs = crate::deep_compat::parse_file_to_lists(module_source)
+        .map_err(|error| format!("reparse module: {error}"))?;
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
     Ok(inject_into_defining_module(&stripped, type_name, defs))
 }
@@ -1951,7 +2085,7 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
         Expr::List(list, span) => {
             let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if list.elements.first().and_then(sym_text) == Some("deftype")
+            if list.tag() == Some(DeepTag::Deftype)
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
                 let kept: Vec<(String, Expr)> = map
@@ -1974,41 +2108,41 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 /// other widths cast an int32 literal to the target width (matching the
 /// generator's `int_lit`), so an int8/int16/int64 producer argument is a
 /// well-typed integer, not a silently-mistyped float.
-fn scalar_lit(prim: &str, v: f64) -> Expr {
+fn scalar_lit(prim: &str, value: ScalarValue) -> Expr {
     if crate::opaque::is_int_width(prim) {
-        deep_int_lit_for(v as i64, prim)
+        deep_int_lit_for(
+            value.as_i64_exact().expect("integer literal stays exact"),
+            prim,
+        )
     } else if prim == "bool" {
-        deep_bool_lit(v != 0.0)
+        deep_bool_lit(value.as_bool_exact().expect("bool literal stays exact"))
     } else {
-        deep_float_lit(v)
+        deep_typed_lit(
+            prim,
+            Expr::Atom(Atom::Float(value.as_f64_lossy()), Span::new(0, 0)),
+        )
     }
 }
 
 fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
     fn find(exprs: &[Expr], producer: &str) -> Option<Vec<String>> {
         for expr in exprs {
-            if list_tag(expr) == Some("def")
+            if list_tag(expr) == Some(DeepTag::Def)
                 && let Some(name) = node_children(expr).first().and_then(sym_text)
                 && name == producer
                 && let Some(fn_node) = node_children(expr).get(1)
-                && list_tag(fn_node) == Some("fn")
+                && list_tag(fn_node) == Some(DeepTag::Fn)
                 && let Some(params) = node_children(fn_node).first()
             {
                 let mut out = Vec::new();
                 for p in node_children(params) {
-                    if let Some(n) = sym_text(p) {
-                        out.push(n.to_string());
-                    } else if let Expr::List(l, _) = p
-                        && let Some(Expr::Atom(Atom::Symbol(s), _)) = l.elements.first()
-                    {
-                        out.push(s.clone());
+                    if let Some(name) = binder_name(p) {
+                        out.push(name.to_string());
                     }
                 }
                 return Some(out);
             }
-            if let Expr::List(l, _) = expr
-                && let Some(found) = find(&l.elements[2.min(l.elements.len())..], producer)
-            {
+            if let Some(found) = find(node_children(expr), producer) {
                 return Some(found);
             }
         }
@@ -2017,29 +2151,48 @@ fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
     find(exprs, producer).unwrap_or_default()
 }
 
-fn sample_scalar(kind: &str, rng: &mut Lcg) -> f64 {
+fn sample_scalar(kind: &str, rng: &mut Lcg) -> ScalarValue {
     // Integer widths sample within the width's representable range via the
     // single-source `int_sample_bounds` (review 5): an int8 producer arg
     // samples in [-128, 127], never an unrepresentable value.
     if let Some((lo, hi)) = crate::opaque::int_sample_bounds(kind) {
-        return rng.next_i64(lo, hi) as f64;
+        return scalar_from_i64(
+            "prove-obligation-sample",
+            Prim::parse_name(kind).expect("integer width is a Prim"),
+            rng.next_i64(lo, hi),
+        )
+        .expect("integer sample bounds are representable");
     }
     match kind {
-        "bool" => {
-            if rng.next_bool() {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        _ => rng.next_f64(-10.0, 10.0),
+        "bool" => scalar_from_i64(
+            "prove-obligation-sample",
+            Prim::Bool,
+            i64::from(rng.next_bool()),
+        )
+        .expect("boolean sample is exactly zero or one"),
+        _ => scalar_from_f64(
+            "prove-obligation-sample",
+            Prim::parse_name(kind).expect("obligation scalar dtype is classified"),
+            rng.next_f64(-10.0, 10.0),
+        )
+        .expect("float sample is valid at its declared width"),
+    }
+}
+
+fn scalar_json(value: ScalarValue) -> serde_json::Value {
+    if let Some(value) = value.as_bool_exact() {
+        serde_json::Value::from(value)
+    } else if let Some(value) = value.as_i64_exact() {
+        serde_json::Value::from(value)
+    } else {
+        serde_json::Value::from(value.as_f64_lossy())
     }
 }
 
 // --- Deep builders ---
 
 fn deep_sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), Span::new(0, 0))
+    Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 fn deep_node(tag: &str, children: Vec<Expr>) -> Expr {
     let mut elements = vec![
@@ -2065,9 +2218,6 @@ fn deep_typed_lit(type_prim: &str, value: Expr) -> Expr {
         Span::new(0, 0),
     )
 }
-fn deep_float_lit(v: f64) -> Expr {
-    deep_typed_lit("f32", Expr::Atom(Atom::Float(v), Span::new(0, 0)))
-}
 /// A width-appropriate integer literal Deep expr: an int32 literal for the
 /// default width, otherwise an int32 literal cast to the target width
 /// (review 5). `prim` must be an integer width (`is_int_width`).
@@ -2082,21 +2232,34 @@ fn deep_int_lit_for(v: i64, prim: &str) -> Expr {
 fn deep_bool_lit(v: bool) -> Expr {
     deep_typed_lit("bool", Expr::Atom(Atom::Bool(v), Span::new(0, 0)))
 }
-fn list_tag(expr: &Expr) -> Option<&str> {
+fn list_tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
-        Expr::List(l, _) => l.elements.first().and_then(sym_text),
+        Expr::Node(node, _) => Some(node.tag()),
+        Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
 fn node_children(expr: &Expr) -> &[Expr] {
     match expr {
+        Expr::Node(node, _) => node.children_slice(),
         Expr::List(l, _) if l.elements.len() >= 2 => &l.elements[2..],
         _ => &[],
     }
 }
 fn sym_text(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn binder_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
+        Expr::MetaExpr(meta, _) => sym_text(&meta.expr),
+        Expr::BareList(elements, _) | Expr::List(List { elements }, _) => {
+            elements.first().and_then(sym_text)
+        }
         _ => None,
     }
 }
@@ -2143,7 +2306,7 @@ mod finding_tests {
     // `BTreeMap`, and the private flatten/validate helpers into scope.
     use super::*;
     use crate::opaque::FieldType;
-    use chelis_compiler_api::schema::TensorValue;
+    use chelis_compiler_api::schema::{TensorElements, TensorValue};
     use chelis_pred::PredAmenability;
 
     /// A minimal single-scalar-field opaque invariant. `opaque_record_env`
@@ -2174,7 +2337,7 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let wrong = ExecutionValue::Adt {
             ctor: "Velocity".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.5 }],
+            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
         };
         let err = opaque_record_env(&wrong, &inv)
             .expect_err("a wrong-ctor same-arity ADT must be rejected, not flattened");
@@ -2193,12 +2356,12 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let right = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.5 }],
+            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
         };
         let env =
             opaque_record_env(&right, &inv).expect("the matching-ctor case must flatten cleanly");
         assert_eq!(
-            env.get("p.value").copied(),
+            env.get("p.value").map(ScalarValue::as_f64_lossy),
             Some(0.5),
             "the scalar field flattens to its binder-dotted path"
         );
@@ -2217,7 +2380,7 @@ mod finding_tests {
         let multi = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![3],
-                data: vec![0.5, f64::NAN, 0.5],
+                data: TensorElements::F32(vec![0.5, f32::NAN, 0.5]),
             },
         };
         let err = flatten_field_value(&multi, &fty, "p.value", &mut env)
@@ -2241,27 +2404,104 @@ mod finding_tests {
         let single = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: vec![0.5],
+                data: TensorElements::F32(vec![0.5]),
             },
         };
         flatten_field_value(&single, &fty, "p.value", &mut env)
             .expect("a 1-element tensor scalar carrier still works");
-        assert_eq!(env.get("p.value").copied(), Some(0.5));
+        assert_eq!(env.get("p.value").map(ScalarValue::as_f64_lossy), Some(0.5));
     }
 
     #[test]
     fn f8_true_scalar_for_scalar_field_still_works() {
-        // A plain Float64 scalar (the common case) is unaffected by the fix.
+        // A plain exact-tagged f32 scalar is unaffected by the fix.
         let fty = FieldType::Scalar("f32".to_string());
         let mut env = BTreeMap::new();
         flatten_field_value(
-            &ExecutionValue::Float64 { value: 0.25 },
+            &ExecutionValue::Float32 { value: 0.25 },
             &fty,
             "p.value",
             &mut env,
         )
         .expect("a true scalar still flattens");
-        assert_eq!(env.get("p.value").copied(), Some(0.25));
+        assert_eq!(
+            env.get("p.value").map(ScalarValue::as_f64_lossy),
+            Some(0.25)
+        );
+    }
+
+    #[test]
+    fn int64_scalar_field_flattens_without_crossing_f64() {
+        let fty = FieldType::Scalar("int64".to_string());
+        let mut env = BTreeMap::new();
+        flatten_field_value(
+            &ExecutionValue::Int64 {
+                value: 9_007_199_254_740_993,
+            },
+            &fty,
+            "p.value",
+            &mut env,
+        )
+        .expect("an int64 scalar field must flatten exactly");
+        assert_eq!(env["p.value"].as_i64_exact(), Some(9_007_199_254_740_993));
+    }
+
+    #[test]
+    fn scalar_field_requires_the_exact_public_carrier_dtype() {
+        let fty = FieldType::Scalar("int64".to_string());
+        let mut env = BTreeMap::new();
+        let error = flatten_field_value(
+            &ExecutionValue::Int32 { value: 7 },
+            &fty,
+            "p.value",
+            &mut env,
+        )
+        .expect_err("an int32 carrier must not substitute for declared int64");
+        assert!(
+            error.contains("not a scalar value"),
+            "unexpected error: {error}"
+        );
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn int64_tensor_field_flattens_without_crossing_f64() {
+        let fty = FieldType::Tensor {
+            dims: vec![1],
+            precision: "int64".to_string(),
+        };
+        let value = ExecutionValue::Tensor {
+            value: TensorValue {
+                shape: vec![1],
+                data: TensorElements::Int64(vec![9_007_199_254_740_993]),
+            },
+        };
+        let mut env = BTreeMap::new();
+        flatten_field_value(&value, &fty, "p.ids", &mut env)
+            .expect("an int64 tensor field must flatten exactly");
+        assert_eq!(env["p.ids.0"].as_i64_exact(), Some(9_007_199_254_740_993));
+    }
+
+    #[test]
+    fn tensor_field_dtype_mismatch_fails_closed() {
+        let fty = FieldType::Tensor {
+            dims: vec![1],
+            precision: "int64".to_string(),
+        };
+        let value = ExecutionValue::Tensor {
+            value: TensorValue {
+                shape: vec![1],
+                data: TensorElements::F64(vec![1.0]),
+            },
+        };
+        let mut env = BTreeMap::new();
+        let error = flatten_field_value(&value, &fty, "p.ids", &mut env)
+            .expect_err("a wire/declaration dtype mismatch must fail closed");
+        assert!(
+            error.contains("dtype mismatch"),
+            "unexpected error: {error}"
+        );
+        assert!(env.is_empty());
     }
 
     // --- Finding #11: prim_name returns the canonical Prim::name() ---

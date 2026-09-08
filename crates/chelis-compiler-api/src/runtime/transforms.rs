@@ -1,14 +1,62 @@
-use std::collections::{HashMap, HashSet};
+use chelis_deep::DeepTag;
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::lower::try_lower_subexpr_program;
-use chelis_types::types::Prim;
+use chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress;
+use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
 
+use super::host_ops::terminal_name_matches;
 use super::named_axis::*;
 use super::*;
+
+#[derive(Clone)]
+enum GradListShape {
+    Leaf,
+    Unit,
+    List(Vec<GradListShape>),
+    Tuple(Vec<GradListShape>),
+    Adt {
+        ctor: String,
+        field_names: Option<Vec<String>>,
+        fields: Vec<GradListShape>,
+    },
+}
+
+impl GradListShape {
+    fn leaf_count(&self) -> usize {
+        match self {
+            Self::Leaf => 1,
+            Self::Unit => 0,
+            Self::List(items) | Self::Tuple(items) => items.iter().map(Self::leaf_count).sum(),
+            Self::Adt { fields, .. } => fields.iter().map(Self::leaf_count).sum(),
+        }
+    }
+
+    fn repack(&self, leaves: &mut impl Iterator<Item = RuntimeValue>) -> RuntimeValue {
+        match self {
+            Self::Leaf => leaves.next().expect("gradient leaf count checked above"),
+            Self::Unit => RuntimeValue::Unit,
+            Self::List(items) => {
+                RuntimeValue::List(items.iter().map(|item| item.repack(leaves)).collect())
+            }
+            Self::Tuple(items) => {
+                RuntimeValue::Tuple(items.iter().map(|item| item.repack(leaves)).collect())
+            }
+            Self::Adt {
+                ctor,
+                field_names,
+                fields,
+            } => RuntimeValue::Adt {
+                ctor: ctor.clone(),
+                fields: fields.iter().map(|field| field.repack(leaves)).collect(),
+                field_names: field_names.clone(),
+            },
+        }
+    }
+}
 
 impl<'a> EvalContext<'a> {
     /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
@@ -23,7 +71,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         kind: TransformKind,
         transform_expr: &Expr,
-        captured_env: HashMap<String, RuntimeValue>,
+        captured_env: UnordMap<String, RuntimeValue>,
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
         // Allocate placeholder names for the call's actual arguments. We
@@ -32,32 +80,27 @@ impl<'a> EvalContext<'a> {
         // load callback when forward-evaluating the lowered DAG.
         let mut placeholder_names: Vec<String> = Vec::with_capacity(args.len());
         let mut placeholder_types: Vec<TensorType> = Vec::with_capacity(args.len());
-        let mut placeholder_tensors: HashMap<String, IrTensorValue> =
-            HashMap::with_capacity(args.len());
+        let mut placeholder_tensors: UnordMap<String, IrTensorValue> = UnordMap::new();
         // Per-argument Deep expression to splice into the synthesized app:
-        // a typed placeholder var for tensor/scalar args, or a synthesized
-        // ADT construction over per-field placeholders (chelis#520 D2).
+        // a typed placeholder var for tensor/scalar args, or a recursive
+        // List/tuple/ADT construction over leaf placeholders.
         let mut arg_exprs: Vec<Expr> = Vec::with_capacity(args.len());
-        // chelis#520 D2: per-differentiated-target repack plan. After
+        // Per-differentiated-target repack plan. After
         // evaluation the gradient roots come back as one FLAT tuple (the
         // pytree of every wrt-selected target's fields, concatenated in
         // parameter order); each plan slot says how many of those flat
         // roots the target owns and what structure to fold them back into
-        // (a bare tensor, or a constructor-shaped `Adt`). This is the
+        // (a bare tensor, or a recursive List/tuple/ADT value). This is the
         // eval-lane twin of the IR lowering's `GradResultPlan` list. Only
         // wrt-selected differentiable targets get a slot; a non-selected
         // or non-differentiable argument still marshals its placeholders
         // (the body may read it) but owns no gradient root.
         enum ArgRepack {
             Tensor,
-            Adt {
-                ctor: String,
-                field_names: Option<Vec<String>>,
-                field_count: usize,
-            },
+            Structured { shape: GradListShape },
         }
         let mut arg_repacks: Vec<ArgRepack> = Vec::with_capacity(args.len());
-        // wrt indices for this grad call, if narrowed (`grad(f, wrt=(i))`).
+        // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
         // `None` means differentiate every differentiable argument, exactly
         // as the checker's `grad_result_type` and the IR lowering's
         // `is_selected_wrt` do.
@@ -73,6 +116,13 @@ impl<'a> EvalContext<'a> {
         let fn_expr = match transform_expr {
             Expr::List(list, _) => children(list).first(),
             _ => None,
+        };
+        let grad_formals = match kind {
+            TransformKind::Grad => {
+                resolve_transform_fn_for_formals(transform_expr, &self.top_level_defs)
+                    .map(|(function, _)| function)
+            }
+            TransformKind::Vmap => None,
         };
 
         // chelis#351: in the vmap lane, marshalling the batched actuals
@@ -98,102 +148,79 @@ impl<'a> EvalContext<'a> {
 
         let span = Span::new(0, 0);
         for (index, value) in args.iter().enumerate() {
-            // chelis#520 D2: an ADT-valued grad argument marshals as one
-            // placeholder per field plus a synthesized construction expr,
-            // so the IR lowering sees the static constructor shape and
-            // differentiates field-wise.
-            if let (
-                TransformKind::Grad,
-                RuntimeValue::Adt {
-                    ctor,
-                    fields,
-                    field_names,
-                },
-            ) = (&kind, value)
+            // A handled grad must allocate Random ordinals along the branch
+            // actually selected by a concrete discrete argument. Keeping a
+            // bool behind a synthetic Load makes `lower_if` lower both arms,
+            // so an untaken Random arm advances the stream. The evaluator
+            // already has the exact runtime value at this boundary: embed it
+            // as a typed literal so the lowering context can prune the
+            // untaken arm before it allocates Random nodes or ordinals.
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::Bool(value) = value
             {
-                // Type-level gate: the checker types `grad` over an ADT
-                // as non-differentiable (unit payload) when ANY variant
-                // of the type carries a non-float field, or when the
-                // type is a pure enum with no fields. The constructed
-                // value's own fields may look float-clean (e.g. the
-                // clean variant of a mixed sum type), but producing a
-                // gradient struct here would contradict the static type.
-                // Reject with the reason recorded at context build.
-                if let Some(reason) = self.adt_grad_rejections.get(ctor) {
-                    return Err(format!(
-                        "host runtime: `grad(...)` argument {index}: {reason} \
-                         (chelis#520 D2)"
+                arg_exprs.push(make_bool_literal_with_type(*value, span));
+                continue;
+            }
+            // A grad body may use an integer scalar as a discrete selector
+            // (for example list_index/take_list/drop_list). A synthetic Load
+            // preserves its dtype but erases its exact runtime value before
+            // the staged List spine is selected. Embed that non-differentiable
+            // argument as an exact typed literal instead; float/tensor
+            // arguments still use Loads so the AD roots remain connected.
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::Scalar(payload) = value
+                && payload.dtype().is_integer()
+            {
+                let precision = fn_expr
+                    .and_then(|expr| param_precision_at(expr, index))
+                    .unwrap_or(payload.dtype());
+                if precision.is_integer() {
+                    arg_exprs.push(make_integer_literal_with_type(
+                        payload.as_i64(),
+                        precision,
+                        span,
                     ));
+                    continue;
                 }
-                // Field names aligned with `fields` order. `fields` is in
-                // DECLARED order (`eval_record` reorders by the deftype
-                // table), so prefer the authoritative `adt_fields` entry;
-                // the value's own `field_names` is the fallback for Adt
-                // values built outside `eval_record`.
-                let aligned_names: Option<Vec<String>> = self
-                    .adt_fields
-                    .get(ctor)
-                    .cloned()
-                    .filter(|names| names.len() == fields.len())
-                    .or_else(|| {
-                        field_names
-                            .clone()
-                            .filter(|names| names.len() == fields.len())
-                    });
-                let mut field_placeholders: Vec<(String, TensorType)> =
-                    Vec::with_capacity(fields.len());
-                for (fidx, field_value) in fields.iter().enumerate() {
-                    let field_label = aligned_names
-                        .as_ref()
-                        .and_then(|names| names.get(fidx).cloned())
-                        .unwrap_or_else(|| fidx.to_string());
-                    let convertible = matches!(
-                        field_value,
-                        RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_)
-                    );
-                    if !convertible {
-                        return Err(format!(
-                            "host runtime: `grad(...)` argument {index}: field \
-                             `{field_label}` of constructor `{ctor}` is not a tensor or \
-                             scalar; only ADT values whose fields are all float tensors \
-                             can be differentiated (chelis#520 D2)"
-                        ));
-                    }
-                    let (tensor_value, tensor_type) =
-                        runtime_value_to_dag_input(field_value, None, index)?;
-                    let placeholder = format!("__chelis_xform_arg_{index}_field_{fidx}");
-                    placeholder_tensors.insert(placeholder.clone(), tensor_value);
-                    placeholder_names.push(placeholder.clone());
-                    placeholder_types.push(tensor_type.clone());
-                    field_placeholders.push((placeholder, tensor_type));
-                }
-                arg_exprs.push(make_adt_construction_expr(
-                    ctor,
-                    aligned_names.as_deref(),
-                    &field_placeholders,
+            }
+            if matches!(kind, TransformKind::Grad)
+                && matches!(
+                    value,
+                    RuntimeValue::List(_) | RuntimeValue::Tuple(_) | RuntimeValue::Adt { .. }
+                )
+            {
+                let mut leaf_index = 0;
+                let (expr, shape, differentiable) = stage_grad_list_value(
+                    value,
+                    index,
+                    &mut leaf_index,
+                    &mut placeholder_names,
+                    &mut placeholder_types,
+                    &mut placeholder_tensors,
                     span,
-                ));
-                // A clean (all-float-field) ADT argument is a differentiated
-                // target whenever `wrt` selects it (or `wrt` is the default,
-                // all-args form). The rejection above guarantees the type is
-                // differentiable, so a wrt-selected slot always owns exactly
-                // `fields.len()` gradient roots (the IR lowering zero-fills a
-                // field with no adjoint, so every field is represented).
-                let selected = grad_wrt
-                    .as_ref()
-                    .is_none_or(|indices| indices.contains(&index));
-                if selected {
-                    arg_repacks.push(ArgRepack::Adt {
-                        ctor: ctor.clone(),
-                        field_names: aligned_names,
-                        field_count: fields.len(),
+                )?;
+                arg_exprs.push(expr);
+                // A finite executed constructor can have no float leaves
+                // even though another variant of its checked nominal type
+                // does. Default and explicit `wrt` selection are type-based,
+                // not guessed from that one runtime value.
+                let statically_differentiable = grad_formals
+                    .and_then(|function| param_type_expr_at(function, index))
+                    .is_some_and(|ty| {
+                        grad_type_expr_has_float(ty, &self.adt_registry, &mut Vec::new())
                     });
+                let selected = (differentiable || statically_differentiable)
+                    && grad_wrt
+                        .as_ref()
+                        .is_none_or(|indices| indices.contains(&index));
+                if selected {
+                    arg_repacks.push(ArgRepack::Structured { shape });
                 }
                 continue;
             }
             let placeholder = format!("__chelis_xform_arg_{index}");
             let (tensor_value, mut tensor_type) =
-                runtime_value_to_dag_input(value, fn_expr, index)?;
+                runtime_value_to_dag_input_lossy(value, fn_expr, index)?;
             if let (Some((callee_fn, Some(axis))), RuntimeValue::Tensor(tensor)) =
                 (&vmap_formals, value)
                 && let Some(formal) = param_type_expr_at(callee_fn, index)
@@ -224,7 +251,7 @@ impl<'a> EvalContext<'a> {
 
         // Synthesize `(app {} <transform-expr> <arg-expr_0> ...)`.
         let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + arg_exprs.len());
-        app_elements.push(Expr::Atom(Atom::Symbol("app".to_string()), span));
+        app_elements.push(Expr::Atom(Atom::Tag(DeepTag::App), span));
         app_elements.push(Expr::Map(MetaMap::default(), span));
         app_elements.push(transform_expr.clone());
         app_elements.extend(arg_exprs);
@@ -235,7 +262,7 @@ impl<'a> EvalContext<'a> {
             span,
         );
 
-        let scoped_types: HashMap<String, TensorType> = placeholder_names
+        let scoped_types: UnordMap<String, TensorType> = placeholder_names
             .iter()
             .cloned()
             .zip(placeholder_types.iter().cloned())
@@ -246,7 +273,7 @@ impl<'a> EvalContext<'a> {
         // from `captured_env` (so `target = fn (...) -> ...; grad(target)(x)`
         // resolves `target` when the inner DAG lowering reaches it).
         let mut program_defs = self.top_level_defs.clone();
-        for (name, value) in captured_env.iter() {
+        for (name, value) in captured_env.to_sorted() {
             if let RuntimeValue::Closure { params, body, .. } = value {
                 program_defs
                     .entry(name.clone())
@@ -291,10 +318,16 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        let lower_result =
-            try_lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs);
-        let dag = match lower_result {
-            Ok(dag) => dag,
+        let lower_result = try_lower_subexpr_program_with_random_state_progress(
+            &app_expr,
+            scoped_types,
+            self.type_env.clone(),
+            program_defs,
+            self.random_seed,
+            self.random_counter,
+        );
+        let (dag, next_random_counter) = match lower_result {
+            Ok(result) => result,
             Err(diagnostic) => {
                 let kind_label = match kind {
                     TransformKind::Grad => "grad",
@@ -306,6 +339,14 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
+        let starting_random_counter = self.random_counter;
+        let path_sensitive_random = dag.nodes().iter().any(|node| {
+            matches!(node.op, chelis_ir::dag::RiscOp::UniformLike { .. }) && node.inputs.len() == 2
+        });
+        if !path_sensitive_random {
+            // The ordinary baked-seed lane computes progression statically.
+            self.random_counter = next_random_counter;
+        }
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -314,6 +355,25 @@ impl<'a> EvalContext<'a> {
         let tensor_bindings = self.tensor_bindings;
         let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
         if roots.is_empty() {
+            if matches!(kind, TransformKind::Grad)
+                && !arg_repacks.is_empty()
+                && arg_repacks.iter().all(
+                    |slot| matches!(slot, ArgRepack::Structured { shape } if shape.leaf_count() == 0),
+                )
+            {
+                let mut no_leaves = std::iter::empty();
+                let mut empty_slots = arg_repacks.iter().map(|slot| match slot {
+                    ArgRepack::Structured { shape } => shape.repack(&mut no_leaves),
+                    ArgRepack::Tensor => {
+                        unreachable!("guarded by empty List repack check")
+                    }
+                });
+                return Ok(if arg_repacks.len() == 1 {
+                    empty_slots.next().expect("one empty List slot")
+                } else {
+                    RuntimeValue::Tuple(empty_slots.collect())
+                });
+            }
             let kind_label = match kind {
                 TransformKind::Grad => "grad",
                 TransformKind::Vmap => "vmap",
@@ -334,8 +394,9 @@ impl<'a> EvalContext<'a> {
         // parity gap pinned by `issue_352_grad_over_capturing_def_eval_gap`.
         // Only `Tensor` captures are served; non-tensor captures (closures,
         // scalars routed elsewhere) are not load inputs here.
-        let mut captured_tensors: HashMap<String, IrTensorValue> = captured_env
-            .iter()
+        let mut captured_tensors: UnordMap<String, IrTensorValue> = captured_env
+            .to_sorted()
+            .into_iter()
             .filter_map(|(name, value)| match value {
                 RuntimeValue::Tensor(tensor) => Some((name.clone(), tensor.value.clone())),
                 _ => None,
@@ -399,20 +460,29 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         }
-        let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
-            placeholder_tensors
-                .get(name)
-                .cloned()
-                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
-                .or_else(|| captured_tensors.get(name).cloned())
-        })
-        .map_err(|err| {
-            let kind_label = match kind {
-                TransformKind::Grad => "grad",
-                TransformKind::Vmap => "vmap",
-            };
-            format!("host runtime `{kind_label}` evaluation failed: {err}")
-        })?;
+        let (values, executed_random_counter) =
+            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                &dag,
+                &roots,
+                starting_random_counter,
+                |name| {
+                    placeholder_tensors
+                        .get(name)
+                        .cloned()
+                        .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+                        .or_else(|| captured_tensors.get(name).cloned())
+                },
+            )
+            .map_err(|err| {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                format!("host runtime `{kind_label}` evaluation failed: {err}")
+            })?;
+        if path_sensitive_random {
+            self.random_counter = executed_random_counter;
+        }
 
         // Pack roots back into a RuntimeValue.
         let kind_label = match kind {
@@ -428,10 +498,10 @@ impl<'a> EvalContext<'a> {
         // bare gradient). A pure-tensor grad needs no re-collapse: `packed`
         // is already the flat tuple the pre-#520 contract specifies, and
         // the eval-root display (chelis#614) walks it component-wise.
-        let has_adt_slot = arg_repacks
+        let has_structured_slot = arg_repacks
             .iter()
-            .any(|slot| matches!(slot, ArgRepack::Adt { .. }));
-        if matches!(kind, TransformKind::Grad) && has_adt_slot {
+            .any(|slot| matches!(slot, ArgRepack::Structured { .. }));
+        if matches!(kind, TransformKind::Grad) && has_structured_slot {
             let flat: Vec<RuntimeValue> = match packed {
                 RuntimeValue::Tuple(items) => items,
                 single => vec![single],
@@ -449,7 +519,7 @@ impl<'a> EvalContext<'a> {
                 .iter()
                 .map(|slot| match slot {
                     ArgRepack::Tensor => 1,
-                    ArgRepack::Adt { field_count, .. } => *field_count,
+                    ArgRepack::Structured { shape } => shape.leaf_count(),
                 })
                 .sum();
             if flat.len() != expected {
@@ -468,21 +538,7 @@ impl<'a> EvalContext<'a> {
                     ArgRepack::Tensor => {
                         slots.push(flat_iter.next().expect("count checked above"));
                     }
-                    ArgRepack::Adt {
-                        ctor,
-                        field_names,
-                        field_count,
-                    } => {
-                        let mut fields = Vec::with_capacity(*field_count);
-                        for _ in 0..*field_count {
-                            fields.push(flat_iter.next().expect("count checked above"));
-                        }
-                        slots.push(RuntimeValue::Adt {
-                            ctor: ctor.clone(),
-                            fields,
-                            field_names: field_names.clone(),
-                        });
-                    }
+                    ArgRepack::Structured { shape } => slots.push(shape.repack(&mut flat_iter)),
                 }
             }
             return Ok(match slots.len() {
@@ -505,12 +561,12 @@ impl<'a> EvalContext<'a> {
 /// `None`, so the caller falls back to the differentiate-all default.
 fn grad_wrt_indices_from_transform(transform_expr: &Expr) -> Option<Vec<usize>> {
     let list = as_list(transform_expr)?;
-    if tag(list) != Some("grad") {
+    if tag(list) != Some(DeepTag::Grad) {
         return None;
     }
     let wrt_expr = children(list).get(1)?;
     if let Expr::List(tuple, _) = wrt_expr
-        && tag(tuple) == Some("tuple")
+        && tag(tuple) == Some(DeepTag::Tuple)
     {
         return Some(
             children(tuple)
@@ -522,70 +578,408 @@ fn grad_wrt_indices_from_transform(transform_expr: &Expr) -> Option<Vec<usize>> 
     static_usize_value(wrt_expr).map(|index| vec![index])
 }
 
-/// chelis#520 D2: synthesize the Deep construction expression that
-/// rebuilds an ADT argument from its per-field typed placeholders --
-/// `(record {} Ctor (kv {} field (var {type: ...} ph)) ...)` for record
-/// constructors, `(app {} (var Ctor) (var {type: ...} ph) ...)` for
-/// positional ones. The IR lowering resolves either form to a static
-/// `LoweredValue::Adt`, which is what lets the differentiated body's
-/// `match` destructuring resolve at lowering time.
-fn make_adt_construction_expr(
+fn lookup_registered_type<'a, T>(
+    entries: &'a std::collections::BTreeMap<String, T>,
+    name: &str,
+) -> Option<(&'a str, &'a T)> {
+    entries
+        .get_key_value(name)
+        .map(|(key, value)| (key.as_str(), value))
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|(candidate, _)| terminal_name_matches(candidate, name))
+                .map(|(key, value)| (key.as_str(), value))
+        })
+}
+
+fn registered_type_has_float(
+    name: &str,
+    argument_flags: Vec<bool>,
+    registry: &chelis_types::adt::AdtRegistry,
+    visiting: &mut Vec<(String, Vec<bool>)>,
+) -> bool {
+    if terminal_name_matches(name, "List") {
+        return argument_flags.first().copied().unwrap_or(false);
+    }
+    if let Some((alias_name, alias)) = lookup_registered_type(&registry.aliases, name) {
+        let key = (format!("alias:{alias_name}"), argument_flags.clone());
+        if visiting.contains(&key) {
+            return false;
+        }
+        visiting.push(key.clone());
+        let substitutions = alias
+            .param_args
+            .iter()
+            .zip(argument_flags)
+            .filter_map(|(argument, flag)| match argument {
+                NominalArg::Type(Type::Var(var)) => Some((*var, flag)),
+                _ => None,
+            })
+            .collect::<UnordMap<_, _>>();
+        let result = stored_type_has_float(&alias.body, registry, &substitutions, visiting);
+        debug_assert_eq!(visiting.pop().as_ref(), Some(&key));
+        return result;
+    }
+    let Some((definition_name, definition)) = lookup_registered_type(&registry.defs, name) else {
+        return false;
+    };
+    let key = (format!("adt:{definition_name}"), argument_flags.clone());
+    if visiting.contains(&key) {
+        return false;
+    }
+    visiting.push(key.clone());
+    let substitutions = definition
+        .param_args
+        .iter()
+        .zip(argument_flags)
+        .filter_map(|(argument, flag)| match argument {
+            NominalArg::Type(Type::Var(var)) => Some((*var, flag)),
+            _ => None,
+        })
+        .collect::<UnordMap<_, _>>();
+    let result = definition.variants.iter().any(|variant| {
+        variant
+            .fields
+            .iter()
+            .any(|(_, field)| stored_type_has_float(field, registry, &substitutions, visiting))
+    });
+    debug_assert_eq!(visiting.pop().as_ref(), Some(&key));
+    result
+}
+
+fn stored_type_has_float(
+    ty: &Type,
+    registry: &chelis_types::adt::AdtRegistry,
+    substitutions: &UnordMap<TypeVar, bool>,
+    visiting: &mut Vec<(String, Vec<bool>)>,
+) -> bool {
+    match ty {
+        Type::Prim(prim) => prim.is_float(),
+        Type::Tensor(_, TensorPrec::Concrete(prim)) => prim.is_float(),
+        Type::Tensor(_, TensorPrec::Var(var)) | Type::Var(var) => {
+            substitutions.get(var).copied().unwrap_or(false)
+        }
+        Type::Ref(inner) => stored_type_has_float(inner, registry, substitutions, visiting),
+        Type::Tuple(items) => items
+            .iter()
+            .any(|item| stored_type_has_float(item, registry, substitutions, visiting)),
+        Type::Adt(name, arguments) => registered_type_has_float(
+            name,
+            arguments
+                .iter()
+                .map(|argument| stored_type_has_float(argument, registry, substitutions, visiting))
+                .collect(),
+            registry,
+            visiting,
+        ),
+        Type::KindedAdt(name, arguments) => registered_type_has_float(
+            name,
+            arguments
+                .iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => {
+                        stored_type_has_float(ty, registry, substitutions, visiting)
+                    }
+                    NominalArg::Dimension(_) => false,
+                })
+                .collect(),
+            registry,
+            visiting,
+        ),
+        Type::Fn(_, _) | Type::Unit | Type::Error(_) => false,
+    }
+}
+
+fn grad_type_expr_has_float(
+    expr: &Expr,
+    registry: &chelis_types::adt::AdtRegistry,
+    visiting: &mut Vec<(String, Vec<bool>)>,
+) -> bool {
+    let (node_tag, kids) = match expr {
+        Expr::List(list, _) => (tag(list), children(list)),
+        Expr::Node(node, _) => (Some(node.tag()), node.children_slice()),
+        _ => (None, &[][..]),
+    };
+    match node_tag {
+        Some(DeepTag::TPrim) => kids
+            .first()
+            .and_then(symbol_name)
+            .and_then(prim_from_name)
+            .is_some_and(|prim| prim.is_float()),
+        Some(DeepTag::TTensor) => kids
+            .last()
+            .is_some_and(|precision| grad_type_expr_has_float(precision, registry, visiting)),
+        Some(DeepTag::TRef) => kids
+            .first()
+            .is_some_and(|inner| grad_type_expr_has_float(inner, registry, visiting)),
+        Some(DeepTag::TTuple) => kids
+            .iter()
+            .any(|item| grad_type_expr_has_float(item, registry, visiting)),
+        Some(DeepTag::TAdt) => {
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                return false;
+            };
+            registered_type_has_float(
+                name,
+                kids.iter()
+                    .skip(1)
+                    .map(|argument| grad_type_expr_has_float(argument, registry, visiting))
+                    .collect(),
+                registry,
+                visiting,
+            )
+        }
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_grad_list_value(
+    value: &RuntimeValue,
+    argument_index: usize,
+    leaf_index: &mut usize,
+    placeholder_names: &mut Vec<String>,
+    placeholder_types: &mut Vec<TensorType>,
+    placeholder_tensors: &mut UnordMap<String, IrTensorValue>,
+    span: Span,
+) -> Result<(Expr, GradListShape, bool), String> {
+    match value {
+        RuntimeValue::List(items) => {
+            let mut item_exprs = Vec::with_capacity(items.len());
+            let mut item_shapes = Vec::with_capacity(items.len());
+            // A finite empty List has no runtime leaf from which to infer
+            // differentiability, but its checked element type already made
+            // the grad target legal. Preserve an empty repack slot so the
+            // cotangent is the exact empty List rather than "no roots".
+            let mut differentiable = items.is_empty();
+            for item in items {
+                let (expr, shape, item_differentiable) = stage_grad_list_value(
+                    item,
+                    argument_index,
+                    leaf_index,
+                    placeholder_names,
+                    placeholder_types,
+                    placeholder_tensors,
+                    span,
+                )?;
+                item_exprs.push(expr);
+                item_shapes.push(shape);
+                differentiable |= item_differentiable;
+            }
+            Ok((
+                make_list_construction_expr(item_exprs, span),
+                GradListShape::List(item_shapes),
+                differentiable,
+            ))
+        }
+        RuntimeValue::Tuple(items) => {
+            let mut item_exprs = Vec::with_capacity(items.len());
+            let mut item_shapes = Vec::with_capacity(items.len());
+            let mut differentiable = false;
+            for item in items {
+                let (expr, shape, item_differentiable) = stage_grad_list_value(
+                    item,
+                    argument_index,
+                    leaf_index,
+                    placeholder_names,
+                    placeholder_types,
+                    placeholder_tensors,
+                    span,
+                )?;
+                item_exprs.push(expr);
+                item_shapes.push(shape);
+                differentiable |= item_differentiable;
+            }
+            Ok((
+                make_tuple_expr(item_exprs, span),
+                GradListShape::Tuple(item_shapes),
+                differentiable,
+            ))
+        }
+        RuntimeValue::Adt {
+            ctor,
+            fields,
+            field_names,
+        } => {
+            let mut field_exprs = Vec::with_capacity(fields.len());
+            let mut field_shapes = Vec::with_capacity(fields.len());
+            let mut differentiable = false;
+            for field in fields {
+                let (expr, shape, field_differentiable) = stage_grad_list_value(
+                    field,
+                    argument_index,
+                    leaf_index,
+                    placeholder_names,
+                    placeholder_types,
+                    placeholder_tensors,
+                    span,
+                )?;
+                field_exprs.push(expr);
+                field_shapes.push(shape);
+                differentiable |= field_differentiable;
+            }
+            Ok((
+                make_adt_construction_exprs(ctor, field_names.as_deref(), field_exprs, span),
+                GradListShape::Adt {
+                    ctor: ctor.clone(),
+                    field_names: field_names.clone(),
+                    fields: field_shapes,
+                },
+                differentiable,
+            ))
+        }
+        RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_) | RuntimeValue::Bool(_) => {
+            let current_leaf = *leaf_index;
+            *leaf_index += 1;
+            let (tensor_value, tensor_type) =
+                runtime_value_to_dag_input_lossy(value, None, current_leaf)?;
+            let placeholder =
+                format!("__chelis_xform_arg_{argument_index}_list_leaf_{current_leaf}");
+            placeholder_tensors.insert(placeholder.clone(), tensor_value);
+            placeholder_names.push(placeholder.clone());
+            placeholder_types.push(tensor_type.clone());
+            let differentiable = tensor_type.precision.is_float();
+            let shape = if differentiable {
+                GradListShape::Leaf
+            } else {
+                GradListShape::Unit
+            };
+            Ok((
+                make_var_with_type(&placeholder, &tensor_type, span),
+                shape,
+                differentiable,
+            ))
+        }
+        RuntimeValue::Unit => Ok((make_unit_expr(span), GradListShape::Unit, false)),
+        _ => Err(format!(
+            "host runtime: `grad(...)` structured argument {argument_index}: recursive \
+             element is not a supported scalar, tensor, List, tuple, ADT, or unit value"
+        )),
+    }
+}
+
+fn make_tuple_expr(elements: Vec<Expr>, span: Span) -> Expr {
+    Expr::List(
+        List {
+            elements: std::iter::once(Expr::Atom(Atom::Tag(DeepTag::Tuple), span))
+                .chain(std::iter::once(Expr::Map(MetaMap::default(), span)))
+                .chain(elements)
+                .collect(),
+        },
+        span,
+    )
+}
+
+fn make_unit_expr(span: Span) -> Expr {
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Tuple), span),
+                Expr::Map(MetaMap::default(), span),
+            ],
+        },
+        span,
+    )
+}
+
+fn make_adt_construction_exprs(
     ctor: &str,
     field_names: Option<&[String]>,
-    field_placeholders: &[(String, TensorType)],
+    field_exprs: Vec<Expr>,
     span: Span,
 ) -> Expr {
     match field_names {
-        Some(names) => {
+        Some(names) if names.len() == field_exprs.len() => {
             let mut elements = vec![
-                Expr::Atom(Atom::Symbol("record".to_string()), span),
+                Expr::Atom(Atom::Tag(DeepTag::Record), span),
                 Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(ctor.to_string()), span),
+                Expr::Atom(Atom::Name(ctor.to_string()), span),
             ];
-            for (name, (placeholder, ty)) in names.iter().zip(field_placeholders.iter()) {
-                elements.push(Expr::List(
+            elements.extend(names.iter().zip(field_exprs).map(|(name, expr)| {
+                Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Symbol("kv".to_string()), span),
+                            Expr::Atom(Atom::Tag(DeepTag::Kv), span),
                             Expr::Map(MetaMap::default(), span),
-                            Expr::Atom(Atom::Symbol(name.clone()), span),
-                            make_var_with_type(placeholder, ty, span),
+                            Expr::Atom(Atom::Name(name.clone()), span),
+                            expr,
                         ],
                     },
                     span,
-                ));
-            }
+                )
+            }));
             Expr::List(List { elements }, span)
         }
-        None => {
+        _ => {
             let mut elements = vec![
-                Expr::Atom(Atom::Symbol("app".to_string()), span),
+                Expr::Atom(Atom::Tag(DeepTag::App), span),
                 Expr::Map(MetaMap::default(), span),
                 Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Symbol("var".to_string()), span),
+                            Expr::Atom(Atom::Tag(DeepTag::Var), span),
                             Expr::Map(MetaMap::default(), span),
-                            Expr::Atom(Atom::Symbol(ctor.to_string()), span),
+                            Expr::Atom(Atom::Name(ctor.to_string()), span),
                         ],
                     },
                     span,
                 ),
             ];
-            for (placeholder, ty) in field_placeholders {
-                elements.push(make_var_with_type(placeholder, ty, span));
-            }
+            elements.extend(field_exprs);
             Expr::List(List { elements }, span)
         }
     }
 }
 
-/// Bucket 1 helper: convert a host-runtime argument into a
-/// `(TensorValue, TensorType)` pair the IR DAG can consume. Scalar args
-/// (Int/Float/Bool) are wrapped as rank-0 tensors with the precision
+/// Build the exact closed `Cons`/`Nil` value used to stage a runtime List
+/// through the tensor DAG transform. Elements may themselves be staged Lists;
+/// every scalar or tensor leaf owns one typed placeholder, so reverse mode can
+/// reconstruct the complete primal runtime shape and order.
+fn make_list_construction_expr(elements: Vec<Expr>, span: Span) -> Expr {
+    let mut tail = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name("Nil".to_string()), span),
+            ],
+        },
+        span,
+    );
+    for element in elements.into_iter().rev() {
+        tail = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::App), span),
+                    Expr::Map(MetaMap::default(), span),
+                    Expr::List(
+                        List {
+                            elements: vec![
+                                Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                                Expr::Map(MetaMap::default(), span),
+                                Expr::Atom(Atom::Name("Cons".to_string()), span),
+                            ],
+                        },
+                        span,
+                    ),
+                    element,
+                    tail,
+                ],
+            },
+            span,
+        );
+    }
+    tail
+}
+
+/// Bucket 1 helper: lossily convert a host-runtime argument into the legacy
+/// f64-backed `(TensorValue, TensorType)` pair the IR DAG can consume. Scalar
+/// args (Int/Float/Bool) are wrapped as rank-0 tensors with the precision
 /// pulled from the inner fn's parameter type metadata when available, or
-/// from the runtime value as a fallback.
-pub(super) fn runtime_value_to_dag_input(
+/// from the runtime value as a fallback. Exact transform ingress remains
+/// chelis#688 / #729 Phase 2 work.
+pub(super) fn runtime_value_to_dag_input_lossy(
     value: &RuntimeValue,
     fn_expr: Option<&Expr>,
     index: usize,
@@ -609,7 +1003,7 @@ pub(super) fn runtime_value_to_dag_input(
                 .and_then(|e| param_precision_at(e, index))
                 .unwrap_or(payload.dtype());
             Ok((
-                IrTensorValue::scalar(payload.bits().as_f64()),
+                IrTensorValue::scalar(payload.as_f64_lossy()),
                 TensorType {
                     dims: vec![],
                     precision,
@@ -621,7 +1015,7 @@ pub(super) fn runtime_value_to_dag_input(
                 .and_then(|e| param_precision_at(e, index))
                 .unwrap_or(payload.dtype());
             Ok((
-                IrTensorValue::scalar(payload.bits().as_i64() as f64),
+                IrTensorValue::scalar(payload.as_i64() as f64),
                 TensorType {
                     dims: vec![],
                     precision,
@@ -654,28 +1048,28 @@ pub(super) fn runtime_value_to_dag_input(
 /// Lit-dim placeholder marshalling (the pre-#351 behavior).
 fn resolve_transform_fn_for_formals<'a>(
     expr: &'a Expr,
-    defs: &'a HashMap<String, Expr>,
+    defs: &'a UnordMap<String, Expr>,
 ) -> Option<(&'a Expr, Option<usize>)> {
     let mut current = expr;
     let mut vmap_axis: Option<usize> = None;
-    let mut visited: HashSet<&str> = HashSet::new();
+    let mut visited: UnordSet<&str> = UnordSet::new();
     loop {
         let Expr::List(list, _) = current else {
             return None;
         };
         match tag(list) {
-            Some("fn") => return Some((current, vmap_axis)),
-            Some("var") => {
+            Some(DeepTag::Fn) => return Some((current, vmap_axis)),
+            Some(DeepTag::Var) => {
                 let name = children(list).first().and_then(symbol_name)?;
                 if !visited.insert(name) {
                     return None;
                 }
                 current = defs.get(name)?;
             }
-            Some("grad") => {
+            Some(DeepTag::Grad) => {
                 current = children(list).first()?;
             }
-            Some("vmap") => {
+            Some(DeepTag::Vmap) => {
                 if vmap_axis.is_some() {
                     return None;
                 }
@@ -699,11 +1093,11 @@ fn static_usize_value(expr: &Expr) -> Option<usize> {
     match expr {
         Expr::Atom(Atom::Int(n), _) => usize::try_from(*n).ok(),
         Expr::List(list, _) => match tag(list)? {
-            "lit" => match children(list).first()? {
+            DeepTag::Lit => match children(list).first()? {
                 Expr::Atom(Atom::Int(n), _) => usize::try_from(*n).ok(),
                 _ => None,
             },
-            "cast" => static_usize_value(children(list).first()?),
+            DeepTag::Cast => static_usize_value(children(list).first()?),
             _ => None,
         },
         _ => None,
@@ -768,7 +1162,7 @@ pub(super) fn param_type_expr_at(fn_expr: &Expr, index: usize) -> Option<&Expr> 
     let Expr::List(list, _) = fn_expr else {
         return None;
     };
-    if tag(list) != Some("fn") {
+    if tag(list) != Some(DeepTag::Fn) {
         return None;
     }
     let params = children(list).first()?;
@@ -785,15 +1179,14 @@ fn param_precision_at(fn_expr: &Expr, index: usize) -> Option<Prim> {
 }
 
 pub(super) fn extract_prim_from_type_expr(expr: &Expr) -> Option<Prim> {
-    let Expr::List(list, _) = expr else {
-        return None;
+    let (node_tag, kids) = match expr {
+        Expr::List(list, _) => (tag(list)?, children(list)),
+        Expr::Node(node, _) => (node.tag(), node.children_slice()),
+        _ => return None,
     };
-    match tag(list) {
-        Some("t-prim") => children(list)
-            .first()
-            .and_then(symbol_name)
-            .and_then(prim_from_name),
-        Some("t-tensor") => children(list).last().and_then(extract_prim_from_type_expr),
+    match node_tag {
+        DeepTag::TPrim => kids.first().and_then(symbol_name).and_then(prim_from_name),
+        DeepTag::TTensor => kids.last().and_then(extract_prim_from_type_expr),
         _ => None,
     }
 }
@@ -853,9 +1246,9 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
     let prim_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), span),
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
                 Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(prim_name.to_string()), span),
+                Expr::Atom(Atom::Name(prim_name.to_string()), span),
             ],
         },
         span,
@@ -864,7 +1257,7 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
         prim_node
     } else {
         let mut tensor_elems = vec![
-            Expr::Atom(Atom::Symbol("t-tensor".to_string()), span),
+            Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
             Expr::Map(MetaMap::default(), span),
         ];
         for dim in &ty.dims {
@@ -883,9 +1276,71 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("var".to_string()), span),
+                Expr::Atom(Atom::Tag(DeepTag::Var), span),
                 Expr::Map(meta, span),
-                Expr::Atom(Atom::Symbol(name.to_string()), span),
+                Expr::Atom(Atom::Name(name.to_string()), span),
+            ],
+        },
+        span,
+    )
+}
+
+/// Build a `(lit {type: (t-prim {} <integer-dtype>)} value)` expression.
+/// Grad uses this for exact runtime-fed discrete arguments whose value must be
+/// visible while lowering a staged List spine.
+fn make_integer_literal_with_type(value: i64, precision: Prim, span: Span) -> Expr {
+    let prim_name = match precision {
+        Prim::Int8 => "int8",
+        Prim::Int16 => "int16",
+        Prim::Int32 => "int32",
+        Prim::Int64 => "int64",
+        _ => panic!("integer transform argument unexpectedly declared with non-integer dtype"),
+    };
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name(prim_name.to_string()), span),
+            ],
+        },
+        span,
+    );
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), prim_node));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
+                Expr::Map(meta, span),
+                Expr::Atom(Atom::Int(value), span),
+            ],
+        },
+        span,
+    )
+}
+
+/// Build a `(lit {type: (t-prim {} bool)} value)` expression for a concrete
+/// non-differentiable transform argument.
+fn make_bool_literal_with_type(value: bool, span: Span) -> Expr {
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name("bool".to_string()), span),
+            ],
+        },
+        span,
+    );
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), prim_node));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
+                Expr::Map(meta, span),
+                Expr::Atom(Atom::Bool(value), span),
             ],
         },
         span,
@@ -897,7 +1352,7 @@ fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
         DimInfo::Lit(value) => Expr::List(
             List {
                 elements: vec![
-                    Expr::Atom(Atom::Symbol("d-lit".to_string()), span),
+                    Expr::Atom(Atom::Tag(DeepTag::DLit), span),
                     Expr::Map(MetaMap::default(), span),
                     Expr::Atom(Atom::Int(*value as i64), span),
                 ],
@@ -907,9 +1362,9 @@ fn dim_to_expr(dim: &DimInfo, span: Span) -> Expr {
         DimInfo::Named(name, _) => Expr::List(
             List {
                 elements: vec![
-                    Expr::Atom(Atom::Symbol("d-name".to_string()), span),
+                    Expr::Atom(Atom::Tag(DeepTag::DName), span),
                     Expr::Map(MetaMap::default(), span),
-                    Expr::Atom(Atom::Symbol(name.clone()), span),
+                    Expr::Atom(Atom::Name(name.clone()), span),
                 ],
             },
             span,
@@ -924,10 +1379,10 @@ fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
     let span = body.span();
     let param_exprs = params
         .iter()
-        .map(|name| Expr::Atom(Atom::Symbol(name.clone()), span))
+        .map(|name| Expr::Atom(Atom::Name(name.clone()), span))
         .collect::<Vec<_>>();
     let mut params_elements = vec![
-        Expr::Atom(Atom::Symbol("params".to_string()), span),
+        Expr::Atom(Atom::Tag(DeepTag::Params), span),
         Expr::Map(MetaMap::default(), span),
     ];
     params_elements.extend(param_exprs);
@@ -940,7 +1395,7 @@ fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("fn".to_string()), span),
+                Expr::Atom(Atom::Tag(DeepTag::Fn), span),
                 Expr::Map(MetaMap::default(), span),
                 params_list,
                 body.clone(),
@@ -951,16 +1406,20 @@ fn synth_fn_expr(params: &[String], body: &Expr) -> Expr {
 }
 
 pub(super) fn var_name(expr: &Expr) -> Option<&str> {
-    let list = as_list(expr)?;
-    if tag(list) != Some("var") {
-        return None;
+    match expr {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Var) => {
+            children(list).first().and_then(symbol_name)
+        }
+        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
+            node.children_slice().first().and_then(symbol_name)
+        }
+        _ => None,
     }
-    children(list).first().and_then(symbol_name)
 }
 
 pub(super) fn runtime_param_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         Expr::MetaExpr(meta, _) => runtime_param_name(&meta.expr),
         Expr::List(list, _) => list
             .elements
@@ -999,9 +1458,9 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
     let Expr::List(list, _) = expr else {
         return;
     };
-    if tag(list) == Some("app")
+    if tag(list) == Some(DeepTag::App)
         && let Some(Expr::List(callee, _)) = children(list).first()
-        && tag(callee) == Some("var")
+        && tag(callee) == Some(DeepTag::Var)
         && let Some(name) = children(callee).first().and_then(symbol_name)
         && HOST_ONLY_BUILTIN_NAMES.contains(&name)
     {
@@ -1010,7 +1469,7 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
         }
         return;
     }
-    if tag(list) == Some("var")
+    if tag(list) == Some(DeepTag::Var)
         && let Some(name) = children(list).first().and_then(symbol_name)
     {
         vars.push(name.to_string());
@@ -1043,10 +1502,10 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
 /// a silently-lowered host-only op, so it is left as-is.
 pub(super) fn find_reachable_host_only_builtin_call(
     root: &Expr,
-    defs: &HashMap<String, Expr>,
+    defs: &UnordMap<String, Expr>,
 ) -> Option<String> {
     let mut hit: Option<String> = None;
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut visited: UnordSet<String> = UnordSet::new();
     let mut worklist: Vec<&Expr> = vec![root];
     while let Some(expr) = worklist.pop() {
         let mut vars: Vec<String> = Vec::new();

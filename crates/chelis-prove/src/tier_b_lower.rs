@@ -21,7 +21,8 @@
 //! derived obligation proves with `proof_tier:"smt"` for linear-arithmetic
 //! invariants. A residual irreducible `match` falls to Tier C.
 
-use std::collections::HashMap;
+use chelis_deep::DeepTag;
+use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr};
 
@@ -36,47 +37,63 @@ const MAX_INLINE_DEPTH: usize = 3;
 // Deep helpers
 // ===========================================================================
 
-fn tag(expr: &Expr) -> Option<&str> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
-    {
-        Some(s.as_str())
-    } else {
-        None
+// chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: these two are the
+// whole module's view of a Deep node, and they were `Expr::List`-only. The CLI
+// `chelis prove foo.dp` path hands `run_module_obligations` the stamped exprs
+// from `parse_and_stamp_file` without normalizing, so every read here returned
+// nothing, the obligation could not lower, and `run_one` fell through to
+// Tier C. The same module submitted as `.ch` proved at Tier B: one program,
+// two proof tiers, distinguished only by which spelling was submitted, with
+// both reporting `passed` and exit 0.
+
+fn tag(expr: &Expr) -> Option<DeepTag> {
+    match expr {
+        Expr::Node(node, _) => Some(node.tag()),
+        Expr::List(list, _) => list.tag(),
+        _ => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
 fn symbol_text(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
         _ => None,
     }
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    (tag(expr) == Some("var"))
+    (tag(expr) == Some(DeepTag::Var))
         .then(|| symbol_text(children(expr).first()?))
         .flatten()
 }
 
 fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
-    if tag(expr) == Some("app") {
+    if tag(expr) == Some(DeepTag::App) {
         let kids = children(expr);
         let callee = kids.first()?;
         let name = var_name(callee)?;
         return Some((name, &kids[1..]));
     }
     None
+}
+
+/// The element sequence of an inline-annotated param `(name {type: T})`, on
+/// either carrier it can arrive in: a tagless `Expr::List` on the normalizing
+/// tide route and an `Expr::BareList` on the stamped CLI route.
+fn inline_param_elements(expr: &Expr) -> &[Expr] {
+    match expr {
+        Expr::List(list, _) => &list.elements,
+        Expr::BareList(elements, _) => elements,
+        _ => &[],
+    }
 }
 
 /// A producer def found in the program: param names and body.
@@ -88,21 +105,24 @@ struct ProducerBody<'a> {
 fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>> {
     fn find<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>> {
         for expr in exprs {
-            if tag(expr) == Some("def")
+            if tag(expr) == Some(DeepTag::Def)
                 && let kids = children(expr)
                 && kids.first().and_then(symbol_text) == Some(name)
                 && let Some(fn_node) = kids.get(1)
-                && tag(fn_node) == Some("fn")
+                && tag(fn_node) == Some(DeepTag::Fn)
             {
                 let fkids = children(fn_node);
                 let params_node = fkids.first()?;
                 let mut params = Vec::new();
                 for p in children(params_node) {
-                    // `(name {type: ...})` or bare symbol.
+                    // `(name {type: ...})` or bare symbol. chelis#1125 PP7
+                    // finding 1: an inline-annotated param is a TAGLESS list,
+                    // so the stamp pass produces `Expr::BareList` rather than
+                    // `Expr::Node`; both spellings put the name atom first.
                     if let Some(n) = symbol_text(p) {
                         params.push(n.to_string());
-                    } else if let Expr::List(list, _) = p
-                        && let Some(Expr::Atom(Atom::Symbol(s), _)) = list.elements.first()
+                    } else if let Some(Expr::Atom(Atom::Name(s), _)) =
+                        inline_param_elements(p).first()
                     {
                         params.push(s.clone());
                     }
@@ -110,9 +130,9 @@ fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>
                 let body = fkids.get(1)?;
                 return Some(ProducerBody { params, body });
             }
-            if let Expr::List(list, _) = expr
-                && let Some(found) = find(&list.elements[2.min(list.elements.len())..], name)
-            {
+            // Descend into a `module` wrapper (or any other decoded form) on
+            // either carrier; `children` drops the tag and metadata for both.
+            if let Some(found) = find(children(expr), name) {
                 return Some(found);
             }
         }
@@ -169,11 +189,11 @@ pub fn lower_obligation(
     // The set of producer-param names that are opaque inputs, mapped to
     // their (binder-name -> flattened-prefix) so the body lowering
     // resolves `access(var p) field` to `Var("p.field")`.
-    let mut opaque_params: HashMap<String, OpaqueInvariant> = HashMap::new();
+    let mut opaque_params: UnordMap<String, OpaqueInvariant> = UnordMap::new();
     // Substitution: a scalar param maps to a free solver var; an opaque
     // input param is left as itself (its field projections lower directly
     // to flattened vars, so it must NOT be substituted by a single var).
-    let mut subst: HashMap<String, Expr> = HashMap::new();
+    let mut subst: UnordMap<String, Expr> = UnordMap::new();
 
     for (pname, (vname, pty)) in prod.params.iter().zip(producer_params.iter()) {
         match pty {
@@ -230,10 +250,10 @@ pub fn lower_obligation(
 /// flattening, so the body and the assumption share one variable space.
 fn rewrite_opaque_field_access(
     expr: &Expr,
-    opaque_params: &HashMap<String, OpaqueInvariant>,
+    opaque_params: &UnordMap<String, OpaqueInvariant>,
 ) -> Expr {
     // `(access (var p) field)` -> `(var "p.field")` when p is opaque.
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         let kids = children(expr);
         if let (Some(target), Some(field_node)) = (kids.first(), kids.get(1))
             && let Some(pname) = var_name(target)
@@ -243,6 +263,10 @@ fn rewrite_opaque_field_access(
             return make_var(&format!("{pname}.{field}"));
         }
     }
+    // chelis#1125 PP7: recurse on BOTH carriers, rebuilding each as itself.
+    // The `Expr::List`-only recursion cloned a stamped `Expr::Node` whole, so
+    // no opaque field access inside it was rewritten and the obligation could
+    // not lower.
     match expr {
         Expr::List(list, span) => {
             let elements = list
@@ -251,6 +275,23 @@ fn rewrite_opaque_field_access(
                 .map(|e| rewrite_opaque_field_access(e, opaque_params))
                 .collect();
             Expr::List(chelis_deep::ast::List { elements }, *span)
+        }
+        Expr::Node(node, span) => {
+            let children = node
+                .children_slice()
+                .iter()
+                .map(|e| rewrite_opaque_field_access(e, opaque_params))
+                .collect();
+            let mut rewritten = node.clone();
+            // The rewrite replaces one runtime expression (`access`) with
+            // another (`var`) and touches no binder or selector child, so the
+            // node's role contract still holds. A failure here would be a
+            // compiler bug, which is what `Node`'s own panicking constructor
+            // is documented for.
+            rewritten
+                .try_replace_children(children)
+                .expect("opaque field-access rewrite preserves every child role");
+            Expr::Node(rewritten, *span)
         }
         other => other.clone(),
     }
@@ -275,9 +316,9 @@ fn make_var(name: &str) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("var".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
                 Expr::Map(Default::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Symbol(name.to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(name.to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
@@ -290,8 +331,8 @@ fn make_var(name: &str) -> Expr {
 #[allow(clippy::too_many_arguments)]
 fn lower_obligation_body(
     result_expr: &Expr,
-    subst: &HashMap<String, Expr>,
-    opaque_params: &HashMap<String, OpaqueInvariant>,
+    subst: &UnordMap<String, Expr>,
+    opaque_params: &UnordMap<String, OpaqueInvariant>,
     inv: &OpaqueInvariant,
     ob: &ObligationProperty,
     exprs: &[Expr],
@@ -335,7 +376,7 @@ fn lower_option_obligation(
     depth: usize,
 ) -> Option<SmtExpr> {
     // if g then <then> else <else>: push the case analysis into branches.
-    if tag(result) == Some("if") {
+    if tag(result) == Some(DeepTag::If) {
         let kids = children(result);
         let g = lower_field_bool(kids.first()?)?;
         let then_e = lower_option_obligation(kids.get(1)?, inner, inv, ob, exprs, consts, depth)?;
@@ -404,15 +445,15 @@ fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
 }
 
 /// Extract the `(record C (kv {} field expr) ...)` field map.
-fn record_fields(expr: &Expr) -> Option<HashMap<String, Expr>> {
-    if tag(expr) != Some("record") {
+fn record_fields(expr: &Expr) -> Option<UnordMap<String, Expr>> {
+    if tag(expr) != Some(DeepTag::Record) {
         return None;
     }
     let kids = children(expr);
     // kids[0] is the constructor name; the rest are kv nodes.
-    let mut map = HashMap::new();
+    let mut map = UnordMap::new();
     for kv in &kids[1..] {
-        if tag(kv) == Some("kv") {
+        if tag(kv) == Some(DeepTag::Kv) {
             let kkids = children(kv);
             let field = symbol_text(kkids.first()?)?.to_string();
             let val = kkids.get(1)?.clone();
@@ -431,7 +472,7 @@ fn record_fields(expr: &Expr) -> Option<HashMap<String, Expr>> {
 /// producer/helper calls, and beta-reduce `(access (record ...) field)`.
 fn reduce(
     expr: &Expr,
-    subst: &HashMap<String, Expr>,
+    subst: &UnordMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
     depth: usize,
@@ -458,7 +499,7 @@ fn reduce(
         return Some(expr.clone());
     }
     // access over a reduced record => record beta.
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         let kids = children(expr);
         let target = reduce(kids.first()?, subst, consts, exprs, depth)?;
         let field = symbol_text(kids.get(1)?)?;
@@ -485,25 +526,25 @@ fn reduce(
             && let Some(prod) = lookup_producer(exprs, name)
             && prod.params.len() == reduced_args.len()
         {
-            let inner_subst: HashMap<String, Expr> =
+            let inner_subst: UnordMap<String, Expr> =
                 prod.params.iter().cloned().zip(reduced_args).collect();
             return reduce(prod.body, &inner_subst, consts, exprs, depth + 1);
         }
         return Some(rebuild_app(name, reduced_args));
     }
     // record: reduce field exprs.
-    if tag(expr) == Some("record") {
+    if tag(expr) == Some(DeepTag::Record) {
         let kids = children(expr);
         let mut new_children = vec![kids.first()?.clone()];
         for kv in &kids[1..] {
-            if tag(kv) == Some("kv") {
+            if tag(kv) == Some(DeepTag::Kv) {
                 let kkids = children(kv);
                 let field = kkids.first()?.clone();
                 let val = reduce(kkids.get(1)?, subst, consts, exprs, depth)?;
                 new_children.push(Expr::List(
                     List {
                         elements: vec![
-                            Expr::Atom(Atom::Symbol("kv".to_string()), Span::new(0, 0)),
+                            Expr::Atom(Atom::Tag(DeepTag::Kv), Span::new(0, 0)),
                             Expr::Map(Default::default(), Span::new(0, 0)),
                             field,
                             val,
@@ -518,7 +559,7 @@ fn reduce(
         return Some(rebuild(expr, new_children));
     }
     // if: reduce children (keep structure for case analysis).
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = reduce(kids.first()?, subst, consts, exprs, depth)?;
         let t = reduce(kids.get(1)?, subst, consts, exprs, depth)?;
@@ -553,9 +594,9 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     let type_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Symbol(int_ty.to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Name(int_ty.to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
@@ -565,7 +606,7 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("lit".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Int(value), Span::new(0, 0)),
             ],
@@ -582,9 +623,9 @@ fn float_lit_node(value: f64) -> Expr {
     let type_node = Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
                 Expr::Map(MetaMap::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Symbol("f32".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Name("f32".to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
@@ -594,7 +635,7 @@ fn float_lit_node(value: f64) -> Expr {
     Expr::List(
         List {
             elements: vec![
-                Expr::Atom(Atom::Symbol("lit".to_string()), Span::new(0, 0)),
+                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
                 Expr::Map(meta, Span::new(0, 0)),
                 Expr::Atom(Atom::Float(value), Span::new(0, 0)),
             ],
@@ -603,14 +644,30 @@ fn float_lit_node(value: f64) -> Expr {
     )
 }
 
+/// Rebuild `template`'s form around new children.
+///
+/// This is the one reader in the PP7 slice that does NOT return the carrier it
+/// was handed: it emits the list form for either template, as it always has,
+/// and the decoded tag is what makes that safe, because `tag` and `children`
+/// read the result on either carrier. The metadata map is dropped for both
+/// carriers alike, which is pre-existing behavior on the list carrier and
+/// inert at all three call sites (`access`, `record`, `if`), none of whose
+/// metadata anything downstream reads. Reconstructing a `Node` here belongs
+/// with the shared total accessor, not with this slice.
 fn rebuild(template: &Expr, new_children: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
-    let tag_sym = match template {
-        Expr::List(list, _) => list.elements.first().cloned(),
-        _ => None,
-    }
-    .unwrap_or_else(|| Expr::Atom(Atom::Symbol("?".to_string()), Span::new(0, 0)));
+    // chelis#1125 PP7: take the DECODED tag rather than copying element 0,
+    // which exists only on the list carrier. A stamped `Expr::Node` template
+    // fell to the `?` placeholder, and every downstream `tag()` read of the
+    // rebuilt form then failed, so the obligation could not lower. All three
+    // call sites guard on an explicit `tag(expr) == Some(..)` test, so the
+    // placeholder arm below is now unreachable; it is kept as the total
+    // match's other half rather than as a live path.
+    let tag_sym = match tag(template) {
+        Some(decoded) => Expr::Atom(Atom::Tag(decoded), Span::new(0, 0)),
+        None => Expr::Atom(Atom::Name("?".to_string()), Span::new(0, 0)),
+    };
     let mut elements = vec![tag_sym, Expr::Map(Default::default(), Span::new(0, 0))];
     elements.extend(new_children);
     Expr::List(List { elements }, Span::new(0, 0))
@@ -620,7 +677,7 @@ fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
     let mut elements = vec![
-        Expr::Atom(Atom::Symbol("app".to_string()), Span::new(0, 0)),
+        Expr::Atom(Atom::Tag(DeepTag::App), Span::new(0, 0)),
         Expr::Map(Default::default(), Span::new(0, 0)),
         make_var(callee),
     ];
@@ -642,7 +699,7 @@ fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
 fn lower_pred_bool(
     expr: &Expr,
     binder: &str,
-    fields: &HashMap<String, Expr>,
+    fields: &UnordMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
     binder_fields: &[(String, crate::opaque::FieldType)],
@@ -650,7 +707,7 @@ fn lower_pred_bool(
     if let Expr::Atom(Atom::Bool(b), _) = expr {
         return Some(SmtExpr::BoolLit(*b));
     }
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_pred_bool(kids.first()?, binder, fields, consts, exprs, binder_fields)?;
         let t = lower_pred_bool(kids.get(1)?, binder, fields, consts, exprs, binder_fields)?;
@@ -679,7 +736,7 @@ fn lower_pred_bool(
             exprs,
             binder_fields,
         )?))),
-        "eq" | "neq" | "cmplt" | "lte" | "gte" => {
+        "eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" => {
             let op = cmp_op(name)?;
             let lhs_arg = args.first()?;
             let rhs_arg = args.get(1)?;
@@ -713,12 +770,13 @@ fn pred_arg_is_int_sorted(
     if matches!(arg, Expr::Atom(Atom::Int(_), _)) {
         return true;
     }
-    if tag(arg) == Some("lit") && matches!(children(arg).first(), Some(Expr::Atom(Atom::Int(_), _)))
+    if tag(arg) == Some(DeepTag::Lit)
+        && matches!(children(arg).first(), Some(Expr::Atom(Atom::Int(_), _)))
     {
         return true;
     }
     // A field projection `(access (var binder) field)` onto an int field.
-    if tag(arg) == Some("access") {
+    if tag(arg) == Some(DeepTag::Access) {
         let kids = children(arg);
         if let (Some(target), Some(field_node)) = (kids.first(), kids.get(1))
             && var_name(target) == Some(binder)
@@ -737,7 +795,7 @@ fn pred_arg_is_int_sorted(
 fn lower_pred_arith(
     expr: &Expr,
     binder: &str,
-    fields: &HashMap<String, Expr>,
+    fields: &UnordMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
 ) -> Option<SmtExpr> {
@@ -746,7 +804,7 @@ fn lower_pred_arith(
         Expr::Atom(Atom::Int(v), _) => return Some(SmtExpr::IntLit(*v)),
         _ => {}
     }
-    if tag(expr) == Some("lit") {
+    if tag(expr) == Some(DeepTag::Lit) {
         return match children(expr).first() {
             Some(Expr::Atom(Atom::Float(v), _)) => Some(SmtExpr::RealLit(*v)),
             Some(Expr::Atom(Atom::Int(v), _)) => Some(SmtExpr::IntLit(*v)),
@@ -755,7 +813,7 @@ fn lower_pred_arith(
     }
     // Field projection `(access (var binder) field)`: record beta — look
     // up the produced field expr and lower it (params are free vars).
-    if tag(expr) == Some("access") {
+    if tag(expr) == Some(DeepTag::Access) {
         let kids = children(expr);
         let target = kids.first()?;
         let field = symbol_text(kids.get(1)?)?;
@@ -818,7 +876,7 @@ fn lower_field_expr(expr: &Expr) -> Option<SmtExpr> {
         Expr::Atom(Atom::Int(v), _) => return Some(SmtExpr::IntLit(*v)),
         _ => {}
     }
-    if tag(expr) == Some("lit") {
+    if tag(expr) == Some(DeepTag::Lit) {
         return match children(expr).first() {
             Some(Expr::Atom(Atom::Float(v), _)) => Some(SmtExpr::RealLit(*v)),
             Some(Expr::Atom(Atom::Int(v), _)) => Some(SmtExpr::IntLit(*v)),
@@ -829,7 +887,7 @@ fn lower_field_expr(expr: &Expr) -> Option<SmtExpr> {
         return Some(SmtExpr::Var(name.to_string()));
     }
     // A field expr may itself be an `if` (e.g. a clamp): if => ite.
-    if tag(expr) == Some("if") {
+    if tag(expr) == Some(DeepTag::If) {
         let kids = children(expr);
         let c = lower_field_bool(kids.first()?)?;
         let t = lower_field_expr(kids.get(1)?)?;
@@ -881,7 +939,7 @@ fn lower_field_bool(expr: &Expr) -> Option<SmtExpr> {
                 .collect::<Option<Vec<_>>>()?,
         )),
         "not" => Some(SmtExpr::Not(Box::new(lower_field_bool(args.first()?)?))),
-        "eq" | "neq" | "cmplt" | "lte" | "gte" => {
+        "eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" => {
             let op = cmp_op(name)?;
             let l = lower_field_expr(args.first()?)?;
             let r = lower_field_expr(args.get(1)?)?;
@@ -896,6 +954,7 @@ fn cmp_op(name: &str) -> Option<CmpOp> {
         "eq" => CmpOp::Eq,
         "neq" => CmpOp::Ne,
         "cmplt" => CmpOp::Lt,
+        "gt" => CmpOp::Gt,
         "lte" => CmpOp::Le,
         "gte" => CmpOp::Ge,
         _ => return None,

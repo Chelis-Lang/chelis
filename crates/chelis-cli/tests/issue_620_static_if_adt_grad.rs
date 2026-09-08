@@ -78,7 +78,11 @@ fn parse_scalar(stdout: &str) -> f64 {
         .trim()
         .lines()
         .last()
-        .and_then(|l| l.trim().parse::<f64>().ok())
+        .and_then(|l| {
+            let trimmed = l.trim();
+            let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+            value_str.parse::<f64>().ok()
+        })
         .unwrap_or_else(|| panic!("no scalar in eval output: {stdout}"))
 }
 
@@ -103,12 +107,11 @@ fn issue_620_static_cond_if_adt_branch_prunes_under_grad() {
          \x20 | ModeA\n\
          \x20 | ModeB\n\n\
          def pick(c: f32) -> Mode = if c > 0.0 then ModeA else ModeB\n\n\
-         def fwd_staticpick(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match pick(cast(1.0, f32)) with {{\n\
+         def fwd_staticpick(x: tensor[2, f32]) -> f32 = match pick(cast(1.0, f32)) with {{\n\
          \x20   | ModeA => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
          \x20   | ModeB => cast(0.0, f32)\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_staticpick)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
@@ -128,12 +131,11 @@ fn issue_620_static_cond_if_false_selects_else_ctor() {
          \x20 | ModeA\n\
          \x20 | ModeB\n\n\
          def pick(c: f32) -> Mode = if c > 0.0 then ModeA else ModeB\n\n\
-         def fwd_staticpick(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match pick(cast(-1.0, f32)) with {{\n\
+         def fwd_staticpick(x: tensor[2, f32]) -> f32 = match pick(cast(-1.0, f32)) with {{\n\
          \x20   | ModeA => cast(0.0, f32)\n\
          \x20   | ModeB => sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_staticpick)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.5, -0.5]),
     );
@@ -157,12 +159,9 @@ fn issue_620_eps_fail_guard_body_differentiates() {
     let x = [1.5, -0.5];
     let source = format!(
         "module Repro.Guard620\n\n\
-         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = {{\n\
-         \x20 if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else {{\n\
-         \x20   sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
-         \x20 }}\n\
-         }}\n\n\
-         out = grad(loss_guard, wrt=(x))(to_tensor([{}]), cast(0.001, f32))\n",
+         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
+\n\
+         out = grad(loss_guard, wrt=x)(to_tensor([{}]), cast(0.001, f32))\n",
         fmt_f32_list(&x),
     );
     let (stdout, stderr, ok) = eval_program(&source);
@@ -185,11 +184,8 @@ fn issue_620_eps_fail_guard_forward_parity() {
     let x = [1.5, -0.5];
     let source = format!(
         "module Repro.Guard620F\n\n\
-         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = {{\n\
-         \x20 if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else {{\n\
-         \x20   sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
-         \x20 }}\n\
-         }}\n\n\
+         def loss_guard(x: tensor[2, f32], eps: f32) -> f32 = if lte(eps, cast(0.0, f32)) then fail(\"eps must be positive\") else sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
+\n\
          out = loss_guard(to_tensor([{}]), cast(0.001, f32))\n",
         fmt_f32_list(&x),
     );
@@ -208,12 +204,11 @@ fn issue_620_eps_fail_guard_forward_parity() {
 fn collector_program(x: &[f64], applied: &str) -> String {
     format!(
         "module Repro.Collect620\n\n\
-         def collect(x: &tensor[2, f32], k: int64, n: int64) -> List[tensor[2, f32]] = {{\n\
-         \x20 if gte(k, n) then [] else {{\n\
+         def collect(x: &tensor[2, f32], k: int64, n: int64) -> List[tensor[2, f32]] = if gte(k, n) then [] else {{\n\
          \x20   rest = collect(x, add(k, cast(1, int64)), n)\n\
          \x20   concat([mul(x, x)], rest)\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          def loss_windows(x: tensor[2, f32]) -> f32 = {{\n\
          \x20 stacked = concat(collect(&x, cast(0, int64), cast(3, int64)), cast(0, int32))\n\
          \x20 sum(stacked, cast(0, int32)) |> tensor_to_scalar\n\
@@ -276,12 +271,11 @@ fn issue_620_deep_combining_recursion_within_cap_grads() {
     let base = [1.5, -0.5];
     let source = format!(
         "module Repro.Deep620\n\n\
-         def collect(x: &tensor[2, f32], k: int64, n: int64) -> List[tensor[2, f32]] = {{\n\
-         \x20 if gte(k, n) then [] else {{\n\
+         def collect(x: &tensor[2, f32], k: int64, n: int64) -> List[tensor[2, f32]] = if gte(k, n) then [] else {{\n\
          \x20   rest = collect(x, add(k, cast(1, int64)), n)\n\
          \x20   concat([mul(x, x)], rest)\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          def loss(x: tensor[2, f32]) -> f32 = {{\n\
          \x20 stacked = concat(collect(&x, cast(0, int64), cast(484, int64)), cast(0, int32))\n\
          \x20 sum(stacked, cast(0, int32)) |> tensor_to_scalar\n\
@@ -318,12 +312,11 @@ fn issue_620_nan_condition_adt_branch_rejected_not_mispruned() {
          type Mode =\n\
          \x20 | ModeA\n\
          \x20 | ModeB\n\n\
-         def fwd(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match (if gte(div(cast(0.0, f32), cast(0.0, f32)), cast(0.0, f32)) then ModeA else ModeB) with {{\n\
+         def fwd(x: tensor[2, f32]) -> f32 = match (if gte(div(cast(0.0, f32), cast(0.0, f32)), cast(0.0, f32)) then ModeA else ModeB) with {{\n\
          \x20   | ModeA => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
          \x20   | ModeB => sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd)(to_tensor([{}]))\n",
         fmt_f32_list(&[3.0, 4.0]),
     );
@@ -340,7 +333,7 @@ fn issue_620_nan_condition_adt_branch_rejected_not_mispruned() {
 
 // --- Multi-argument params loss (the issue's headline ask) ---------------------
 
-/// `grad(loss, wrt=(p))(params, x, y, eps)`: a real loss shape -- params
+/// `grad(loss, wrt=p)(params, x, y, eps)`: a real loss shape -- params
 /// ADT destructured by match, an eps fail-guard, data tensors alongside --
 /// returns the Params-shaped cotangent. d/dw sum((x*w - y)^2) = 2(xw-y)x.
 #[test]
@@ -352,15 +345,14 @@ fn issue_620_multiarg_params_loss_grad() {
         "module Repro.Loss620\n\n\
          type Params =\n\
          \x20 | Params {{ w: tensor[2, f32] }}\n\n\
-         def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32], eps: f32) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Params {{ w: w }} => if lte(eps, cast(0.0, f32)) then fail(\"eps\") else {{\n\
+         def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32], eps: f32) -> f32 = match p with {{\n\
+         \x20   | Params {{ w }} => if lte(eps, cast(0.0, f32)) then fail(\"eps\") else {{\n\
          \x20     d = sub(mul(&x, &w), y)\n\
          \x20     sum(mul(&d, &d), cast(0, int32)) |> tensor_to_scalar\n\
          \x20   }}\n\
          \x20 }}\n\
-         }}\n\n\
-         out = grad(loss, wrt=(p))(Params {{ w: to_tensor([{w}]) }}, to_tensor([{x}]), to_tensor([{y}]), cast(0.00001, f32))\n",
+\n\
+         out = grad(loss, wrt=p)(Params {{ w: to_tensor([{w}]) }}, to_tensor([{x}]), to_tensor([{y}]), cast(0.00001, f32))\n",
         w = fmt_f32_list(&w),
         x = fmt_f32_list(&x),
         y = fmt_f32_list(&y),
@@ -395,14 +387,13 @@ fn issue_620_curried_closure_over_params_adt() {
         "module Repro.Curry620\n\n\
          type Params =\n\
          \x20 | Params {{ w: tensor[2, f32] }}\n\n\
-         def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match p with {{\n\
-         \x20   | Params {{ w: w }} => {{\n\
+         def loss(p: Params, x: tensor[2, f32], y: tensor[2, f32]) -> f32 = match p with {{\n\
+         \x20   | Params {{ w }} => {{\n\
          \x20     d = sub(mul(&x, &w), y)\n\
          \x20     sum(mul(&d, &d), cast(0, int32)) |> tensor_to_scalar\n\
          \x20   }}\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          x = to_tensor([{x}])\n\
          y = to_tensor([{y}])\n\
          out = grad(fn (p: Params) -> loss(p, x, y))(Params {{ w: to_tensor([{w}]) }})\n",
@@ -448,10 +439,10 @@ fn issue_620_owned_adt_double_read_stays_a_linearity_error() {
          \x20 | Params {{ w: tensor[2, f32] }}\n\n\
          def fwd_two_reads(p: Params) -> f32 = {{\n\
          \x20 a = match p with {{\n\
-         \x20   | Params {{ w: w }} => sum(w, cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | Params {{ w }} => sum(w, cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
          \x20 b = match p with {{\n\
-         \x20   | Params {{ w: w }} => sum(mul(&w, &w), cast(0, int32)) |> tensor_to_scalar\n\
+         \x20   | Params {{ w }} => sum(mul(&w, &w), cast(0, int32)) |> tensor_to_scalar\n\
          \x20 }}\n\
          \x20 add(a, b)\n\
          }}\n\n\
@@ -485,15 +476,14 @@ fn issue_620_param_named_params_binds_and_differentiates() {
         "module Repro.Named620\n\n\
          type P2 =\n\
          \x20 | P2 {{ g: tensor[2, f32], b: tensor[2, f32] }}\n\n\
-         def loss2f(params: P2, x: tensor[2, f32], eps: f32) -> f32 = {{\n\
-         \x20 match params with {{\n\
-         \x20   | P2 {{ g: g, b: b }} => if lte(eps, cast(0.0, f32)) then fail(\"eps\") else {{\n\
+         def loss2f(params: P2, x: tensor[2, f32], eps: f32) -> f32 = match params with {{\n\
+         \x20   | P2 {{ g, b }} => if lte(eps, cast(0.0, f32)) then fail(\"eps\") else {{\n\
          \x20     scaled = add(mul(&x, &g), b)\n\
          \x20     sum(mul(&scaled, &scaled), cast(0, int32)) |> tensor_to_scalar\n\
          \x20   }}\n\
          \x20 }}\n\
-         }}\n\n\
-         out = grad(loss2f, wrt=(params))(P2 {{ g: to_tensor([{g}]), b: to_tensor([{b}]) }}, to_tensor([{x}]), cast(0.00001, f32))\n",
+\n\
+         out = grad(loss2f, wrt=params)(P2 {{ g: to_tensor([{g}]), b: to_tensor([{b}]) }}, to_tensor([{x}]), cast(0.00001, f32))\n",
         g = fmt_f32_list(&g),
         b = fmt_f32_list(&b),
         x = fmt_f32_list(&x),
@@ -582,13 +572,9 @@ fn c_agree_body() -> String {
      \x20 | ModeA\n\
      \x20 | ModeB\n\n\
      def pick(c: f32) -> Mode = if c > 0.0 then ModeA else ModeB\n\n\
-     def fwd_cguard(x: tensor[2, f32]) -> f32 = {\n\
-     \x20 match pick(cast(1.0, f32)) with {\n\
-     \x20   | ModeA => if lte(cast(0.001, f32), cast(0.0, f32)) then fail(\"eps\") else {\n\
-     \x20     sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
-     \x20   }\n\
+     def fwd_cguard(x: tensor[2, f32]) -> f32 = match pick(cast(1.0, f32)) with {\n\
+     \x20   | ModeA => if lte(cast(0.001, f32), cast(0.0, f32)) then fail(\"eps\") else sum(mul(&x, &x), cast(0, int32)) |> tensor_to_scalar\n\
      \x20   | ModeB => cast(0.0, f32)\n\
-     \x20 }\n\
      }\n"
     .to_string()
 }
@@ -609,13 +595,19 @@ fn issue_620_static_if_grad_matches_c_backend() {
 #include "chelis_runtime.h"
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
-    int shape[1] = {2};
-    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
+    int64_t shape[1] = {2};
+    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     float xd[2] = {1.0f, 2.0f};
-    memcpy(x->data, xd, sizeof(xd));
+    chelis_tensor_write* x_guard = chelis_tensor_begin_write(x);
+    chelis_write_view x_view = chelis_tensor_write_view(x_guard);
+    memcpy(x_view.data, xd, sizeof(xd));
+    chelis_tensor_end_write(x_guard);
     chelis_tensor* g = out(x);
-    if (g->size != 2) { printf("FAIL_SIZE %d\n", g->size); return 1; }
-    for (int i = 0; i < 2; i++) printf("%.6f\n", g->data[i]);
+    chelis_read_view g_view = chelis_tensor_read_view(g);
+    if (g_view.count != 2) { printf("FAIL_SIZE %lld\n", (long long)g_view.count); return 1; }
+    for (int i = 0; i < 2; i++) printf("%.6f\n", ((const float *)g_view.data)[i]);
+    chelis_tensor_release(g);
+    chelis_tensor_release(x);
     return 0;
 }
 "#;
@@ -656,12 +648,11 @@ fn issue_620_runtime_cond_adt_branch_rejected_cites_618() {
          \x20 | ModeA\n\
          \x20 | ModeB\n\n\
          def pick(c: f32) -> Mode = if c > 0.0 then ModeA else ModeB\n\n\
-         def fwd_dynpick(x: tensor[2, f32]) -> f32 = {{\n\
-         \x20 match pick(tensor_to_scalar(sum(&x, cast(0, int32)))) with {{\n\
+         def fwd_dynpick(x: tensor[2, f32]) -> f32 = match pick(tensor_to_scalar(sum(&x, cast(0, int32)))) with {{\n\
          \x20   | ModeA => sum(x, cast(0, int32)) |> tensor_to_scalar\n\
          \x20   | ModeB => cast(0.0, f32)\n\
          \x20 }}\n\
-         }}\n\n\
+\n\
          out = grad(fwd_dynpick)(to_tensor([{}]))\n",
         fmt_f32_list(&[-1.0, -2.0]),
     );
@@ -684,11 +675,8 @@ fn issue_620_runtime_cond_adt_branch_rejected_cites_618() {
 fn issue_620_unbounded_recursion_errors_at_unroll_cap() {
     let source = format!(
         "module Repro.Neg620B\n\n\
-         def spin(x: &tensor[2, f32], k: int64) -> f32 = {{\n\
-         \x20 if gte(k, cast(0, int64)) then spin(x, add(k, cast(1, int64))) else {{\n\
-         \x20   sum(x, cast(0, int32)) |> tensor_to_scalar\n\
-         \x20 }}\n\
-         }}\n\n\
+         def spin(x: &tensor[2, f32], k: int64) -> f32 = if gte(k, cast(0, int64)) then spin(x, add(k, cast(1, int64))) else sum(x, cast(0, int32)) |> tensor_to_scalar\n\
+\n\
          def loss_spin(x: tensor[2, f32]) -> f32 = spin(&x, cast(0, int64))\n\n\
          out = grad(loss_spin)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),

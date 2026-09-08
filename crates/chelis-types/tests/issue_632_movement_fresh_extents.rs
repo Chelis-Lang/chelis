@@ -2,10 +2,10 @@
 //! non-identity stride/pad axis instead of passing the input's symbolic
 //! dim through unchanged.
 //!
-//! The pass-through was an annotation-level lie (`stride(&x, 2, 2)` on
+//! The pass-through was an annotation-level lie (`stride(&x, 2i64, 2i64)` on
 //! `tensor[batch, 4, f32]` stamped `batch` on an axis whose true extent
 //! is `ceil(batch/2)`) and falsely tripped the §4.4.1 return-dim rigidity
-//! rule on `sig f: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2)`
+//! rule on `sig f: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2i64)`
 //! (the pass-through unified `u := n`). The identity cases — stride step
 //! 1, zero pad — MUST keep passing the symbol through (the
 //! `issue_513_symbolic_axis_adjoints` contract), mirroring the IR-side
@@ -49,10 +49,9 @@ fn expect_clean(src: &str, what: &str) -> Vec<Expr> {
 }
 
 fn list_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // element-0 string.
+    list.tag().map(|tag| tag.as_str())
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
@@ -63,7 +62,7 @@ fn var_name(expr: &Expr) -> Option<&str> {
         return None;
     }
     match list.elements.get(2) {
-        Some(Expr::Atom(Atom::Symbol(name), _)) => Some(name.as_str()),
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
 }
@@ -92,7 +91,7 @@ fn stamped_app_type(exprs: &[Expr], builtin: &str) -> Option<String> {
 // Non-identity axes mint fresh extents.
 // ---------------------------------------------------------------------------
 
-/// `stride(&x, 2, 2)` on `tensor[batch, 4, f32]`: axis 0's true extent is
+/// `stride(&x, 2i64, 2i64)` on `tensor[batch, 4, f32]`: axis 0's true extent is
 /// `ceil(batch/2)`, not `batch`. The stamped stride type must carry a
 /// wildcard on axis 0 (fresh, runtime-guarded extent), not the input's
 /// symbol. Pre-chelis#632 the pass-through arm stamped `batch` — the
@@ -101,7 +100,7 @@ fn stamped_app_type(exprs: &[Expr], builtin: &str) -> Option<String> {
 fn issue632_stride_nonidentity_step_mints_fresh_extent() {
     let annotated = expect_clean(
         r#"
-def f(x: tensor[batch, 4, f32]) -> tensor[*, 2, f32] = stride(&x, 2, 2)
+def f(x: tensor[batch, 4, f32]) -> tensor[*, 2, f32] = stride(&x, 2i64, 2i64)
 "#,
         "non-identity stride on a symbolic axis",
     );
@@ -116,13 +115,13 @@ def f(x: tensor[batch, 4, f32]) -> tensor[*, 2, f32] = stride(&x, 2, 2)
     );
 }
 
-/// `pad(&x, [[1, 0]], 0.0)` on `tensor[batch, f32]`: the padded extent is
+/// `pad(&x, [[1i64, 0i64]], 0.0)` on `tensor[batch, f32]`: the padded extent is
 /// `batch + 1`, so the input symbol must not pass through.
 #[test]
 fn issue632_pad_nonzero_padding_mints_fresh_extent() {
     let annotated = expect_clean(
         r#"
-def p(x: tensor[batch, f32]) -> tensor[*, f32] = pad(&x, [[1, 0]], 0.0)
+def p(x: tensor[batch, f32]) -> tensor[*, f32] = pad(&x, [[1i64, 0i64]], 0.0)
 "#,
         "non-zero pad on a symbolic axis",
     );
@@ -148,7 +147,7 @@ fn issue632_sig_symbol_stride_no_false_rigidity_rejection() {
         r#"
 module Repro.SigStride
 sig f: tensor[n, f32] -> tensor[u, f32]
-def f(x) = stride(x, cast(2, int32))
+def f(x) = stride(x, cast(2, int64))
 "#,
         "sig-symbol direct-return stride",
     );
@@ -166,7 +165,7 @@ def f(x) = stride(x, cast(2, int32))
 fn issue632_stride_identity_step_keeps_symbolic_dim() {
     let annotated = expect_clean(
         r#"
-def f(x: tensor[batch, 4, f32]) -> tensor[batch, 2, f32] = stride(&x, 1, 2)
+def f(x: tensor[batch, 4, f32]) -> tensor[batch, 2, f32] = stride(&x, 1i64, 2i64)
 "#,
         "identity stride on a symbolic axis",
     );
@@ -182,7 +181,7 @@ def f(x: tensor[batch, 4, f32]) -> tensor[batch, 2, f32] = stride(&x, 1, 2)
 fn issue632_pad_zero_padding_keeps_symbolic_dim() {
     let annotated = expect_clean(
         r#"
-def p(x: tensor[batch, f32]) -> tensor[batch, f32] = pad(&x, [[0, 0]], 0.0)
+def p(x: tensor[batch, f32]) -> tensor[batch, f32] = pad(&x, [[0i64, 0i64]], 0.0)
 "#,
         "zero pad on a symbolic axis",
     );
@@ -204,8 +203,8 @@ def p(x: tensor[batch, f32]) -> tensor[batch, f32] = pad(&x, [[0, 0]], 0.0)
 fn issue632_literal_axes_keep_exact_arithmetic() {
     expect_clean(
         r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1, 2)
-def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[0, 1], [0, 1]], 0.0)
+def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = stride(&x, 1i64, 2i64)
+def p(x: tensor[2, 4, f32]) -> tensor[3, 5, f32] = pad(&x, [[0i64, 1i64], [0i64, 1i64]], 0.0)
 "#,
         "literal stride/pad arithmetic",
     );

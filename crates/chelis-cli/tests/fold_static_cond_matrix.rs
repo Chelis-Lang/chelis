@@ -1,8 +1,6 @@
-//! chelis#720 - `fold_static_cond`'s Cast arm folds f16/bf16 conditions with
-//! f32 semantics (via `convert_cast_data`, whose Bf16|F16 arm narrows only
-//! to f32, chelis#717) and DELETES the branch IEEE f16/bf16 semantics would
-//! take. The two lanes then return opposite answers, and the branch eval
-//! considers correct does not exist in the emitted C.
+//! chelis#720 regression matrix for `fold_static_cond`: cast operands must be
+//! finalized as sealed f16/bf16 scalars before comparison. Folding through an
+//! f32 memo deletes the branch IEEE f16/bf16 semantics require.
 //!
 //! Sibling of chelis#711 (the integer Const arm of the same fold, threshold
 //! 2^53); this one fires at 2049 (f16) / 257 (bf16). The fixes do not
@@ -14,9 +12,9 @@
 //! false-positive the #711 audit recorded).
 //!
 //! Bounding controls: conditions with an effectful branch (`fail`) route
-//! host-lane, do not fold, and the compiled int64 comparison there is EXACT
-//! (locked below); int8 conditions do not fold either but diverge at
-//! runtime through #714/#718's int64_t widening.
+//! host-lane, do not fold, and the compiled int64 comparison there is exact
+//! (locked below). The Phase 3 int8 row also proves that folding cannot hide
+//! the required checked-overflow trap.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -97,8 +95,8 @@ fn eval_first_line(program: &str) -> Result<String, String> {
 }
 
 /// f32 bit pattern of the 222.0 branch payload as it appears in emitted
-/// `chelis_fill_f32_bits` calls (111.0 is 0x42de0000; the broken rows
-/// assert on the DELETED branch's bits, which is 222.0's).
+/// `chelis_fill_scalar` calls (111.0 is 0x42de0000; the broken rows assert on
+/// the DELETED branch's bits, which is 222.0's).
 const BITS_222: &str = "435e0000";
 
 // ===========================================================================
@@ -106,19 +104,17 @@ const BITS_222: &str = "435e0000";
 // ===========================================================================
 
 /// True f16 rounds cast(2049.0, f16) to 2048, so lt(2048, 2048) is false and
-/// the answer is 222. Observed today: eval prints 222 (correct); the
+/// the answer is 222. Before the compiled Phase 3 fix, eval printed 222
+/// (correct) while the
 /// compiled binary prints 111, and 222's bit pattern is ABSENT from the
 /// emitted C - the correct branch was deleted at compile time.
 #[test]
-#[ignore = "chelis#720: the fold computes the f16 condition with f32 semantics (2048 < 2049 \
-            = true), prints 111, and deletes the 222 branch; eval correctly prints 222. Run \
-            with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn f16_cast_condition_folds_with_f16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(2048.0, f16), cast(2049.0, f16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
     assert_eq!(
         eval_first_line(program).expect("eval"),
-        "222",
+        "222.0",
         "eval is the correct lane here and must stay correct"
     );
     if !c_toolchain_available() {
@@ -131,20 +127,17 @@ fn f16_cast_condition_folds_with_f16_semantics() {
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
-        stdout.lines().next().unwrap_or("").trim() == "222",
+        stdout.lines().next().unwrap_or("").trim() == "222.0",
         "the compiled program must take the IEEE f16 branch; got: {stdout}"
     );
 }
 
 /// bf16 sibling at threshold 257 (8-bit mantissa).
 #[test]
-#[ignore = "chelis#720: same deletion at bf16 - fold computes 256 < 257 = true, prints 111, \
-            deletes the 222 branch; correct bf16 answer is 222 and eval agrees. Run with \
-            `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn bf16_cast_condition_folds_with_bf16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(256.0, bf16), cast(257.0, bf16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
-    assert_eq!(eval_first_line(program).expect("eval"), "222");
+    assert_eq!(eval_first_line(program).expect("eval"), "222.0");
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
@@ -155,7 +148,7 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
-        stdout.lines().next().unwrap_or("").trim() == "222",
+        stdout.lines().next().unwrap_or("").trim() == "222.0",
         "the compiled program must take the IEEE bf16 branch; got: {stdout}"
     );
 }
@@ -171,10 +164,6 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
 /// verified when this row was probed). The decided contract (#680/#695)
 /// says the overflow itself must trap in both lanes.
 #[test]
-#[ignore = "chelis#718: an int8 overflow used as a branch condition sends eval and C down \
-            opposite branches (eval wraps to -56 and prints 111; C widens to 200 and prints \
-            222); the contract says the overflow must trap in both lanes. Run with \
-            `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn int8_overflow_condition_traps_in_both_lanes() {
     let program = "def pick() -> f32 = if lt(add(100i8, 100i8), 0i8) \
                    then 111.0 else 222.0\nout = print(pick())\n";

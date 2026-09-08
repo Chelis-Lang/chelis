@@ -24,8 +24,8 @@
 //! Closes `Lint-ExceptionPathRoot-F1`.
 
 use crate::{Exception, Violation};
+use chelis_unord::UnordSet;
 use regex::Regex;
-use std::collections::HashSet;
 use std::sync::OnceLock;
 
 /// Validate an exception list against the recorded style guide.
@@ -59,9 +59,9 @@ pub fn verify_cross_refs(exceptions: &[Exception], spec_source: &str) -> Result<
 
 /// Extract every `§<number>` section identifier from a markdown spec file
 /// by scanning for `### N.M Title` and `### N.M.K Title` headings.
-fn section_ids_from_spec(spec_source: &str) -> HashSet<String> {
+pub(crate) fn section_ids_from_spec(spec_source: &str) -> UnordSet<String> {
     let heading = heading_re();
-    let mut out = HashSet::new();
+    let mut out = UnordSet::new();
     for caps in heading.captures_iter(spec_source) {
         let id = caps.get(1).unwrap().as_str();
         out.insert(format!("§{id}"));

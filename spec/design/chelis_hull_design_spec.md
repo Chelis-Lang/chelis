@@ -53,8 +53,8 @@ type Expr =
   | EWhere(Expr, Expr, Expr)
   | EConcat(List[Expr], int64)
   | EReshape(Expr, List[Dim])      -- Deep `(app {} (var {} reshape) tensor shape-list)`
-  | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation
-  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
+  | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation. NOTE: spec/05 [05-DIM-1] (2026-08-03) classifies permutation entries as axis-domain int32; this int64 encoding disagrees and needs reconciling when hull is built.
+  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64 here; spec/05 [05-DIM-1] classifies rank indices as int32 — same reconciliation as EPermute); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
   | ECumsum(Expr, int64)
   | ESort(Expr, int64)
   | EGrad(Expr)
@@ -799,6 +799,39 @@ the in-fragment parser image.
 
 ## 6. Differential Testing Harness - `Hull.Check`
 
+### Host and candidate identity (2026-09-08)
+
+Hull's released host and the compiler under test are distinct roles. The
+campaign orchestrator accepts `--host-chelis-bin` and `--target-chelis-bin`.
+The existing `--chelis-bin` spelling remains an alias for the host selector;
+the two host spellings are mutually exclusive. If no target is supplied, the
+target is the host, preserving the ordinary release-pinned campaign.
+
+Both selectors are absolute executable paths. The host must report the exact
+`reef.toml` compiler version. An explicitly selected candidate need not match
+that version: it is an externally supplied artifact, never a compiler built
+or vendored by Hull. Do not change the shell pin or the machine-global default
+to select it. This host/target facility is Hull-specific test infrastructure,
+not a new requirement on other shells.
+
+The host launches the reference driver. The absolute target path is written
+into every shard configuration and used for both nested compiler-check and
+compiler-evaluation calls; a missing target field fails closed rather than
+selecting a compiler from PATH. Record each selected executable's path, version
+output, and SHA-256 in the campaign result. Recheck both file hashes before
+accepting the aggregate to reject differences visible at those observations.
+These endpoint checks assume files remain immutable during the campaign; they
+cannot detect a temporary replacement restored before the final check or prove
+which bytes every invocation executed. They identify selected files, not their
+build provenance or an interpreter behind a wrapper. The campaign retains its existing identity,
+locking, accounting, conservative-whitelist, and acceptance rules.
+
+Test host/target routing independently of verdict agreement: matching outputs
+cannot show which executable ran. Cover same-binary compatibility, different
+host and target versions, wrong host pin, invalid target selection, explicit
+target propagation, and changed executable detection. Compiler validation,
+formal-model certification, and reference agreement remain separate claims.
+
 The core use case. Given a Deep source file, type-check it with both Hull's reference checker and the real compiler, and compare results.
 
 ```chelis
@@ -808,7 +841,7 @@ import Std.Io (read_file, process_run)
 
 -- Parse a Deep file and type-check with the reference checker. The Io effect uses the
 -- shipped `Effect::Io` (lowercase casing in the enum; §2).
-def reference_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
+def reference_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
   src = read_file(path)
   expr = parse_deep_file(src)?
   type_check([], expr)
@@ -816,13 +849,13 @@ def reference_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
 
 -- Run the real compiler's structured check and parse the JSON result. `process_run` is
 -- the new subprocess builtin (under Io) that the next-phase monorepo work adds (§8.1).
-def compiler_check(path: String) -> Option[(Type, EffectRow)] ! { Io } = {
+def compiler_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
   result = process_run("chelis", ["check", path, "--json"])
   parse_check_result(result)
 }
 
 -- Compare both results
-def differential_check(path: String) -> CheckResult ! { Io } = {
+def differential_check(path: String) -> CheckResult ! { IO } = {
   ref_result = reference_check(path)
   comp_result = compiler_check(path)
   match (ref_result, comp_result) {
@@ -1045,7 +1078,7 @@ original sketch listed `gen_conformance_suite.py` and `run_differential.py`. The
 reconciled as follows, and this is the pinned decision:
 
 - **`gen_conformance_suite` and `run_differential_suite` are Chelis drivers, not Python.**
-  They are `.ch` programs with `def main() -> unit ! { Io }` that read Deep files, run the
+  They are `.ch` programs with `def main() -> unit ! { IO }` that read Deep files, run the
   reference checker/evaluator, shell out to the compiler, and write the corpus. They are
   pure Chelis because Hull gains a new `process_run` exec builtin (under `Io`) to invoke
   the compiler.

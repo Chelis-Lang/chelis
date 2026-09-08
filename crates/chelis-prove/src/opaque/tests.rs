@@ -1,6 +1,10 @@
 use super::*;
 use chelis_pred::PredAmenability;
 
+fn f32_value(value: f64) -> ScalarValue {
+    scalar_from_f64("prove-test", Prim::F32, value).expect("valid f32 test value")
+}
+
 /// Desugar a Surf module string to Deep for collection tests.
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
@@ -62,7 +66,7 @@ fn recomputes_amenability_not_trusting_recorded_metadata() {
 @invariant(p) p.a * p.b >= 0.0
 type Poly =
   | Poly { a: f32, b: f32 }
-def make(a: f32, b: f32) -> Poly = Poly { a: a, b: b }
+def make(a: f32, b: f32) -> Poly = Poly { a, b }
 ";
     let exprs = deep_of(surf);
     let invs = collect_opaque_invariants(&exprs);
@@ -83,23 +87,23 @@ fn lowers_linear_predicate_to_flattened_smt() {
 #[test]
 fn flattened_predicate_validates_with_concrete_eval() {
     use crate::concrete_eval::eval_bool;
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
     let exprs = deep_of(PROB);
     let inv = &collect_opaque_invariants(&exprs)[0];
     let smt = lower_predicate_flattened(inv, "p", &ConstEnv::new()).expect("lowerable");
-    let mut env: HashMap<String, f64> = HashMap::new();
-    env.insert("p.value".to_string(), 0.5);
+    let mut env = UnordMap::new();
+    env.insert("p.value".to_string(), f32_value(0.5));
     assert!(eval_bool(&smt, &env), "0.5 satisfies 0<=v<=1");
-    env.insert("p.value".to_string(), 1.5);
+    env.insert("p.value".to_string(), f32_value(1.5));
     assert!(!eval_bool(&smt, &env), "1.5 violates v<=1");
-    env.insert("p.value".to_string(), -0.1);
+    env.insert("p.value".to_string(), f32_value(-0.1));
     assert!(!eval_bool(&smt, &env), "-0.1 violates 0<=v");
 }
 
 #[test]
 fn lowers_sum_with_constant_for_simplex_band() {
     use crate::concrete_eval::eval_bool;
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
     // Tolerance-band simplex invariant referencing a module constant `eps`.
     let surf = "module M.Simplex
 @opaque
@@ -118,13 +122,13 @@ def make(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }
     assert!(s.contains("p.weights.2"), "expected all 3 elements: {s}");
 
     // A weight vector summing to exactly 1.0 satisfies the band.
-    let mut env: HashMap<String, f64> = HashMap::new();
-    env.insert("p.weights.0".to_string(), 0.2);
-    env.insert("p.weights.1".to_string(), 0.3);
-    env.insert("p.weights.2".to_string(), 0.5);
+    let mut env = UnordMap::new();
+    env.insert("p.weights.0".to_string(), f32_value(0.2));
+    env.insert("p.weights.1".to_string(), f32_value(0.3));
+    env.insert("p.weights.2".to_string(), f32_value(0.5));
     assert!(eval_bool(&smt, &env), "sum 1.0 is within band");
     // A vector summing to 1.5 violates the upper band.
-    env.insert("p.weights.2".to_string(), 1.0);
+    env.insert("p.weights.2".to_string(), f32_value(1.0));
     assert!(!eval_bool(&smt, &env), "sum 1.5 violates band");
 }
 
@@ -217,7 +221,7 @@ def make(x: f32) -> Probability = Probability { value: x }
 
     // A finite value that satisfies `!= 0.5` is accepted.
     let mut ok = BTreeMap::new();
-    ok.insert("p.value".to_string(), 0.25);
+    ok.insert("p.value".to_string(), f32_value(0.25));
     assert!(
         validate_env(&ok, inv, &pred, &consts),
         "a finite satisfying value is accepted"
@@ -226,7 +230,7 @@ def make(x: f32) -> Probability = Probability { value: x }
     // NaN: `NaN != 0.5` is true under strict IEEE, but the field is
     // non-finite, so it must be REJECTED (fail-closed), not accepted.
     let mut nan = BTreeMap::new();
-    nan.insert("p.value".to_string(), f64::NAN);
+    nan.insert("p.value".to_string(), f32_value(f64::NAN));
     assert!(
         !validate_env(&nan, inv, &pred, &consts),
         "a NaN field is rejected even though `NaN != 0.5` is true"
@@ -234,7 +238,7 @@ def make(x: f32) -> Probability = Probability { value: x }
 
     // +Inf is likewise non-finite and rejected.
     let mut inf = BTreeMap::new();
-    inf.insert("p.value".to_string(), f64::INFINITY);
+    inf.insert("p.value".to_string(), f32_value(f64::INFINITY));
     assert!(
         !validate_env(&inf, inv, &pred, &consts),
         "an infinite field is rejected"
@@ -263,15 +267,31 @@ fn int8_field_samples_are_integers_within_int8_range() {
     for _ in 0..200 {
         let mut env = std::collections::BTreeMap::new();
         sample_field_into("x", &fty, &mut rng, &mut env);
-        let v = env["x"];
-        assert_eq!(
-            v.fract(),
-            0.0,
-            "int8 sample must be integer-valued, got {v}"
-        );
+        let v = env["x"].as_i64_exact().expect("int8 sample stays integer");
         assert!(
-            (-128.0..=127.0).contains(&v),
+            (-128..=127).contains(&v),
             "int8 sample must be in [-128, 127], got {v}"
         );
     }
+}
+
+#[test]
+fn int64_wire_element_enters_the_prover_without_crossing_f64() {
+    let elements = chelis_compiler_api::schema::TensorElements::Int64(vec![9_007_199_254_740_993]);
+    let value = tensor_element_scalar(&elements, 0).expect("int64 wire element");
+    assert_eq!(value.prim(), Prim::Int64);
+    assert_eq!(value.as_i64_exact(), Some(9_007_199_254_740_993));
+}
+
+#[test]
+fn typed_generated_env_renders_plain_exact_integer_json() {
+    let mut env = BTreeMap::new();
+    env.insert(
+        "p.id".to_string(),
+        scalar_from_i64("prove-test", Prim::Int64, 9_007_199_254_740_993).expect("valid int64"),
+    );
+    assert_eq!(
+        generated_env_json(&env)["p.id"].as_i64(),
+        Some(9_007_199_254_740_993)
+    );
 }

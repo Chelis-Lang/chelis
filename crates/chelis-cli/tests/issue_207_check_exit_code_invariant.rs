@@ -96,7 +96,7 @@ fn issue_207_check_exits_nonzero_on_type_mismatch() {
 /// errors array. Pins the other side of the iff invariant.
 #[test]
 fn issue_207_check_exits_zero_on_clean_program() {
-    let src = "def answer -> int32 = cast(7, int32)\n";
+    let src = "def answer() -> int32 = cast(7, int32)\n";
     let tmp = write_tempfile("issue207-clean-", src);
     let (code, stdout) = run_check_capture(tmp.path());
     let errors = parse_errors_array(&stdout);
@@ -109,6 +109,86 @@ fn issue_207_check_exits_zero_on_clean_program() {
         Some(0),
         "issue #207 invariant: errors empty implies exit 0; stdout={stdout}"
     );
+}
+
+#[test]
+fn pipeline_artifact_semantic_reports_stay_exact() {
+    let fixtures = [
+        (
+            "clean",
+            "def answer() -> int32 = cast(7, int32)\n",
+            serde_json::json!({
+                "score": 1,
+                "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
+                "typed_nodes": 2,
+                "untyped_nodes": 0,
+                "total_nodes": 2,
+                "unresolved_names": [],
+                "errors": [],
+            }),
+            Some(0),
+        ),
+        (
+            "effect",
+            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+            serde_json::json!({
+                "score": 0.8,
+                "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
+                "typed_nodes": 4,
+                "untyped_nodes": 0,
+                "total_nodes": 4,
+                "unresolved_names": [],
+                "errors": [{
+                    "kind": "UnhandledEffect",
+                    "message": "Function `noisy` is declared with effects `{}` but its body performs effects `{Random}` that were not declared",
+                    "severity": 0.8,
+                    // [04-FIT-15] again, and this fixture is the one that
+                    // proved the rule was not yet met: the effect checker
+                    // populates repair hints, and the projection dropped
+                    // them, so the field set DID vary by producing stage
+                    // while the linearity fixture below claimed it did not.
+                    "suggestions": [
+                        "Either add the missing effect(s) to the signature of `noisy` (e.g. `! { Random }`) or refactor the body so it does not perform them."
+                    ],
+                }],
+            }),
+            Some(CHECK_ERRORS_EXIT_CODE),
+        ),
+        (
+            "linearity",
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x)\n add(x, y) }\n",
+            serde_json::json!({
+                "score": 0.8,
+                "components": { "parse": 1, "structure": 1, "names": 1, "types": 1 },
+                "typed_nodes": 7,
+                "untyped_nodes": 0,
+                "total_nodes": 7,
+                "unresolved_names": [],
+                "errors": [{
+                    "kind": "UseAfterConsume",
+                    "message": "variable `x` was already consumed by realize at surf:56..66; later use at surf:72..73 is invalid",
+                    "severity": 0.9,
+                    // chelis#886 [04-FIT-15]: the field set no longer varies
+                    // by producing stage. The embedding API always carried
+                    // repair hints; the report omitting them was the
+                    // divergence, so this fixture gains the hint it was
+                    // always entitled to.
+                    "suggestions": [
+                        "Insert `copy(x)` before the first consuming use if you need to reuse it"
+                    ],
+                }],
+            }),
+            Some(CHECK_ERRORS_EXIT_CODE),
+        ),
+    ];
+
+    for (name, source, expected, expected_code) in fixtures {
+        let file = write_tempfile(&format!("pipeline-artifact-{name}-"), source);
+        let (code, stdout) = run_check_capture(file.path());
+        let actual: Value = serde_json::from_str(&stdout).expect("check JSON");
+        assert_eq!(actual, expected, "{name} report changed");
+        assert_eq!(code, expected_code, "{name} exit code changed");
+    }
 }
 
 /// Invariant sweep across three distinct error categories. For each
@@ -131,8 +211,8 @@ fn issue_207_invariant_holds_across_error_categories() {
         ),
         (
             "dm",
-            "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-             def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+            "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+             def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
             "DimensionMismatch",
         ),
         (
@@ -167,6 +247,18 @@ fn issue_207_invariant_holds_across_error_categories() {
                 "category {tag} expected kind {expected_kind}; stdout={stdout}"
             );
         }
+        if *tag == "dm" {
+            let has_type_mismatch = errors.iter().any(|error| {
+                error
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == "TypeMismatch")
+            });
+            assert!(
+                !has_type_mismatch,
+                "DimensionMismatch fixture must not include an unrelated trace return TypeMismatch; stdout={stdout}"
+            );
+        }
         assert_eq!(
             code,
             Some(CHECK_ERRORS_EXIT_CODE),
@@ -181,7 +273,7 @@ fn issue_207_invariant_holds_across_error_categories() {
 /// one-sided implication.
 #[test]
 fn issue_207_invariant_holds_for_clean_program() {
-    let src = "def answer -> int32 = cast(7, int32)\n";
+    let src = "def answer() -> int32 = cast(7, int32)\n";
     let tmp = write_tempfile("issue207-inv-clean-", src);
     let (code, stdout) = run_check_capture(tmp.path());
     let errors = parse_errors_array(&stdout);

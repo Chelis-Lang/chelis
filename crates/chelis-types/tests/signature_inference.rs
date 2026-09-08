@@ -105,17 +105,27 @@ def caller(a, b: tensor[4, f32]) = {
     assert!(caller.params[0].inferred_read_only);
 }
 
+/// [04-INF-5]: a reference to a hole-signature helper is typed at the helper's
+/// body-determined signature wherever the reference sits, so a forward
+/// reference in a bare unit reads exactly what a backward one reads.
+///
+/// `def helper(x, y: tensor[4, f32])` carries one annotation, so the desugarer
+/// synthesizes a `defsig` with a wildcard for `x` and for the result. The
+/// schedule's hole edge infers that body before any reader, in every region.
+///
+/// This test previously asserted the opposite, as
+/// `later_helper_does_not_retroactively_make_earlier_unconstrained_call_read_only`:
+/// in a BARE unit the forward reference saw nothing, `caller`'s `a` stayed
+/// unconstrained, and read-only inference defaulted it to owned, while the
+/// module-wrapped spelling of the same program inferred it read-only. That
+/// layout dependence is the chelis#1486 defect [04-INF-5] decides away, and
+/// `earlier_inferred_signature_makes_later_call_read_only` above already pins
+/// the backward half.
+///
+/// Regression test: before this change `caller`'s `a` was inferred owned here
+/// and read-only in the other three layouts of the same program.
 #[test]
-fn later_helper_does_not_retroactively_make_earlier_unconstrained_call_read_only() {
-    // The call to `helper(a, b)` here is truly unconstrained: no
-    // ascription is placed on `z`, so the result type comes solely
-    // from `helper`'s scheme as known at the point `caller` is
-    // analyzed (forward reference). Pre-chelis#159 the test had
-    // `z: tensor[4, f32]` but the let-binding ascription was silently
-    // dropped, masking what the test claimed to assert. Post-fix
-    // dropping the ascription restores the intent: `z` stays
-    // unconstrained, `a` stays unconstrained, and read-only inference
-    // correctly defaults to owned for the unknown-type param.
+fn a_forward_reference_to_a_hole_signature_helper_reads_its_body_signature() {
     let checked = checked_surf(
         r#"
 def caller(a, b: tensor[4, f32]) = {
@@ -137,7 +147,12 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
         .get("caller")
         .expect("caller metadata");
     assert!(helper.params[0].inferred_read_only);
-    assert!(!caller.params[0].inferred_read_only);
+    assert!(
+        caller.params[0].inferred_read_only,
+        "`a` is passed to `helper`'s read-only `x`, and [04-INF-5] types that \
+         reference at `helper`'s body-determined signature whether `helper` is \
+         declared before or after `caller`"
+    );
 }
 
 #[test]
@@ -150,13 +165,17 @@ fn module_wrapped_helper_signature_visible_to_caller_annotation() {
     // `(module {} name ...)` wrappers, which means the helper IS
     // visible at caller-annotation time in the wrapped case.
     //
-    // This test pins the post-fix behavior: for a module-wrapped
-    // version of `later_helper_does_not_retroactively_...`, caller's
-    // `a` becomes read-only because helper's read-only-`x` signature
-    // is visible by the time caller is annotated. (Bare-decl
-    // forward-reference semantics stay as-is in the sibling test
-    // above.) Together the two tests document the intentional
-    // asymmetry between bare-decl and module-wrapped programs.
+    // This test pins the post-fix behavior: caller's `a` becomes
+    // read-only because helper's read-only-`x` signature is visible by
+    // the time caller is annotated.
+    //
+    // This comment used to record an intentional asymmetry between the
+    // bare-decl and module-wrapped spellings of this program. There is
+    // none any more: [04-INF-5] types every reference to a
+    // hole-signature declaration at its body-determined signature
+    // wherever the reference sits, and the schedule's hole edge is
+    // bounded by no region, so the bare sibling above now agrees with
+    // this one (chelis#1486).
     let checked = checked_surf(
         r#"
 module Foo
@@ -184,6 +203,47 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
         "module-wrapped caller's `a` SHOULD become read-only: helper's signature \
          is visible at caller-annotation time after the #183 module-descent fix"
     );
+}
+
+#[test]
+fn module_wrapped_backward_helper_keeps_the_same_primary_signature() {
+    let checked = checked_surf(
+        r#"
+module Foo
+def helper(x, y: tensor[4, f32]) = add(x, y)
+def caller(a, b: tensor[4, f32]) = {
+  z = helper(a, b)
+  add(a, z)
+}
+"#,
+    );
+    let caller = checked
+        .signature_inference()
+        .functions
+        .get("caller")
+        .expect("caller metadata");
+    assert!(
+        caller.params[0].inferred_read_only,
+        "dependency scheduling must agree in both source orders"
+    );
+}
+
+#[test]
+fn module_wrapped_unknown_helper_reports_exactly_one_unbound_root() {
+    let decls = parse_str(
+        r#"
+module Foo
+def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
+"#,
+    )
+    .expect("surf parse");
+    let deep = desugar_program(&decls);
+    let result = check_typed_program(&deep).expect_err("unknown helper must reject");
+    assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
+    assert!(matches!(
+        result.errors[0].kind,
+        chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+    ));
 }
 
 #[test]
@@ -268,4 +328,98 @@ def caller(a, b: tensor[4, f32]) = {
         .get("caller")
         .expect("caller metadata");
     assert!(caller.params[0].inferred_read_only);
+}
+
+#[test]
+fn imported_rank_generic_adt_signatures_instantiate_independently() {
+    // chelis#968: applying the global substitution through a scheme's
+    // quantified dimension made the instantiated body dimension appear free
+    // in the environment. The exported scheme then omitted that dimension
+    // quantifier, so the first imported call concretized every later call.
+    let library_decls = parse_str(
+        r#"
+type Curve[n] =
+  | Curve { xs: tensor[n, f32] }
+def make[n](xs: tensor[n, f32]) -> Curve[n] =
+  Curve { xs }
+def value[n](curve: Curve[n]) -> f32 =
+  match curve with {
+    | Curve { xs: values } => index(to_list(values), cast(0, int64))
+  }
+"#,
+    )
+    .expect("library surf parse");
+    let library_deep = desugar_program(&library_decls);
+    let (type_env, library_checked) =
+        build_compiled_library_context(&library_deep).expect("library context");
+
+    for (first_extent, second_extent) in [(3, 2), (2, 3)] {
+        let vector = |extent| {
+            (0..extent)
+                .map(|index| format!("cast({index}.0, f32)"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let app_source = format!(
+            r#"
+def first() -> f32 =
+  value(make(to_tensor([{first_values}])))
+def second() -> f32 =
+  value(make(to_tensor([{second_values}])))
+"#,
+            first_values = vector(first_extent),
+            second_values = vector(second_extent),
+        );
+        let app_decls = parse_str(&app_source).expect("app surf parse");
+        let app_deep = desugar_program(&app_decls);
+        check_ir_with_signature_context(
+            &type_env,
+            library_checked.signature_inference(),
+            &app_deep,
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "imported generic signatures must instantiate independently for \
+                 {first_extent} then {second_extent}: {:?}",
+                err.errors
+            )
+        });
+    }
+}
+
+#[test]
+fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
+    // Negative parity for chelis#968: independent generic instantiation must
+    // not weaken a genuinely fixed rank/extent contract.
+    let library_decls = parse_str(
+        r#"
+def fixed(xs: tensor[3, f32]) -> f32 =
+  index(to_list(xs), cast(0, int64))
+"#,
+    )
+    .expect("library surf parse");
+    let library_deep = desugar_program(&library_decls);
+    let (type_env, library_checked) =
+        build_compiled_library_context(&library_deep).expect("library context");
+    let app_decls = parse_str(
+        r#"
+def wrong() -> f32 =
+  fixed(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
+"#,
+    )
+    .expect("app surf parse");
+    let app_deep = desugar_program(&app_decls);
+    let err = check_ir_with_signature_context(
+        &type_env,
+        library_checked.signature_inference(),
+        &app_deep,
+    )
+    .expect_err("fixed tensor extent must remain enforced");
+    assert!(
+        err.errors
+            .iter()
+            .any(|error| error.message.contains("Lit(3) vs Lit(2)")),
+        "fixed-rank negative control must fail for the actual extent mismatch: {:?}",
+        err.errors
+    );
 }

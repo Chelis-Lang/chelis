@@ -1,3 +1,4 @@
+use chelis_deep::DeepTag;
 use chelis_deep::printer::print_canonical;
 use pest::Parser;
 use pest::iterators::Pair;
@@ -18,71 +19,6 @@ mod surf {
     #[grammar = "surf.pest"]
     pub struct Grammar;
 }
-
-const VALID_TAGS: &[&str] = &[
-    "module",
-    "import",
-    "import-all",
-    "export",
-    "def",
-    "defsig",
-    "deftype",
-    "typealias",
-    "variant",
-    "field",
-    "defdim",
-    "fn",
-    "app",
-    "let",
-    "match",
-    "arm",
-    "if",
-    "var",
-    "lit",
-    "record",
-    "access",
-    "pipe",
-    "block",
-    "tuple",
-    "tuple-get",
-    "par",
-    "borrow",
-    "handle-effect",
-    "pat-var",
-    "pat-lit",
-    "pat-ctor",
-    "pat-tuple",
-    "pat-record",
-    "pat-wild",
-    "pat-as",
-    "record-update",
-    "t-prim",
-    "t-fn",
-    "t-tensor",
-    "t-adt",
-    "t-var",
-    "t-ref",
-    "t-unit",
-    "t-tuple",
-    "d-name",
-    "d-var",
-    "d-lit",
-    "d-rank",
-    "grad",
-    "vmap",
-    "jit",
-    "realize",
-    "cast",
-    "copy",
-    "quote",
-    "unquote",
-    "splice",
-    "params",
-    "bind",
-    "kv",
-    "effects",
-    "resource",
-];
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
@@ -125,6 +61,33 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
 }
 
 pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
+    // chelis#1088: the stamped `.dp` ingress runs FIRST, so `validate --deep`
+    // reaches the same program-level verdict `chelis check` does, in the same
+    // words. The order is the whole point. This auxiliary Pest grammar admits
+    // only `node+`, so when it ran first a headless top-level form died as
+    // `expected program` before anything could name it, and a reader got a
+    // caret instead of the [03-PROG-2] class the rule requires. Running the
+    // stamped ingress first means [03-PROG-1], [03-PROG-2], and [03-PROG-3]
+    // decide top-level acceptance, and the grammar keeps the structural
+    // checks below the top level that it alone performs.
+    //
+    // The second thing this ordering buys: a source the stamp rejects is a
+    // validation failure rather than a silent skip of the forgery checks
+    // below. That skip was the original hole, because a forged name in a
+    // source that happened not to stamp passed unreported.
+    let exprs = chelis_deep::parse_and_stamp_file(source)
+        .map_err(|err| ValidationError::Failed(err.to_string()))?;
+
+    // The AST-side structural sweep, on the stamped tree. The Pest leg below
+    // walks node children only, so a malformed shape inside a metadata value
+    // -- `(effects {} 1)` under a `t-fn`'s `eff:`, say -- is structurally
+    // invisible to it. `chelis check` has always caught those through this
+    // validator; running it here is what stops the two surfaces disagreeing
+    // about anything but the top-level rule.
+    if let Some(warning) = chelis_deep::validate::validate(&exprs).into_iter().next() {
+        return Err(ValidationError::Failed(warning.message));
+    }
+
     let mut parsed = deep::Grammar::parse(deep::Rule::program, source)
         .map_err(|err| ValidationError::Failed(err.to_string()))?;
     let Some(program) = parsed.next() else {
@@ -135,34 +98,32 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
             validate_deep_node(pair)?;
         }
     }
+
     // RFC v4b (RT-1 F2) + v5 (RT-1 F2 bypass): structural module-identity
     // forgery checks. The grammar admits two same-name wrappers and the
     // reef linker's reserved internal-name format, but both forge module
     // identity (the checker rejects them too). `validate --deep` only
     // ever processes hand-authored `.dp` (the linker feeds Deep to the
     // checker in-process and never writes `.dp`), so the reserved-name
-    // rejection here is unconditional. Parse through the AST parser (the
-    // grammar already validated above, so this succeeds).
-    if let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) {
-        if let Some(name) = first_forged_linker_name(&exprs) {
-            return Err(ValidationError::Failed(format!(
-                "`{name}` uses the reef package-linker's reserved internal-name \
-                 format (`Pkg__`/`pkg__`...), which only the linker may produce; \
-                 rename the declaration"
-            )));
-        }
-        if let Some(name) = first_reopened_module(&exprs) {
-            return Err(ValidationError::Failed(format!(
-                "module `{name}` is opened by more than one module wrapper; \
-                 a named module may be opened at most once"
-            )));
-        }
-        if let Some(name) = first_duplicate_defsig(&exprs) {
-            return Err(ValidationError::Failed(format!(
-                "duplicate signature: `{name}` has more than one `defsig`; \
-                 Chelis does not dispatch same-name functions by argument type, arity, or rank"
-            )));
-        }
+    // rejection here is unconditional.
+    if let Some(name) = first_forged_linker_name(&exprs) {
+        return Err(ValidationError::Failed(format!(
+            "`{name}` uses the reef package-linker's reserved internal-name \
+             format (`Pkg__`/`pkg__`...), which only the linker may produce; \
+             rename the declaration"
+        )));
+    }
+    if let Some(name) = first_reopened_module(&exprs) {
+        return Err(ValidationError::Failed(format!(
+            "module `{name}` is opened by more than one module wrapper; \
+             a named module may be opened at most once"
+        )));
+    }
+    if let Some(name) = first_duplicate_defsig(&exprs) {
+        return Err(ValidationError::Failed(format!(
+            "duplicate signature: `{name}` has more than one `defsig`; \
+             Chelis does not dispatch same-name functions by argument type, arity, or rank"
+        )));
     }
     Ok(())
 }
@@ -181,45 +142,47 @@ fn is_linker_format_name(name: &str) -> bool {
     matches!(stem.rsplit_once("__"), Some((module, _)) if !module.is_empty())
 }
 
+fn deep_node_parts(expr: &chelis_deep::ast::Expr) -> Option<(DeepTag, &[chelis_deep::ast::Expr])> {
+    match expr {
+        chelis_deep::ast::Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        chelis_deep::ast::Expr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
+        _ => None,
+    }
+}
+
+fn deep_symbol(expr: &chelis_deep::ast::Expr) -> Option<&str> {
+    match expr {
+        chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Name(name), _) => Some(name),
+        _ => None,
+    }
+}
+
 /// Return the first top-level declaration binding name that matches the
 /// reef linker's reserved internal-name format (RFC v5), or `None`.
 fn first_forged_linker_name(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
-    fn binding_name(list: &chelis_deep::ast::List) -> Option<&str> {
-        let tag = match list.elements.first() {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) => {
-                tag.as_str()
-            }
-            _ => return None,
-        };
-        if !matches!(tag, "deftype" | "def" | "defsig" | "typealias" | "defmacro") {
+    fn binding_name(expr: &chelis_deep::ast::Expr) -> Option<&str> {
+        let (tag, children) = deep_node_parts(expr)?;
+        let is_binding_decl = matches!(
+            tag,
+            DeepTag::Deftype | DeepTag::Def | DeepTag::Defsig | DeepTag::Typealias
+        );
+        if !is_binding_decl {
             return None;
         }
-        match list.elements.get(2) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        }
+        children.first().and_then(deep_symbol)
     }
     fn walk(expr: &chelis_deep::ast::Expr) -> Option<String> {
-        let chelis_deep::ast::Expr::List(list, _) = expr else {
-            return None;
-        };
-        let is_module = matches!(
-            list.elements.first(),
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _))
-                if tag == "module"
-        );
-        if is_module {
+        let (tag, children) = deep_node_parts(expr)?;
+        if tag == DeepTag::Module {
             // Descend into a module wrapper's children.
-            for child in list.elements.iter().skip(3) {
+            for child in children.iter().skip(1) {
                 if let Some(found) = walk(child) {
                     return Some(found);
                 }
             }
             return None;
         }
-        if let Some(name) = binding_name(list)
+        if let Some(name) = binding_name(expr)
             && is_linker_format_name(name)
         {
             return Some(name.to_string());
@@ -234,28 +197,20 @@ fn first_forged_linker_name(exprs: &[chelis_deep::ast::Expr]) -> Option<String> 
 /// `None` if every wrapper name is unique. Mirrors the checker's
 /// `detect_module_reopens` (RFC v4b, RT-1 F2).
 fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
-    fn module_name(list: &chelis_deep::ast::List) -> Option<&str> {
-        match list.elements.first() {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _))
-                if tag == "module" => {}
-            _ => return None,
+    fn module_name(expr: &chelis_deep::ast::Expr) -> Option<&str> {
+        let (tag, children) = deep_node_parts(expr)?;
+        if tag != DeepTag::Module {
+            return None;
         }
-        match list.elements.get(2) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        }
+        children.first().and_then(deep_symbol)
     }
     fn walk(
         expr: &chelis_deep::ast::Expr,
         prefix: Option<&str>,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut chelis_unord::UnordSet<String>,
     ) -> Option<String> {
-        let chelis_deep::ast::Expr::List(list, _) = expr else {
-            return None;
-        };
-        let name = module_name(list)?;
+        let (_, children) = deep_node_parts(expr)?;
+        let name = module_name(expr)?;
         let key = match prefix {
             Some(p) => format!("{p}.{name}"),
             None => name.to_string(),
@@ -263,14 +218,14 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         if !seen.insert(key.clone()) {
             return Some(key);
         }
-        for child in list.elements.iter().skip(3) {
+        for child in children.iter().skip(1) {
             if let Some(dup) = walk(child, Some(&key), seen) {
                 return Some(dup);
             }
         }
         None
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     for expr in exprs {
         if let Some(dup) = walk(expr, None, &mut seen) {
             return Some(dup);
@@ -284,39 +239,15 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 /// functions by arity, type, or rank, so multiple signatures for one name have
 /// no valid dispatch meaning.
 fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
-    fn tag(list: &chelis_deep::ast::List) -> Option<&str> {
-        match list.elements.first() {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) => {
-                Some(tag.as_str())
-            }
-            _ => None,
-        }
-    }
-
-    fn symbol_child(list: &chelis_deep::ast::List, index: usize) -> Option<&str> {
-        match list.elements.get(index) {
-            Some(chelis_deep::ast::Expr::Atom(chelis_deep::ast::Atom::Symbol(name), _)) => {
-                Some(name.as_str())
-            }
-            _ => None,
-        }
-    }
-
     fn walk(
         expr: &chelis_deep::ast::Expr,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut chelis_unord::UnordSet<String>,
     ) -> Option<String> {
-        let chelis_deep::ast::Expr::List(list, _) = expr else {
-            return None;
-        };
-        match tag(list) {
-            Some("module") => list
-                .elements
-                .iter()
-                .skip(3)
-                .find_map(|child| walk(child, seen)),
-            Some("defsig") => {
-                let name = symbol_child(list, 2)?;
+        let (tag, children) = deep_node_parts(expr)?;
+        match tag {
+            DeepTag::Module => children.iter().skip(1).find_map(|child| walk(child, seen)),
+            DeepTag::Defsig => {
+                let name = children.first().and_then(deep_symbol)?;
                 if seen.insert(name.to_string()) {
                     None
                 } else {
@@ -327,7 +258,7 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         }
     }
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     exprs.iter().find_map(|expr| walk(expr, &mut seen))
 }
 
@@ -375,17 +306,21 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
         )));
     }
 
-    if !VALID_TAGS.contains(&tag.as_str()) {
+    // Membership in the closed vocabulary is the single `DeepTag`
+    // declaration (chelis#731 Phase 3); the duplicated local string list
+    // and its drift test are retired.
+    let Some(deep_tag) = DeepTag::parse(&tag) else {
         return Err(ValidationError::Failed(format!(
             "unknown Deep tag `{tag}` at byte {}",
             span.start()
         )));
-    }
+    };
 
     for child in &children {
         match child.as_rule() {
             deep::Rule::node => validate_deep_node(child.clone())?,
             deep::Rule::typed_helper => validate_typed_helper(child.clone())?,
+            deep::Rule::bare_list => validate_bare_list(child.clone())?,
             deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
             other => {
                 return Err(ValidationError::Failed(format!(
@@ -397,7 +332,32 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
         }
     }
 
-    validate_tag_shape(&tag, &children, span.start())
+    validate_tag_shape(deep_tag, &children, span.start())
+}
+
+fn validate_bare_list(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
+    for item in pair.into_inner().filter(is_structural_pair) {
+        let child = match item.as_rule() {
+            deep::Rule::bare_list_item => item.into_inner().find(is_structural_pair),
+            _ => Some(item),
+        };
+        let Some(child) = child else {
+            continue;
+        };
+        match child.as_rule() {
+            deep::Rule::node => validate_deep_node(child)?,
+            deep::Rule::typed_helper => validate_typed_helper(child)?,
+            deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
+            other => {
+                return Err(ValidationError::Failed(format!(
+                    "unexpected Deep bare-list rule {:?} at byte {}",
+                    other,
+                    child.as_span().start()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_typed_helper(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
@@ -419,11 +379,16 @@ fn validate_typed_helper(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationErr
     Ok(())
 }
 
+/// Per-tag shape validation over the closed vocabulary. The match is
+/// exhaustive with no `_` arm (chelis#731 Phase 3, checker_totality.md
+/// §C4.2): a 63rd `DeepTag` variant fails to compile here until it gets an
+/// explicit shape disposition.
 fn validate_tag_shape(
-    tag: &str,
+    deep_tag: DeepTag,
     children: &[Pair<'_, deep::Rule>],
     offset: usize,
 ) -> Result<(), ValidationError> {
+    let tag = deep_tag.as_str();
     let child_count = children.len();
 
     let wrong_arity = |expected: &str| {
@@ -432,27 +397,102 @@ fn validate_tag_shape(
         ))
     };
 
-    match tag {
-        "if" | "arm" if child_count != 3 => Err(wrong_arity("exactly 3 children")),
-        "handle-effect" if child_count != 2 => Err(wrong_arity("exactly 2 children")),
-        "fn" => {
+    match deep_tag {
+        DeepTag::If | DeepTag::Arm => {
+            if child_count != 3 {
+                return Err(wrong_arity("exactly 3 children"));
+            }
+            Ok(())
+        }
+        DeepTag::HandleEffect => {
+            if child_count != 2 {
+                return Err(wrong_arity("exactly 2 children"));
+            }
+            Ok(())
+        }
+        DeepTag::Fn => {
             if child_count != 2 {
                 return Err(wrong_arity("exactly 2 children"));
             }
             expect_node_tag(&children[0], "params", offset)
         }
-        "let" => {
+        DeepTag::Let => {
             if child_count != 2 {
                 return Err(wrong_arity("exactly 2 children"));
             }
             expect_node_tag(&children[0], "bind", offset)
         }
-        "app" if child_count < 1 => Err(wrong_arity("at least 1 child")),
-        "params" => validate_params_children(children, offset),
-        "bind" => validate_bind_children(children, offset),
-        "effects" => validate_effects_children(children, offset),
-        "resource" if child_count != 1 => Err(wrong_arity("exactly 1 child")),
-        _ => Ok(()),
+        DeepTag::App => {
+            if child_count < 1 {
+                return Err(wrong_arity("at least 1 child"));
+            }
+            Ok(())
+        }
+        DeepTag::Params => validate_params_children(children, offset),
+        DeepTag::Bind => validate_bind_children(children, offset),
+        DeepTag::Effects => validate_effects_children(children, offset),
+        DeepTag::Resource => {
+            if child_count != 1 {
+                return Err(wrong_arity("exactly 1 child"));
+            }
+            Ok(())
+        }
+        // No additional shape constraint at this validator: these tags'
+        // arity/shape rules are owned by the type checker (spec/03
+        // §2.5.1/§2.6, §8.2) or by their enclosing form. Listed explicitly
+        // rather than wildcarded so a 63rd tag forces a decision here.
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Def
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::Match
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::Borrow
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Kv => Ok(()),
     }
 }
 
@@ -546,24 +586,34 @@ fn validate_effects_children(
 
 #[cfg(test)]
 mod tests {
-    use super::{VALID_TAGS, validate_deep, validate_desugared, validate_surf};
-    use std::collections::HashSet;
+    use super::{validate_deep, validate_desugared, validate_surf};
 
     #[test]
     fn valid_tags_match_canonical_deep_vocabulary() {
         // The Phase 1f executable-grammar validator must accept exactly the
-        // tags the compiler's strict parser accepts. A drift here means
-        // `chelis validate` rejects shipped canonical Deep (this is how the
-        // `t-ref`/`d-rank` rank-polymorphism tags were initially missed).
-        let local: HashSet<&str> = VALID_TAGS.iter().copied().collect();
-        let canonical: HashSet<&str> = chelis_deep::validate::VALID_TAGS.iter().copied().collect();
-        let missing: Vec<&&str> = canonical.difference(&local).collect();
-        let extra: Vec<&&str> = local.difference(&canonical).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "chelis-validate VALID_TAGS drifted from chelis_deep::validate::VALID_TAGS.\n  \
-             missing (in compiler vocabulary, not in validator): {missing:?}\n  \
-             extra (in validator, not in compiler vocabulary): {extra:?}"
+        // tags the compiler's strict parser accepts. Pre-chelis#731-Phase-3
+        // this asserted set equality between a local `VALID_TAGS` copy and
+        // `chelis_deep::validate::VALID_TAGS`; the local copy is retired and
+        // membership is now the single `chelis_deep::DeepTag` declaration on
+        // both surfaces, so a list drift is unrepresentable. What remains
+        // observable is rejection parity on non-members (acceptance parity
+        // on members is exercised by the corpus tests in this module, e.g.
+        // the `t-ref`/`d-rank` case that motivated the original test).
+        for bogus in ["mystery", "defmacro", "macro-invoke", "sig", "apply"] {
+            let source = format!("({bogus} {{}} x)");
+            assert!(
+                validate_deep(&source).is_err(),
+                "`{bogus}` must be rejected by the executable-grammar validator"
+            );
+            assert!(
+                chelis_deep::parse_and_stamp_file(&source).is_err(),
+                "`{bogus}` must be rejected by the compiler's stamped ingress"
+            );
+        }
+        assert_eq!(
+            chelis_deep::validate::VALID_TAGS.len(),
+            chelis_deep::DeepTag::COUNT,
+            "the derived string list must cover the whole vocabulary"
         );
     }
 
@@ -574,6 +624,13 @@ mod tests {
         let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
         validate_deep(source)
             .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
+    }
+
+    #[test]
+    fn deep_accepts_canonical_nominal_parameter_lists() {
+        let source = "(deftype {} Column (n a) (variant {} Column (field {} items (t-tensor {} (d-var {} n) (t-var {} a)))))\n";
+        validate_deep(source)
+            .expect("validator must accept the compiler's canonical bare nominal-parameter list");
     }
 
     fn assert_duplicate_defsig_rejected(source: &str) {
@@ -615,10 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn surf_accepts_semicolon_block_and_axis_identifier() {
-        let source = "def f(axis) = { y = axis; y }\ndef g() = par { a; b }\n";
+    fn surf_accepts_newline_block_semicolon_par_and_axis_identifier() {
+        let source = "def f(axis) = {\n  y = axis\n  y\n}\ndef g() = par { a; b }\n";
         validate_surf(source)
-            .expect("validator should accept semicolon block/par and axis identifiers");
+            .expect("validator should accept canonical block/par separators and axis identifiers");
     }
 
     #[test]
@@ -676,11 +733,31 @@ mod tests {
         validate_surf(source).expect_err("validator must reject bare par items too");
     }
 
+    /// chelis#858 rejection parity: both `.dp` validation surfaces reject
+    /// an untagged top-level list. The pest grammar always did; the
+    /// AST-walking validator (`chelis_deep::validate`) now warns too.
+    #[test]
+    fn deep_rejects_untagged_top_level_list_on_both_surfaces() {
+        let source = "((var {} f) (var {} x))\n";
+        validate_deep(source).expect_err("pest grammar must reject an untagged top-level list");
+        let exprs = chelis_deep::parser::parse_str(source).expect("lenient parse");
+        assert!(
+            !chelis_deep::validate::validate(&exprs).is_empty(),
+            "the AST validator must reject the same input class"
+        );
+    }
+
     #[test]
     fn deep_rejects_unknown_tag() {
-        let source = "(mystery {} x)";
+        // chelis#1088: the fixture moved inside a declaration. A top-level
+        // `(mystery {} x)` is now a [03-PROG-1] rejection, which would make
+        // this test pass for the wrong reason; below a `def` the unknown
+        // head is what the validator is left to decide.
+        let source = "(def {} f (mystery {} x))";
         let error = validate_deep(source).expect_err("unknown tag should fail");
-        assert!(error.to_string().contains("unknown Deep tag"));
+        let rendered = error.to_string();
+        assert!(rendered.contains("unknown tag"), "{rendered}");
+        assert!(rendered.contains("mystery"), "{rendered}");
     }
 
     #[test]
@@ -691,20 +768,29 @@ mod tests {
 
     #[test]
     fn deep_rejects_invalid_effects_children() {
-        let source = "(effects {} 1)";
+        // chelis#1088: `(effects ...)` is only ever a metadata value in real
+        // Deep, never a top-level form, so the fixture now sits where it
+        // actually occurs. That position is invisible to the Pest leg, which
+        // walks node children; the AST-side sweep is what reaches it, and
+        // running that sweep here is what keeps `validate --deep` agreeing
+        // with `check` below the top level too.
+        let source = "(defsig {} f (t-fn {eff: (effects {} 1)} (t-prim {} f32)))";
         let error = validate_deep(source).expect_err("non-symbol effects child should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("`effects` must contain bare names")
-        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("`effects` must contain"), "{rendered}");
     }
 
     #[test]
     fn deep_rejects_invalid_resource_arity() {
-        let source = "(resource {} x y)";
+        // chelis#1088: likewise nested where a `resource` entry really
+        // appears. The stamped ingress reaches the arity first and says so
+        // in the node vocabulary's own terms; the Pest arity arm remains as
+        // the second line of defence.
+        let source = "(defsig {} f (t-fn {eff: (effects {} (resource {} x y))} (t-prim {} f32)))";
         let error = validate_deep(source).expect_err("resource arity should fail");
-        assert!(error.to_string().contains("expected exactly 1 child"));
+        let rendered = error.to_string();
+        assert!(rendered.contains("resource"), "{rendered}");
+        assert!(rendered.contains("wrong child count"), "{rendered}");
     }
 
     #[test]
@@ -729,18 +815,19 @@ mod tests {
     //
     // Each positive case asserts that the commented form validates AND
     // that it accepts exactly what the comment-free form does, so the two
-    // surfaces stay in parity with `chelis_deep::parser::parse_str_strict`.
+    // surfaces stay in parity with `chelis_deep::parse_and_stamp_file`
+    // (chelis#1088: that is now the one Deep ingress both surfaces use).
 
     /// The base program these comment cases wrap, comment-free.
     const BASE: &str = "(module {} hello)\n";
 
     fn assert_validates(source: &str, label: &str) {
         // Both the commented and the bare form must validate, and the
-        // strict hand-rolled parser must also accept the source, so the
+        // stamped hand-rolled ingress must also accept the source, so the
         // two Deep surfaces agree (the core complaint of #167).
         validate_deep(source).unwrap_or_else(|err| panic!("{label} should validate: {err}"));
         validate_deep(BASE).expect("base program should validate");
-        chelis_deep::parser::parse_str_strict(source)
+        chelis_deep::parse_and_stamp_file(source)
             .unwrap_or_else(|err| panic!("{label} should parse strictly: {err}"));
     }
 
@@ -850,12 +937,12 @@ mod tests {
     // a `;` comment in its first internal `spacing`, which surfaces as a
     // visible `comment` pair ahead of the tag. If the introspection does
     // not skip it, the validator reads the comment text as the tag and
-    // wrongly rejects source that `parse_str_strict` accepts.
+    // wrongly rejects source that the stamped ingress accepts.
 
     #[test]
     fn deep_accepts_comment_before_params_tag_in_fn() {
         assert_validates(
-            "(fn {} (; note\nparams {}) (var {} x))\n",
+            "(def {} f (fn {} (; note\nparams {}) (var {} x)))\n",
             "comment before nested `params` tag",
         );
     }
@@ -863,7 +950,7 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_bind_tag_in_let() {
         assert_validates(
-            "(let {} (; note\nbind {}) (var {} x))\n",
+            "(def {} f (let {} (; note\nbind {}) (var {} x)))\n",
             "comment before nested `bind` tag",
         );
     }
@@ -871,8 +958,118 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_resource_tag_in_effects() {
         assert_validates(
-            "(effects {} (; note\nresource {} foo))\n",
+            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} foo))} (t-prim {} f32)))\n",
             "comment before nested `resource` tag",
+        );
+    }
+
+    // ---- ingress parity with `chelis check` (chelis#1088) ----------------
+
+    #[test]
+    fn deep_rejects_a_program_with_no_top_level_form() {
+        // [03-PROG-3]. Empty, whitespace-only, and comments-only text all
+        // yield zero forms, and all three are the same rejection.
+        for source in ["", "   \n\t\n", "; just a comment\n", "\n; a\n; b\n\n"] {
+            let error = validate_deep(source)
+                .expect_err("[03-PROG-3] rejects text yielding no top-level form");
+            assert!(
+                error.to_string().contains("empty program"),
+                "{source:?}: {error}"
+            );
+            assert!(
+                chelis_deep::parse_and_stamp_file(source).is_err(),
+                "the compiler's stamped ingress must agree about {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_identifies_every_headless_class_the_way_check_does() {
+        // chelis#1088: the Pest grammar admits only `node+`, so before the
+        // stamped ingress ran first a headless top-level form died as
+        // `expected program` and the reader never learned its class. These
+        // are the nine [03-PROG-2] classes, through `validate --deep`.
+        let cases: [(&str, &str); 9] = [
+            ("some_name", "a bare identifier"),
+            ("42", "a bare integer literal"),
+            ("1.5", "a bare float literal"),
+            ("\"text\"", "a bare string literal"),
+            ("true", "a bare boolean literal"),
+            ("()", "an empty list"),
+            ("((var {} f) (var {} x))", "a list without a tag symbol"),
+            ("{key: 1}", "a metadata map"),
+            (
+                "^{:surf_literal_style \"explicit\"} (var {} x)",
+                "a metadata-annotated form",
+            ),
+        ];
+        for (source, identification) in cases {
+            let error = validate_deep(source)
+                .expect_err("[03-PROG-1] rejects every headless top-level form");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(identification),
+                "[03-PROG-2] requires {source:?} to be identified as \
+                 {identification}, got: {rendered}"
+            );
+            assert!(
+                !rendered.contains('<') && !rendered.contains('>'),
+                "[03-PROG-2] forbids a placeholder identification: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_rejects_a_top_level_form_that_is_not_a_declaration() {
+        // The pest grammar admits any top-level tagged node, and the AST leg
+        // used to skip its checks silently whenever its own parse failed.
+        // Both legs now agree with `chelis check`: a top-level form is a
+        // `(module ...)` wrapper or a declaration.
+        for source in [
+            "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))\n",
+            "(var {} x)\n",
+            "(app {} (var {} f) (var {} x))\n",
+        ] {
+            let error =
+                validate_deep(source).expect_err("a top-level non-declaration must be rejected");
+            assert!(
+                error.to_string().contains("expected declaration"),
+                "wrong reason for `{source}`: {error}"
+            );
+            assert!(
+                chelis_deep::parse_and_stamp_file(source).is_err(),
+                "the compiler's stamped ingress must agree about `{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_accepts_both_module_wrappers_and_bare_declarations() {
+        // The positive control for the rule above: the two admissible
+        // top-level shapes still validate, and the compiler's stamped
+        // ingress agrees.
+        for source in [
+            "(module {} hello (def {} f (var {} x)))\n",
+            "(def {} f (var {} x))\n",
+            "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} f32)))\n",
+        ] {
+            validate_deep(source).unwrap_or_else(|err| panic!("`{source}` should validate: {err}"));
+            chelis_deep::parse_and_stamp_file(source)
+                .unwrap_or_else(|err| panic!("`{source}` should stamp: {err}"));
+        }
+    }
+
+    #[test]
+    fn deep_reports_a_forged_linker_name_it_used_to_skip_silently() {
+        // The forgery checks used to run only when the AST leg's own parse
+        // succeeded, so a source that failed it passed unreported. Now the
+        // parse failure is itself a rejection, and a forged name in a source
+        // that does stamp is still named.
+        let error = validate_deep("(def {} Pkg__p__M__forged (var {} x))\n")
+            .expect_err("a reserved linker-format name must be rejected");
+        assert!(
+            error.to_string().contains("reserved internal-name"),
+            "wrong reason: {error}"
         );
     }
 
@@ -901,5 +1098,101 @@ mod tests {
         // not be swallowed into a comment and silently accepted.
         let source = "; a comment\n@@@ not a node\n";
         validate_deep(source).expect_err("garbage after a comment must still fail to parse");
+    }
+
+    /// chelis#1417: `dtype_bounds` is the first map-valued metadata key, so
+    /// this grammar is the second implementation that has to admit it.
+    /// Reverting `meta_value`'s `meta` alternative turns this RED with
+    /// `expected meta_value`, which is exactly how every migrated stdlib
+    /// module failed `chelis deep <file> | chelis validate --deep`.
+    #[test]
+    fn deep_admits_a_map_valued_metadata_key() {
+        for source in [
+            "(defsig {dtype_bounds: {p: int}} arange (t-fn {} (t-var {} p) (t-var {} p)))\n",
+            "(defsig {dtype_bounds: {p: float, q: numeric}} f (t-fn {} (t-var {} p) (t-var {} q)))\n",
+            // The empty map is a legal value, as it is a legal node meta.
+            "(defsig {dtype_bounds: {}} f (t-fn {} (t-var {} p) (t-var {} p)))\n",
+        ] {
+            validate_deep(source)
+                .unwrap_or_else(|e| panic!("map-valued metadata must validate: {source}\n{e}"));
+        }
+    }
+
+    /// The Surf half of the same second-implementation contract. `validate_surf`
+    /// has a "grammar rejects, parser accepts" rescue, so without these the new
+    /// binder syntax would pass through that hole and the grammar would cover
+    /// none of it. Reverting `type_binders` in `surf.pest` does not change the
+    /// exit verdict, so these assert on the GRAMMAR directly.
+    #[test]
+    fn surf_grammar_admits_the_dtype_family_binder_list() {
+        use pest::Parser;
+        for source in [
+            "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
+            "sig total[p: Numeric]: p -> p -> p\n",
+            "def only_floats[p: Float](x: p) -> p = x\n",
+            "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
+            "def unbounded[a](x: a) -> a = x\n",
+        ] {
+            super::surf::Grammar::parse(super::surf::Rule::program, source)
+                .unwrap_or_else(|e| panic!("the Surf grammar must admit `{source}`: {e}"));
+            validate_surf(source).expect("and the compiler parser agrees");
+        }
+    }
+
+    /// The negative half: the bound position is a closed three-name set in the
+    /// grammar too, so an ADT name there is not quietly admitted.
+    #[test]
+    fn surf_grammar_rejects_a_non_family_bound() {
+        use pest::Parser;
+        for source in ["sig f[p: Tensor]: p -> p\n", "sig f[p: f32]: p -> p\n"] {
+            assert!(
+                super::surf::Grammar::parse(super::surf::Rule::program, source).is_err(),
+                "the Surf grammar must reject `{source}`"
+            );
+            validate_surf(source).expect_err("and the compiler parser rejects it too");
+        }
+    }
+
+    /// §1.1 declares the metadata key charset as `[A-Za-z_][A-Za-z0-9_]*`.
+    /// `dtype_bounds` needs the underscore; §7's PEG and this grammar are the
+    /// two implementations that have to agree with that sentence.
+    #[test]
+    fn deep_admits_the_declared_metadata_key_charset() {
+        for key in [
+            "dtype_bounds",
+            "chelis_role",
+            "surf_path",
+            "_leading",
+            "Upper",
+        ] {
+            let source = format!("(defsig {{{key}: x}} f (t-var {{}} p))\n");
+            validate_deep(&source)
+                .unwrap_or_else(|e| panic!("`{key}` is a legal metadata key: {e}"));
+        }
+        // The no-hyphen rule that keeps Deep symbols portable still holds.
+        validate_deep("(defsig {has-hyphen: x} f (t-var {} p))\n")
+            .expect_err("a hyphenated metadata key must still be rejected");
+    }
+
+    /// The whole path the red team exercised: desugar a bounded declaration
+    /// the way `chelis deep` does, print it, and validate the result. This is
+    /// the control whose absence let the grammar regression reach a green
+    /// gate — nothing else runs `validate --deep` over Deep carrying a
+    /// map-valued metadata key.
+    #[test]
+    fn a_bounded_declaration_survives_desugar_then_deep_validation() {
+        let source = "module Std.Planted\n\
+                      export (planted_pick)\n\
+                      sig planted_pick[p: Numeric]: p -> p -> p\n\
+                      def planted_pick(a, b) = a\n";
+        let decls = chelis_surf::parser::parse_str(source).expect("bounded Surf parses");
+        let printed =
+            chelis_deep::printer::print_canonical(&chelis_surf::desugar::desugar_program(&decls));
+        assert!(
+            printed.contains("dtype_bounds: {p: numeric}"),
+            "the fixture must actually carry a map-valued key: {printed}"
+        );
+        validate_deep(&printed)
+            .unwrap_or_else(|e| panic!("desugared bounded Deep must validate:\n{printed}\n{e}"));
     }
 }

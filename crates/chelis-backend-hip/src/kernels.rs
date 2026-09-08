@@ -54,6 +54,16 @@ __device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned lon
     double unit = (double)(x >> 11) / (double)(1ULL << 53);
     return fmaf(high - low, (float)unit, low);
 }
+__device__ double chelis_uniform_sample_f64(unsigned long long seed, unsigned long long index, double low, double high) {
+    unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBULL;
+    x ^= x >> 31;
+    double unit = (double)(x >> 11) / (double)(1ULL << 53);
+    return fma(high - low, unit, low);
+}
 ";
 
 /// Maximum tensor dimensions (must match CHELIS_MAX_DIM in runtime).
@@ -294,12 +304,11 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Generate kernel source for a binary function op (fmaxf for max_elem).
-/// `func` is the f32-suffixed libm name (e.g. `fmaxf`); for f64 the
-/// f-suffix is dropped per [`ElemKind::func`].
-pub fn binary_func(kernel_name: &str, func: &str, kind: ElemKind) -> String {
+/// Generate an exact direct extrema-selection kernel. The chosen operand is
+/// assigned unchanged so NaN payloads/signs and signed zero bits survive.
+pub fn binary_extrema(kernel_name: &str, is_max: bool, kind: ElemKind) -> String {
     let ty = kind.c_type();
-    let resolved = kind.func(func);
+    let comparison = if is_max { ">=" } else { "<=" };
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
@@ -315,7 +324,10 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
-  out[i] = {resolved}(a[idx_a], b[idx_b]);
+  {ty} av = a[idx_a];
+  {ty} bv = b[idx_b];
+  bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
+  out[i] = select_left ? av : bv;
 }}
 ",
         a_strides = stride_params("a"),
@@ -323,6 +335,214 @@ extern \"C\" __global__ void {kernel_name}(
         out_shape = shape_params("out"),
         build_a_s = build_array("a_s", "a", "s"),
         build_b_s = build_array("b_s", "b", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Exact signed-integer direct extrema selection. Equality selects the lhs;
+/// no arithmetic is performed.
+pub fn binary_extrema_integer(kernel_name: &str, is_max: bool, elem_c_ty: &str) -> String {
+    let comparison = if is_max { ">=" } else { "<=" };
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {elem_c_ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {elem_c_ty} *b, {b_strides}, int b_ndim, int b_size,
+    {elem_c_ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_b_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  {elem_c_ty} av = a[idx_a];
+  {elem_c_ty} bv = b[idx_b];
+  out[i] = av {comparison} bv ? av : bv;
+}}
+",
+        a_strides = stride_params("a"),
+        b_strides = stride_params("b"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_b_s = build_array("b_s", "b", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate the AD-only exact extrema cotangent kernel. Inputs are the two
+/// forward operands and the incoming cotangent; output is the complete
+/// cotangent for the selected operand and exact positive zero otherwise.
+pub fn extrema_adjoint(
+    kernel_name: &str,
+    is_max: bool,
+    select_left_operand: bool,
+    kind: ElemKind,
+) -> String {
+    let ty = kind.c_type();
+    let comparison = if is_max { ">=" } else { "<=" };
+    let selected = if select_left_operand {
+        "select_left"
+    } else {
+        "!select_left"
+    };
+    let zero = kind.zero_lit_bool();
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {ty} *b, {b_strides}, int b_ndim, int b_size,
+    const {ty} *g, {g_strides}, int g_ndim, int g_size,
+    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_b_s}
+{build_g_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  int idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  {ty} av = a[idx_a];
+  {ty} bv = b[idx_b];
+  bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
+  out[i] = {selected} ? g[idx_g] : {zero};
+}}
+",
+        a_strides = stride_params("a"),
+        b_strides = stride_params("b"),
+        g_strides = stride_params("g"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_b_s = build_array("b_s", "b", "s"),
+        build_g_s = build_array("g_s", "g", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate the dedicated ReLU kernel. The selected input is assigned
+/// unchanged, preserving NaN payloads/signs and negative zero bits.
+pub fn relu(kernel_name: &str, kind: ElemKind) -> String {
+    let ty = kind.c_type();
+    let zero = kind.zero_lit_bool();
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, int a_ndim, int a_size,
+    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  {ty} value = a[idx];
+  out[i] = value < {zero} ? {zero} : value;
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate the AD-only ReLU cotangent kernel. The incoming cotangent is
+/// copied exactly only for strictly positive inputs; every rejected lane is
+/// exact positive zero, including both zeros and NaNs.
+pub fn relu_adjoint(kernel_name: &str, kind: ElemKind) -> String {
+    let ty = kind.c_type();
+    let zero = kind.zero_lit_bool();
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {ty} *g, {g_strides}, int g_ndim, int g_size,
+    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_g_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  out[i] = {zero} < a[idx_a] ? g[idx_g] : {zero};
+}}
+",
+        a_strides = stride_params("a"),
+        g_strides = stride_params("g"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_g_s = build_array("g_s", "g", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Raw IEEE-754 binary16/bfloat16 ReLU. HIP's narrow tensors use a tagged
+/// 16-bit unsigned carrier outside matmul, so the predicate is expressed on the
+/// sign/exponent/fraction fields and the selected stored bits are copied.
+pub fn relu_reduced(kernel_name: &str, exponent_mask: u16, fraction_mask: u16) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const unsigned short *a, {a_strides}, int a_ndim, int a_size,
+    unsigned short *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  unsigned short value = a[idx];
+  bool is_nan = (value & 0x{exponent_mask:04x}u) == 0x{exponent_mask:04x}u && (value & 0x{fraction_mask:04x}u) != 0;
+  bool is_negative = (value & 0x8000u) != 0 && (value & 0x7fffu) != 0 && !is_nan;
+  out[i] = is_negative ? (unsigned short)0 : value;
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Raw IEEE-754 binary16/bfloat16 ReLU adjoint. `0 < x` is true exactly
+/// for positive, nonzero, non-NaN encodings; selected cotangent bits survive.
+pub fn relu_adjoint_reduced(kernel_name: &str, exponent_mask: u16, fraction_mask: u16) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const unsigned short *a, {a_strides}, int a_ndim, int a_size,
+    const unsigned short *g, {g_strides}, int g_ndim, int g_size,
+    unsigned short *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_g_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  unsigned short value = a[idx_a];
+  bool is_nan = (value & 0x{exponent_mask:04x}u) == 0x{exponent_mask:04x}u && (value & 0x{fraction_mask:04x}u) != 0;
+  bool is_positive = (value & 0x8000u) == 0 && (value & 0x7fffu) != 0 && !is_nan;
+  out[i] = is_positive ? g[idx_g] : (unsigned short)0;
+}}
+",
+        a_strides = stride_params("a"),
+        g_strides = stride_params("g"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_g_s = build_array("g_s", "g", "s"),
         build_out_sh = build_array("out_sh", "out", "sh"),
     )
 }
@@ -550,22 +770,23 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Generate kernel source for uniform_like random fill. The PRNG itself
-/// always runs in f32 — the f64 variant simply widens at the final store
-/// because `chelis_uniform_sample_f32` is the only PRNG the runtime ships
-/// today and the spec does not pin a higher-precision tensor random
-/// surface.
+/// Generate kernel source for uniform_like random fill. [05-OP-8] binds
+/// each output width to its own affine: f32 uses fmaf and f64 uses fma.
 pub fn uniform_like(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
+    let sampler = match kind {
+        ElemKind::F32 => "chelis_uniform_sample_f32",
+        ElemKind::F64 => "chelis_uniform_sample_f64",
+    };
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    float low, float high, unsigned long long seed,
+    {ty} low, {ty} high, unsigned long long seed,
     {ty} *out, {out_shape}, int out_ndim, int out_size) {{
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  out[i] = ({ty})chelis_uniform_sample_f32(seed, (unsigned long long)i, low, high);
+  out[i] = {sampler}(seed, (unsigned long long)i, low, high);
 }}
 ",
         out_shape = shape_params("out"),
@@ -920,6 +1141,11 @@ fn fused_step_lines(
                 let b = resolve_fused_input(&step.input_indices[1]);
                 format!("{a} + {b}")
             }
+            FusedStepOp::Sub => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let b = resolve_fused_input(&step.input_indices[1]);
+                format!("{a} - {b}")
+            }
             FusedStepOp::Mul => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
@@ -949,8 +1175,12 @@ fn fused_step_lines(
             FusedStepOp::MaxElem => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
-                let fmax = kind.func("fmaxf");
-                format!("{fmax}({a}, {b})")
+                format!("(isnan({a}) || (!isnan({b}) && ({a}) >= ({b})) ? ({a}) : ({b}))")
+            }
+            FusedStepOp::MinElem => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let b = resolve_fused_input(&step.input_indices[1]);
+                format!("(isnan({a}) || (!isnan({b}) && ({a}) <= ({b})) ? ({a}) : ({b}))")
             }
             FusedStepOp::CmpLt => {
                 let a = resolve_fused_input(&step.input_indices[0]);

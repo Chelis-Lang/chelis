@@ -6,14 +6,13 @@
 //! [`GoalShape::BoxRange`] form against the frozen seam contract
 //! (`docs/design/phase2_seam_contract.md`), populating the goal's
 //! [`IrHandle`] with the content hash + root index that addresses the
-//! serialized `WireDag` v1 artifact a consumer resolves.
+//! serialized exact-version `WireDag` v6 artifact a consumer resolves.
 //!
 //! ## Why content addressing, not a Dag handle
 //!
 //! Beacon consumes the SERIALIZED `WireDag` JSON bytes out of process:
-//! it parses the slice, validates `schema_version <= WIRE_DAG_SCHEMA_VERSION`
-//! (a lower version is forward-compatible via additive defaults, a higher
-//! one fails closed), sha256s the bytes,
+//! it requires `schema_version == WIRE_DAG_SCHEMA_VERSION` before decoding an
+//! op, validates the complete cross-node wire contract, sha256s the bytes,
 //! and selects the output by root index. So this producer addresses that
 //! artifact by its content hash (lowercase hex sha256) plus a root index,
 //! and [`ExtractedGoal`] also carries the serialized bytes so nothing
@@ -55,8 +54,10 @@
 //! a hash + index.
 
 use chelis_compiler_api::compiler;
+#[cfg(debug_assertions)]
+use chelis_compiler_api::schema::WIRE_DAG_SCHEMA_VERSION;
 use chelis_compiler_api::schema::{
-    LowerRequest, LowerResult, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagSchemaError,
+    LowerRequest, LowerResult, SourceKind, WireDag, WireDagContractError, WireDagSchemaError,
     WireRiscOp,
 };
 use sha2::{Digest, Sha256};
@@ -64,7 +65,7 @@ use sha2::{Digest, Sha256};
 use crate::discharge::{Goal, GoalError, IntervalBox, IrHandle, OutputRange};
 
 /// A box/range [`Goal`] produced from real source, plus the serialized
-/// `WireDag` v1 artifact its [`IrHandle`] addresses.
+/// exact-version `WireDag` v6 artifact its [`IrHandle`] addresses.
 ///
 /// The goal's [`IrHandle`] carries the content hash (lowercase-hex sha256)
 /// of [`wire_dag_bytes`](Self::wire_dag_bytes) and the root index its single
@@ -76,7 +77,7 @@ use crate::discharge::{Goal, GoalError, IntervalBox, IrHandle, OutputRange};
 pub struct ExtractedGoal {
     /// The box/range goal, with a populated [`IrHandle`].
     pub goal: Goal,
-    /// The serialized `WireDag` v1 JSON bytes the handle's hash addresses.
+    /// The serialized exact-version `WireDag` v6 JSON bytes the handle's hash addresses.
     /// A consumer recomputes sha256 over exactly these bytes and compares
     /// for byte-identity before trusting the DAG.
     pub wire_dag_bytes: Vec<u8>,
@@ -100,6 +101,12 @@ pub enum GraphExtractError {
     /// relies on: a future-version DAG never silently becomes a hash).
     #[error("WireDag schema rejected at producer boundary: {0}")]
     SchemaRejected(WireDagSchemaError),
+
+    /// The exact-version `WireDag` violates a cross-node dtype, shape, axis,
+    /// or payload invariant. The producer returns this typed error before
+    /// serialization rather than panicking inside `WireDag::serialize`.
+    #[error("WireDag contract rejected at producer boundary: {0}")]
+    WireContractRejected(WireDagContractError),
 
     /// The requested output name is not a root of the lowered DAG, so no
     /// root index addresses it. Carries the missing name and the available
@@ -171,10 +178,14 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
                 reject_if_non_finite(id, "high", *high)?;
             }
             WireRiscOp::Dropout { rate, .. } => reject_if_non_finite(id, "rate", *rate)?,
-            WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
-            WireRiscOp::Const { value } => reject_if_non_finite(id, "value", *value)?,
+            WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", fill.as_f64_lossy())?,
+            // Wire v4 (chelis#856): the constant payloads are sealed
+            // dtype-tagged values. Prove's real-envelope reading takes
+            // the f64 image (integer payloads are always finite; the
+            // exact-env swap is the chelis#688 Phase 2 work).
+            WireRiscOp::Const { value } => reject_if_non_finite(id, "value", value.as_f64_lossy())?,
             WireRiscOp::ConstTensor { data } => {
-                for v in data.iter() {
+                for v in data.to_f64_lossy_vec() {
                     if !v.is_finite() {
                         return Err(GraphExtractError::NonFiniteValue {
                             node: id,
@@ -188,12 +199,17 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             // wildcard) so a new variant breaks the build until someone
             // decides whether it carries an f64. ---
             WireRiscOp::Add
+            | WireRiscOp::Sub
             | WireRiscOp::Mul
             | WireRiscOp::Div
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::CmpLt
             | WireRiscOp::MaxElem
+            | WireRiscOp::MinElem
+            | WireRiscOp::ExtremaAdjoint { .. }
+            | WireRiscOp::Relu
+            | WireRiscOp::ReluAdjoint
             | WireRiscOp::Neg
             | WireRiscOp::Recip
             | WireRiscOp::Exp
@@ -208,6 +224,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Ceil
             | WireRiscOp::Round
             | WireRiscOp::Sum { .. }
+            | WireRiscOp::Count { .. }
             | WireRiscOp::MaxReduce { .. }
             | WireRiscOp::MinReduce { .. }
             | WireRiscOp::ProdReduce { .. }
@@ -228,6 +245,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Drop
             | WireRiscOp::Realize
             | WireRiscOp::Cast { .. }
+            | WireRiscOp::CastTrunc { .. }
             | WireRiscOp::FusedElem { .. }
             | WireRiscOp::BlasMatmul { .. }
             | WireRiscOp::Gather { .. }
@@ -303,6 +321,9 @@ pub fn box_range_goal_from_wire_dag(
     wire_dag
         .validate_schema_version()
         .map_err(GraphExtractError::SchemaRejected)?;
+    wire_dag
+        .validate_wire_contract()
+        .map_err(GraphExtractError::WireContractRejected)?;
 
     // Fail closed on a non-finite float before hashing: serde_json emits a
     // non-finite f64 as `null`, which would produce a self-consistent hash
@@ -341,7 +362,7 @@ pub fn box_range_goal_from_wire_dag(
     })
 }
 
-/// Lower `source` to a `WireDag` v1 via the public
+/// Lower `source` to an exact-version `WireDag` v6 via the public
 /// [`chelis_compiler_api::compiler::lower`] API, mapping a lowering failure to
 /// [`GraphExtractError::LowerFailed`]. When `entry` is `Some`, lowering is
 /// scoped to the defs reachable from that named entry (the WI-3
@@ -369,7 +390,7 @@ fn lower_source(
 /// Build a single box/range [`Goal`] from Chelis source, addressing the
 /// goal's ONE scalar output by name.
 ///
-/// Lowers the WHOLE `source` to a `WireDag` v1, then delegates to
+/// Lowers the WHOLE `source` to an exact-version `WireDag` v6, then delegates to
 /// [`box_range_goal_from_wire_dag`]. The `output_range.output` name must be a
 /// named root of the lowered program. Use
 /// [`box_range_goal_from_source_entry`] to extract one entry from a module
@@ -480,7 +501,25 @@ const _: () = {
     // op group (`WireRtDim` carries no float field), so the box/range
     // float-bound extraction contract is unchanged; the version moves
     // because the reshape payload shape itself changed.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 3);
+    // Moved to `4` for the chelis#729 rework (chelis#856): the constant
+    // payloads (`Const::value`, `ConstTensor::data`) became sealed
+    // dtype-tagged values with finalize-on-decode. The float-bound
+    // extraction reads their f64 images through the named-lossy
+    // accessors, so the box/range contract is unchanged in value terms;
+    // integer constants above 2^53 are now representable on the wire and
+    // still enter the real envelope through the same lossy image (the
+    // exact-envelope swap is the chelis#688 Phase 2 work).
+    // Moved to `5` for chelis#878: `Pad::fill` became a sealed typed scalar.
+    // Moved to `6` for chelis#1287: first-class bool `count` adds the
+    // f64-free `WireRiscOp::Count { axes }` payload and exact-only schema
+    // decoding. It does not change prove's float-bound extraction contract.
+    // Chelis#1306 adds direct `Sub`, `MinElem`, and `ExtremaAdjoint`
+    // identities plus their fused-step identities to v6. They carry no
+    // embedded float field and are covered by the f64-free operation group.
+    // Moved to `7` for chelis#1277 Slice A: Expand's display-string size
+    // became the existing typed WireRtDim carrier, which gained InputAxis.
+    // Both remain in the f64-free operation group above.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 7);
 };
 
 #[cfg(test)]

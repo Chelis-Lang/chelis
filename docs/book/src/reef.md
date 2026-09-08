@@ -98,6 +98,35 @@ Note the convention: the **tag** is `v<version>` (with the leading
 without the leading `v`. Both forms are accepted by the
 `<org>/<repo>@<tag>` parser (`@v<version>` and `@<version>` are equivalent).
 
+### Reproducible builds
+
+Unchanged package inputs produce byte-identical archive and CHB files across
+repeated `chelis reef build` runs. Reef sorts archive members by their UTF-8
+package-relative paths and normalizes regular-file headers to mode `0644`,
+uid/gid `0`, and mtime `0`.
+
+Set `SOURCE_DATE_EPOCH` to a non-negative integer number of seconds when a
+release requires a different canonical timestamp:
+
+```sh
+SOURCE_DATE_EPOCH=1700000000 chelis reef build
+```
+
+The same inputs and epoch produce the same bytes. A malformed
+`SOURCE_DATE_EPOCH` stops the build instead of silently producing artifacts
+under a different timestamp. The CHB embeds the SHA-256 of the canonical
+source archive, so changing the epoch intentionally changes both artifact
+identities.
+
+CHB format 2 has an explicit `CHELCHB\0` magic and version envelope. Each
+function symbol records any quantified type-variable domain restrictions by
+the same alpha-canonical variable identity used in its printed type. The
+machine-readable output of `chelis reef schema` reports `format_version: 2`
+and the identical `type_variable_restrictions` ledger; for example, a shared
+active-float precision appears as
+`[{"variable":"t0","domain":"active_float"}]`. Older unversioned CHB bytes
+and unknown versions are rejected explicitly.
+
 ## Auto-fetch During Build
 
 `chelis reef build` is auto-fetch-by-default: if a dependency is
@@ -200,6 +229,27 @@ regardless of whether the project listed chelis-std in
 `[dependencies]`. Lockfiles produced by older compilers that recorded
 chelis-std as `LocalRegistry` are auto-migrated to `Bundled` on read
 and rewritten on the next `chelis reef build`.
+
+### Prepared package cache
+
+Commands that repeatedly consume the same locked package graph reuse a
+prepared-graph cache under `$CHELIS_REEF_HOME/.cache/prepared-graphs/` (or the
+normal XDG/Home cache fallback). Entries are tied to the compiler version and
+canonical project root. The determinant inventories the path and exact bytes
+of every `.ch` file under every declared source root, so source additions,
+deletions, and renames invalidate it alongside content changes, manifests,
+`reef.lock`, and published archive/shell identities. Graph construction is
+bracketed by identical pre/post inventory snapshots; concurrent edits cause a
+retry instead of storing declarations parsed from one version under another
+version's hash. The cache file has a versioned, checksummed envelope; corrupt
+or version-skewed entries emit a stderr diagnostic and are rebuilt rather than
+trusted. Declared source-root symlinks may not escape their package root.
+
+For `chelis prove`, the package graph is prepared once per invocation. The
+post-verdict type check remains fail-closed for every declaration in the
+selected module and for all transitively referenced dependency declarations;
+unreachable declarations in an otherwise large installed shell are not
+rechecked.
 
 ## Import Syntax
 

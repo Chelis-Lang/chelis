@@ -8,7 +8,7 @@
     "status": "passed",
     "coverage_bucket": "proved",
     "reason": null,
-    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where (s >= 0.0), (k >= 0.0), (disc >= 0.0), (disc <= 1.0): ((((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) - ((k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d2)))) - (s * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d1))))) == (s - (k * disc)))",
+    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where s >= 0.0, k >= 0.0, disc >= 0.0, disc <= 1.0: ((((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) - ((k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d2)))) - (s * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d1))))) == (s - (k * disc)))",
     "qualifiers": [
       "real_arithmetic",
       "fuzz"
@@ -24,7 +24,7 @@
     "status": "passed",
     "coverage_bucket": "proved",
     "reason": null,
-    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where (s >= 0.0), (k >= 0.0), (disc >= 0.0), (disc <= 1.0): (((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) <= s)",
+    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where s >= 0.0, k >= 0.0, disc >= 0.0, disc <= 1.0: (((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) <= s)",
     "qualifiers": [
       "real_arithmetic",
       "fuzz"
@@ -56,7 +56,7 @@
     "status": "failed",
     "coverage_bucket": "disproved",
     "reason": null,
-    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where (s >= 0.0), (k >= 0.0), (disc >= 0.0), (disc <= 1.0): ((((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) - ((k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d2)))) - ((2.0 * s) * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d1))))) == (s - (k * disc)))",
+    "goal_expr": "forall(s: f32, k: f32, d1: f32, d2: f32, disc: f32) where s >= 0.0, k >= 0.0, disc >= 0.0, disc <= 1.0: ((((s * pkg__chelis__std__Std__Contracts__normal_cdf(d1)) - (k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(d2)))) - ((k * (disc * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d2)))) - ((2.0 * s) * pkg__chelis__std__Std__Contracts__normal_cdf(neg(d1))))) == (s - (k * disc)))",
     "qualifiers": [
       "real_arithmetic"
     ],

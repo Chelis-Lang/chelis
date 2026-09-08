@@ -56,14 +56,14 @@ def make_x() -> tensor[1, 1, 4, 4, f32] = to_tensor([[[
     [cast(13.0, f32), cast(14.0, f32), cast(15.0, f32), cast(16.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] =
-    reduce_window_max(&x, [2, 2], [1, 1])
+    reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 3, 3], "Valid pooling output shape");
     assert_eq!(
-        out.data,
+        out.data.to_f64_lossy_vec(),
         vec![6.0, 7.0, 8.0, 10.0, 11.0, 12.0, 14.0, 15.0, 16.0]
     );
 }
@@ -77,7 +77,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_min(&x, [2, 2], [1, 1])
+    reduce_window_min(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
@@ -85,7 +85,7 @@ out = run(make_x())
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
     // 2x2 mins of [[1,5,3],[4,2,6],[7,8,9]]:
     // [1,5,4,2]→1, [5,3,2,6]→2, [4,2,7,8]→2, [2,6,8,9]→2.
-    assert_eq!(out.data, vec![1.0, 2.0, 2.0, 2.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![1.0, 2.0, 2.0, 2.0]);
 }
 
 #[test]
@@ -97,13 +97,13 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_sum(&x, [2, 2], [1, 1])
+    reduce_window_sum(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
-    assert_eq!(out.data, vec![12.0, 16.0, 24.0, 28.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![12.0, 16.0, 24.0, 28.0]);
 }
 
 #[test]
@@ -115,13 +115,13 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_mean(&x, [2, 2], [1, 1])
+    reduce_window_mean(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![1, 1, 2, 2]);
-    assert_eq!(out.data, vec![3.0, 4.0, 6.0, 7.0]);
+    assert_eq!(out.data.to_f64_lossy_vec(), vec![3.0, 4.0, 6.0, 7.0]);
 }
 
 // -------- Negative coverage --------
@@ -134,7 +134,7 @@ def make_x() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[
     [cast(3.0, f32), cast(4.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 2, 2, f32]) -> tensor[1, 1, 1, 1, f32] =
-    reduce_window_max(&x, [3, 3], [1, 1])
+    reduce_window_max(&x, [3i64, 3i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let outcome = eval(EvalRequest {
@@ -157,7 +157,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_max(&x, [2, 2], [1, 0])
+    reduce_window_max(&x, [2i64, 2i64], [1i64, 0i64])
 out = run(make_x())
 "#;
     let outcome = eval(EvalRequest {
@@ -173,7 +173,7 @@ out = run(make_x())
 
 #[test]
 fn issue254_reduce_window_rejects_string_input() {
-    let src = r#"out = reduce_window_max("not a tensor", [2, 2], [1, 1])"#;
+    let src = r#"out = reduce_window_max("not a tensor", [2i64, 2i64], [1i64, 1i64])"#;
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),

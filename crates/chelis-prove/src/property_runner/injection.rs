@@ -17,9 +17,12 @@
 //! Gated on the `chelis-prove` optional dependency (the obligation /
 //! generation machinery lives there).
 
+use chelis_deep::DeepTag;
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
+use chelis_types::types::Prim;
+use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
 
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, DischargeMethod, DischargeTier, FUZZ_TOLERANCE,
@@ -106,15 +109,21 @@ pub(super) fn prove_with_injection(
             match b {
                 Binder::Scalar { name, prim } => {
                     let v = sample_scalar(prim, &mut rng);
-                    bindings.push((name.clone(), scalar_lit(prim, v), serde_json::json!(v)));
+                    bindings.push((name.clone(), scalar_lit(prim, v), scalar_json(v)));
                 }
-                Binder::Tensor { name, dims } => {
+                Binder::Tensor {
+                    name,
+                    dims,
+                    precision,
+                } => {
                     let count: usize = dims.iter().product::<usize>().max(1);
-                    let vals: Vec<f64> = (0..count).map(|_| rng_f64(&mut rng)).collect();
+                    let values = (0..count)
+                        .map(|_| sample_scalar(precision, &mut rng))
+                        .collect::<Vec<_>>();
                     bindings.push((
                         name.clone(),
-                        crate::opaque::tensor_value_expr_pub(dims, "f32", &vals),
-                        serde_json::json!(vals),
+                        crate::opaque::tensor_value_expr_typed(dims, precision, &values),
+                        crate::opaque::scalar_values_json(&values),
                     ));
                 }
                 Binder::Opaque { name, inv } => {
@@ -130,8 +139,7 @@ pub(super) fn prove_with_injection(
                         gen_budget,
                     ) {
                         Ok(generated) => {
-                            let json = serde_json::to_value(&generated.env)
-                                .unwrap_or(serde_json::json!(null));
+                            let json = crate::opaque::generated_env_json(&generated.env);
                             bindings.push((name.clone(), generated.value_expr, json));
                         }
                         Err(diag) => {
@@ -279,6 +287,7 @@ enum Binder {
     Tensor {
         name: String,
         dims: Vec<usize>,
+        precision: String,
     },
     Opaque {
         name: String,
@@ -354,7 +363,9 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
                     })
             }
         }
-        TypeExpr::Tensor(dims, precision, _) if matches!(precision.as_str(), "f32" | "f64") => {
+        TypeExpr::Tensor(dims, precision, _)
+            if Prim::parse_name(precision).is_some_and(|prim| prim.is_valid_tensor_precision()) =>
+        {
             let lit: Option<Vec<usize>> = dims
                 .iter()
                 .map(|d| match d {
@@ -365,6 +376,7 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
             lit.map(|dims| Binder::Tensor {
                 name: p.name.clone(),
                 dims,
+                precision: precision.clone(),
             })
         }
         _ => None,
@@ -421,7 +433,7 @@ fn eval_bool_in_module(
         [root] => match &root.value {
             ExecutionValue::Bool { value } => Ok(*value),
             ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Ok(value.data[0] != 0.0)
+                Ok(value.data.element_as_f64_lossy(0) != 0.0)
             }
             other => Err(format!("property evaluated to non-bool: {other:?}")),
         },
@@ -465,7 +477,7 @@ fn resolve_constants(
                 && value.shape.is_empty()
                 && value.data.len() == 1
             {
-                env.insert(name.clone(), value.data[0]);
+                env.insert(name.clone(), value.data.element_as_f64_lossy(0));
                 break;
             }
         }
@@ -501,16 +513,41 @@ fn conjoin(exprs: &[Expr]) -> Expr {
 
 // --- sampling ---
 
-fn sample_scalar(prim: &str, rng: &mut crate::opaque::GenRng) -> f64 {
+fn sample_scalar(prim: &str, rng: &mut crate::opaque::GenRng) -> ScalarValue {
     // Integer widths sample within the width's representable range via the
     // single-source `int_sample_bounds` (review 5).
     if let Some((lo, hi)) = crate::opaque::int_sample_bounds(prim) {
         let span = (hi - lo + 1) as u64;
-        return (lo + (rng.next_u64() % span) as i64) as f64;
+        return scalar_from_i64(
+            "prove-injection-sample",
+            Prim::parse_name(prim).expect("integer width is a Prim"),
+            lo + (rng.next_u64() % span) as i64,
+        )
+        .expect("integer sample bounds are representable");
     }
     match prim {
-        "bool" => (rng.next_u64() & 1) as f64,
-        _ => rng_f64(rng),
+        "bool" => scalar_from_i64(
+            "prove-injection-sample",
+            Prim::Bool,
+            (rng.next_u64() & 1) as i64,
+        )
+        .expect("boolean sample is exactly zero or one"),
+        _ => scalar_from_f64(
+            "prove-injection-sample",
+            Prim::parse_name(prim).expect("injection scalar dtype is classified"),
+            rng_f64(rng),
+        )
+        .expect("float sample is valid at its declared width"),
+    }
+}
+
+fn scalar_json(value: ScalarValue) -> serde_json::Value {
+    if let Some(value) = value.as_bool_exact() {
+        serde_json::Value::from(value)
+    } else if let Some(value) = value.as_i64_exact() {
+        serde_json::Value::from(value)
+    } else {
+        serde_json::Value::from(value.as_f64_lossy())
     }
 }
 
@@ -525,7 +562,7 @@ fn span0() -> Span {
     Span::new(0, 0)
 }
 fn sym(s: &str) -> Expr {
-    Expr::Atom(Atom::Symbol(s.to_string()), span0())
+    Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
     let mut elements = vec![sym(tag), Expr::Map(MetaMap::default(), span0())];
@@ -547,41 +584,23 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
         span0(),
     )
 }
-fn scalar_lit(prim: &str, v: f64) -> Expr {
-    // Integer widths recognized through the single-source `is_int_width`
-    // (review 5): int32 is the literal default; the other widths cast an
-    // int32 literal to the target width, so an int8/int16/int64 binder value
-    // is a well-typed integer rather than a silently-mistyped float.
-    if crate::opaque::is_int_width(prim) {
-        let lit = typed_lit("int32", Expr::Atom(Atom::Int(v as i64), span0()));
-        return if prim == "int32" {
-            lit
-        } else {
-            node("cast", vec![lit, node("t-prim", vec![sym(prim)])])
-        };
-    }
-    match prim {
-        "bool" => typed_lit("bool", Expr::Atom(Atom::Bool(v != 0.0), span0())),
-        "f64" => node(
-            "cast",
-            vec![
-                typed_lit("f32", Expr::Atom(Atom::Float(v), span0())),
-                node("t-prim", vec![sym("f64")]),
-            ],
-        ),
-        _ => typed_lit("f32", Expr::Atom(Atom::Float(v), span0())),
+fn scalar_lit(prim: &str, value: ScalarValue) -> Expr {
+    debug_assert_eq!(value.prim().name(), prim);
+    if let Some(value) = value.as_bool_exact() {
+        typed_lit("bool", Expr::Atom(Atom::Bool(value), span0()))
+    } else if let Some(value) = value.as_i64_exact() {
+        typed_lit(prim, Expr::Atom(Atom::Int(value), span0()))
+    } else {
+        typed_lit(prim, Expr::Atom(Atom::Float(value.as_f64_lossy()), span0()))
     }
 }
 fn bool_lit(v: bool) -> Expr {
     typed_lit("bool", Expr::Atom(Atom::Bool(v), span0()))
 }
 
-fn list_tag(expr: &Expr) -> Option<&str> {
+fn list_tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
-        Expr::List(l, _) => match l.elements.first() {
-            Some(Expr::Atom(Atom::Symbol(s), _)) => Some(s.as_str()),
-            _ => None,
-        },
+        Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
@@ -589,7 +608,7 @@ fn list_tag(expr: &Expr) -> Option<&str> {
 fn child0_sym(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::List(l, _) if l.elements.len() >= 3 => match &l.elements[2] {
-            Expr::Atom(Atom::Symbol(s), _) => Some(s.as_str()),
+            Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
             _ => None,
         },
         _ => None,
@@ -597,7 +616,7 @@ fn child0_sym(expr: &Expr) -> Option<&str> {
 }
 
 fn module_defines(expr: &Expr, type_name: &str) -> bool {
-    if list_tag(expr) == Some("deftype") && child0_sym(expr) == Some(type_name) {
+    if list_tag(expr) == Some(DeepTag::Deftype) && child0_sym(expr) == Some(type_name) {
         return true;
     }
     if let Expr::List(l, _) = expr {
@@ -611,7 +630,7 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
     let mut injected = false;
     for expr in exprs {
         if !injected
-            && list_tag(expr) == Some("module")
+            && list_tag(expr) == Some(DeepTag::Module)
             && (type_name.is_empty() || module_defines(expr, type_name))
             && let Expr::List(l, span) = expr
         {
@@ -637,7 +656,7 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
         Expr::List(list, span) => {
             let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if matches!(list.elements.first(), Some(Expr::Atom(Atom::Symbol(s), _)) if s == "deftype")
+            if (list.tag() == Some(DeepTag::Deftype))
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
                 let kept: Vec<(String, Expr)> = map
@@ -722,5 +741,15 @@ mod tests {
         // exhaustion (it never reaches the cap).
         let result = run_rejection_loop(5, Some(1000), /* never_accepts */ false);
         assert_eq!(result.expect("accepting path succeeds"), 5);
+    }
+
+    #[test]
+    fn injected_int64_scalar_sample_is_not_widened_through_f64() {
+        let mut rng = crate::opaque::GenRng::new(9);
+        let value = sample_scalar("int64", &mut rng);
+
+        assert_eq!(value.prim(), chelis_types::types::Prim::Int64);
+        assert!(value.as_i64_exact().is_some());
+        assert!(value.as_bool_exact().is_none());
     }
 }

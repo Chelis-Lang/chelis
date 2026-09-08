@@ -561,7 +561,11 @@ m = 3.0
 
     // Value-binding int constant `n = 3`.
     let node = super::const_lit_node(&exprs, "n", 3.0);
-    assert_eq!(super::tag(&node), Some("lit"), "is a lit node");
+    assert_eq!(
+        super::tag(&node),
+        Some(chelis_deep::DeepTag::Lit),
+        "is a lit node"
+    );
     let lit_value = super::children(&node).first().cloned().expect("lit value");
     assert!(
         matches!(lit_value, Expr::Atom(Atom::Int(3), _)),
@@ -915,9 +919,9 @@ fn cmp(op: crate::solver::CmpOp, a: SmtExpr, b: SmtExpr) -> SmtExpr {
 fn assert_cvc5_agrees_with_eval(desc: &str, goal: SmtExpr) {
     use crate::concrete_eval::eval_bool_strict;
     use crate::tier_b::{TierBResult, solve_property};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
-    let runtime_true = eval_bool_strict(&goal, &HashMap::new());
+    let runtime_true = eval_bool_strict(&goal, &UnordMap::new());
     let verdict = solve_property(&ground_goal(goal.clone()), 5000);
     let cvc5_true = match verdict {
         TierBResult::Proved => true,
@@ -944,7 +948,7 @@ fn assert_cvc5_agrees_with_eval(desc: &str, goal: SmtExpr) {
 fn cvc5_disproves_point_one_plus_point_two_eq_point_three() {
     use crate::solver::{ArithOp, CmpOp};
     use crate::tier_b::{TierBResult, solve_property};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     let goal = cmp(
         CmpOp::Eq,
@@ -953,7 +957,7 @@ fn cvc5_disproves_point_one_plus_point_two_eq_point_three() {
     );
     // The f64 ground truth: false.
     assert!(
-        !crate::concrete_eval::eval_bool_strict(&goal, &HashMap::new()),
+        !crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new()),
         "f64 ground truth: 0.1 + 0.2 != 0.3"
     );
     // cvc5 must now AGREE: Disproved (a counterexample-free disproof of a
@@ -975,7 +979,7 @@ fn cvc5_disproves_point_one_plus_point_two_eq_point_three() {
 fn cvc5_proves_point_one_plus_point_two_gt_point_three() {
     use crate::solver::{ArithOp, CmpOp};
     use crate::tier_b::{TierBResult, solve_property};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     let goal = cmp(
         CmpOp::Gt,
@@ -983,7 +987,7 @@ fn cvc5_proves_point_one_plus_point_two_gt_point_three() {
         real(0.3),
     );
     assert!(
-        crate::concrete_eval::eval_bool_strict(&goal, &HashMap::new()),
+        crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new()),
         "f64 ground truth: 0.1 + 0.2 > 0.3"
     );
     assert_eq!(
@@ -1063,11 +1067,11 @@ fn cvc5_agrees_with_evaluator_on_non_dyadic_battery() {
 fn cvc5_dyadic_control_unaffected_by_fix() {
     use crate::solver::{ArithOp::*, CmpOp::*};
     use crate::tier_b::{TierBResult, solve_property};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     let goal = cmp(Eq, arith(Add, real(0.5), real(0.25)), real(0.75));
     assert!(
-        crate::concrete_eval::eval_bool_strict(&goal, &HashMap::new()),
+        crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new()),
         "f64 ground truth (dyadic): 0.5 + 0.25 == 0.75"
     );
     assert_eq!(
@@ -1098,7 +1102,7 @@ fn cvc5_dyadic_control_unaffected_by_fix() {
 fn cvc5_disproves_point_one_eq_one_over_ten_documented_op_rounding_gap() {
     use crate::solver::{ArithOp, CmpOp};
     use crate::tier_b::{TierBResult, solve_property};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     let goal = cmp(
         CmpOp::Eq,
@@ -1107,7 +1111,7 @@ fn cvc5_disproves_point_one_eq_one_over_ten_documented_op_rounding_gap() {
     );
     // The f64 evaluator says TRUE (1.0_f64 / 10.0_f64 rounds to 0.1_f64) ...
     assert!(
-        crate::concrete_eval::eval_bool_strict(&goal, &HashMap::new()),
+        crate::concrete_eval::eval_bool_strict(&goal, &UnordMap::new()),
         "f64 ground truth: 1.0 / 10.0 == 0.1 (the division rounds to 0.1_f64)"
     );
     // ... yet cvc5 DISPROVES it (exact 1/10 != the f64 rational of 0.1). This

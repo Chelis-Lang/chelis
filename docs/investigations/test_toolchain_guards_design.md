@@ -33,46 +33,55 @@ Three failure modes kept recurring in CI:
 
 ### Design
 
-- The CI integration job runs `cargo nextest run --workspace`. A `ci`
-  nextest profile (`.config/nextest.toml`) adds a `[profile.ci.junit]`
-  section so nextest writes machine-readable per-test JUnit XML to
+- Two CI `workspace-tests-shard` workers run deterministic, disjoint hash
+  partitions of `cargo nextest run --workspace`; a stable `workspace-tests`
+  aggregate requires both workers to succeed. A `ci` nextest profile
+  (`.config/nextest.toml`) adds a `[profile.ci.junit]` section so each worker
+  writes machine-readable per-test JUnit XML to
   `target/nextest/ci/junit.xml`.
 - `scripts/test_timing_check.py` parses that JUnit XML
   (`<testcase classname=... name=... time=...>`, keyed as
   `binary::test`) and flags tests over budget.
 - Thresholds are config, never hardcoded:
-  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier)
-    and `absolute_ceiling` (seconds).
+  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
+    `absolute_ceiling` (seconds), and `min_regression_delta` (seconds).
   - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
-- The check flags a test when either:
-  - it is NEW relative to the baseline AND runs longer than
-    `absolute_ceiling`, or
-  - it regressed past `tolerance` x its baseline time.
+- Every ordinary-PR test, whether baselined or new, is reported above the
+  `absolute_ceiling`. Baselined tests that exceed both `tolerance` times their
+  baseline and `min_regression_delta` are reported as relative regressions.
 - The baseline is hand-curated and explicitly regenerated, NOT
   auto-regenerated on merge. Auto-regen would launder a real
   regression into the baseline. Regeneration is one documented
   command: `python3 scripts/test_timing_check.py --update-baseline`.
-- CI wiring: an informational, non-failing step
-  (`continue-on-error: true`) runs after the integration test step.
-  It is promotable to blocking later by removing `continue-on-error`.
+- CI merges the two exact, disjoint workspace JUnit shards before one timing
+  check. All threshold findings use `--informational`: repeated unchanged-code
+  hosted samples vary too much to make a single observation a reliable
+  required check, but the report remains visible. Dtype,
+  explicit-generalization, and macOS workers apply the same validation and
+  report to their own JUnit before their required aggregates, so tests outside
+  the Linux workspace selection remain observable. Missing, malformed, empty,
+  or non-finite telemetry still fails the producing or aggregate job.
 
 ### Why these defaults
 
-`tolerance = 2.0` and `absolute_ceiling = 30.0`s were chosen against
-the current-state baseline: the slowest existing tests are the
-`phase3j_pre_std` stdlib build oracles at ~42s. They are already in
-the baseline, so they are only flagged if they more than double. A
-genuinely new test that lands over 30s is worth a look. A separate
-workstream (typecheck cache) is expected to shift the timing baseline
-shortly; when it lands, the baseline is regenerated with the one
-documented command above.
+`tolerance = 2.0`, `min_regression_delta = 0.05`, and
+`absolute_ceiling = 30.0`s preserve useful diagnostics. The committed
+two-shard hosted baseline contained 8,166 tests and no observation above 30
+seconds. Exact-head run `33248009321` of unchanged test code then reported a
+36.64-second workspace case and 34.87-to-83.02-second cases in the dtype and
+generalization lanes, alongside dozens of relative outliers. The slow cases
+were nested-build and compile/execute tests competing inside the runner, not
+one consistent regression. That evidence makes both threshold classes useful
+for diagnosis and unsuitable for a one-sample required check.
 
 ### Exit codes
 
-`scripts/test_timing_check.py` exits `0` when nothing is over budget,
-`1` when one or more tests are over budget, and `2` on usage / IO
-error (missing or malformed JUnit XML, bad config). A malformed or
-empty JUnit file is a loud error, never a silent pass.
+By default, `scripts/test_timing_check.py` exits `1` for either kind of finding.
+With `--informational-relative`, relative-only findings exit `0`, while any
+absolute-ceiling finding still exits `1`. Hosted CI uses `--informational`,
+which reports both classes and exits `0` for a valid report. Exit `2` is a
+usage or IO error (missing or malformed JUnit XML, bad config) under every
+mode. A malformed or empty JUnit file is a loud error, never a silent pass.
 
 ## Guard 2: em-dash-in-test-strings visibility
 
@@ -128,56 +137,111 @@ charset checker was added: that would be a second source of truth for
 
 - `scripts/gate.py` is the single source of truth for the per-PR
   developer-runnable gate. It defines the command list once, split by
-  CI stage (`lint-and-unit`, `integration`), with the union as the
-  full gate. `--stage` runs one subset; `--list` prints the canonical
-  full list.
-- The canonical full list:
-  - `cargo build --workspace --all-targets`
+  CI stage (`lint-and-unit`, `integration`, `runtime-representation`), with
+  the union as the full gate.
+  Two `workspace-tests-shard` workers invoke disjoint partitions of the
+  integration test command, and shard 2 invokes the support-only slice
+  exactly once. The `runtime-representation` stage is
+  the chelis#893 Phase 0 oracle alone: its release-profile reproducers and
+  serial mutation re-scans cost about eleven hosted minutes, so the
+  `runtime-representation-phase0-oracle` job runs it on a runner of its own
+  rather than doubling a workspace shard. The stable `Workspace Tests
+  (Linux)` context aggregates the shards, and `Integration Tests (Linux)`
+  aggregates it with the parallel phase oracles. A stage name runs one
+  subset; `--list` prints the canonical full list and `--local` derives
+  per-crate tests from the diff against `origin/main`.
+- `python3 scripts/gate.py ...` is a bootstrap command, not permission to use
+  the system interpreter for gate logic. Unless it is already running in
+  Devenv, a uv-created venv, or `uv run`, the script re-executes itself as
+  `uv run --managed-python --python 3.11 --no-project python
+  scripts/gate.py ...`. It validates an explicit `PYO3_PYTHON` or exports the
+  selected interpreter to every child command.
+- Every child command's combined stdout/stderr streams live and is teed to a
+  temporary transcript. Successful transcripts are removed. On failure the
+  transcript moves under `target/gate-failures/`; diagnostics include the
+  stage/index, duration, exit code or signal, host and relevant environment,
+  exact rerun command, complete-log path, and a 200-line tail replay.
+- The gate normalizes `CARGO_TARGET_DIR` inside the current worktree and
+  rejects external paths. It sets `CARGO_HUSKY_DONT_INSTALL_HOOKS=1` so a
+  build cannot mutate the clone's shared Git hooks while sibling worktrees
+  are active.
+- Every nextest profile sets `fail-fast = false`, and gate-owned nextest
+  commands also pass `--no-fail-fast` explicitly. A failing assertion does
+  not cancel later tests that may reveal independent failures.
+- The canonical full list (`python3 scripts/gate.py --list` is authoritative;
+  the two feature-matrix clippy commands are abbreviated here):
   - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo clippy --workspace --all-targets --features <solver-free features> -- -D warnings`
+  - `cargo clippy --workspace --all-targets --no-default-features -- -D warnings`
   - `cargo fmt --all -- --check`
   - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
-  - `cargo nextest run --workspace --profile ci`
+  - `<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check`
+  - `cargo test -p chelis-types --doc`
+  - `cargo test -p chelis-compiler-api --doc`
+  - `cargo test -p chelis-pipeline-core --doc`
+  - `<managed-python> scripts/check_checkpoint_compile_fail.py`
+  - `<managed-python> scripts/check_hash_order_phase_b_compile_fail.py`
+  - `<managed-python> scripts/check_configuration_closure.py`
+  - `<managed-python> scripts/pipeline_core_dependency_guard.py`
+  - `<managed-python> scripts/pipeline_core_documentation_guard.py`
+  - `<managed-python> scripts/check_pipeline_core_compile_fail.py`
+  - `cargo nextest run --workspace --no-fail-fast`
+  - `<managed-python> scripts/compiler_front_end_performance.py`
+  - `<managed-python> scripts/unrepresentable_domain_oracle.py`
+  - `<managed-python> scripts/runtime_representation_oracle.py --phase 0`
+- CI substitutes `cargo nextest run --workspace --profile ci
+  --no-fail-fast` for the workspace-nextest command and delegates the excluded
+  capacity-census binaries to the required
+  dtype oracle.
 - `.github/workflows/ci.yml` gate steps call
   `python3 scripts/gate.py <stage>` instead of inlining
   cargo/chelis commands.
+- The parity guard pins the complete ordered set of single-line `run:` scalars
+  in each gate-owned worker. It does not try to emulate Bash or classify an
+  executable from shell text; every added command requires an explicit review.
 - `AGENTS.md` "Minimum repo gate" points at `python3 scripts/gate.py`
-  plus a `--list` echo of the canonical list.
-- Scope is the per-PR developer-runnable gate ONLY. The sanitizer,
-  macOS-smoke, LOC-report, no-AI-authorship, and docs CI jobs are out
-  of scope by design.
+  plus a `--list` echo of the canonical list and documents uv routing and
+  retained failure diagnostics.
+- Scope is the per-PR developer-runnable gate ONLY. The dtype oracle and
+  result aggregator, sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
+  and docs CI jobs are out of scope by design.
 
 ### The parity lock
 
 `scripts/test_gate.py` asserts:
 
 - the `--stage` subsets union exactly to the full list;
-- a parity assertion that greps `.github/workflows/ci.yml` and asserts
-  every `cargo`/`chelis` invocation in a gate step is produced by
-  `gate.py`. This is the lock that makes future drift a test failure.
-  The parity test excludes the sanitizer / macOS-smoke / docs /
-  LOC-report / no-AI-authorship jobs by name (`NON_GATE_JOBS`) so the
-  exclusion is visible and reviewable;
+- a structural parity assertion that parses every single-line `run:` scalar in
+  the gate-owned jobs and compares the complete ordered list with an exact
+  allowlist. This makes future drift a test failure without depending on a
+  partial Bash parser. Every other CI job is classified by name
+  (`NON_GATE_JOBS`) so the exclusion is visible and reviewable;
 - `--list` prints the canonical list.
+- uv/Devenv detection, unmanaged re-exec, missing-uv guidance, child
+  `PYO3_PYTHON` propagation, success cleanup, and complete failed-command
+  diagnostics are covered by `scripts/test_gate_diagnostics.py`.
 
-A `run: |` multi-line block in either gate job would hide its commands
-from the line-based parity parser; `test_no_multiline_run_in_gate_jobs`
-disallows it so parity stays enforceable.
+A `run: |` multi-line block in any gate-owned worker is outside the exact
+scalar contract; `test_no_multiline_run_in_gate_jobs` also names that
+prohibition directly.
 
 ## Ordering
 
 Guard 3 owns the CI-step refactor (it touches the gate steps in
-`.github/workflows/ci.yml`); Guard 1 slots its new informational step
+`.github/workflows/ci.yml`); Guard 1 slots its timing telemetry step
 and the `ci` nextest profile in afterward. Guard 2 is independent of
 both.
 
 ## Acceptance
 
 - `cargo build --workspace --all-targets`
-- `cargo nextest run --workspace`
+- `cargo nextest run --workspace --no-fail-fast`
 - `cargo test --workspace --lib`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
 - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
   (exit 0)
-- `python3 -m unittest scripts/test_test_timing_check.py scripts/test_gate.py`
+- `uv run --managed-python --python 3.11 --no-project python -m unittest
+  scripts.test_test_timing_check scripts.test_gate scripts.test_gate_local
+  scripts.test_gate_diagnostics`
 - `python3 scripts/gate.py` (runs and passes)

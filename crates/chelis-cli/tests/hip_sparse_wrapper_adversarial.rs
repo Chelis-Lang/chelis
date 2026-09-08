@@ -85,9 +85,9 @@ fn try_build_to_hip(source: &str, name: &str) -> (bool, Option<String>, Option<S
 #[test]
 fn hip_gather_behind_let_block_binding_emits_kernel_gather_i64() {
     let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
-                  -> tensor[64, 128, f32] = { \
-                  rows = gather(table, indices, 0); \
-                  rows \
+                  -> tensor[64, 128, f32] = {\n\
+                  rows = gather(table, indices, 0)\n\
+                  rows\n\
                   }\n\
                   def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
@@ -242,9 +242,9 @@ fn hip_gather_wrapper_with_cast_callsite_indices_loud_failure_or_kernel() {
 #[test]
 fn hip_scatter_replace_behind_let_block_emits_kernel_scatter_replace_i32() {
     let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
-                  updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = { \
-                  out = scatter_replace(table, indices, updates, 0); \
-                  out \
+                  updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = {\n\
+                  out = scatter_replace(table, indices, updates, 0)\n\
+                  out\n\
                   }\n\
                   def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \

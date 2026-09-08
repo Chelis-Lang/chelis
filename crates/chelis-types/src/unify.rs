@@ -8,7 +8,7 @@
 //! caller resolves a variable via [`Subst::apply`] or [`Subst::apply_dim`],
 //! the resolver iteratively follows the chain to its terminal value AND
 //! writes the resolved value back into the substitution so future lookups
-//! land in O(1). The HashMaps live behind a `RefCell` so this in-place
+//! land in O(1). The maps live behind a `Mutex` so this in-place
 //! compression remains available to callers that hold an immutable
 //! borrow of `Subst` (annotation passes, `Env::generalize`, occurs checks).
 //!
@@ -21,12 +21,45 @@
 //! `nn/embedding.ch`. See the gdb backtrace recorded in this commit's
 //! body for the canonical reproducer.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
+
+/// A level change and the variable-generator state at which it took effect.
+/// Transitions are append-only between persisted-context resumptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum LevelTransitionKind {
+    Enter,
+    Leave,
+    Resume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct LevelTransition {
+    kind: LevelTransitionKind,
+    level: u32,
+    watermarks: VarWatermarks,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VarClass {
+    Type,
+    Dim,
+    Rank,
+}
+
+/// Linear token proving which child level must be left next.
+///
+/// The token is deliberately neither `Copy` nor `Clone`: every successful
+/// enter must have exactly one matching leave, and leaves must be LIFO.
+#[derive(Debug)]
+pub(crate) struct LevelToken {
+    parent_level: u32,
+    child_level: u32,
+}
 
 /// Type error produced during unification.
 #[derive(Debug, Clone)]
@@ -47,7 +80,7 @@ pub enum TypeErrorKind {
 
 /// Substitution: maps type variables to types and dim variables to dims.
 ///
-/// The HashMaps are wrapped in `Mutex` so [`Subst::apply`] and
+/// The maps are wrapped in `Mutex` so [`Subst::apply`] and
 /// [`Subst::apply_dim`] can perform in-place path compression while
 /// keeping the public method receiver `&self`. The Mutex is uncontended
 /// in normal use (each `compile_new_source_in_context` call clones the
@@ -56,12 +89,17 @@ pub enum TypeErrorKind {
 /// [`Subst::insert_dim`] to record new bindings during unification.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Subst {
-    types: Mutex<HashMap<TypeVar, Type>>,
-    dims: Mutex<HashMap<DimVar, Dim>>,
+    types: Mutex<UnordMap<TypeVar, Type>>,
+    /// Semantic domains attached to unresolved type variables. This is
+    /// serialized with reusable checking contexts: a constrained function
+    /// value must not become unconstrained after a cache round trip.
+    #[serde(default)]
+    tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
+    dims: Mutex<UnordMap<DimVar, Dim>>,
     /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
     /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
     /// is a rank-to-rank alias resolved transitively by `resolve_rvar`.
-    ranks: Mutex<HashMap<RankVar, Vec<Dim>>>,
+    ranks: Mutex<UnordMap<RankVar, Vec<Dim>>>,
     /// Issue #256 soundness ledger. The `borrow` inference arm accepts a
     /// borrow whose inner type is still an unresolved `Type::Var`,
     /// deferring the tensor-or-carrier classification to subsequent
@@ -88,6 +126,24 @@ pub struct Subst {
     /// serialized: transient per-pass bookkeeping.
     #[serde(skip)]
     deferred_opaque_uses: Mutex<Vec<(TypeVar, DeferredOpaqueUse)>>,
+    /// Current lexical generalization level. Serialized because a cloned
+    /// checking context must preserve in-flight transactional state.
+    #[serde(default)]
+    current_level: u32,
+    /// Ordered enter/leave/resume watermarks used to recover mint levels.
+    #[serde(default)]
+    level_transitions: Vec<LevelTransition>,
+    /// Sparse overrides for variables unified into an older scope.
+    #[serde(default)]
+    lowered_tvar_levels: UnordMap<TypeVar, u32>,
+    #[serde(default)]
+    lowered_dvar_levels: UnordMap<DimVar, u32>,
+    #[serde(default)]
+    lowered_rvar_levels: UnordMap<RankVar, u32>,
+    /// IDs below these floors came from an earlier persisted check and are
+    /// always level zero in the resumed check.
+    #[serde(default)]
+    resume_floors: VarWatermarks,
 }
 
 /// Which deferred use shape registered a ledger entry (determines the
@@ -104,6 +160,12 @@ impl Clone for Subst {
     fn clone(&self) -> Self {
         Subst {
             types: Mutex::new(self.types.lock().expect("subst.types poisoned").clone()),
+            tvar_restrictions: Mutex::new(
+                self.tvar_restrictions
+                    .lock()
+                    .expect("subst.tvar_restrictions poisoned")
+                    .clone(),
+            ),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
             ranks: Mutex::new(self.ranks.lock().expect("subst.ranks poisoned").clone()),
             deferred_borrow_vars: Mutex::new(
@@ -118,6 +180,12 @@ impl Clone for Subst {
                     .expect("subst.deferred_opaque_uses poisoned")
                     .clone(),
             ),
+            current_level: self.current_level,
+            level_transitions: self.level_transitions.clone(),
+            lowered_tvar_levels: self.lowered_tvar_levels.clone(),
+            lowered_dvar_levels: self.lowered_dvar_levels.clone(),
+            lowered_rvar_levels: self.lowered_rvar_levels.clone(),
+            resume_floors: self.resume_floors,
         }
     }
 }
@@ -127,14 +195,198 @@ impl Subst {
         Self::default()
     }
 
+    pub(crate) fn current_level(&self) -> u32 {
+        self.current_level
+    }
+
+    /// Enter a lexical inference scope and record the first IDs minted there.
+    pub(crate) fn enter_level(&mut self, var_gen: &VarGen) -> LevelToken {
+        let parent_level = self.current_level;
+        let child_level = parent_level
+            .checked_add(1)
+            .expect("type-checker generalization level overflow");
+        self.current_level = child_level;
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Enter,
+            level: child_level,
+            watermarks: var_gen.watermarks(),
+        });
+        LevelToken {
+            parent_level,
+            child_level,
+        }
+    }
+
+    /// Leave the most recently entered lexical inference scope.
+    pub(crate) fn leave_level(&mut self, token: LevelToken, var_gen: &VarGen) {
+        assert_eq!(
+            self.current_level, token.child_level,
+            "generalization levels must be left in LIFO order"
+        );
+        self.current_level = token.parent_level;
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Leave,
+            level: token.parent_level,
+            watermarks: var_gen.watermarks(),
+        });
+    }
+
+    /// Normalize a persisted solver before it is reused for a new check.
+    /// Existing IDs become level-zero imports; only work performed after this
+    /// point contributes level metadata to the serialized context.
+    pub(crate) fn resume_for_new_check(&mut self, var_gen: &VarGen) {
+        assert_eq!(
+            self.current_level, 0,
+            "a persisted type environment cannot resume inside an inference scope"
+        );
+        let floors = var_gen.watermarks();
+        self.resume_floors = floors;
+        self.level_transitions.clear();
+        let stale_tvars = self
+            .lowered_tvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_tvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_tvars {
+            self.lowered_tvar_levels.remove(&var);
+        }
+        let stale_dvars = self
+            .lowered_dvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_dvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_dvars {
+            self.lowered_dvar_levels.remove(&var);
+        }
+        let stale_rvars = self
+            .lowered_rvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_rvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_rvars {
+            self.lowered_rvar_levels.remove(&var);
+        }
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Resume,
+            level: 0,
+            watermarks: floors,
+        });
+    }
+
+    fn mint_level(&self, id: u32, class: VarClass) -> u32 {
+        let floor = match class {
+            VarClass::Type => self.resume_floors.next_tvar,
+            VarClass::Dim => self.resume_floors.next_dvar,
+            VarClass::Rank => self.resume_floors.next_rvar,
+        };
+        if id < floor {
+            return 0;
+        }
+        let transition_index = self.level_transitions.partition_point(|transition| {
+            let watermark = match class {
+                VarClass::Type => transition.watermarks.next_tvar,
+                VarClass::Dim => transition.watermarks.next_dvar,
+                VarClass::Rank => transition.watermarks.next_rvar,
+            };
+            watermark <= id
+        });
+        transition_index
+            .checked_sub(1)
+            .map_or(0, |index| self.level_transitions[index].level)
+    }
+
+    pub(crate) fn level_of_tvar(&self, var: TypeVar) -> u32 {
+        self.lowered_tvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Type))
+    }
+
+    pub(crate) fn level_of_dvar(&self, var: DimVar) -> u32 {
+        self.lowered_dvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Dim))
+    }
+
+    pub(crate) fn level_of_rvar(&self, var: RankVar) -> u32 {
+        self.lowered_rvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Rank))
+    }
+
+    fn lower_tvar_to(&mut self, var: TypeVar, level: u32) {
+        if level < self.level_of_tvar(var) {
+            self.lowered_tvar_levels.insert(var, level);
+        }
+    }
+
+    fn lower_dvar_to(&mut self, var: DimVar, level: u32) {
+        if level < self.level_of_dvar(var) {
+            self.lowered_dvar_levels.insert(var, level);
+        }
+    }
+
+    fn lower_rvar_to(&mut self, var: RankVar, level: u32) {
+        if level < self.level_of_rvar(var) {
+            self.lowered_rvar_levels.insert(var, level);
+        }
+    }
+
+    /// Lower every variable reachable through the post-substitution type.
+    fn lower_type_to(&mut self, ty: &Type, level: u32) {
+        let ty = self.apply(ty);
+        for var in crate::env::free_tvars(&ty) {
+            self.lower_tvar_to(var, level);
+        }
+        for var in crate::env::free_dvars(&ty) {
+            self.lower_dvar_to(var, level);
+        }
+        for var in crate::env::free_rvars(&ty) {
+            self.lower_rvar_to(var, level);
+        }
+    }
+
+    fn lower_dim_to(&mut self, dim: &Dim, level: u32) {
+        match self.apply_dim(dim) {
+            Dim::Var(var) => self.lower_dvar_to(var, level),
+            Dim::Rank(var) => self.lower_rvar_to(var, level),
+            Dim::Lit(_) | Dim::Name(_) | Dim::Wildcard => {}
+        }
+    }
+
+    fn lower_ground_rank_to(&mut self, dims: &[Dim], level: u32) {
+        for dim in dims {
+            self.lower_dim_to(dim, level);
+        }
+    }
+
+    pub(crate) fn lower_type_to_current(&mut self, ty: &Type) {
+        self.lower_type_to(ty, self.current_level);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn level_metadata_counts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.level_transitions.len(),
+            self.lowered_tvar_levels.len(),
+            self.lowered_dvar_levels.len(),
+            self.lowered_rvar_levels.len(),
+        )
+    }
+
     /// Snapshot of the type-variable bindings (cloned out of the lock).
     /// Useful for serialization, tests, and read-only inspection.
-    pub fn types_snapshot(&self) -> HashMap<TypeVar, Type> {
+    pub fn types_snapshot(&self) -> UnordMap<TypeVar, Type> {
         self.types.lock().expect("subst.types poisoned").clone()
     }
 
     /// Snapshot of the dim-variable bindings.
-    pub fn dims_snapshot(&self) -> HashMap<DimVar, Dim> {
+    pub fn dims_snapshot(&self) -> UnordMap<DimVar, Dim> {
         self.dims.lock().expect("subst.dims poisoned").clone()
     }
 
@@ -148,12 +400,71 @@ impl Subst {
         self.dims.lock().expect("subst.dims poisoned").len()
     }
 
-    /// Record a new type-variable binding.
-    pub fn insert_type(&mut self, v: TypeVar, ty: Type) {
+    /// Record a type-variable binding through ordinary unification.
+    ///
+    /// This public mutation seam enforces occurs checks, semantic domains,
+    /// deferred constraints, and restriction transfer exactly like every
+    /// checker-created binding. It must never write the map directly.
+    pub fn insert_type(&mut self, v: TypeVar, ty: Type) -> Result<(), TypeError> {
+        unify(&Type::Var(v), &ty, self)
+    }
+
+    /// Publish a type binding after [`bind_tvar`] has validated the complete
+    /// transaction. Keeping the raw map write private prevents callers from
+    /// bypassing semantic domains through the public API.
+    fn record_validated_type_binding(&mut self, v: TypeVar, ty: Type) {
         self.types
             .lock()
             .expect("subst.types poisoned")
             .insert(v, ty);
+    }
+
+    /// Attach a semantic domain to an unresolved inference variable,
+    /// narrowing to the intersection with any domain it already carries.
+    ///
+    /// `spec/04-type-system.md` [04-DTYPE-2]: identifying two bounded
+    /// variables yields the intersection of their families, and an empty
+    /// intersection is a `PrecisionMismatch`. Narrowing here rather than
+    /// overwriting is what keeps a `Numeric` alias from widening a `Float`
+    /// variable back out to every numeric dtype.
+    pub(crate) fn narrow_tvar_restriction(
+        &self,
+        v: TypeVar,
+        restriction: TypeVarRestriction,
+    ) -> Result<(), TypeError> {
+        let mut restrictions = self
+            .tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned");
+        let narrowed = match restrictions.get(&v).copied() {
+            Some(existing) => merge_tvar_restrictions(existing, restriction)?,
+            None => restriction,
+        };
+        restrictions.insert(v, narrowed);
+        Ok(())
+    }
+
+    /// Restriction currently attached to an unresolved variable, if any.
+    pub fn tvar_restriction(&self, v: TypeVar) -> Option<TypeVarRestriction> {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .get(&v)
+            .copied()
+    }
+
+    fn tvar_restrictions_snapshot(&self) -> UnordMap<TypeVar, TypeVarRestriction> {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .clone()
+    }
+
+    fn remove_tvar_restriction(&self, v: TypeVar) {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .remove(&v);
     }
 
     /// Record a new dim-variable binding.
@@ -172,8 +483,70 @@ impl Subst {
             .insert(r, dims);
     }
 
+    pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i128> {
+        dims.iter().try_fold(1_i128, |product, dim| {
+            let Dim::Lit(value) = self.apply_dim(dim) else {
+                return None;
+            };
+            product.checked_mul(i128::from(value))
+        })
+    }
+
+    /// Compare two fully-static dimension products without a fixed-width
+    /// multiplication. Pairwise GCD cancellation is exact for any number of
+    /// i64 factors, so a large known shape never degrades into "unknown".
+    pub(crate) fn static_dim_products_match(&self, lhs: &[Dim], rhs: &[Dim]) -> Option<bool> {
+        fn values(subst: &Subst, dims: &[Dim]) -> Option<Vec<i64>> {
+            dims.iter()
+                .map(|dim| match subst.apply_dim(dim) {
+                    Dim::Lit(value) => Some(value),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn sign_and_factors(values: &[i64]) -> (bool, Vec<u64>) {
+            let negative = values.iter().filter(|value| **value < 0).count() % 2 == 1;
+            let factors = values.iter().map(|value| value.unsigned_abs()).collect();
+            (negative, factors)
+        }
+
+        fn gcd(mut a: u64, mut b: u64) -> u64 {
+            while b != 0 {
+                let remainder = a % b;
+                a = b;
+                b = remainder;
+            }
+            a
+        }
+
+        let lhs = values(self, lhs)?;
+        let rhs = values(self, rhs)?;
+        let lhs_zero = lhs.contains(&0);
+        let rhs_zero = rhs.contains(&0);
+        if lhs_zero || rhs_zero {
+            return Some(lhs_zero && rhs_zero);
+        }
+
+        let (lhs_negative, mut lhs_factors) = sign_and_factors(&lhs);
+        let (rhs_negative, mut rhs_factors) = sign_and_factors(&rhs);
+        if lhs_negative != rhs_negative {
+            return Some(false);
+        }
+        for left in &mut lhs_factors {
+            for right in &mut rhs_factors {
+                let divisor = gcd(*left, *right);
+                *left /= divisor;
+                *right /= divisor;
+            }
+        }
+        Some(
+            lhs_factors.iter().all(|factor| *factor == 1)
+                && rhs_factors.iter().all(|factor| *factor == 1),
+        )
+    }
     /// Snapshot of the rank-variable bindings.
-    pub fn ranks_snapshot(&self) -> HashMap<RankVar, Vec<Dim>> {
+    pub fn ranks_snapshot(&self) -> UnordMap<RankVar, Vec<Dim>> {
         self.ranks.lock().expect("subst.ranks poisoned").clone()
     }
 
@@ -344,12 +717,239 @@ impl Subst {
                 let args = args.iter().map(|a| self.apply(a)).collect();
                 Type::Adt(name.clone(), args)
             }
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name.clone(),
+                args.iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.apply(ty)),
+                        NominalArg::Dimension(dim) => NominalArg::Dimension(self.apply_dim(dim)),
+                    })
+                    .collect(),
+            ),
             Type::Tuple(ts) => {
                 let ts = ts.iter().map(|t| self.apply(t)).collect();
                 Type::Tuple(ts)
             }
-            Type::Prim(_) | Type::Unit | Type::Error => ty.clone(),
+            Type::Prim(_) | Type::Unit | Type::Error(_) => ty.clone(),
         }
+    }
+
+    /// Apply this substitution to a scheme body without substituting through
+    /// the scheme's universally quantified variables.
+    ///
+    /// A global inference substitution can contain bindings whose numeric IDs
+    /// coincide with a quantified variable in an environment scheme. Those
+    /// bindings belong to an instantiation, not to the scheme itself. Applying
+    /// them while computing the environment's free variables turns a
+    /// quantified dimension into a free one and prevents later
+    /// generalization (chelis#968).
+    pub fn apply_scheme(&self, scheme: &Scheme) -> Type {
+        let quantified_tvars = scheme.tvars.iter().copied().collect();
+        let quantified_dvars = scheme.dvars.iter().copied().collect();
+        let quantified_rvars = scheme.rvars.iter().copied().collect();
+        self.apply_excluding(
+            &scheme.body,
+            &quantified_tvars,
+            &quantified_dvars,
+            &quantified_rvars,
+        )
+    }
+
+    fn apply_excluding(
+        &self,
+        ty: &Type,
+        quantified_tvars: &chelis_unord::UnordSet<TypeVar>,
+        quantified_dvars: &chelis_unord::UnordSet<DimVar>,
+        quantified_rvars: &chelis_unord::UnordSet<RankVar>,
+    ) -> Type {
+        match ty {
+            Type::Var(v) if quantified_tvars.contains(v) => ty.clone(),
+            Type::Var(v) => {
+                let resolved = self.resolve_tvar_excluding(*v, quantified_tvars);
+                if resolved == Type::Var(*v) {
+                    resolved
+                } else {
+                    self.apply_excluding(
+                        &resolved,
+                        quantified_tvars,
+                        quantified_dvars,
+                        quantified_rvars,
+                    )
+                }
+            }
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter()
+                    .map(|arg| {
+                        self.apply_excluding(
+                            arg,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )
+                    })
+                    .collect(),
+                Box::new(self.apply_excluding(
+                    ret,
+                    quantified_tvars,
+                    quantified_dvars,
+                    quantified_rvars,
+                )),
+            ),
+            Type::Ref(inner) => Type::Ref(Box::new(self.apply_excluding(
+                inner,
+                quantified_tvars,
+                quantified_dvars,
+                quantified_rvars,
+            ))),
+            Type::Tensor(dims, prec) => {
+                let mut resolved_dims = Vec::with_capacity(dims.len());
+                for dim in dims {
+                    match dim {
+                        Dim::Var(var) if quantified_dvars.contains(var) => {
+                            resolved_dims.push(dim.clone());
+                        }
+                        Dim::Rank(var) if quantified_rvars.contains(var) => {
+                            resolved_dims.push(dim.clone());
+                        }
+                        Dim::Rank(var) => {
+                            for resolved in self.resolve_rvar_excluding(*var, quantified_rvars) {
+                                resolved_dims
+                                    .push(self.apply_dim_excluding(&resolved, quantified_dvars));
+                            }
+                        }
+                        _ => resolved_dims.push(self.apply_dim_excluding(dim, quantified_dvars)),
+                    }
+                }
+                let resolved_prec = match prec {
+                    TensorPrec::Var(var) if quantified_tvars.contains(var) => prec.clone(),
+                    TensorPrec::Var(var) => {
+                        match self.resolve_tvar_excluding(*var, quantified_tvars) {
+                            Type::Prim(prim) => TensorPrec::Concrete(prim),
+                            Type::Var(resolved) => TensorPrec::Var(resolved),
+                            _ => prec.clone(),
+                        }
+                    }
+                    TensorPrec::Concrete(_) => prec.clone(),
+                };
+                Type::Tensor(resolved_dims, resolved_prec)
+            }
+            Type::Adt(name, args) => Type::Adt(
+                name.clone(),
+                args.iter()
+                    .map(|arg| {
+                        self.apply_excluding(
+                            arg,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name.clone(),
+                args.iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.apply_excluding(
+                            ty,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )),
+                        NominalArg::Dimension(Dim::Var(var)) if quantified_dvars.contains(var) => {
+                            argument.clone()
+                        }
+                        NominalArg::Dimension(Dim::Rank(var)) if quantified_rvars.contains(var) => {
+                            argument.clone()
+                        }
+                        NominalArg::Dimension(dim) => {
+                            NominalArg::Dimension(self.apply_dim_excluding(dim, quantified_dvars))
+                        }
+                    })
+                    .collect(),
+            ),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| {
+                        self.apply_excluding(
+                            item,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::Prim(_) | Type::Unit | Type::Error(_) => ty.clone(),
+        }
+    }
+
+    fn resolve_tvar_excluding(
+        &self,
+        start: TypeVar,
+        quantified: &chelis_unord::UnordSet<TypeVar>,
+    ) -> Type {
+        let map = self.types.lock().expect("subst.types poisoned");
+        let mut current = start;
+        let max_steps = map.len() + 1;
+        for _ in 0..max_steps {
+            if quantified.contains(&current) {
+                return Type::Var(current);
+            }
+            match map.get(&current) {
+                None => return Type::Var(current),
+                Some(Type::Var(next)) if *next != current => current = *next,
+                Some(Type::Var(_)) => return Type::Var(current),
+                Some(other) => return other.clone(),
+            }
+        }
+        Type::Var(current)
+    }
+
+    fn apply_dim_excluding(&self, dim: &Dim, quantified: &chelis_unord::UnordSet<DimVar>) -> Dim {
+        let Dim::Var(start) = dim else {
+            return dim.clone();
+        };
+        let map = self.dims.lock().expect("subst.dims poisoned");
+        let mut current = *start;
+        let max_steps = map.len() + 1;
+        for _ in 0..max_steps {
+            if quantified.contains(&current) {
+                return Dim::Var(current);
+            }
+            match map.get(&current) {
+                None => return Dim::Var(current),
+                Some(Dim::Var(next)) if *next != current => current = *next,
+                Some(Dim::Var(_)) => return Dim::Var(current),
+                Some(other) => return other.clone(),
+            }
+        }
+        Dim::Var(current)
+    }
+
+    fn resolve_rvar_excluding(
+        &self,
+        start: RankVar,
+        quantified: &chelis_unord::UnordSet<RankVar>,
+    ) -> Vec<Dim> {
+        let map = self.ranks.lock().expect("subst.ranks poisoned");
+        let mut current = start;
+        let max_steps = map.len() + 1;
+        for _ in 0..max_steps {
+            if quantified.contains(&current) {
+                return vec![Dim::Rank(current)];
+            }
+            match map.get(&current) {
+                None => return vec![Dim::Rank(current)],
+                Some(bound) => match bound.as_slice() {
+                    [Dim::Rank(next)] if *next != current => current = *next,
+                    [Dim::Rank(_)] => return vec![Dim::Rank(current)],
+                    _ => return bound.clone(),
+                },
+            }
+        }
+        vec![Dim::Rank(current)]
     }
 
     /// Apply this substitution to a dimension. Path-compresses chains.
@@ -385,19 +985,167 @@ impl Subst {
     }
 
     /// Compose: apply `other` to all bindings in self, then merge.
-    pub fn compose(&mut self, other: &Subst) {
+    ///
+    /// Composition is transactional because independent substitutions can
+    /// carry a binding and a semantic restriction for the same variable.
+    /// Restrictions from both operands are canonicalized through the merged
+    /// binding graph; a forbidden concrete resolution rejects the complete
+    /// compose and leaves `self` unchanged.
+    pub fn compose(&mut self, other: &Subst) -> Result<(), TypeError> {
+        let mut trial = self.clone();
+        trial.compose_bindings(other);
+
+        let mut restrictions = self.tvar_restrictions_snapshot();
+        for (var, incoming) in other.tvar_restrictions_snapshot().into_sorted() {
+            let narrowed = match restrictions.get(&var).copied() {
+                Some(existing) => merge_tvar_restrictions(existing, incoming)?,
+                None => incoming,
+            };
+            restrictions.insert(var, narrowed);
+        }
+
+        trial
+            .tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .clear();
+        for (source, restriction) in restrictions.into_sorted() {
+            let resolved = trial.resolve_tvar(source);
+            ensure_tvar_restriction(restriction, &resolved)?;
+            if let Type::Var(target) = resolved {
+                trial.narrow_tvar_restriction(target, restriction)?;
+            }
+        }
+
+        *self = trial;
+        Ok(())
+    }
+
+    /// Project semantic domains from an inferred implementation type onto a
+    /// structurally corresponding declared type.
+    ///
+    /// Most declared definitions use ordinary unification, which transfers
+    /// restrictions while binding matching variables. A small set of exact
+    /// stdlib contracts deliberately retains its declared type when unrelated
+    /// shape relations are not yet procedurally inferable. This projection
+    /// preserves the semantic domains learned while checking those bodies
+    /// without weakening them into an unconstrained exported function value.
+    /// The operation is transactional so a later conflicting slot cannot
+    /// publish an earlier partial transfer.
+    pub(crate) fn project_tvar_restrictions(
+        &mut self,
+        inferred: &Type,
+        declared: &Type,
+    ) -> Result<(), TypeError> {
+        let mut trial = self.clone();
+        trial.project_tvar_restrictions_inner(inferred, declared)?;
+        *self = trial;
+        Ok(())
+    }
+
+    fn project_tvar_restrictions_inner(
+        &mut self,
+        inferred: &Type,
+        declared: &Type,
+    ) -> Result<(), TypeError> {
+        let inferred = self.apply(inferred);
+        let declared = self.apply(declared);
+        match (&inferred, &declared) {
+            (Type::Var(source), target) => {
+                let Some(restriction) = self.tvar_restriction(*source) else {
+                    return Ok(());
+                };
+                ensure_tvar_restriction(restriction, target)?;
+                if let Type::Var(target) = target {
+                    self.narrow_tvar_restriction(*target, restriction)?;
+                }
+                Ok(())
+            }
+            (Type::Fn(inferred_args, inferred_ret), Type::Fn(declared_args, declared_ret))
+                if inferred_args.len() == declared_args.len() =>
+            {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                self.project_tvar_restrictions_inner(inferred_ret, declared_ret)
+            }
+            (Type::Ref(inferred), Type::Ref(declared)) => {
+                self.project_tvar_restrictions_inner(inferred, declared)
+            }
+            (
+                Type::Tensor(inferred_dims, inferred_prec),
+                Type::Tensor(declared_dims, declared_prec),
+            ) if inferred_dims.len() == declared_dims.len() => {
+                let inferred = match inferred_prec {
+                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                    TensorPrec::Var(var) => Type::Var(*var),
+                };
+                let declared = match declared_prec {
+                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                    TensorPrec::Var(var) => Type::Var(*var),
+                };
+                self.project_tvar_restrictions_inner(&inferred, &declared)
+            }
+            (Type::Adt(inferred_name, inferred_args), Type::Adt(declared_name, declared_args))
+                if inferred_name == declared_name && inferred_args.len() == declared_args.len() =>
+            {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                Ok(())
+            }
+            (
+                Type::KindedAdt(inferred_name, inferred_args),
+                Type::KindedAdt(declared_name, declared_args),
+            ) if inferred_name == declared_name && inferred_args.len() == declared_args.len() => {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    if let (NominalArg::Type(inferred), NominalArg::Type(declared)) =
+                        (inferred, declared)
+                    {
+                        self.project_tvar_restrictions_inner(inferred, declared)?;
+                    }
+                }
+                Ok(())
+            }
+            (Type::Tuple(inferred), Type::Tuple(declared)) if inferred.len() == declared.len() => {
+                for (inferred, declared) in inferred.iter().zip(declared) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn compose_bindings(&mut self, other: &Subst) {
         // Note: `other.apply` / `other.apply_dim` lock `other`'s maps;
-        // we must not be holding a lock on `other` simultaneously
-        // (which we never do — `self` and `other` are distinct).
+        // we must not be holding a lock on `other` simultaneously. This
+        // helper runs on a clone, so it is distinct even for `s.compose(&s)`.
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
-            for val in self_types.values_mut() {
+            let vars = self_types
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_types
+                    .get_mut(&var)
+                    .expect("collected type variable remains present");
                 *val = other.apply(val);
             }
         }
         {
             let mut self_dims = self.dims.lock().expect("subst.dims poisoned");
-            for val in self_dims.values_mut() {
+            let vars = self_dims
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_dims
+                    .get_mut(&var)
+                    .expect("collected dimension variable remains present");
                 *val = other.apply_dim(val);
             }
         }
@@ -407,7 +1155,15 @@ impl Subst {
             // silently drop rank substitutions through a compose — a Tier-3
             // footgun since ranks are now load-bearing.
             let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
-            for val in self_ranks.values_mut() {
+            let vars = self_ranks
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_ranks
+                    .get_mut(&var)
+                    .expect("collected rank variable remains present");
                 *val = val.iter().map(|d| other.apply_dim(d)).collect();
             }
         }
@@ -416,19 +1172,19 @@ impl Subst {
         let other_ranks = other.ranks_snapshot();
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
-            for (k, v) in other_types {
+            for (k, v) in other_types.into_sorted() {
                 self_types.entry(k).or_insert(v);
             }
         }
         {
             let mut self_dims = self.dims.lock().expect("subst.dims poisoned");
-            for (k, v) in other_dims {
+            for (k, v) in other_dims.into_sorted() {
                 self_dims.entry(k).or_insert(v);
             }
         }
         {
             let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
-            for (k, v) in other_ranks {
+            for (k, v) in other_ranks.into_sorted() {
                 self_ranks.entry(k).or_insert(v);
             }
         }
@@ -438,6 +1194,26 @@ impl Subst {
     }
 }
 
+/// Combine the bounds of two variables being identified.
+///
+/// [04-DTYPE-2] makes this the family intersection rather than equality: a
+/// `Numeric`-bounded variable may legitimately be identified with a `Float`
+/// one, and the result admits only floats. Only `Float` against `Int` is
+/// empty, and an empty intersection is a `PrecisionMismatch` naming both
+/// families.
+fn merge_tvar_restrictions(
+    existing: TypeVarRestriction,
+    incoming: TypeVarRestriction,
+) -> Result<TypeVarRestriction, TypeError> {
+    existing.intersect(incoming).ok_or_else(|| TypeError {
+        kind: TypeErrorKind::PrecisionMismatch,
+        message: format!(
+            "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
+            existing.family_name(),
+            incoming.family_name()
+        ),
+    })
+}
 /// Unify two types, producing a substitution or a type error.
 pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     let t1 = subst.apply(t1);
@@ -552,6 +1328,39 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             }
             Ok(())
         }
+        (Type::KindedAdt(n1, args1), Type::KindedAdt(n2, args2)) => {
+            if n1 != n2 {
+                return Err(TypeError {
+                    kind: TypeErrorKind::TypeMismatch,
+                    message: format!("type mismatch: {n1} vs {n2}"),
+                });
+            }
+            if args1.len() != args2.len() {
+                return Err(TypeError {
+                    kind: TypeErrorKind::ArityMismatch,
+                    message: format!(
+                        "ADT type argument count mismatch for {n1}: {} vs {}",
+                        args1.len(),
+                        args2.len()
+                    ),
+                });
+            }
+            for (a1, a2) in args1.iter().zip(args2) {
+                match (a1, a2) {
+                    (NominalArg::Type(t1), NominalArg::Type(t2)) => unify(t1, t2, subst)?,
+                    (NominalArg::Dimension(d1), NominalArg::Dimension(d2)) => {
+                        unify_dim(d1, d2, subst)?
+                    }
+                    _ => {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::TypeMismatch,
+                            message: format!("nominal argument kind mismatch for {n1}"),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        }
 
         // Tuple types
         (Type::Tuple(ts1), Type::Tuple(ts2)) => {
@@ -577,7 +1386,7 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
         // body collapses to Error but the declared type is concrete, we
         // still emit a "body has type `<error>`, declared type is `T`"
         // diagnostic so the user sees the unresolved declared shape).
-        (Type::Error, _) | (_, Type::Error) => Ok(()),
+        (Type::Error(_), _) | (_, Type::Error(_)) => Ok(()),
 
         // Everything else is a mismatch
         _ => Err(TypeError {
@@ -681,8 +1490,60 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
             message: format!("infinite type: ?{} occurs in {ty}", v.0),
         });
     }
-    subst.insert_type(v, ty.clone());
+
+    let source_restriction = subst.tvar_restriction(v);
+    let target_restriction = match ty {
+        Type::Var(target) => subst.tvar_restriction(*target),
+        _ => None,
+    };
+    // Both endpoints keep their bound: the identified variable admits only
+    // the dtypes both families admit ([04-DTYPE-2]). `.or()` would silently
+    // discard the narrower of the two.
+    let merged_restriction = match (source_restriction, target_restriction) {
+        (Some(source), Some(target)) => Some(merge_tvar_restrictions(source, target)?),
+        (found, None) | (None, found) => found,
+    };
+    if let Some(restriction) = source_restriction {
+        ensure_tvar_restriction(restriction, ty)?;
+    }
+
+    // An older variable that becomes bound to a younger composite makes all
+    // reachable variables part of the older scope.
+    let target_level = subst.level_of_tvar(v);
+    subst.lower_type_to(ty, target_level);
+    subst.record_validated_type_binding(v, ty.clone());
+    subst.remove_tvar_restriction(v);
+    if let (Some(restriction), Type::Var(target)) = (merged_restriction, ty) {
+        subst.narrow_tvar_restriction(*target, restriction)?;
+    }
     Ok(())
+}
+
+/// Check one instantiation of a bounded type variable ([04-DTYPE-2]).
+///
+/// An unresolved variable and a witnessed error both pass: the first is
+/// narrowed instead by [`Subst::narrow_tvar_restriction`], and the second
+/// already owns a diagnostic.
+fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result<(), TypeError> {
+    let family = restriction.family_name();
+    let gloss = restriction.membership_gloss();
+    match ty {
+        Type::Var(_) | Type::Error(_) => Ok(()),
+        Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
+        Type::Prim(prim) => Err(TypeError {
+            kind: TypeErrorKind::PrecisionMismatch,
+            message: format!(
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
+                prim.name()
+            ),
+        }),
+        other => Err(TypeError {
+            kind: TypeErrorKind::PrecisionMismatch,
+            message: format!(
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
+            ),
+        }),
+    }
 }
 
 fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
@@ -697,6 +1558,8 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
             message: format!("infinite dimension: d{} occurs in {dim:?}", v.0),
         });
     }
+    let target_level = subst.level_of_dvar(v);
+    subst.lower_dim_to(dim, target_level);
     subst.insert_dim(v, dim.clone());
     Ok(())
 }
@@ -949,6 +1812,8 @@ fn unify_row_against_row(d1: &[Dim], d2: &[Dim], subst: &mut Subst) -> Result<()
         match (a, b) {
             (Dim::Rank(r1), Dim::Rank(r2)) => {
                 if r1 != r2 {
+                    let target_level = subst.level_of_rvar(*r1);
+                    subst.lower_rvar_to(*r2, target_level);
                     subst.insert_rank(*r1, vec![Dim::Rank(*r2)]);
                 }
             }
@@ -982,6 +1847,8 @@ fn bind_rvar(r: RankVar, dims: &[Dim], subst: &mut Subst) -> Result<(), TypeErro
             ),
         });
     }
+    let target_level = subst.level_of_rvar(r);
+    subst.lower_ground_rank_to(dims, target_level);
     subst.insert_rank(r, dims.to_vec());
     Ok(())
 }
@@ -1003,8 +1870,11 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
             TensorPrec::Var(v2) => *v2 == v,
         },
         Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(|ty| occurs_in(v, ty, subst))),
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),
-        Type::Prim(_) | Type::Unit | Type::Error => false,
+        Type::Prim(_) | Type::Unit | Type::Error(_) => false,
     }
 }
 
@@ -1019,6 +1889,579 @@ mod tests {
 
     fn var_gen() -> VarGen {
         VarGen::default()
+    }
+
+    #[test]
+    fn level_transitions_restore_parent_mint_levels_for_every_id_class() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+
+        let child = subst.enter_level(&vg);
+        let child_t = vg.fresh_tvar();
+        let child_d = vg.fresh_dvar();
+        let child_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(child_t), 1);
+        assert_eq!(subst.level_of_dvar(child_d), 1);
+        assert_eq!(subst.level_of_rvar(child_r), 1);
+
+        subst.leave_level(child, &vg);
+        let parent_t = vg.fresh_tvar();
+        let parent_d = vg.fresh_dvar();
+        let parent_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(parent_t), 0);
+        assert_eq!(subst.level_of_dvar(parent_d), 0);
+        assert_eq!(subst.level_of_rvar(parent_r), 0);
+
+        let sibling = subst.enter_level(&vg);
+        let sibling_t = vg.fresh_tvar();
+        let sibling_d = vg.fresh_dvar();
+        let sibling_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(sibling_t), 1);
+        assert_eq!(subst.level_of_dvar(sibling_d), 1);
+        assert_eq!(subst.level_of_rvar(sibling_r), 1);
+        subst.leave_level(sibling, &vg);
+        assert_eq!(subst.current_level(), 0);
+        assert_eq!(subst.level_of_tvar(child_t), 1);
+        assert_eq!(subst.level_of_dvar(child_d), 1);
+        assert_eq!(subst.level_of_rvar(child_r), 1);
+        assert_eq!(subst.level_of_tvar(parent_t), 0);
+        assert_eq!(subst.level_of_dvar(parent_d), 0);
+        assert_eq!(subst.level_of_rvar(parent_r), 0);
+    }
+
+    #[test]
+    fn binding_older_type_to_younger_composite_lowers_every_reachable_class() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older = vg.fresh_tvar();
+        let mut env = crate::env::Env::new();
+        env.bind("outer".to_string(), Scheme::mono(Type::Var(older)));
+        let inner = subst.enter_level(&vg);
+        let younger_t = vg.fresh_tvar();
+        let younger_d = vg.fresh_dvar();
+        let younger_r = vg.fresh_rvar();
+
+        let composite = Type::Tuple(vec![
+            Type::Var(younger_t),
+            Type::Tensor(
+                vec![Dim::Var(younger_d), Dim::Rank(younger_r)],
+                TensorPrec::Var(younger_t),
+            ),
+        ]);
+        unify(&Type::Var(older), &composite, &mut subst).expect("composite bind");
+
+        assert_eq!(subst.level_of_tvar(younger_t), 0);
+        assert_eq!(subst.level_of_dvar(younger_d), 0);
+        assert_eq!(subst.level_of_rvar(younger_r), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(&composite, &subst);
+        assert!(escaped.tvars.is_empty());
+        assert!(escaped.dvars.is_empty());
+        assert!(escaped.rvars.is_empty());
+    }
+
+    #[test]
+    fn dimension_rank_and_rank_alias_bindings_lower_younger_variables() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older_d = vg.fresh_dvar();
+        let older_ground_r = vg.fresh_rvar();
+        let older_alias_r = vg.fresh_rvar();
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "outer".to_string(),
+            Scheme::mono(Type::Tuple(vec![
+                Type::Tensor(vec![Dim::Var(older_d)], TensorPrec::Concrete(Prim::F32)),
+                Type::Tensor(
+                    vec![Dim::Rank(older_ground_r)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(
+                    vec![Dim::Rank(older_alias_r)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+            ])),
+        );
+        let inner = subst.enter_level(&vg);
+        let younger_d_alias = vg.fresh_dvar();
+        let younger_d_in_rank = vg.fresh_dvar();
+        let younger_r = vg.fresh_rvar();
+
+        unify_dim(&Dim::Var(older_d), &Dim::Var(younger_d_alias), &mut subst)
+            .expect("dimension alias");
+        bind_rvar(older_ground_r, &[Dim::Var(younger_d_in_rank)], &mut subst)
+            .expect("ground rank bind");
+        unify_row_against_row(
+            &[Dim::Rank(older_alias_r)],
+            &[Dim::Rank(younger_r)],
+            &mut subst,
+        )
+        .expect("rank alias");
+
+        assert_eq!(subst.level_of_dvar(younger_d_alias), 0);
+        assert_eq!(subst.level_of_dvar(younger_d_in_rank), 0);
+        assert_eq!(subst.level_of_rvar(younger_r), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(
+            &Type::Tuple(vec![
+                Type::Tensor(
+                    vec![Dim::Var(younger_d_alias)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(
+                    vec![Dim::Var(younger_d_in_rank)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(vec![Dim::Rank(younger_r)], TensorPrec::Concrete(Prim::F32)),
+            ]),
+            &subst,
+        );
+        assert!(escaped.dvars.is_empty());
+        assert!(escaped.rvars.is_empty());
+    }
+
+    #[test]
+    fn expanded_rank_dimensions_and_precision_aliases_are_lowered() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older_type = vg.fresh_tvar();
+        let older_precision = vg.fresh_tvar();
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "outer".to_string(),
+            Scheme::mono(Type::Tuple(vec![
+                Type::Var(older_type),
+                Type::Tensor(vec![], TensorPrec::Var(older_precision)),
+            ])),
+        );
+        let inner = subst.enter_level(&vg);
+        let younger_rank = vg.fresh_rvar();
+        let younger_dim = vg.fresh_dvar();
+        let younger_precision = vg.fresh_tvar();
+
+        bind_rvar(younger_rank, &[Dim::Var(younger_dim)], &mut subst)
+            .expect("inner ground rank bind");
+        unify(
+            &Type::Var(older_type),
+            &Type::Tensor(
+                vec![Dim::Rank(younger_rank)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+            &mut subst,
+        )
+        .expect("expanded rank reaches the older type");
+        unify_tensor_prec(
+            &TensorPrec::Var(older_precision),
+            &TensorPrec::Var(younger_precision),
+            &mut subst,
+        )
+        .expect("precision alias");
+
+        assert_eq!(subst.level_of_dvar(younger_dim), 0);
+        assert_eq!(subst.level_of_tvar(younger_precision), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(
+            &Type::Tuple(vec![
+                Type::Tensor(vec![Dim::Var(younger_dim)], TensorPrec::Concrete(Prim::F32)),
+                Type::Tensor(vec![], TensorPrec::Var(younger_precision)),
+            ]),
+            &subst,
+        );
+        assert!(escaped.tvars.is_empty());
+        assert!(escaped.dvars.is_empty());
+    }
+
+    #[test]
+    fn tensor_precision_variables_generalize_at_an_ordinary_boundary() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let boundary = subst.enter_level(&vg);
+        let precision = vg.fresh_tvar();
+        let linked = vg.fresh_tvar();
+        unify_tensor_prec(
+            &TensorPrec::Var(precision),
+            &TensorPrec::Var(linked),
+            &mut subst,
+        )
+        .expect("precision variables link");
+        subst.leave_level(boundary, &vg);
+
+        let scheme = crate::env::Env::new()
+            .generalize(&Type::Tensor(vec![], TensorPrec::Var(precision)), &subst);
+        assert_eq!(scheme.tvars, vec![linked]);
+
+        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &subst);
+        let Type::Tensor(_, TensorPrec::Var(fresh_precision)) = instantiated else {
+            panic!("precision instantiation must remain a tensor precision variable");
+        };
+        unify_tensor_prec(
+            &TensorPrec::Var(fresh_precision),
+            &TensorPrec::Concrete(Prim::F32),
+            &mut subst,
+        )
+        .expect("precision variable binds to a concrete precision");
+        assert_eq!(
+            subst.apply_tensor_prec(&TensorPrec::Var(fresh_precision)),
+            TensorPrec::Concrete(Prim::F32)
+        );
+    }
+
+    /// chelis#1417: identifying a `Numeric`-bounded variable with a
+    /// `Float`-bounded one keeps the INTERSECTION, in both orders.
+    ///
+    /// This is the direction test, not the conflict test. The two acceptance
+    /// tests that exercise narrowing through a program detect
+    /// `merge_tvar_restrictions` returning `Err`, so a reversion that merely
+    /// widens survives them; this one asserts the surviving family IS `Float`
+    /// and that `int32` is consequently rejected.
+    ///
+    /// It does not isolate either mechanism, and measurement rather than
+    /// reasoning says so. `bind_tvar`'s `merged_restriction` and
+    /// `narrow_tvar_restriction` each independently suffice to produce the
+    /// narrowing, so reverting either ALONE leaves this green (and leaves all
+    /// 1460 crate tests green); only reverting BOTH reds it. Neither is dead
+    /// code — both sit on live paths — but neither is individually necessary
+    /// for this behavior, so no single test can discriminate them. Five
+    /// program shapes, including the reversed order, were tried and none
+    /// discriminates either.
+    #[test]
+    fn identifying_a_numeric_variable_with_a_float_one_keeps_float() {
+        for numeric_first in [true, false] {
+            let mut vg = var_gen();
+            let mut subst = Subst::new();
+            let numeric = vg.fresh_tvar();
+            let float = vg.fresh_tvar();
+            subst
+                .narrow_tvar_restriction(numeric, TypeVarRestriction::ActiveNumeric)
+                .expect("fresh variable takes a bound");
+            subst
+                .narrow_tvar_restriction(float, TypeVarRestriction::ActiveFloat)
+                .expect("fresh variable takes a bound");
+
+            let (left, right) = if numeric_first {
+                (numeric, float)
+            } else {
+                (float, numeric)
+            };
+            unify(&Type::Var(left), &Type::Var(right), &mut subst)
+                .expect("Float is a subset of Numeric, so the two are compatible");
+
+            // Whichever variable survives the binding must admit floats only.
+            let surviving = match subst.resolve_tvar(left) {
+                Type::Var(v) => v,
+                other => panic!("expected a variable, got {other}"),
+            };
+            assert_eq!(
+                subst.tvar_restriction(surviving),
+                Some(TypeVarRestriction::ActiveFloat),
+                "identifying Numeric with Float must narrow to Float, not keep \
+                 Numeric (numeric_first = {numeric_first})"
+            );
+
+            // And the narrowing is observable: int32 is in Numeric but not in
+            // Float, so it must now be rejected.
+            let error = unify(&Type::Var(surviving), &Type::Prim(Prim::Int32), &mut subst)
+                .expect_err("a narrowed variable must reject a non-float dtype");
+            assert!(
+                matches!(error.kind, TypeErrorKind::PrecisionMismatch)
+                    && error.message.contains("Float"),
+                "expected a Float PrecisionMismatch, got: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn active_float_restrictions_propagate_through_aliases_and_generalization() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let boundary = subst.enter_level(&vg);
+        let restricted = vg.fresh_tvar();
+        let alias = vg.fresh_tvar();
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        unify(&Type::Var(restricted), &Type::Var(alias), &mut subst)
+            .expect("restriction must flow through an ordinary type-variable alias");
+        subst.leave_level(boundary, &vg);
+
+        let scheme = crate::env::Env::new().generalize(&Type::Var(alias), &subst);
+        assert_eq!(scheme.tvars.len(), 1);
+        assert_eq!(
+            scheme.tvar_restrictions,
+            vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
+        );
+
+        let mut call_subst = Subst::new();
+        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &call_subst);
+        let Type::Var(call_var) = instantiated else {
+            panic!("generalized alias must instantiate to a fresh variable");
+        };
+        let error = unify(
+            &Type::Var(call_var),
+            &Type::Prim(Prim::Bool),
+            &mut call_subst,
+        )
+        .expect_err("instantiated alias must retain its active-float domain");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+    }
+
+    #[test]
+    fn compose_preserves_active_float_restrictions_from_both_operands() {
+        let receiver_var = TypeVar(80_001);
+        let other_var = TypeVar(80_002);
+        let shared_var = TypeVar(80_003);
+        let mut receiver = Subst::new();
+        receiver
+            .narrow_tvar_restriction(receiver_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        receiver
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let other = Subst::new();
+        other
+            .narrow_tvar_restriction(other_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        other
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        receiver
+            .compose(&other)
+            .expect("identical and independent restrictions compose");
+
+        assert_eq!(
+            receiver.tvar_restriction(receiver_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "compose must retain the receiver's restriction"
+        );
+        assert_eq!(
+            receiver.tvar_restriction(other_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "compose must merge the right operand's restriction"
+        );
+        assert_eq!(
+            receiver.tvar_restriction(shared_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "the same restriction on a shared key must compose idempotently"
+        );
+    }
+
+    #[test]
+    fn compose_canonicalizes_active_float_restrictions_through_alias_chains() {
+        let source = TypeVar(80_004);
+        let middle = TypeVar(80_005);
+        let terminal = TypeVar(80_006);
+        let mut receiver = Subst::new();
+        receiver
+            .narrow_tvar_restriction(source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        receiver
+            .insert_type(source, Type::Var(middle))
+            .expect("restricted source aliases an unresolved variable");
+        let mut other = Subst::new();
+        other
+            .insert_type(middle, Type::Var(terminal))
+            .expect("unrestricted alias chain is valid");
+
+        receiver
+            .compose(&other)
+            .expect("a restriction follows the composed alias chain");
+        assert_eq!(receiver.apply(&Type::Var(source)), Type::Var(terminal));
+        assert_eq!(
+            receiver.tvar_restriction(terminal),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        receiver
+            .insert_type(terminal, Type::Prim(Prim::F64))
+            .expect("the composed restriction accepts an active float");
+        assert_eq!(receiver.apply(&Type::Var(source)), Type::Prim(Prim::F64));
+        assert_eq!(receiver.tvar_restriction(terminal), None);
+    }
+
+    #[test]
+    fn compose_rejects_forbidden_bindings_transactionally_in_either_operand() {
+        let restricted_in_receiver = TypeVar(80_007);
+        let mut receiver = Subst::new();
+        receiver
+            .narrow_tvar_restriction(restricted_in_receiver, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let mut other = Subst::new();
+        other
+            .insert_type(restricted_in_receiver, Type::Prim(Prim::Int64))
+            .expect("the independent substitution does not know the restriction");
+        let receiver_types_before = receiver.types_snapshot();
+        let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
+
+        let error = receiver
+            .compose(&other)
+            .expect_err("the merged substitution must enforce the receiver restriction");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert_eq!(receiver.types_snapshot(), receiver_types_before);
+        assert_eq!(
+            receiver.tvar_restrictions_snapshot(),
+            receiver_restrictions_before
+        );
+
+        let restricted_in_other = TypeVar(80_008);
+        let mut receiver = Subst::new();
+        receiver
+            .insert_type(restricted_in_other, Type::Prim(Prim::Int16))
+            .expect("the receiver does not yet know the restriction");
+        let other = Subst::new();
+        other
+            .narrow_tvar_restriction(restricted_in_other, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let receiver_types_before = receiver.types_snapshot();
+        let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
+
+        let error = receiver
+            .compose(&other)
+            .expect_err("the merged substitution must enforce the right restriction");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert_eq!(receiver.types_snapshot(), receiver_types_before);
+        assert_eq!(
+            receiver.tvar_restrictions_snapshot(),
+            receiver_restrictions_before
+        );
+    }
+
+    #[test]
+    fn direct_type_insertion_cannot_bypass_active_float_restrictions() {
+        let restricted = TypeVar(80_009);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        let error = subst
+            .insert_type(restricted, Type::Prim(Prim::Int32))
+            .expect_err("a forbidden direct insertion must fail explicitly");
+
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert!(error.message.contains("int32"));
+        assert_eq!(subst.apply(&Type::Var(restricted)), Type::Var(restricted));
+        assert_eq!(
+            subst.tvar_restriction(restricted),
+            Some(TypeVarRestriction::ActiveFloat),
+            "a rejected direct binding must preserve the restriction ledger"
+        );
+    }
+
+    #[test]
+    fn direct_type_insertion_transfers_and_resolves_active_float_restrictions() {
+        let restricted = TypeVar(80_010);
+        let alias = TypeVar(80_011);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        subst
+            .insert_type(restricted, Type::Var(alias))
+            .expect("an unresolved alias preserves the semantic domain");
+        assert_eq!(subst.tvar_restriction(restricted), None);
+        assert_eq!(
+            subst.tvar_restriction(alias),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        subst
+            .insert_type(alias, Type::Prim(Prim::F16))
+            .expect("an active float satisfies the transferred restriction");
+        assert_eq!(subst.apply(&Type::Var(restricted)), Type::Prim(Prim::F16));
+        assert_eq!(subst.tvar_restriction(alias), None);
+    }
+
+    #[test]
+    fn structural_projection_preserves_domains_across_an_exact_signature_boundary() {
+        let inferred_precision = TypeVar(80_012);
+        let declared_precision = TypeVar(80_013);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(inferred_precision, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let inferred_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(inferred_precision));
+        let declared_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(declared_precision));
+        let inferred = Type::Fn(
+            vec![
+                Type::Ref(Box::new(inferred_tensor)),
+                Type::Var(inferred_precision),
+            ],
+            Box::new(Type::Unit),
+        );
+        let declared = Type::Fn(
+            vec![
+                Type::Ref(Box::new(declared_tensor)),
+                Type::Var(declared_precision),
+            ],
+            Box::new(Type::Unit),
+        );
+
+        subst
+            .project_tvar_restrictions(&inferred, &declared)
+            .expect("matching signature positions carry the inferred domain");
+        assert_eq!(
+            subst.tvar_restriction(declared_precision),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+        let error = subst
+            .insert_type(declared_precision, Type::Prim(Prim::Bool))
+            .expect_err("the projected declaration must reject a non-float");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+    }
+
+    #[test]
+    fn structural_projection_is_transactional_when_a_later_slot_conflicts() {
+        let first_source = TypeVar(80_014);
+        let second_source = TypeVar(80_015);
+        let first_target = TypeVar(80_016);
+        let mut subst = Subst::new();
+        subst
+            .narrow_tvar_restriction(first_source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        subst
+            .narrow_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        let inferred = Type::Tuple(vec![Type::Var(first_source), Type::Var(second_source)]);
+        let declared = Type::Tuple(vec![Type::Var(first_target), Type::Prim(Prim::Int32)]);
+        let restrictions_before = subst.tvar_restrictions_snapshot();
+
+        let error = subst
+            .project_tvar_restrictions(&inferred, &declared)
+            .expect_err("a forbidden declared slot rejects the whole projection");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert_eq!(subst.tvar_restrictions_snapshot(), restrictions_before);
+        assert_eq!(subst.tvar_restriction(first_target), None);
+    }
+
+    #[test]
+    fn pp1_monomorphic_binding_is_lowered_before_a_sibling_boundary() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let pp1_level = subst.enter_level(&vg);
+        let pp1_var = vg.fresh_tvar();
+        subst.leave_level(pp1_level, &vg);
+        subst.lower_type_to_current(&Type::Var(pp1_var));
+
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "pending_shape".to_string(),
+            Scheme::mono(Type::Var(pp1_var)),
+        );
+        let sibling_level = subst.enter_level(&vg);
+        let sibling_var = vg.fresh_tvar();
+        subst.leave_level(sibling_level, &vg);
+        let scheme = env.generalize(
+            &Type::Tuple(vec![Type::Var(pp1_var), Type::Var(sibling_var)]),
+            &subst,
+        );
+        assert_eq!(scheme.tvars, vec![sibling_var]);
     }
 
     #[test]
@@ -1547,6 +2990,19 @@ mod tests {
     // === WS-A5 precision polymorphism unification ===
 
     #[test]
+    fn static_dim_product_comparison_is_exact_beyond_i128() {
+        let s = Subst::new();
+        let max = Dim::Lit(i64::MAX);
+        let lhs = vec![max.clone(), max.clone(), max.clone(), Dim::Lit(2)];
+        let rhs = vec![Dim::Lit(2), max.clone(), max.clone(), max.clone()];
+        let unequal = vec![max.clone(), max.clone(), max, Dim::Lit(3)];
+
+        assert_eq!(s.static_dim_product(&lhs), None);
+        assert_eq!(s.static_dim_products_match(&lhs, &rhs), Some(true));
+        assert_eq!(s.static_dim_products_match(&lhs, &unequal), Some(false));
+    }
+
+    #[test]
     fn unify_tensor_prec_var_binds_to_concrete() {
         // tensor[batch, ?p] vs tensor[batch, f32]
         // ?p must bind to f32 in the substitution.
@@ -1676,8 +3132,9 @@ mod tests {
         // closed at the call site in `infer.rs`, not by tightening the
         // unification rule.
         let mut s = Subst::new();
-        assert!(unify(&Type::Error, &Type::Prim(Prim::F32), &mut s).is_ok());
-        assert!(unify(&Type::Prim(Prim::F32), &Type::Error, &mut s).is_ok());
+        let err = crate::errors::error_sentinel_for_test();
+        assert!(unify(&err, &Type::Prim(Prim::F32), &mut s).is_ok());
+        assert!(unify(&Type::Prim(Prim::F32), &err, &mut s).is_ok());
     }
 
     #[test]

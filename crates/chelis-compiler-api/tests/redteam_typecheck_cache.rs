@@ -20,10 +20,10 @@
 //!   the running binary; a mismatch is a clean miss (`Ok(None)`), never a
 //!   stale hit. A belt-and-braces inner-vs-envelope check rejects a
 //!   tampered identity as `CacheError::IdentityMismatch`.
-//! - The cache format version and magic bumped to 5 (the W1 opaque-types
-//!   registry change added `AdtDef::opaque`/`defining_module` and
-//!   `TypeEnvInner::opacity`); a stale V4-shaped
-//!   file is rejected, never decoded.
+//! - The cache format version and magic are now 15. The current format
+//!   canonicalizes unordered collections, carries checker-owned nominal
+//!   parameter kinds and kinded arguments, and tags each deferred shape
+//!   obligation. A stale V14 file is rejected, never decoded.
 //! - `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a binary
 //!   built from different compiler source does not stale-hit an older
 //!   binary's `StdLibContext`.
@@ -38,8 +38,8 @@
 //! canonicalization equivalence (a wrong-canonicalization regression
 //! would be a NEW collision class), the `IdentityMismatch`
 //! envelope-vs-inner tamper guard, fingerprint sensitivity to every
-//! identity component, the format-version-4 magic rejection of a forged
-//! V4 file, and adversarial corruption shapes against the recompute
+//! identity component, the format-version-15 magic rejection of a forged
+//! V14 file, and adversarial corruption shapes against the recompute
 //! fall-through.
 //!
 //! Kept on the per-PR `ci` profile: every test is cache-key / identity /
@@ -94,7 +94,7 @@ fn make_pkg(name: &str, version: &str, main_ch: &str) -> (TempDir, PathBuf) {
     (dir, root)
 }
 
-const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value -> int32 = cast(0, int32)\n";
+const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value() -> int32 = cast(0, int32)\n";
 
 /// Build a context, save it to a scratch path, and return the path plus
 /// the saved bytes. The scratch dir guard is kept alive by the caller.
@@ -225,7 +225,7 @@ fn rt1_distinct_source_packages_still_do_not_collide() {
     let (_dir_b, root_b) = make_pkg(
         "rt-distinct",
         "0.1.0",
-        "module Rt.Main\n\ndef rt_value -> int32 = cast(1, int32)\n",
+        "module Rt.Main\n\ndef rt_value() -> int32 = cast(1, int32)\n",
     );
 
     let ctx_a = compile_reef_context(Path::new("/tmp/unused"), &root_a).expect("ctx a");
@@ -425,15 +425,15 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
 
     let patterns: Vec<Vec<u8>> = vec![
         vec![],                                               // empty
-        b"CHELIS_CTX_V5\n".to_vec(),                          // magic only, no envelope
-        b"CHELIS_CTX_V4\n".to_vec(),                          // stale-version magic only
+        b"CHELIS_CTX_V16\n".to_vec(),                         // current magic only, no envelope
+        b"CHELIS_CTX_V9\n".to_vec(),                          // stale-version magic only
         b"not a cache file at all".to_vec(),                  // no magic
         vec![0u8; 4096],                                      // all zeros
         vec![0xffu8; 4096],                                   // all ones
         (0..4096).map(|i| ((i * 31) ^ 0x5a) as u8).collect(), // pseudo-random
         {
-            // valid magic followed by garbage
-            let mut v = b"CHELIS_CTX_V5\n".to_vec();
+            // valid (current) magic followed by garbage
+            let mut v = b"CHELIS_CTX_V16\n".to_vec();
             v.extend((0..512).map(|i| (i % 256) as u8));
             v
         },
@@ -479,36 +479,34 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 }
 
 // ---------------------------------------------------------------------
-// Format-version-5 bump. The magic and `CACHE_FORMAT_VERSION` moved to 5
-// with the W1 opaque-types registry fields; a stale V4-shaped file must
-// be rejected, never decoded.
+// Format-version-15 bump. Compiler contexts now tag every deferred shape
+// obligation, on top of the V14 canonical unordered collections and nominal
+// parameter kinds, so every V14 payload has a preceding shape and must be
+// rejected before decode.
 // ---------------------------------------------------------------------
 
 #[test]
 fn a_forged_stale_magic_file_is_rejected_not_decoded() {
-    // W1 bumped the magic to `CHELIS_CTX_V5\n`. A leftover file written
-    // by a pre-bump binary carries the `CHELIS_CTX_V4\n` magic. Forge one
-    // by taking a real V5 file and rewriting the magic's version digit.
+    // The current magic is `CHELIS_CTX_V16\n`. A leftover file carries a
+    // `CHELIS_CTX_V15\n` (or older) magic. Forge one from a real V16 payload.
     // load_if_fresh must reject it (the magic no longer matches), never
-    // attempt to decode the V4-shaped envelope as a V5 one.
-    let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-v4", TRIVIAL_MAIN);
+    // attempt to decode the stale-shaped envelope.
+    let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-stale-magic", TRIVIAL_MAIN);
     assert!(
-        bytes.starts_with(b"CHELIS_CTX_V5\n"),
-        "fixture must be written with the post-W1 V5 magic"
+        bytes.starts_with(b"CHELIS_CTX_V16\n"),
+        "fixture must be written with the current V16 magic"
     );
 
-    let mut forged = bytes.clone();
-    // `CHELIS_CTX_V5\n` -> `CHELIS_CTX_V4\n`: the version digit is at
-    // index 12 ("CHELIS_CTX_V" is 12 chars).
-    forged[12] = b'4';
-    fs::write(&cache_path, &forged).expect("write forged V4 file");
+    let mut forged = b"CHELIS_CTX_V15\n".to_vec();
+    forged.extend_from_slice(&bytes[b"CHELIS_CTX_V16\n".len()..]);
+    fs::write(&cache_path, &forged).expect("write forged stale-magic file");
 
     let outcome =
         CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &cache_path);
     match outcome {
-        Ok(Some(_)) => panic!("a V4-magic file must NEVER load as a V5 Ok(Some(_))"),
+        Ok(Some(_)) => panic!("a stale-magic file must NEVER load as an Ok(Some(_))"),
         Ok(None) => panic!(
-            "a V4-magic file is corrupt bytes for a V5 binary, not a clean miss: \
+            "a stale-magic file is corrupt bytes for the current binary, not a clean miss: \
              load_if_fresh must flag it so the operator sees the version skew"
         ),
         Err(CacheError::Corrupt(_)) => { /* expected: wrong magic header */ }
@@ -521,18 +519,18 @@ fn a_forged_stale_magic_file_is_rejected_not_decoded() {
 
 #[test]
 fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
-    // Distinct from the magic check: keep the V5 magic intact but corrupt
-    // the envelope's `version: u32` field so it decodes to a value other
-    // than 4. load_if_fresh must reject it as
+    // Distinct from the magic check: keep the current magic intact but corrupt
+    // the envelope's `version: u32` field so it decodes to a value other than
+    // the expected one. load_if_fresh must reject it as
     // `CacheError::UnsupportedVersion`, never decode the payload. The
     // envelope `version` field is the first field after the magic, so it
     // sits at bytes [magic.len() .. magic.len()+4].
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-envver", TRIVIAL_MAIN);
-    let magic_len = b"CHELIS_CTX_V5\n".len();
+    let magic_len = b"CHELIS_CTX_V16\n".len();
     assert!(bytes.len() > magic_len + 4);
 
     let mut forged = bytes.clone();
-    // bincode encodes a u32 little-endian; bump the low byte well past 5.
+    // bincode encodes a u32 little-endian; bump the low byte well past 15.
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
@@ -542,8 +540,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 5, "the running binary expects format version 5");
-            assert_ne!(stored, 5, "the forged version must differ from 5");
+            assert_eq!(expected, 16, "the running binary expects format version 16");
+            assert_ne!(stored, 16, "the forged version must differ from 16");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
@@ -562,6 +560,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
 // decl-honesty property RT-1 originally flagged.
 // ---------------------------------------------------------------------
 
+const REDTEAM_STDLIB_SOURCE_DIGEST: [u8; 32] = [0x77; 32];
+
 #[test]
 fn stdlib_cache_key_is_deterministic_for_one_decl_slice() {
     // The intended cross-fixture-reuse property: a fixed decl slice must
@@ -569,11 +569,11 @@ fn stdlib_cache_key_is_deterministic_for_one_decl_slice() {
     // share one entry. A non-deterministic key would silently disable the
     // cache (perpetual cold cost), not corrupt anything, but it is still
     // a regression worth pinning.
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample -> int32 = 1\n")
+    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
         .expect("sample decls parse");
     assert_eq!(
-        stdlib_cache_key(&decls),
-        stdlib_cache_key(&decls),
+        stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST),
+        stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST),
         "stdlib_cache_key must be deterministic for a fixed decl slice"
     );
 }
@@ -587,17 +587,17 @@ fn stdlib_cache_key_depends_on_the_decls_themselves() {
     // package resolves the checkout's own source, not the bundle). A key
     // that ignored the decl bytes would let an edited runtime silently
     // reuse the unedited runtime's typecheck result.
-    let decls_a = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_a -> int32 = 1\n")
+    let decls_a = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_a() -> int32 = 1\n")
         .expect("decls a parse");
-    let decls_b = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_b -> int32 = 2\n")
+    let decls_b = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_b() -> int32 = 2\n")
         .expect("decls b parse");
     assert_ne!(
         decls_a, decls_b,
         "test setup: the two decl slices must differ"
     );
     assert_ne!(
-        stdlib_cache_key(&decls_a),
-        stdlib_cache_key(&decls_b),
+        stdlib_cache_key(&decls_a, REDTEAM_STDLIB_SOURCE_DIGEST),
+        stdlib_cache_key(&decls_b, REDTEAM_STDLIB_SOURCE_DIGEST),
         "stdlib_cache_key must fold the actual decl bytes, so an edited chelis-std \
          checkout cannot stale-hit a bundled-std artifact"
     );
@@ -605,31 +605,38 @@ fn stdlib_cache_key_depends_on_the_decls_themselves() {
 
 #[test]
 fn stdlib_cache_key_folds_the_compiler_version() {
-    // Post-#130 `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a
-    // chelis binary built from different compiler source does NOT
+    // `stdlib_cache_key` folds the compiler BUILD fingerprint directly, so
+    // a chelis binary built from different compiler source does NOT
     // stale-hit an older binary's StdLibContext even when the bundled
     // chelis-std bytes are identical. We cannot rebuild the compiler
     // mid-test; instead we re-derive the key the way `stdlib_cache_key`
-    // does and confirm (a) the real compiler version reproduces the real
-    // key byte-for-byte, proving the mirror is faithful, and (b) a
-    // different compiler version flips it. If a future refactor drops
-    // COMPILER_VERSION from the key, assertion (a) breaks and this test
-    // is the tripwire.
+    // does and confirm (a) the real fingerprint reproduces the real key
+    // byte-for-byte, proving the mirror is faithful, and (b) a different
+    // one flips it. If a future refactor drops the build identity from
+    // the key, assertion (a) breaks and this test is the tripwire.
+    //
+    // chelis#1156: this input used to be `COMPILER_VERSION`. That is a
+    // release identity — every build of an unreleased version shares it —
+    // so two binaries with different type semantics shared this cache.
+    // The stdlib sub-context is keyed WITHOUT a package root, so it is
+    // shared by every package on the machine; a stale hit here reaches
+    // further than the per-package context cache.
     use sha2::{Digest, Sha256};
 
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample -> int32 = 1\n")
+    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
         .expect("sample decls parse");
-    let real = stdlib_cache_key(&decls);
+    let real = stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 2 (the
-    // shipped value after the W1 opaque-types registry fields); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 13 (the
+    // deferred-ledger removal following the deferred-shape-obligation,
+    // exact-source determinant, hash-order and nominal-kind bumps); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(2u32.to_le_bytes());
+        hasher.update(13u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());
@@ -642,6 +649,8 @@ fn stdlib_cache_key_folds_the_compiler_version() {
         let shell = chelis_std_bundle::shell_sha256();
         hasher.update((shell.len() as u64).to_le_bytes());
         hasher.update(shell.as_bytes());
+        hasher.update(b"exact-source-digest");
+        hasher.update(REDTEAM_STDLIB_SOURCE_DIGEST);
         match bincode::serialize(&decls) {
             Ok(decl_bytes) => {
                 hasher.update(b"decls");
@@ -653,22 +662,32 @@ fn stdlib_cache_key_folds_the_compiler_version() {
         hasher.finalize().into()
     };
 
-    // (a) the mirror reproduces the real key for the real compiler
-    // version: this both proves the mirror is faithful AND proves
-    // COMPILER_VERSION is genuinely an input (a key that ignored it could
-    // not be reproduced by a derivation that feeds it in).
+    // (a) the mirror reproduces the real key for the real build
+    // fingerprint: this both proves the mirror is faithful AND proves the
+    // fingerprint is genuinely an input (a key that ignored it could not
+    // be reproduced by a derivation that feeds it in).
     assert_eq!(
         real,
-        recompute(COMPILER_VERSION),
+        recompute(chelis_compiler_api::build_fingerprint()),
         "the recompute mirror must reproduce the real stdlib_cache_key for the \
-         running compiler version; if this breaks, stdlib_cache_key's inputs changed"
+         running build fingerprint; if this breaks, stdlib_cache_key's inputs changed"
     );
-    // (b) a different compiler version flips the key.
+    // (b) a different build fingerprint flips the key.
     assert_ne!(
         real,
         recompute("0.0.0-some-other-compiler-build"),
-        "a different compiler version must produce a different stdlib cache key, so \
+        "a different build fingerprint must produce a different stdlib cache key, so \
          a differently-built binary cannot stale-hit an older StdLibContext"
+    );
+    // (c) chelis#1156 regression: the bare release version must NOT be
+    // what the key folds in, or every build of one version collides.
+    // Unconditional: both arms of the fingerprint (digest and degraded)
+    // extend `COMPILER_VERSION`, so it is never the bare release string.
+    assert_ne!(
+        real,
+        recompute(COMPILER_VERSION),
+        "the stdlib cache key must fold the BUILD fingerprint, not the bare \
+         release version; two builds of one version must not share this cache"
     );
 }
 

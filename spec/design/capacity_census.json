@@ -1,0 +1,1479 @@
+{
+  "version": 3,
+  "legs": {
+    "covered": [
+      {
+        "leg": "header-export",
+        "artifact": "crates/chelis-runtime/include/*.h published closure",
+        "enumerator": "preprocessed_headers -> header_rows",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "reviewer_preprocessor_capacity_seam_is_visible",
+          "c_identity_is_token_canonical_across_preprocessor_whitespace",
+          "c_identity_is_stable_across_bool_preprocessor_spellings"
+        ]
+      },
+      {
+        "leg": "header-struct",
+        "artifact": "crates/chelis-runtime/include/*.h published closure",
+        "enumerator": "preprocessed_headers -> header_rows",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "planted_struct_layout_is_inventoried"
+        ]
+      },
+      {
+        "leg": "std-adt-numeric",
+        "artifact": "packages/chelis-std/src/**/*.ch desugared Deep AST",
+        "enumerator": "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "std_adt_identity_changes_when_same_dtype_variant_changes"
+        ]
+      },
+      {
+        "leg": "std-def-numeric",
+        "artifact": "packages/chelis-std/src/**/*.ch desugared Deep AST",
+        "enumerator": "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "exported_public_numeric_stdlib_def_is_enumerated"
+        ]
+      },
+      {
+        "leg": "prelude-adt-numeric",
+        "artifact": "chelis_types::builtins::register_prelude_adts Rust-registered prelude value ADTs",
+        "enumerator": "prelude_adt_rows -> chelis_types::prelude_adt_defs",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "planted_prelude_adt_with_f64_variant_is_detected",
+          "final_surface_has_no_duplicate_prelude_json"
+        ]
+      },
+      {
+        "leg": "wire-schema-numeric-fields",
+        "artifact": "crates/chelis-compiler-api/src/schema.rs public serialized type graph",
+        "enumerator": "rustdoc JSON public schema type graph -> wire-schema numeric fields",
+        "command": "cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
+        "expected_success": "wire_schema_numeric_fields_match_the_reviewed_baseline passes",
+        "mutations": [
+          "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
+        ]
+      },
+      {
+        "leg": "binding-raw-dtype-params",
+        "artifact": "crates/chelis-python/src/lib.rs registered PyO3 callables",
+        "enumerator": "live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures",
+        "command": "cargo nextest run -p chelis-python --test capacity_census_bindings",
+        "expected_success": "registered_pyfunctions_match_the_reviewed_rustdoc_signatures passes",
+        "mutations": [
+          "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected"
+        ]
+      }
+    ],
+    "deferred": []
+  },
+  "rows": [
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_option_is_some ( const chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_adt * chelis_adt_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * left , const chelis_dict * right ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_chunk ( const chelis_list * list , int64_t size ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_drop ( const chelis_list * list , int64_t count ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_take ( const chelis_list * list , int64_t count ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_mmap_read ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_range_i64 ( int64_t start , int64_t end ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_tensor_elements ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int32_t axis , const chelis_list * sizes ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_mapped_file * chelis_mapped_file_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_option_none ( void ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_option_some ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_option_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_read_view chelis_tensor_read_view ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_tensor_to_scalar ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_value_unbox_scalar ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_scalar ( chelis_scalar value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_slice ( chelis_string value , int64_t start , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_scalar pad_value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_scalar pad_value ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor ( chelis_scalar value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lower , const chelis_tensor * upper ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * left , const chelis_tensor * right ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * left , const chelis_tensor * right , chelis_dtype accumulator ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_entry_borrow ( int32_t rank , const int64_t * shape , chelis_dtype dtype , const void * data , int64_t byte_capacity ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_values ( const chelis_list * list , chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_replace ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * condition , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor_write * chelis_tensor_begin_write ( chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tuple_from_values ( const chelis_value * items , int64_t len ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tuple_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_adt_get_field ( const chelis_adt * adt , int64_t index ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_list_index ( const chelis_list * list , int64_t index ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_option_unwrap ( const chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_box_scalar ( chelis_scalar value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_clone ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_adt ( chelis_adt * adt ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_dict ( chelis_dict * dict ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_list ( chelis_list * list ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_mapped_file ( chelis_mapped_file * mapped ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_option ( chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_string ( chelis_string value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_tensor ( chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_tuple ( chelis_tuple * tuple ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_write_view chelis_tensor_write_view ( const chelis_tensor_write * guard ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_adt * chelis_adt_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_dict * chelis_dict_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_list * chelis_list_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_mapped_file * chelis_mapped_file_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_option * chelis_option_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_tensor * chelis_tensor_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_tuple * chelis_tuple_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int32_t chelis_tensor_rank ( const chelis_tensor * tensor ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_adt_field_count ( const chelis_adt * adt ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_dict_len ( const chelis_dict * dict ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_dtype_size ( chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_list_len ( const chelis_list * list ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor_write * guard , chelis_scalar value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_mapped_file_release ( const chelis_mapped_file * mapped ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_mapped_file_retain ( const chelis_mapped_file * mapped ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_option_release ( const chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_option_retain ( const chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_end_write ( chelis_tensor_write * guard ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_release ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_repurpose ( chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_retain ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 , CHELIS_VALUE_OPTION = 8 , CHELIS_VALUE_MAPPED_FILE = 9 }",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { chelis_dtype dtype ; uint8_t reserved [ 7 ] ; uint64_t bits ; } chelis_scalar",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef union { chelis_scalar scalar ; void * handle ; } chelis_value_payload",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
+      "flags": []
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-adt-numeric",
+      "id": "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::normal_cdf: [p: Float] (t-fn {} (t-var {} p) (t-var {} p))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "contracts::standard_contract_tolerance: (t-fn {} (t-prim {} f32))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal: (t-fn {} (t-prim {} string) (t-adt {} Decimal))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_add: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_gt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_gte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_lt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_lte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_mul: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_string: (t-fn {} (t-adt {} Decimal) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/kaiming::kaiming_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/kaiming::kaiming_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/random::normal_like: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/xavierext::trunc_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/xavierext::xavier_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "init/xavierext::xavier_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_array: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} List (t-adt {} Json))))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_bigint: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_bool: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} bool)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
+      "flags": [
+        "float-carrier"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_get: (t-fn {} (t-adt {} Json) (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_is_null: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_object: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} Dict (t-prim {} string) (t-adt {} Json))))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_string: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::parse_json: (t-fn {} (t-prim {} string) (t-adt {} Json))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::to_json: (t-fn {} (t-adt {} Json) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_parse_json: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_to_json: (t-fn {} (t-adt {} Json) (t-adt {} Option (t-prim {} string)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-adt {} Option (t-unit {})))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-unit {}))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "scalar::abs: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "scalar::max: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p) (t-var {} p))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "scalar::min: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p) (t-var {} p))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::arange: [p: Int] (t-fn {} (t-var {} p) (t-var {} p) (t-tensor {} (d-var {} n) (t-var {} p)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_close: [p: Float] (t-fn {eff: (effects {} test)} (t-var {} p) (t-var {} p) (t-var {} p) (t-prim {} string) (t-unit {}))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_close_tensor: [p: Float] (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-prim {} string) (t-unit {}))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_eq: (t-fn {eff: (effects {} test)} (t-var {} q) (t-var {} q) (t-prim {} string) (t-unit {}))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_eq_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} string) (t-unit {}))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::day_of_week: (t-fn {} (t-adt {} Date) (t-adt {} DayOfWeek))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::day_of_week_name: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Tokenizer))",
+      "flags": []
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::try_load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Tokenizer)))",
+      "flags": []
+    }
+  ]
+}

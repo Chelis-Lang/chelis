@@ -47,6 +47,16 @@ class IsDocPathTests(unittest.TestCase):
         # mdBook theme asset) is prose-adjacent; the Docs job still runs.
         self.assertTrue(m.is_doc_path("docs/book/theme/custom.css"))
 
+    def test_openspec_changes_prefix_is_doc(self):
+        self.assertTrue(
+            m.is_doc_path("openspec/changes/add-thing/proposal.md")
+        )
+        # `openspec new change` always writes this non-Markdown metadata
+        # file; without the prefix rule it alone forces the full matrix.
+        self.assertTrue(
+            m.is_doc_path("openspec/changes/add-thing/.openspec.yaml")
+        )
+
     def test_code_paths_are_not_doc(self):
         for p in (
             "crates/chelis-types/src/infer.rs",
@@ -56,6 +66,8 @@ class IsDocPathTests(unittest.TestCase):
             "packages/chelis-std/tests/foo.ch",
             "docsignore",  # sibling, not under docs/
             "readme.md.rs",  # .rs wins; not a doc
+            "openspec/config.yaml",  # tool config, not one change
+            "openspec/changesets/x.yaml",  # sibling, not under changes/
         ):
             self.assertFalse(m.is_doc_path(p), p)
 
@@ -83,6 +95,82 @@ class IsDocsOnlyTests(unittest.TestCase):
     def test_single_code_file_is_not_docs_only(self):
         self.assertFalse(m.is_docs_only(["Cargo.toml"]))
 
+    def test_executable_oracle_doc_forces_full_suite(self):
+        for oracle_doc in (
+            "spec/design/faithful_observation.md",
+            "spec/02-surf-syntax.md",
+            "spec/03-deep-syntax.md",
+            "spec/04-type-system.md",
+            "spec/05-risc-primitives.md",
+            "spec/11-ffi.md",
+            "spec/design/capability_table.md",
+            "spec/design/compiled_value_ownership.md",
+            "spec/design/dtype_semantics.md",
+            "spec/design/loud_unsupported.md",
+            "spec/design/spec_provenance.md",
+            "spec/design/remediation_roadmap.md",
+            "docs/investigations/remediation_status_2026_08_04.md",
+        ):
+            with self.subTest(oracle_doc=oracle_doc):
+                self.assertFalse(m.is_docs_only([oracle_doc]))
+                self.assertFalse(m.is_docs_only(["README.md", oracle_doc]))
+
+
+class RejectionAuthorityChangeTests(unittest.TestCase):
+    def test_manifest_and_validator_changes_require_live_validation(self):
+        for path in (
+            "spec/design/loud_unsupported_issue_manifest.json",
+            "scripts/validate_rejection_issue_manifest.py",
+            "scripts/check_rejection_authority_boundary.py",
+            "scripts/test_check_rejection_authority_boundary.py",
+            "scripts/generate_rejection_registries.py",
+            "scripts/capacity_census_liveness.py",
+            "scripts/ci_detect_docs_only.py",
+            "crates/chelis-types/src/rejection_registry_generated.rs",
+            "crates/chelis-types/src/unsupported.rs",
+            "crates/chelis-types/src/lib.rs",
+            ".github/workflows/ci.yml",
+        ):
+            self.assertTrue(m.rejection_authority_changed([path]), path)
+
+    def test_unrelated_paths_do_not_require_live_validation(self):
+        self.assertFalse(
+            m.rejection_authority_changed(
+                ["README.md", "crates/chelis-ir/src/lower.rs"]
+            )
+        )
+
+    def test_empty_change_set_fails_safe(self):
+        self.assertTrue(m.rejection_authority_changed([]))
+
+
+class DiagnosticKindChangeTests(unittest.TestCase):
+    def test_every_oracle_owner_and_control_triggers_the_mutation_job(self):
+        for path in (
+            ".github/workflows/ci.yml",
+            "crates/chelis-compiler-api/src/context.rs",
+            "crates/chelis-compiler-api/src/lib.rs",
+            "crates/chelis-compiler-api/src/schema.rs",
+            "crates/chelis-compiler-api/tests/diagnostic_kind_pipeline.rs",
+            "crates/chelis-vocab/src/lib.rs",
+            "scripts/ci_detect_docs_only.py",
+            "scripts/diagnostic_kind_oracle.py",
+            "scripts/test_ci_detect_docs_only.py",
+            "scripts/test_diagnostic_kind_oracle.py",
+            "scripts/test_gate.py",
+        ):
+            self.assertTrue(m.diagnostic_kind_changed([path]), path)
+
+    def test_unrelated_paths_do_not_trigger_the_mutation_job(self):
+        self.assertFalse(
+            m.diagnostic_kind_changed(
+                ["README.md", "crates/chelis-ir/src/lower.rs"]
+            )
+        )
+
+    def test_empty_change_set_fails_safe(self):
+        self.assertTrue(m.diagnostic_kind_changed([]))
+
 
 class EmitTests(unittest.TestCase):
     def test_emit_writes_github_output_and_stdout(self):
@@ -93,10 +181,24 @@ class EmitTests(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    m._emit(True)
-                self.assertEqual(buf.getvalue().strip(), "docs_only=true")
+                    m._emit(True, False, False)
+                self.assertEqual(
+                    buf.getvalue().splitlines(),
+                    [
+                        "docs_only=true",
+                        "rejection_authority_changed=false",
+                        "diagnostic_kind_changed=false",
+                    ],
+                )
                 with open(out_path, encoding="utf-8") as fh:
-                    self.assertIn("docs_only=true", fh.read())
+                    self.assertEqual(
+                        fh.read().splitlines(),
+                        [
+                            "docs_only=true",
+                            "rejection_authority_changed=false",
+                            "diagnostic_kind_changed=false",
+                        ],
+                    )
             finally:
                 if old is None:
                     os.environ.pop("GITHUB_OUTPUT", None)
@@ -108,8 +210,15 @@ class EmitTests(unittest.TestCase):
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                m._emit(False)
-            self.assertEqual(buf.getvalue().strip(), "docs_only=false")
+                m._emit(False, True, True)
+            self.assertEqual(
+                buf.getvalue().splitlines(),
+                [
+                    "docs_only=false",
+                    "rejection_authority_changed=true",
+                    "diagnostic_kind_changed=true",
+                ],
+            )
         finally:
             if old is not None:
                 os.environ["GITHUB_OUTPUT"] = old
@@ -125,7 +234,14 @@ class MainTests(unittest.TestCase):
             with redirect_stdout(buf):
                 rc = m.main([])
             self.assertEqual(rc, 0)
-            self.assertEqual(buf.getvalue().strip(), "docs_only=true")
+            self.assertEqual(
+                buf.getvalue().splitlines(),
+                [
+                    "docs_only=true",
+                    "rejection_authority_changed=false",
+                    "diagnostic_kind_changed=false",
+                ],
+            )
         finally:
             sys.stdin = old_stdin
             if old_out is not None:

@@ -75,19 +75,18 @@ snake_case to be importable.
 
 ### 1.3 Reserved keywords
 
-23 reserved Surf keywords, all lowercase:
+28 active Surf keywords are lexically reserved, all lowercase:
 
 ```
-def sig type dim macro match with fn module import
-if then else grad vmap jit realize copy tensor cast
-export par true false
+def sig type dim macro match with fn module import export
+if then else grad vmap jit realize copy tensor cast par do
+quote unquote splice true false
 ```
 
-Plus 7 reserved-for-Phase-2:
-
-```
-effect handler perform resume borrow where do
-```
+Grammar-specific words such as `property`, `forall`, `where`, `opaque`, and
+`invariant` are contextual rather than globally reserved. The future words
+`effect`, `handler`, `perform`, `resume`, and `borrow` are also lexically
+reserved but have no active production. Explicit borrow syntax is `&`.
 
 ### 1.4 Deep tag vocabulary
 
@@ -134,8 +133,15 @@ the lint is.
 
 ### 1.7 Backend symbol emission
 
-C and HIP backends emit user names as-is. No symbol mangling, no case
-rewriting. Surf identifiers cross the language boundary literally.
+> **[01-CID-1]** C and HIP backend symbol emission SHALL preserve the
+> spelling of a user identifier unless that spelling is reserved by the
+> target language. The C backend SHALL prefix a reserved C spelling with
+> `chelis_user__`; if that mapping collides with another user identifier,
+> the build SHALL reject both names and ask the user to rename one. It SHALL
+> NOT select one definition or emit an ambiguous translation unit.
+
+No case rewriting is performed. Non-reserved Surf identifiers cross the
+language boundary literally.
 
 ---
 
@@ -223,7 +229,7 @@ coral      = { version = "0.5.0" }
 
 **Rule:** snake_case (PEP 8 throughout).
 
-Examples: `bench_phase_j.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
+Examples: `benchmark_parser_throughput.py`, `bump_compiler_pins.py`, `gen_goldens.py`,
 `validate_book_examples.py`.
 
 ### 2.9 Shell scripts
@@ -349,13 +355,12 @@ def softmax(x: Tensor[batch, vocab, f32]) -> Tensor[batch, vocab, f32] =
 def loss(p: f32, q: f32) -> f32 = -(p * log(q))
 ```
 
-Both forms parse, but the arrow is the canonical surface choice
-ecosystem-wide: it visually pairs with parameter `:` annotations without
-overloading the colon for two unrelated jobs (parameter binding vs.
-function-result type), and it matches the Surf Style Guide bullet in
-`AGENTS.md` / `CLAUDE.md`. The lint rule `surf-def-arrow-form` enforces
-this; `chelis fmt` rewrites colon-form decls to arrow-form on next
-canonicalization.
+The arrow is the only canonical Surf spelling. The canonical parser rejects a
+colon in result position; the explicit v0.18 migration path rewrites legacy
+colon-form declarations. This visually pairs with parameter `:` annotations
+without overloading the colon for two unrelated jobs (parameter binding vs.
+function-result type). `chelis fmt` formats canonical Surf and does not act as
+a dialect translator.
 
 ### 3.6 Pipe-first composition and first-argument stages
 
@@ -380,6 +385,15 @@ explicit lambda:
 ```chelis
 x |> fn (v) -> f(y, v)
 ```
+
+Canonical Surf producers promote a nested application chain to this pipe form
+only when the typed pipeline proof establishes a linear first-argument
+dataflow chain. If that proof fails, the producer retains calls;
+later-position insertion retains the explicit lambda. The equivalence is
+limited to the proven chain and does not authorize token-only or untyped call
+rewriting.
+
+(This requirement is not fully implemented; see chelis#1171.)
 
 The decompiler may compact a lambda stage back to call-stage sugar only
 when the carried value is the first argument of the call. Naming rules
@@ -730,7 +744,7 @@ chelis monorepo's authoritative language-spec ordering.
 ```
 
 Shell repos (`nautilus`, `coral`, `shoals`, `octant`) have their own
-`spec/` directories holding per-shell phase plans and design notes.
+`spec/` directories holding per-shell implementation plans and design notes.
 Those follow §8.2's snake_case rule, not §8.1's numbered-spec rule.
 
 ### 8.2 Design files
@@ -738,9 +752,9 @@ Those follow §8.2's snake_case rule, not §8.1's numbered-spec rule.
 **Rule:** snake_case in `chelis/spec/design/` and in any shell repo's
 top-level `spec/` directory.
 
-Examples: `phase1a_kernel_codegen.md`, `chelis_canonical_reference.md`,
-`phase3j_pre_release.md`, `grad_eval_host_runtime.md`,
-`phase3l.md` (shell repo phase plan).
+Examples: `dtype_semantics.md`, `chelis_canonical_reference.md`,
+`pre_release_validation.md`, `grad_eval_host_runtime.md`,
+`runtime_abi.md` (shell repo implementation plan).
 
 The historical kebab-case minority files (`grad-eval-host-runtime.md`,
 `host-emit-hashmap-iteration-nondeterminism.md`, etc.) rename to
@@ -908,45 +922,18 @@ already outside the rule's scope; no additional carve-out is needed.
 
 ## 9. Project-cutting conventions
 
-### 9.1 Phase identifiers
-
-**Rule:** lowercase `phase` + digit + lowercase letter.
-
-Established by historical practice (`phase3j`, `phase1a`, `phase5`).
-Phase A artifacts use the same form: `phase_a` in filenames,
-`phase-a` in branch names.
-
-```
-reef_install_from_github.rs    // Rust file (snake)
-feat/phase-a-item6-from-github  // git branch (kebab)
-phase-a-item6                   // commit scope (kebab)
-```
-
-### 9.2 Branch naming
-
-**Rule:** `{type}/{phase-id}-{item-slug-kebab}`.
-
-Type prefixes follow conventional commits (`feat`, `fix`, `test`,
-`docs`, `style`, `chore`, `refactor`).
-
-```
-feat/phase-a-item6-from-github
-fix/phase-a-chelis-std-runtime
-docs/spec-nomenclature-expansion
-```
-
-### 9.3 Commit conventions
+### 9.1 Commit conventions
 
 **Rule:** Conventional commits.
 
 ```
-feat(phase-a-item9): add lockfile remote_origin
-test(phase-a-item8): bootstrap parallel install
-style(reef): rename phaseA tests to phase_a
-docs(spec): expand nomenclature with style rules
+feat(reef): record lockfile remote origin
+test(reef): cover parallel bootstrap installs
+style(reef): give bootstrap tests descriptive names
+docs(spec): define declarative naming
 ```
 
-### 9.4 CI workflows
+### 9.2 CI workflows
 
 **Rule:** Three workflow files per repo, identical names across all
 five repos.
@@ -1279,7 +1266,83 @@ Advisory (non-blocking) lint rules support the invariant workflow:
 The authoritative design record is
 `spec/design/opaque_invariants_rfc.md`.
 
-### 12.2 Future rule queue
+### 12.2 Lint traversal exclusions
+
+Whole-tree exclusions are stronger than diagnostic exceptions: a matched
+nested path is pruned before classification, rule preparation, or rule
+checks, so no rule sees it. They are permitted only for infrastructure,
+build output, dependencies, generated artifacts, or immutable inputs that
+should not be part of the editable lint corpus. They must not be added merely
+to hide current violations.
+
+`chelis-lint` composes its shipped baseline policy with the nearest ancestor
+`chelis-lint.toml`. Nearest-ancestor discovery resolves a relative lint
+target against the invocation working directory before walking ancestors, so
+relative and absolute spellings of the same target discover the same policy.
+Repository patterns are gitignore-style and anchored to
+the directory containing that file. The schema is versioned and strict:
+
+```toml
+version = 1
+spec = "spec/01-nomenclature.md"
+
+[[exclude]]
+pattern = "path/to/generated/"
+class = "generated"
+cross_ref = "§12.2"
+```
+
+Every entry requires a pattern, a class from `infrastructure`, `build`,
+`dependency`, `generated`, or `immutable`, and a cross-reference resolving
+in the declared spec. Unknown fields, unsupported versions or classes,
+invalid patterns, missing specs, and unresolved references fail lint before
+traversal. Policy and spec paths are resolved before use: non-file or broken
+policy paths and links escaping the policy root fail closed, while links that
+remain inside the policy root are allowed. Loose targets without repository policy
+receive only the shipped baseline.
+
+The traversal engine must not consult `.gitignore`, `.ignore`, parent or
+global Git configuration, `.git/info/exclude`, or hidden-file defaults. This
+keeps local and CI scope identical and keeps hidden source such as
+`.github/workflows/` visible unless Chelis policy explicitly excludes it.
+An explicitly named file or directory overrides exclusion matching at
+traversal depth zero; it must still be a regular file or directory (or a link
+resolving to one) inside the policy root. An explicitly named root that
+exists but fails that admission — a socket, FIFO, device, or other
+non-regular entry, a link resolving to a different entry kind or outside the
+policy root, or an unresolvable link — fails the lint invocation loudly with
+the root path and rejection reason, matching the nonexistent-root failure; it
+never produces a successful empty result. Only discovered (non-explicit)
+inadmissible entries are silently omitted. Separately excluded descendants under
+an explicit directory remain pruned. Non-explicit discovered entries must be
+directories, regular files, or symlinks that resolve to the same entry kind
+inside the policy root. Sockets, FIFOs, devices, and other special entries or
+targets are omitted before a rule can open or read them. A symlink's target and
+governed parents must remain policy-admitted. Broken links, links escaping the
+policy root, and aliases into excluded content are omitted before any rule can
+read them. Internal links to admitted regular files remain visible and are
+classified by the link path.
+Under an explicitly named excluded directory, that root's exclusion remains
+overridden for an internal symlink target while separately excluded
+descendants remain effective.
+
+Traversal policy does not replace rule-specific `Exception` entries or inline
+`allow` and `keep` directives. Those mechanisms act after a path has entered
+the canonical corpus and retain their existing per-rule diagnostic or autofix
+semantics. Rule-side catalogs and ancillary metadata must derive from the same
+canonical entry set or pass a parent-aware traversal-policy admission check;
+content under an excluded directory must not change an admitted entry's
+verdict indirectly. When repository policy exists, its root bounds ancillary
+workspace discovery: admitted sibling workspace manifests remain visible when
+lint targets a subdirectory or explicit file, while machine-local ancestors
+above the policy root cannot grant lint exceptions. A workspace crate entry's
+kind is determined from its resolved metadata, so an internal symlinked crate
+directory remains visible while a directory link resolving outside the policy
+root is rejected. Governance follows the ancillary link path as well as its
+resolved target: a link above the policy root remains machine-local even when
+it points to an admitted file inside the root.
+
+### 12.3 Future rule queue
 
 The following rules are intentionally queued, not currently part of
 the blocking registry:

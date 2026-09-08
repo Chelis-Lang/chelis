@@ -16,8 +16,8 @@
 //!   * at `f64`   -> `2^53` is **CORRECT**. `2^53 + 1` is not representable in
 //!     an f64 mantissa (53 bits), so IEEE-754 ties-to-even rounds it down. Any
 //!     "fix" that makes this return `2^53 + 1` has broken f64.
-//!   * at `int64` -> `2^53` is a **BUG**. The value is exactly representable in
-//!     an i64; it is only wrong because the evaluator laundered it through f64.
+//!   * at `int64` -> `2^53 + 1` is **REQUIRED**. The value is exactly
+//!     representable in an i64; the historical bug laundered it through f64.
 //!
 //! Same literal inputs, opposite verdicts. That collision is precisely why the
 //! bug survived: an f64-typed, tolerance-based oracle
@@ -29,14 +29,14 @@
 //! * `Locked` - verified correct today; this row is a regression lock.
 //! * `ByDesign` - lossy, and CORRECT to be lossy (float mantissa limits). Locks
 //!   the boundary so a fix does not over-correct.
-//! * `Broken` - verified wrong today; carries its issue number. These assert the
-//!   correct behavior and fail until the fix lands, which is the point (write
-//!   the failing test first, per the repo contract). They are `#[ignore]`d so CI
-//!   stays green; run them with `-- --ignored`.
 //!
-//! Every `Broken` row below was confirmed by running the code, not by reading
-//! it. Two claims that came from source inspection alone turned out to be false
-//! during this investigation, so nothing here is asserted without execution.
+//! Historical broken rows retain their issue references in prose, but become
+//! ordinary `Locked` regression tests as soon as their implementation lands.
+//!
+//! Every historical broken row was confirmed by running the code, not by
+//! reading it. Two claims that came from source inspection alone turned out to
+//! be false during this investigation, so nothing here is asserted without
+//! execution.
 //!
 //! ## Precision boundaries used
 //!
@@ -85,8 +85,6 @@ enum Status {
     /// Lossy AND correct to be lossy (float mantissa). Locks the boundary so a
     /// fix does not over-correct the float lane.
     ByDesign,
-    /// Verified wrong today. Carries the tracking issue.
-    Broken(&'static str),
 }
 
 /// Which lanes a row is asserted in.
@@ -302,16 +300,13 @@ fn f32_add_below_mantissa_boundary_is_exact() {
 /// compiled C returns 9007199254740993, so this asserts BOTH correctness and
 /// lane parity.
 #[test]
-#[ignore = "chelis#680: eval returns 9007199254740992, compiled C returns 9007199254740993. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_add_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_add_2p53",
             expr: "add(cast(9007199254740992, int64), cast(1, int64))",
             expected: "9007199254740993",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::Both,
             note: "int64 is exact across its whole range. f64's mantissa limit \
                    is not int64's problem. Contrast f64_add_at_mantissa_boundary.",
@@ -359,16 +354,13 @@ fn int64_mul_above_mantissa_boundary_is_exact() {
 
 /// int64 subtraction at the boundary.
 #[test]
-#[ignore = "chelis#680: operand 2^53+1 corrupted via f64. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_sub_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_sub_2p53",
             expr: "sub(cast(9007199254740993, int64), cast(1, int64))",
             expected: "9007199254740992",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::Both,
             note: "The operand 2^53+1 is corrupted on the way in via f64.",
         },
@@ -379,16 +371,13 @@ fn int64_sub_at_mantissa_boundary_is_exact() {
 /// `abs` on int64. Verified: eval returns 9007199254740992 while compiled C
 /// returns 9007199254740993.
 #[test]
-#[ignore = "chelis#680: eval returns 9007199254740992, compiled C returns 9007199254740993. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_abs_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_abs_2p53",
             expr: "abs(cast(-9007199254740993, int64))",
             expected: "9007199254740993",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::Both,
             note: "numeric_unop routes int through `op(as_f64()) as i64` \
                    (host_ops.rs:427).",
@@ -399,16 +388,13 @@ fn int64_abs_at_mantissa_boundary_is_exact() {
 
 /// `neg` on int64 at the boundary.
 #[test]
-#[ignore = "chelis#680: numeric_unop routes int through f64. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_neg_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_neg_2p53",
             expr: "neg(cast(9007199254740993, int64))",
             expected: "-9007199254740993",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::Both,
             note: "Same numeric_unop f64 path as abs.",
         },
@@ -425,16 +411,13 @@ fn int64_neg_at_mantissa_boundary_is_exact() {
 /// f64. `compare_eq` immediately above it was fixed to use `.as_i64()` in #387;
 /// `ordered_compare` never was.
 #[test]
-#[ignore = "chelis#680: ordered_compare compares via as_f64; returns false. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_lt_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_lt_2p53",
             expr: "lt(cast(9007199254740992, int64), cast(9007199254740993, int64))",
             expected: "true",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::EvalOnly,
             note: "A wrong comparison changes CONTROL FLOW, not just a value.",
         },
@@ -443,16 +426,13 @@ fn int64_lt_at_mantissa_boundary_is_exact() {
 }
 
 #[test]
-#[ignore = "chelis#680: ordered_compare compares via as_f64; returns false. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_gt_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_gt_2p53",
             expr: "gt(cast(9007199254740993, int64), cast(9007199254740992, int64))",
             expected: "true",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::EvalOnly,
             note: "Sibling of lt via ordered_compare.",
         },
@@ -461,16 +441,13 @@ fn int64_gt_at_mantissa_boundary_is_exact() {
 }
 
 #[test]
-#[ignore = "chelis#680: ordered_compare compares via as_f64. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_gte_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_gte_2p53",
             expr: "gte(cast(9007199254740992, int64), cast(9007199254740993, int64))",
             expected: "false",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::EvalOnly,
             note: "2^53 >= 2^53+1 is false; f64 collapse makes it true.",
         },
@@ -498,34 +475,24 @@ fn int64_eq_at_mantissa_boundary_is_exact() {
     );
 }
 
-/// Verified: returns the SMALLER operand. `max_elem` routes through
-/// `numeric_binop(args, f64::max)` (`eval.rs:843`).
+/// Direct `max_elem` compares both int64 operands at their declared width.
 #[test]
-#[ignore = "chelis#680: returns the SMALLER operand. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_max_elem_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
             name: "int64_max_elem_2p53",
             expr: "max_elem(cast(9007199254740992, int64), cast(9007199254740993, int64))",
             expected: "9007199254740993",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::Both,
-            note: "Returns the SMALLER value today: both operands collapse to \
-                   the same f64 and f64::max returns the first.",
+            note: "Direct int64 selection preserves the distinct operands above 2^53.",
         },
         "int64",
     );
 }
 
-/// `min_elem` passes today BY LUCK: both operands collapse to the same f64, and
-/// `min` of two equal values happens to be the expected answer. Kept as a lock
-/// and documented so nobody reads the green as evidence the lane is sound.
+/// Direct `min_elem` compares both int64 operands at their declared width.
 #[test]
-#[ignore = "chelis#691: lane parity fails: C emits fmaxf/fminf on int64_t. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_min_elem_at_mantissa_boundary_is_exact() {
     check_row(
         &Row {
@@ -534,9 +501,7 @@ fn int64_min_elem_at_mantissa_boundary_is_exact() {
             expected: "9007199254740992",
             status: Status::Locked,
             lanes: Lanes::Both,
-            note: "PASSES BY LUCK: operands collapse to one f64 and min of two \
-                   equal values is coincidentally right. Not evidence of \
-                   soundness. Its sibling max_elem is wrong on the same inputs.",
+            note: "Direct int64 selection preserves the distinct operands above 2^53.",
         },
         "int64",
     );
@@ -550,9 +515,6 @@ fn int64_min_elem_at_mantissa_boundary_is_exact() {
 /// branch (111). This is the most severe observable form of #680: the bug does
 /// not merely perturb a value, it selects a different code path.
 #[test]
-#[ignore = "chelis#680: eval takes else (222), compiled C takes then (111). This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int_condition_selects_the_same_branch_in_every_lane() {
     check_row(
         &Row {
@@ -560,7 +522,7 @@ fn int_condition_selects_the_same_branch_in_every_lane() {
             expr: "if lt(cast(9007199254740992, int64), cast(9007199254740993, int64)) \
                    then cast(111, int64) else cast(222, int64)",
             expected: "111",
-            status: Status::Broken("chelis#680"),
+            status: Status::Locked,
             lanes: Lanes::Both,
             note: "eval=222, C=111. A wrong integer comparison changes which \
                    branch executes.",
@@ -570,28 +532,22 @@ fn int_condition_selects_the_same_branch_in_every_lane() {
 }
 
 // ===========================================================================
-// BITWISE / SHIFT: #682. No large values; C emits the literal 0.
+// BITWISE / SHIFT: #682 compiled-lane parity locks.
 // ===========================================================================
 
 macro_rules! bitwise_row {
     ($fn_name:ident, $label:literal, $expr:literal, $expected:literal) => {
         #[test]
-        #[ignore = "chelis#682: the C backend has no match arm for this builtin \
-                    and emits `/* unsupported builtin */ 0`, so eval and \
-                    compiled C disagree. This test asserts the CORRECT behavior \
-                    and fails until the fix lands. Run with `cargo test -p \
-                    chelis-cli --test precision_matrix -- --ignored`."]
         fn $fn_name() {
             check_row(
                 &Row {
                     name: $label,
                     expr: $expr,
                     expected: $expected,
-                    status: Status::Broken("chelis#682"),
+                    status: Status::Locked,
                     lanes: Lanes::Both,
-                    note: "C backend has no match arm for this builtin \
-                           (host_emit.rs) and falls through to \
-                           `/* unsupported builtin */ 0`. Not a precision bug.",
+                    note: "chelis#682 closed C-expression emission; eval and C \
+                           must retain exact integer parity.",
                 },
                 "int64",
             );
@@ -669,6 +625,82 @@ fn i64_max_literal_is_exact() {
 }
 
 // ===========================================================================
+// TYPED-LITERAL SUFFIX WITNESSES (spec/02 P10a x chelis#729): the suffix
+// binds the literal "at exactly that precision"; these rows make that
+// guarantee executable in the eval lane per the chelis#729 thread's
+// work item. The compiled-lane halves ride the Phase 3 oracle files.
+// ===========================================================================
+
+/// An f16-suffixed literal computes at f16: the product of 0.1f16 with
+/// itself is the correctly rounded f16 square of the f16 image of 0.1,
+/// rendered shortest-at-f16-width (the scalar-lock value from
+/// narrow_dtype_matrix, reached through the SUFFIX form).
+#[test]
+fn f16_suffix_literal_computes_at_f16() {
+    assert_eq!(
+        eval_lane_str("mul(0.1f16, 0.1f16)").expect("eval"),
+        "0.009995"
+    );
+}
+
+/// An i64-suffixed literal above 2^53 is exact as a bare expression.
+#[test]
+fn int64_suffix_literal_bare_expression_is_exact() {
+    assert_eq!(
+        eval_lane_str("9007199254740993i64").expect("eval"),
+        "9007199254740993"
+    );
+}
+
+/// The same i64-suffixed literal through a top-level BINDING. Fixed at
+/// the chelis#729 rework (chelis#856): the DAG literal payload is the
+/// sealed dtype-true scalar, so the binding form is exact.
+#[test]
+fn int64_suffix_literal_binding_is_exact() {
+    let got = eval_program_first_line("module M.Main\nx = 9007199254740993i64\nout = print(x)\n")
+        .expect("eval");
+    assert_eq!(got, "9007199254740993");
+}
+
+// ===========================================================================
+// PIPE-FORM ACCEPTANCE BYPASS (rt857 F1 / chelis#860): `x |> recip` used
+// to escape the checker's float-only rejection that the direct form gets
+// (a chelis#709-class acceptance hole). CLOSED at the chelis#729 rework:
+// bare pipe stages consult the shared operand-dtype chokepoint, so the
+// rejection is now check-time (see issue_860_checker_chokepoint.rs). The
+// runtime Domain trap remains behind it as defense in depth (the
+// chelis#729 Phase 1 scalar guard).
+// ===========================================================================
+
+/// The program must FAIL LOUDLY on every polarity: since the chelis#860
+/// fix that failure is the check-time rejection; the runtime Domain trap
+/// is the defense-in-depth backstop this row keeps honest. Either way it
+/// must never succeed and print a substituted value (pre-fix it printed
+/// `0` and exited 0).
+#[test]
+fn int_recip_through_pipe_fails_loud_never_zero() {
+    for (expr, label) in [
+        ("cast(2, int32) |> recip", "int32"),
+        ("cast(2, int8) |> recip", "int8"),
+        ("cast(2, int64) |> recip", "int64"),
+    ] {
+        match eval_lane_str(expr) {
+            Ok(v) => panic!(
+                "{label}: `{expr}` must fail loudly (trap or checker rejection), \
+                 but it succeeded and returned {v}"
+            ),
+            Err(stderr) => assert!(
+                stderr.contains("numeric trap: domain")
+                    || stderr.contains("does not accept argument type")
+                    || stderr.contains("not admitted"),
+                "{label}: `{expr}` failed but without the branded domain trap or \
+                 the float-only rejection. Got: {stderr}"
+            ),
+        }
+    }
+}
+
+// ===========================================================================
 // OVERFLOW: per #680, errors not wraps, at EVERY width.
 //
 // Today there are TWO different behaviors split by width, neither authored:
@@ -678,74 +710,74 @@ fn i64_max_literal_is_exact() {
 // The split is decided purely by which Rust `as` cast runs last.
 // ===========================================================================
 
-fn assert_traps_with_overflow(expr: &str, label: &str) {
+fn assert_traps_with_overflow(expr: &str, expected: &str, label: &str) {
     match eval_lane_str(expr) {
         Ok(v) => panic!(
             "{label}: `{expr}` must trap on integer overflow per chelis#680 \
              (errors, not wraps), but it succeeded and returned {v}"
         ),
-        Err(stderr) => assert!(
-            stderr.contains("overflow"),
-            "{label}: `{expr}` failed but without a branded overflow \
-             diagnostic. Got: {stderr}"
-        ),
+        Err(stderr) => {
+            let trap = stderr
+                .lines()
+                .find_map(|line| line.find("numeric trap:").map(|start| &line[start..]))
+                .unwrap_or_else(|| {
+                    panic!("{label}: `{expr}` failed without a numeric-trap line. Got: {stderr}")
+                });
+            assert_eq!(
+                trap, expected,
+                "{label}: numeric traps are a byte-frozen cross-lane contract"
+            );
+        }
     }
 }
 
-/// Verified today: returns i64::MAX (saturates).
+/// Historical failure: returned i64::MAX by saturation instead of trapping.
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_add_overflow_traps() {
     assert_traps_with_overflow(
         &format!("add(cast({I64_MAX}, int64), cast(1, int64))"),
+        "numeric trap: overflow in add at int64",
         "int64_add_overflow",
     );
 }
 
-/// Verified today: returns i64::MAX. Both operands are in range; only the
-/// product overflows, so this cannot be dismissed as a bad literal.
+/// Historical failure: returned i64::MAX. Both operands are in range; only
+/// the product overflows, so this cannot be dismissed as a bad literal.
 #[test]
-#[ignore = "chelis#680: saturates to i64::MAX instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_mul_overflow_traps() {
     assert_traps_with_overflow(
         "mul(cast(4000000000, int64), cast(4000000000, int64))",
+        "numeric trap: overflow in mul at int64",
         "int64_mul_overflow",
     );
 }
 
-/// Verified today: returns -128 (WRAPS, unlike int64 which saturates).
+/// Historical failure: returned -128 by wrapping.
 #[test]
-#[ignore = "chelis#680: wraps to -128 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int8_add_overflow_traps() {
-    assert_traps_with_overflow("add(cast(127, int8), cast(1, int8))", "int8_add_overflow");
+    assert_traps_with_overflow(
+        "add(cast(127, int8), cast(1, int8))",
+        "numeric trap: overflow in add at int8",
+        "int8_add_overflow",
+    );
 }
 
-/// Verified today: returns -32768 (wraps).
+/// Historical failure: returned -32768 by wrapping.
 #[test]
-#[ignore = "chelis#680: wraps to -32768 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int16_add_overflow_traps() {
     assert_traps_with_overflow(
         "add(cast(32767, int16), cast(1, int16))",
+        "numeric trap: overflow in add at int16",
         "int16_add_overflow",
     );
 }
 
-/// Verified today: returns -2147483648 (wraps).
+/// Historical failure: returned -2147483648 by wrapping.
 #[test]
-#[ignore = "chelis#680: wraps to -2147483648 instead of trapping. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int32_add_overflow_traps() {
     assert_traps_with_overflow(
         "add(cast(2147483647, int32), cast(1, int32))",
+        "numeric trap: overflow in add at int32",
         "int32_add_overflow",
     );
 }
@@ -792,9 +824,6 @@ fn int8_add_just_below_overflow_does_not_trap() {
 ///   eval -> [9007199254740992]   (IrTensorValue.data is Vec<f64>)
 ///   C    -> [9007199254740993]   (C runtime has dtype-tagged storage)
 #[test]
-#[ignore = "chelis#684: eval [9007199254740992], compiled C [9007199254740993]. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_tensor_round_trip_is_exact_in_every_lane() {
     let expr = "to_list(to_tensor([cast(9007199254740993, int64)]))";
     let eval_got = eval_lane_str(expr).expect("eval lane");
@@ -887,9 +916,6 @@ fn bare_expression_keeps_int64_exact() {
 /// Verified: prints `tensor(shape=[], data=[9007199254740992.0])`. An
 /// UNannotated top-level binding is enough to promote and corrupt.
 #[test]
-#[ignore = "chelis#684: binding promotes the scalar to a rank-0 f64 tensor. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn unannotated_top_level_binding_keeps_int64_exact() {
     let got = eval_program_first_line(
         "module M.Main\nx = cast(9007199254740993, int64)\nout = print(x)\n",
@@ -897,18 +923,15 @@ fn unannotated_top_level_binding_keeps_int64_exact() {
     .expect("eval");
     assert_eq!(
         got, "9007199254740993",
-        "an int64 top-level binding must stay an exact int64 scalar. It is \
-         currently promoted to a rank-0 tensor backed by Vec<f64> and prints as \
-         `tensor(shape=[], data=[...])`. chelis#684"
+        "an int64 top-level binding must stay an exact int64 scalar; before \
+         typed binding storage it was promoted to a rank-0 Vec<f64> tensor. \
+         chelis#684"
     );
 }
 
 /// Verified: identical corruption to the unannotated form. Proves the promotion
 /// is caused by the BINDING, not by the type annotation.
 #[test]
-#[ignore = "chelis#684: binding promotes the scalar to a rank-0 f64 tensor. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn annotated_top_level_binding_keeps_int64_exact() {
     let got = eval_program_first_line(
         "module M.Main\nx: int64 = cast(9007199254740993, int64)\nout = print(x)\n",
@@ -941,9 +964,6 @@ fn def_body_keeps_int64_exact() {
 /// Fan-out: binding used twice (auto-copy per the implicit-linearity rules).
 /// Both reads must agree with each other and with the true value.
 #[test]
-#[ignore = "chelis#684: binding promotes the scalar to a rank-0 f64 tensor. This test asserts the CORRECT \
-            behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_binding_fanout_keeps_both_reads_exact_and_equal() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("f.ch");
@@ -1010,7 +1030,7 @@ fn borrow_of_int64_scalar_is_rejected_loudly() {
 }
 
 // ===========================================================================
-// C BACKEND emits float32 math for int64 tensors (#691).
+// C BACKEND formerly emitted float32 math for int64 tensors (#691).
 //
 // Verified by compiling and running: the C backend types the pointers
 // correctly as `int64_t*` but calls `fmaxf`, a float32 function:
@@ -1027,48 +1047,25 @@ fn borrow_of_int64_scalar_is_rejected_loudly() {
 // the opposite of #680. A fix must make both lanes exact, not just move the
 // error to the other lane.
 //
-// Reachability: this needs a `def`, which is the ordinary way to write
-// Chelis. A `def` takes the permissive host-lane precision gate
-// (`reject_unsupported_c_precisions_host`, crates/chelis-cli/src/main.rs:
-// 7054-7162), which admits int64 generically. Only a `def`-free program hits
-// the strict bare-DAG gate (`reject_unsupported_c_precisions`, `:7174-7214`)
-// that rejects int64 tensors. Both lanes emit through the same `CEmitter`.
+// Historical reachability: before chelis#730 Phase 3, whether this int64
+// program reached the C emitter depended on whether an unrelated declaration
+// forced the host lane. The divergent precision preflights are now deleted;
+// active dtype admission is independent of that lowering-path choice.
 // ===========================================================================
 
-/// Verified: eval returns `[16777217, 1, 2, 3]`; compiled C returns
-/// `[16777216.0, 1.0, 2.0, 3.0]`.
+/// Before Phase 3, eval returned `[16777217, 1, 2, 3]` while compiled C
+/// returned `[16777216.0, 1.0, 2.0, 3.0]`.
 ///
 /// `16777217` is `2^24 + 1`: not representable in **float32**, trivially
 /// representable in int64. The threshold is 2^24, not 2^53, so this is far
 /// easier to reach than #680. Note the compiled output even renders as floats
 /// for a `tensor[4, int64]`.
 #[test]
-#[ignore = "chelis#691: C backend emits fmaxf (float32) for int64 max_elem; \
-            compiled C returns 16777216 where eval returns 16777217. This test \
-            asserts the CORRECT behavior and fails until the fix lands. Run with \
-            `cargo test -p chelis-cli --test precision_matrix -- --ignored`."]
 fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
-    let program = "module M.Main\n\
-         def pick(a: tensor[4, int64], b: tensor[4, int64]) -> tensor[4, int64] = max_elem(a, b)\n\
-         out = print(to_list(pick(\
-           to_tensor([cast(16777217, int64), cast(1, int64), cast(2, int64), cast(3, int64)]), \
-           to_tensor([cast(1, int64), cast(1, int64), cast(1, int64), cast(1, int64)]))))\n";
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("mx.ch");
-    write_file(&path, program);
-    let out = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", path.to_str().unwrap()])
-        .output()
-        .expect("chelis eval should run");
-    assert!(out.status.success(), "eval lane should succeed");
-    let eval_got = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let expr = "to_list(max_elem(\
+        to_tensor([cast(16777217, int64), cast(1, int64), cast(2, int64), cast(3, int64)]), \
+        to_tensor([cast(1, int64), cast(1, int64), cast(1, int64), cast(1, int64)])))";
+    let eval_got = eval_lane_str(expr).expect("eval lane should succeed");
     common::assert_elements_in_domain("int64", &eval_got, "mx eval");
     assert_eq!(
         eval_got, "[16777217, 1, 2, 3]",
@@ -1079,36 +1076,11 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
         eprintln!("skipping compiled lane: no host C toolchain");
         return;
     }
-    let cdir = tempdir().expect("tempdir");
-    let cpath = cdir.path().join("mx.ch");
-    let cout = cdir.path().join("mx-out");
-    write_file(
-        &cpath,
-        "def pick(a: tensor[4, int64], b: tensor[4, int64]) -> tensor[4, int64] = max_elem(a, b)\n\
-         out = pick(\
-           to_tensor([cast(16777217, int64), cast(1, int64), cast(2, int64), cast(3, int64)]), \
-           to_tensor([cast(1, int64), cast(1, int64), cast(1, int64), cast(1, int64)]))\n",
-    );
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            cpath.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            cout.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    let emitted = std::fs::read_to_string(cout.join("mx.c")).expect("emitted C");
-    assert!(
-        !emitted.contains("fmaxf"),
-        "C backend emitted `fmaxf` (a float32 function) for an int64 max_elem. \
-         `double_math_fn` remaps float->double only when is_f64, so Int64 keeps \
-         the float32 function and both operands are narrowed to a 24-bit \
-         mantissa. chelis#691"
+    let c_got = c_lane_str(expr, "List[int64]", "mx").expect("compiled lane should succeed");
+    common::assert_elements_in_domain("int64", &c_got, "mx C");
+    assert_eq!(
+        c_got, eval_got,
+        "compiled int64 max_elem must preserve the exact tensor elements"
     );
 }
 
@@ -1129,10 +1101,10 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
 ///
 /// Source of the claim: `crates/chelis-runtime/src/lib.rs:144-152`, verbatim:
 ///
-/// > `CHELIS_I32` and `CHELIS_BOOL` tensors still store data as 4-byte f32 bit
+/// > `CHELIS_DTYPE_I32` and `CHELIS_DTYPE_BOOL` tensors still store data as 4-byte f32 bit
 /// > patterns [...] the trait impl for `i32` exists but reads i32 bytes, which
 /// > is the wrong decode for the current f32-encoded storage convention [...]
-/// > A future §5 follow-on migrates `CHELIS_I32` and `CHELIS_BOOL`.
+/// > A future §5 follow-on migrates `CHELIS_DTYPE_I32` and `CHELIS_DTYPE_BOOL`.
 ///
 /// That predicts `16777217` (2^24+1) corrupts to `16777216`. It does not:
 /// verified exact in BOTH the eval and compiled-C lanes. Either the comment is
@@ -1197,12 +1169,8 @@ fn int64_literal_above_mantissa_boundary_is_exact_in_the_compiled_lane() {
     );
 }
 
-/// The int64 scalar `abs` host-lane path in the compiled backend is EXACT,
-/// even though the eval lane is wrong on the same input (chelis#680) and the
-/// DAG-lane `fabsf` arm is wrong for tensors (chelis#691).
-///
-/// Locked to keep the three cases distinct: same operation, three lanes, three
-/// different verdicts. A fix must not collapse them by accident.
+/// The int64 scalar `abs` host-lane path remains exact after the eval and DAG
+/// tensor lanes adopted the same checked integer semantics.
 #[test]
 fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
     if !c_toolchain_available() {
@@ -1215,6 +1183,54 @@ fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
     assert_eq!(
         c_got, "9007199254740993",
         "compiled int64 scalar abs goes through the host lane and is exact"
+    );
+}
+
+/// The scalar host lane owes the same C2 minimum-value trap as the tensor
+/// kernel. Building MIN from two representable literals avoids relying on a
+/// source token whose unsigned magnitude is outside the lexer range.
+#[test]
+fn int64_scalar_abs_min_traps_in_the_compiled_host_lane() {
+    if !c_toolchain_available() {
+        eprintln!("skipping: no host C toolchain");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("abs_host_min.ch");
+    let out_dir = dir.path().join("abs-host-min-out");
+    write_file(
+        &path,
+        "def run() -> int64 = \
+         abs(sub(cast(-9223372036854775807, int64), cast(1, int64)))\n\
+         out = run()\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let emitted =
+        std::fs::read_to_string(out_dir.join("abs_host_min.c")).expect("generated scalar host C");
+    assert!(emitted.contains("chelis_int_abs_guard"));
+    assert!(!emitted.contains("llabs"));
+    let status = common::link_generated(&out_dir, "abs_host_min.c", "abs_host_min");
+    assert!(status.success(), "link failed: {status}");
+    let run = std::process::Command::new(out_dir.join("abs_host_min"))
+        .output()
+        .expect("compiled scalar host artifact should run");
+    assert!(!run.status.success(), "integer abs MIN must trap");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr).trim(),
+        "numeric trap: overflow in abs at int64",
+        "scalar host abs trap bytes are frozen per C2"
     );
 }
 
@@ -1351,15 +1367,14 @@ fn decimal_rounding_modes_are_correct_on_the_tie_case() {
 // must fail the build, not evaluate to zero.
 // ===========================================================================
 
-/// Assert an int64-tensor unary op agrees across lanes.
-///
-/// Verified today: eval is correct, compiled C returns all zeros.
+/// Assert an int64-tensor unary op agrees across lanes and executes its
+/// compiled artifact, rather than treating source-shape inspection as parity.
 fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
     let eval_program = format!(
         "module M.Main\n\
          def run(x: tensor[4, int64]) -> tensor[4, int64] = {op}(x)\n\
-         out = print(to_list(run(to_tensor([cast(-100, int64), cast(200, int64), \
-         cast(-300, int64), cast(400, int64)]))))\n"
+         out = print(run(to_tensor([cast(-100, int64), cast(200, int64), \
+         cast(-300, int64), cast(400, int64)])))\n"
     );
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("u.ch");
@@ -1378,9 +1393,9 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
         .trim()
         .to_string();
     common::assert_elements_in_domain("int64", &eval_got, name);
-    assert_eq!(
-        eval_got, expected,
-        "{name}: eval lane must be correct for `{op}` on an int64 tensor"
+    assert!(
+        eval_got.contains(&format!("data={expected}")),
+        "{name}: eval lane must be correct for `{op}` on an int64 tensor; got {eval_got}"
     );
 
     if !c_toolchain_available() {
@@ -1420,40 +1435,50 @@ fn assert_int_tensor_unop_parity(op: &str, expected: &str, name: &str) {
          error, so the compiled program silently returns zeros while eval \
          returns {expected}. chelis#699"
     );
+    let status = common::link_generated(&cout, &format!("{name}.c"), name);
+    assert!(status.success(), "{name}: link failed: {status}");
+    let run = std::process::Command::new(cout.join(name))
+        .output()
+        .expect("compiled unary artifact should run");
+    assert!(
+        run.status.success(),
+        "{name}: compiled `{op}` failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(&format!("data={expected}")),
+        "{name}: compiled `{op}` must agree with eval; got {stdout}"
+    );
 }
 
-/// Verified: eval `[100, 200, 300, 400]`, compiled C `[0.0, 0.0, 0.0, 0.0]`.
+/// Integer `abs` is exact in both lanes and must retain its tensor operand.
 #[test]
-#[ignore = "chelis#699: abs on an int64 tensor silently compiles to zeros \
-            (lower_transcendental's non-float 'error placeholder' raises no \
-            error). This test asserts the CORRECT behavior and fails until the \
-            fix lands. Run with `cargo test -p chelis-cli --test \
-            precision_matrix -- --ignored`."]
 fn int64_tensor_abs_agrees_across_lanes() {
     assert_int_tensor_unop_parity("abs", "[100, 200, 300, 400]", "abs_i64");
 }
 
-/// `floor` is identity on integers. Verified: compiled C returns zeros.
+/// `floor` remains a separate Phase 4 capability-table row.
 #[test]
-#[ignore = "chelis#699: floor on an int64 tensor silently compiles to zeros. \
+#[ignore = "chelis#699: floor on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_floor_agrees_across_lanes() {
     assert_int_tensor_unop_parity("floor", "[-100, 200, -300, 400]", "floor_i64");
 }
 
-/// `ceil` is identity on integers. Verified: compiled C returns zeros.
+/// `ceil` remains a separate Phase 4 capability-table row.
 #[test]
-#[ignore = "chelis#699: ceil on an int64 tensor silently compiles to zeros. \
+#[ignore = "chelis#699: ceil on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_ceil_agrees_across_lanes() {
     assert_int_tensor_unop_parity("ceil", "[-100, 200, -300, 400]", "ceil_i64");
 }
 
-/// `round` is identity on integers. Verified: compiled C returns zeros.
+/// `round` remains a separate Phase 4 capability-table row.
 #[test]
-#[ignore = "chelis#699: round on an int64 tensor silently compiles to zeros. \
+#[ignore = "chelis#699: round on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
             --ignored`."]
 fn int64_tensor_round_agrees_across_lanes() {
@@ -1468,10 +1493,6 @@ fn int64_tensor_round_agrees_across_lanes() {
 /// No crash, no NaN, no absurd magnitude. This is the property that makes the
 /// placeholder worse than an unimplemented-op panic: it is not self-announcing.
 #[test]
-#[ignore = "chelis#699: the zeroed abs subtree poisons downstream arithmetic \
-            and yields plausible output ([1,1,1,1] instead of [101,201,301,401]). \
-            Run with `cargo test -p chelis-cli --test precision_matrix -- \
-            --ignored`."]
 fn zeroed_abs_does_not_silently_poison_downstream_arithmetic() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
@@ -1506,13 +1527,17 @@ fn zeroed_abs_does_not_silently_poison_downstream_arithmetic() {
     let run = std::process::Command::new(out_dir.join("poison"))
         .output()
         .expect("compiled binary should run");
+    assert!(
+        run.status.success(),
+        "compiled abs/add artifact failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        !stdout.contains("[1.0, 1.0, 1.0, 1.0]"),
-        "add(abs(x), [1,1,1,1]) returned [1,1,1,1]: the abs subtree was zeroed \
-         and the add computed 0+1 correctly on it. Expected [101, 201, 301, 401]. \
-         Note the output is PLAUSIBLE, not obviously broken. chelis#699. \
-         Got: {stdout}"
+        stdout.contains("data=[101, 201, 301, 401]"),
+        "add(abs(x), [1,1,1,1]) must preserve the exact integer abs subtree; \
+         the old placeholder returned the plausible wrong value [1,1,1,1]. \
+         chelis#699. Got: {stdout}"
     );
 }
 
@@ -1589,15 +1614,11 @@ fn f32_tensor_abs_is_correct_and_unaffected_by_the_placeholder() {
 // declines on overflow. The right implementation exists next door.
 // ===========================================================================
 
-/// Verified: the emitted C contains `chelis_fill_f32_bits(t0, 0x435e0000u)`
-/// (= 222.0, the else branch) and `111.0`'s bit pattern `0x42de0000` appears
+/// Verified: the emitted C passes `CHELIS_DTYPE_F32` and `0x435e0000` to
+/// `chelis_fill_scalar` (= 222.0, the else branch), and `111.0`'s bit pattern
+/// `0x42de0000` appears
 /// NOWHERE in the file. `2^53 < 2^53 + 1` is true, so the answer is 111.0.
 #[test]
-#[ignore = "chelis#711: fold_static_cond folds the int64 comparison in f64, \
-            selects the wrong branch, and DELETES the then-branch at compile \
-            time. This test asserts the CORRECT behavior and fails until the \
-            fix lands. Run with `cargo test -p chelis-cli --test \
-            precision_matrix -- --ignored`."]
 fn static_int_condition_does_not_delete_the_correct_branch() {
     if !c_toolchain_available() {
         eprintln!("skipping: no host C toolchain");
@@ -1643,19 +1664,13 @@ fn static_int_condition_does_not_delete_the_correct_branch() {
 }
 
 // ===========================================================================
-// pad_sequences narrows int64 to int32 in the compiled lane (#713).
+// pad_sequences formerly narrowed int64 to int32 in the compiled lane (#713).
 // ===========================================================================
 
-/// Verified: eval returns `3000000000.0`; compiled C returns `2147483647.0`
-/// (= i32::MAX). `chelis_pad_sequences` (crates/chelis-runtime/src/lib.rs:
-/// 2318-2330) allocates a `CHELIS_I32` output whenever the pad value is int64,
-/// and writes elements `i64 -> f64 -> i32`. The declared return type here is
-/// `tensor[2, 2, int64]`.
+/// Before Phase 3, eval preserved `3000000000` while compiled C saturated it
+/// to `2147483647` (= i32::MAX). The typed runtime path must now allocate and
+/// write the declared int64 representation end to end.
 #[test]
-#[ignore = "chelis#713: pad_sequences allocates an int32 output for int64 \
-            input, so a token id above i32::MAX saturates in the compiled lane \
-            while eval is exact. Run with `cargo test -p chelis-cli --test \
-            precision_matrix -- --ignored`."]
 fn pad_sequences_preserves_int64_ids_above_i32_max() {
     let eval_expr = "pad_sequences([[cast(3000000000, int64), cast(1, int64)], \
                      [cast(2, int64)]], cast(0, int64))";
@@ -1692,6 +1707,19 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
         ])
         .assert()
         .success();
+    let generated = std::fs::read_to_string(out_dir.join("pads.c")).expect("generated pads C");
+    let pad_call = generated
+        .lines()
+        .find(|line| line.contains("chelis_pad_sequences("))
+        .unwrap_or_else(|| panic!("generated C has no pad_sequences call:\n{generated}"));
+    assert!(
+        pad_call.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64"),
+        "pad_sequences must receive an exact tagged int64 scalar:\n{pad_call}"
+    );
+    assert!(
+        !pad_call.contains("chelis_value_from_scalar"),
+        "pad_sequences must not receive a boxed generic value:\n{pad_call}"
+    );
     let status = common::link_generated(&out_dir, "pads.c", "pads");
     assert!(status.success(), "link failed: {status}");
     let run = std::process::Command::new(out_dir.join("pads"))

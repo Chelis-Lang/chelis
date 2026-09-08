@@ -232,9 +232,9 @@ reject path. Keep that bar.
 
 | Issue | State | Note |
 |-------|-------|------|
-| **#609** | open, unassigned | **Top item.** Checker accepts a wrong-rank ascription on a Form-3 `expand` result → eval silently returns a contradicting rank. Live silent-wrong in the Form-3 area; overlaps rlronan's active Form-3 track (#611/#469) → hand off there. |
+| **#609** | addressed by #1277 Slice A review | Checker now constructs the runtime-extent `expand` result and rejects a wrong-rank ascription before execution. |
 | #593 | open, unassigned | Deeper fix for the concat symbolic-wrapper Pad-output mis-sizing (memory-safety). Interim is a loud fail-closed abort; the real fix sizes the wrapper output correctly or emits a graceful error. |
-| #592 | open, unassigned | `vmap(grad(f))(y)` C-build ICE (eval FD-correct); #513-family. |
+| #592 | addressed by #1277 Slice A review | The exact `vmap(grad(f))(y)` reproducer now builds and runs in C and agrees with Eval through the typed `RtDim` carrier. |
 | #587 | open, unassigned | Deeper #549: track the named-axis anchor *through* a permute (recover, don't reject the square case). |
 | #572 / #573 | open, unassigned | Sibling silent-default-0 sites: expand axis-slot (#572), tuple-get index (#573). Same #364/#524/#530 class. |
 | #597 | open, unassigned | let-bound-static expand size errors in eval though C build resolves it (checker annotation gap; fails loud). |

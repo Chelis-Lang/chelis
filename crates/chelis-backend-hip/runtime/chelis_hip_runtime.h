@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "chelis_runtime_dtype.h"
 /* WS-A3: route bf16 / f16 matmul through `hipblasGemmEx` per
  * spec/04-type-system.md §5.7.1 (bf16/f16 forward + f32 accumulator).
  * We use the **legacy** hipblasGemmEx signature
@@ -174,10 +175,11 @@ extern hipblasStatus_t hipblasGemmEx(
 } while (0)
 
 /* GPU tensor: device pointer + shape metadata on host. */
+#define CHELIS_GPU_MAX_DIM 8
 typedef struct {
     float *data;                    /* device pointer (hipMalloc) */
-    int shape[CHELIS_MAX_DIM];
-    int strides[CHELIS_MAX_DIM];
+    int shape[CHELIS_GPU_MAX_DIM];
+    int strides[CHELIS_GPU_MAX_DIM];
     int ndim;
     int dtype;
     int size;                       /* total elements */
@@ -186,16 +188,14 @@ typedef struct {
 
 /* ---- Allocation / deallocation ---- */
 
+/* Device element width. This delegates to the runtime's single width
+ * authority rather than restating the table: a second copy is exactly how
+ * chelis#1360 happened, where this function said `bool` was one byte while
+ * the emitter still dispatched four-byte kernels over the buffer it sized.
+ * `chelis_dtype_size` rejects an unknown tag itself, and a HIP link already
+ * pulls in libchelis_runtime.a, so nothing is gained by inlining a copy. */
 static inline size_t chelis_gpu_dtype_size(int dtype) {
-    if (dtype == CHELIS_I64 || dtype == CHELIS_F64) {
-        return sizeof(int64_t);
-    }
-    if (dtype == CHELIS_BF16 || dtype == CHELIS_F16) {
-        /* WS-A3: bf16 / f16 storage is 2 bytes. Mirrors the host
-         * runtime's `chelis_alloc` dispatch. */
-        return 2;
-    }
-    return sizeof(float);
+    return (size_t)chelis_dtype_size((chelis_dtype)dtype);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {
@@ -258,15 +258,19 @@ static inline void chelis_gpu_free_view(chelis_gpu_tensor *t) {
 /* ---- Host ↔ Device transfer ---- */
 
 static inline void chelis_host_to_device(chelis_gpu_tensor *dst, const chelis_tensor *src) {
-    CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
+    chelis_read_view view = chelis_tensor_read_view(src);
+    CHELIS_HIP_CHECK(hipMemcpy(dst->data, view.data,
                                dst->size * chelis_gpu_dtype_size(dst->dtype),
                                hipMemcpyHostToDevice));
 }
 
 static inline void chelis_device_to_host(chelis_tensor *dst, const chelis_gpu_tensor *src) {
-    CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
-                               dst->size * chelis_gpu_dtype_size(src->dtype),
+    chelis_tensor_write *guard = chelis_tensor_begin_write(dst);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    CHELIS_HIP_CHECK(hipMemcpy(view.data, src->data,
+                               view.count * chelis_gpu_dtype_size(src->dtype),
                                hipMemcpyDeviceToHost));
+    chelis_tensor_end_write(guard);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_clone(const chelis_gpu_tensor *src) {

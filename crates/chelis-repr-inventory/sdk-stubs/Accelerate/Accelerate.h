@@ -1,0 +1,3 @@
+#ifndef STUB_ACCELERATE_H
+#define STUB_ACCELERATE_H
+#endif

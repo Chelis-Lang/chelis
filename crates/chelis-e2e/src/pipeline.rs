@@ -1,117 +1,56 @@
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
-use chelis_deep::ast::Expr as DeepExpr;
-use chelis_ir::dag::Dag;
-use chelis_ir::dag::NodeId;
-use chelis_surf::ast::Decl;
+use chelis_ir::dag::{Dag, NodeId};
 
 pub struct PipelineResult {
     pub dag: Dag,
-    pub deep_text: String, // for debugging
-    pub root_nodes: HashMap<String, NodeId>,
+    pub deep_text: String,
+    pub root_nodes: UnordMap<String, NodeId>,
 }
 
-/// Parse Surf source through the full pipeline:
-/// parse -> desugar -> typecheck -> effect check -> linearity check -> lower -> DAG
+/// Parse Surf source through the canonical compiler-API pipeline.
 pub fn compile_surf(source: &str) -> Result<PipelineResult, String> {
-    // 1. Parse Surf
-    let decls =
-        chelis_surf::parser::parse_str(source).map_err(|e| format!("Surf parse error: {e}"))?;
-
-    // 2. Desugar to Deep
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
-    let deep_exprs =
-        chelis_macros::expand_program(&deep_exprs, &chelis_macros::ExpansionOptions::default())
-            .map_err(|e| format!("Macro expansion error: {e}"))?
-            .into_exprs();
-    let deep_text = chelis_deep::printer::print_canonical(&deep_exprs);
-
-    // 3. Type check
-    let checked = chelis_types::check_ir_program(&deep_exprs)
-        .map_err(|r| format!("Type errors: {:?}", r.errors))?;
-    let lowered_names = lowered_root_names_from_decls(&decls, checked.type_env());
-    let checked = chelis_effects::check_program(&checked).map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|e| e.message)
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    let checked = chelis_types::check_linearity(&checked).map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|e| e.message)
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-
-    // 4. Lower to RISC DAG
-    let dag = chelis_ir::lower::try_lower_program(&checked)
-        .map_err(|diagnostic| diagnostic.to_string())?;
-
-    if dag.roots().len() != lowered_names.len() {
-        return Err(format!(
-            "lowered root count mismatch: expected {} named roots, got {}",
-            lowered_names.len(),
-            dag.roots().len()
-        ));
-    }
-
-    let root_nodes = lowered_names
-        .into_iter()
-        .zip(dag.roots().iter().copied())
+    let outcome =
+        chelis_compiler_api::pipeline::run_source(chelis_compiler_api::pipeline::PipelineRequest {
+            source_kind: chelis_compiler_api::schema::SourceKind::Surf,
+            source,
+            entry: None,
+            goal: chelis_compiler_api::pipeline::PipelineGoal::Lower(
+                chelis_compiler_api::pipeline::LoweringMode::Strict,
+            ),
+        })
+        .map_err(e2e_pipeline_error)?;
+    let chelis_compiler_api::pipeline::PipelineOutcome::Lowered(lowered) = outcome else {
+        unreachable!("the lower goal returns only a lowered outcome")
+    };
+    let parts = lowered.into_parts();
+    let deep_text = chelis_deep::printer::print_canonical(parts.checked.expanded_deep());
+    let root_nodes = parts
+        .named_roots
+        .into_entries()
+        .map(|(name, node)| (name.into_string(), node))
         .collect();
 
     Ok(PipelineResult {
-        dag,
+        dag: parts.dag,
         deep_text,
         root_nodes,
     })
 }
 
-fn lowered_root_names_from_decls(
-    decls: &[Decl],
-    type_env: &HashMap<String, DeepExpr>,
-) -> Vec<String> {
-    let mut names = Vec::new();
-    for decl in decls {
-        collect_decl_root_names(decl, type_env, &mut names);
-    }
-    names
-}
+fn e2e_pipeline_error(rejection: chelis_compiler_api::pipeline::PipelineRejection) -> String {
+    use chelis_compiler_api::pipeline::{PipelineRejection, PreparationError};
 
-fn collect_decl_root_names(
-    decl: &Decl,
-    type_env: &HashMap<String, DeepExpr>,
-    out: &mut Vec<String>,
-) {
-    match decl {
-        Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => {
-            extend_root_names(name, type_env.get(name), out)
+    match rejection {
+        PipelineRejection::Preparation(PreparationError::SurfParse { error, .. }) => {
+            format!("Surf parse error: {error}")
         }
-        Decl::Module { decls, .. } => {
-            for decl in decls {
-                collect_decl_root_names(decl, type_env, out);
-            }
+        PipelineRejection::Preparation(PreparationError::Expansion(error)) => {
+            format!("Macro expansion error: {error}")
         }
-        _ => {}
+        PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
+            format!("Deep parse error: {error}")
+        }
+        other => other.to_string(),
     }
-}
-
-fn extend_root_names(name: &str, ty: Option<&DeepExpr>, out: &mut Vec<String>) {
-    if let Some(DeepExpr::List(list, _)) = ty
-        && let Some(DeepExpr::Atom(chelis_deep::ast::Atom::Symbol(tag), _)) = list.elements.first()
-    {
-        if tag == "t-fn" {
-            extend_root_names(name, list.elements.last(), out);
-            return;
-        }
-        if tag == "t-tuple" {
-            for (index, child) in list.elements.iter().skip(2).enumerate() {
-                extend_root_names(&format!("{name}.{index}"), Some(child), out);
-            }
-            return;
-        }
-    }
-    out.push(name.to_string());
 }

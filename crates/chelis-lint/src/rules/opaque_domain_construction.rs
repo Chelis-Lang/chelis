@@ -4,24 +4,22 @@
 //! downstream domain shells: admitted code must call the constructors whose
 //! postconditions are proved, not write the representation directly.
 
-use crate::{Context, Rule, Surface, Violation};
+use crate::{Context, LintError, PreparedRuleState, Rule, Surface, Violation};
+use chelis_deep::DeepTag;
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 use chelis_surf::ast as surf;
-use std::collections::HashSet;
+use chelis_unord::{UnordMap, UnordSet};
+use std::ops::Deref;
 use std::path::Path;
-use walkdir::WalkDir;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct OpaqueType {
-    name: String,
-    module: Option<String>,
-}
-
-/// The lint's opaque catalog, keyed by (type leaf, defining module)
-/// rather than bare leaf (CR-9).
+/// The lint's opaque catalog, keyed by type leaf and defining module
+/// (CR-9).
 ///
-/// `opaque` lists the opaque types and their defining modules.
+/// `opaque_modules_by_leaf` maps each opaque type leaf to its defining
+/// modules, making each construction-site lookup independent of the total
+/// corpus size. `opaque_defining_modules` supports the untyped Deep
+/// `record-update` check without scanning all opaque declarations.
 /// `declared_leaves` is the set of `(module, leaf)` for EVERY type
 /// declaration (opaque, non-opaque, alias) -- it records that a module
 /// declares a local type of that leaf. A construction site in module M
@@ -34,40 +32,57 @@ struct OpaqueType {
 /// declaration data (no symbol table).
 ///
 /// CR2-7: the corpus walk records every module-LESS file's declarations
-/// under the same `module = None` key, so they would all share one
-/// shadow bucket -- a local type in one module-less file would falsely
-/// suppress the forge lint for a DIFFERENT module-less file. A
-/// module-less file's local types shadow only its OWN constructions, so
-/// the `None` (module-less) shadow lookup uses
-/// `current_file_module_less_leaves` -- the leaves the CURRENTLY-CHECKED
-/// file declares at top level -- never the shared corpus `None` bucket.
-/// Named-module shadow keeps using `declared_leaves` so a module split
-/// across files still shadows correctly.
+/// under the same `module = None` key, so they cannot be used as a
+/// corpus-wide shadow bucket. Named-module shadow remains corpus-wide.
 #[derive(Debug, Default)]
 struct Catalog {
-    opaque: Vec<OpaqueType>,
-    declared_leaves: HashSet<(Option<String>, String)>,
-    current_file_module_less_leaves: HashSet<String>,
+    opaque_modules_by_leaf: UnordMap<String, UnordSet<String>>,
+    opaque_defining_modules: UnordSet<String>,
+    declared_leaves: UnordSet<(Option<String>, String)>,
 }
 
 impl Catalog {
     fn is_empty(&self) -> bool {
-        self.opaque.is_empty()
+        self.opaque_modules_by_leaf.is_empty()
     }
 
-    fn extend(&mut self, other: Catalog) {
-        self.opaque.extend(other.opaque);
-        self.declared_leaves.extend(other.declared_leaves);
-        // `current_file_module_less_leaves` is per-checked-file state,
-        // set after the corpus is built; it is not merged across files.
+    fn insert_opaque(&mut self, name: &str, module: &str) {
+        self.opaque_modules_by_leaf
+            .entry(type_leaf(name).to_string())
+            .or_default()
+            .insert(module.to_string());
+        self.opaque_defining_modules.insert(module.to_string());
     }
+}
 
-    /// Record the leaves declared at top level (module-less) by the
-    /// file currently being checked, for the file-scoped `None` shadow
-    /// (CR2-7).
-    fn set_current_file_module_less_leaves(&mut self, leaves: HashSet<String>) {
-        self.current_file_module_less_leaves = leaves;
+/// Immutable corpus data paired with the current file's module-less
+/// declarations. The latter must never leak to another checked file (CR2-7).
+struct CatalogContext<'a> {
+    corpus: &'a Catalog,
+    current_file_module_less_leaves: &'a UnordSet<String>,
+}
+
+impl Deref for CatalogContext<'_> {
+    type Target = Catalog;
+
+    fn deref(&self) -> &Self::Target {
+        self.corpus
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CATALOG_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_catalog_parse_count() {
+    CATALOG_PARSE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn catalog_parse_count() -> usize {
+    CATALOG_PARSE_COUNT.with(std::cell::Cell::get)
 }
 
 pub struct OpaqueDomainConstruction;
@@ -89,6 +104,15 @@ impl Rule for OpaqueDomainConstruction {
         "types marked opaque may not be directly constructed, record-updated, or cast into outside their defining module"
     }
 
+    fn prepare_run(
+        &self,
+        _root: &Path,
+        entries: &[crate::walker::Entry],
+        _policy: &crate::policy::TraversalPolicy,
+    ) -> Result<PreparedRuleState, LintError> {
+        Ok(Box::new(collect_surf_catalog_from_entries(entries)))
+    }
+
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
         let Some(source) = ctx.source else {
             return Vec::new();
@@ -99,33 +123,87 @@ impl Rule for OpaqueDomainConstruction {
             _ => Vec::new(),
         }
     }
+
+    fn check_prepared(
+        &self,
+        ctx: &Context<'_>,
+        prepared: &(dyn std::any::Any + Send + Sync),
+    ) -> Vec<Violation> {
+        let Some(source) = ctx.source else {
+            return Vec::new();
+        };
+        match ctx.surface {
+            Surface::SurfSource => {
+                if let Some(catalog) = prepared.downcast_ref::<Catalog>() {
+                    check_surf_prepared(ctx, source, catalog)
+                } else {
+                    debug_assert!(false, "opaque rule received another rule's prepared state");
+                    check_surf(ctx, source)
+                }
+            }
+            Surface::DeepSource => check_deep(ctx, source),
+            _ => Vec::new(),
+        }
+    }
 }
 
 fn check_surf(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
     let Ok(decls) = chelis_surf::parser::parse_str(source) else {
         return Vec::new();
     };
-    let mut catalog = collect_surf_catalog(ctx.root);
+    let mut catalog = match collect_surf_catalog(ctx.root) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            return vec![Violation {
+                rule_id: "opaque-domain-construction".to_string(),
+                spec_ref: "§12.1".to_string(),
+                path: ctx.path.to_path_buf(),
+                line: None,
+                col: None,
+                message: format!("could not prepare opaque catalog: {error}"),
+            }];
+        }
+    };
     if catalog.is_empty() {
         collect_surf_decls_catalog(&decls, None, &mut catalog);
     }
+    check_surf_decls_with_catalog(ctx, source, &decls, &catalog)
+}
+
+fn check_surf_prepared(ctx: &Context<'_>, source: &str, catalog: &Catalog) -> Vec<Violation> {
+    let Ok(decls) = chelis_surf::parser::parse_str(source) else {
+        return Vec::new();
+    };
+    check_surf_decls_with_catalog(ctx, source, &decls, catalog)
+}
+
+fn check_surf_decls_with_catalog(
+    ctx: &Context<'_>,
+    source: &str,
+    decls: &[surf::Decl],
+    catalog: &Catalog,
+) -> Vec<Violation> {
     if catalog.is_empty() {
         return Vec::new();
     }
     // CR2-7: the module-less shadow for THIS file's constructions is
     // this file's own top-level type declarations, never the shared
     // corpus `None` bucket.
-    catalog.set_current_file_module_less_leaves(surf_module_less_leaves(&decls));
+    let current_file_module_less_leaves = surf_module_less_leaves(decls);
+    let catalog = CatalogContext {
+        corpus: catalog,
+        current_file_module_less_leaves: &current_file_module_less_leaves,
+    };
     let mut out = Vec::new();
-    check_surf_decls(ctx, source, &decls, &catalog, None, &mut out);
+    check_surf_decls(ctx, source, decls, &catalog, None, &mut out);
     out
 }
 
 /// Leaves of the type declarations the file declares at TOP LEVEL
 /// (outside any `module` wrapper), for the file-scoped module-less
 /// shadow (CR2-7).
-fn surf_module_less_leaves(decls: &[surf::Decl]) -> HashSet<String> {
-    let mut out = HashSet::new();
+fn surf_module_less_leaves(decls: &[surf::Decl]) -> UnordSet<String> {
+    let mut out = UnordSet::new();
     for decl in decls {
         match decl {
             surf::Decl::TypeDef { name, .. } | surf::Decl::TypeAlias { name, .. } => {
@@ -137,36 +215,36 @@ fn surf_module_less_leaves(decls: &[surf::Decl]) -> HashSet<String> {
     out
 }
 
-fn collect_surf_catalog(root: &Path) -> Catalog {
-    if root.is_file() {
-        return std::fs::read_to_string(root)
-            .ok()
-            .and_then(|source| chelis_surf::parser::parse_str(&source).ok())
-            .map(|decls| {
-                let mut catalog = Catalog::default();
-                collect_surf_decls_catalog(&decls, None, &mut catalog);
-                catalog
-            })
-            .unwrap_or_default();
+fn collect_surf_catalog(root: &Path) -> Result<Catalog, LintError> {
+    // Direct `Rule::check` callers may supply in-memory source with a
+    // not-yet-written file path. Validate any ancestor policy, then let the
+    // caller seed the catalog from that current source instead of treating
+    // the absent synthetic root as a filesystem walk failure.
+    if !root.exists() {
+        crate::policy::TraversalPolicy::load_for(root)?;
+        return Ok(Catalog::default());
     }
-    let mut out = Catalog::default();
-    for entry in WalkDir::new(root)
+    let entries: Vec<crate::walker::Entry> = crate::walker::walk(root)?
         .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-    {
-        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("ch") {
+        .collect::<Result<_, _>>()?;
+    Ok(collect_surf_catalog_from_entries(&entries))
+}
+
+fn collect_surf_catalog_from_entries(entries: &[crate::walker::Entry]) -> Catalog {
+    let mut out = Catalog::default();
+    for entry in entries {
+        if entry.surface != Some(Surface::SurfSource) {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(entry.path()) else {
+        let Ok(source) = std::fs::read_to_string(&entry.path) else {
             continue;
         };
+        #[cfg(test)]
+        CATALOG_PARSE_COUNT.with(|count| count.set(count.get() + 1));
         let Ok(decls) = chelis_surf::parser::parse_str(&source) else {
             continue;
         };
-        let mut catalog = Catalog::default();
-        collect_surf_decls_catalog(&decls, None, &mut catalog);
-        out.extend(catalog);
+        collect_surf_decls_catalog(&decls, None, &mut out);
     }
     out
 }
@@ -188,11 +266,8 @@ fn collect_surf_decls_catalog(decls: &[surf::Decl], module: Option<String>, out:
                 // declaration. Catalog opaque types only from named
                 // modules; defer the invalid module-less declaration to
                 // the checker.
-                if *opaque && module.is_some() {
-                    out.opaque.push(OpaqueType {
-                        name: name.clone(),
-                        module: module.clone(),
-                    });
+                if *opaque && let Some(module) = module.as_deref() {
+                    out.insert_opaque(name, module);
                 }
             }
             surf::Decl::TypeAlias { name, .. } => {
@@ -208,7 +283,7 @@ fn check_surf_decls(
     ctx: &Context<'_>,
     source: &str,
     decls: &[surf::Decl],
-    catalog: &Catalog,
+    catalog: &CatalogContext<'_>,
     module: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
@@ -255,7 +330,7 @@ fn check_surf_expr(
     ctx: &Context<'_>,
     source: &str,
     expr: &surf::Expr,
-    catalog: &Catalog,
+    catalog: &CatalogContext<'_>,
     module: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
@@ -276,7 +351,13 @@ fn check_surf_expr(
                 check_surf_expr(ctx, source, value, catalog, module, out);
             }
         }
-        surf::Expr::Cast(inner, target, span) => {
+        surf::Expr::RecordUpdate(base, fields, _) => {
+            check_surf_expr(ctx, source, base, catalog, module, out);
+            for (_, value) in fields {
+                check_surf_expr(ctx, source, value, catalog, module, out);
+            }
+        }
+        surf::Expr::Cast(inner, target, _, span) => {
             if is_outside_opaque_module(target, module, catalog) {
                 push_violation(
                     ctx,
@@ -296,7 +377,10 @@ fn check_surf_expr(
                 check_surf_expr(ctx, source, arg, catalog, module, out);
             }
         }
-        surf::Expr::List(items, _) | surf::Expr::Tuple(items, _) | surf::Expr::Par(items, _) => {
+        surf::Expr::List(items, _)
+        | surf::Expr::Tuple(items, _)
+        | surf::Expr::Par(items, _)
+        | surf::Expr::Do(items, _) => {
             for item in items {
                 check_surf_expr(ctx, source, item, catalog, module, out);
             }
@@ -310,6 +394,9 @@ fn check_surf_expr(
         | surf::Expr::Realize(target, _)
         | surf::Expr::Copy(target, _)
         | surf::Expr::Borrow(target, _)
+        | surf::Expr::Quote(target, _)
+        | surf::Expr::Unquote(target, _)
+        | surf::Expr::Splice(target, _)
         | surf::Expr::Annotate(target, _, _) => {
             check_surf_expr(ctx, source, target, catalog, module, out);
         }
@@ -353,17 +440,25 @@ fn check_surf_expr(
 }
 
 fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
-    let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) else {
+    // chelis#1088: the rule reads the same stamped `.dp` carrier the compiler
+    // does. A `.dp` the compiler will not accept produces no violations here;
+    // the compile path reports it, and a lint has never been the surface that
+    // announces malformed Deep.
+    let Ok(exprs) = chelis_deep::parse_and_stamp_file(source) else {
         return Vec::new();
     };
-    let mut catalog = collect_deep_catalog(&exprs);
+    let catalog = collect_deep_catalog(&exprs);
     if catalog.is_empty() {
         return Vec::new();
     }
     // A `.dp` is one check unit (one source), so its module-less
     // declarations belong to one anonymous module; the file-scoped
     // module-less shadow is this source's own top-level type leaves.
-    catalog.set_current_file_module_less_leaves(deep_module_less_leaves(&exprs));
+    let current_file_module_less_leaves = deep_module_less_leaves(&exprs);
+    let catalog = CatalogContext {
+        corpus: &catalog,
+        current_file_module_less_leaves: &current_file_module_less_leaves,
+    };
     let mut out = Vec::new();
     for expr in &exprs {
         check_deep_expr(ctx, source, expr, &catalog, None, &mut out);
@@ -373,14 +468,14 @@ fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
 
 /// Leaves of the top-level (module-less) `deftype`/`typealias` nodes in
 /// a Deep source, for the file-scoped module-less shadow (CR2-7).
-fn deep_module_less_leaves(exprs: &[deep::Expr]) -> HashSet<String> {
-    let mut out = HashSet::new();
+fn deep_module_less_leaves(exprs: &[deep::Expr]) -> UnordSet<String> {
+    let mut out = UnordSet::new();
     for expr in exprs {
-        let Some(list) = as_list(expr) else {
+        let Some((tag, _, children)) = deep_node_parts(expr) else {
             continue;
         };
-        if matches!(tag(list), Some("deftype") | Some("typealias"))
-            && let Some(name) = children(list).first().and_then(sym_str)
+        if matches!(tag, DeepTag::Deftype | DeepTag::Typealias)
+            && let Some(name) = children.first().and_then(sym_str)
         {
             out.insert(type_leaf(name).to_string());
         }
@@ -397,43 +492,42 @@ fn collect_deep_catalog(exprs: &[deep::Expr]) -> Catalog {
 }
 
 fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &mut Catalog) {
-    let Some(list) = as_list(expr) else {
+    let Some((tag, _, children)) = deep_node_parts(expr) else {
         return;
     };
-    match tag(list) {
-        Some("module") => {
-            let module_name = children(list).first().and_then(sym_str).map(str::to_string);
-            for child in children(list).iter().skip(1) {
+    match tag {
+        DeepTag::Module => {
+            let module_name = children.first().and_then(sym_str).map(str::to_string);
+            for child in children.iter().skip(1) {
                 collect_deep_decls_catalog(child, module_name.clone(), out);
             }
         }
         // Every `deftype`/`typealias` records that its module declares a
         // local type of that leaf (CR-9); opaque deftypes also enter the
-        // opaque list.
-        Some("deftype") => {
-            if let Some(name) = children(list).first().and_then(sym_str) {
+        // leaf/module indices.
+        DeepTag::Deftype => {
+            if let Some(name) = children.first().and_then(sym_str) {
                 out.declared_leaves
                     .insert((module.clone(), type_leaf(name).to_string()));
                 // CR3: only catalog opaque types from a named module --
                 // a module-less @opaque is a checker declaration error
                 // and would collapse distinct module-less files under
                 // the shared `None` key. See the Surf collector.
-                if meta_bool(list, "opaque") && module.is_some() {
-                    out.opaque.push(OpaqueType {
-                        name: name.to_string(),
-                        module,
-                    });
+                if meta_bool(expr, "opaque")
+                    && let Some(module) = module.as_deref()
+                {
+                    out.insert_opaque(name, module);
                 }
             }
         }
-        Some("typealias") => {
-            if let Some(name) = children(list).first().and_then(sym_str) {
+        DeepTag::Typealias => {
+            if let Some(name) = children.first().and_then(sym_str) {
                 out.declared_leaves
                     .insert((module, type_leaf(name).to_string()));
             }
         }
         _ => {
-            for child in children(list) {
+            for child in children {
                 collect_deep_decls_catalog(child, module.clone(), out);
             }
         }
@@ -444,23 +538,23 @@ fn check_deep_expr(
     ctx: &Context<'_>,
     source: &str,
     expr: &deep::Expr,
-    catalog: &Catalog,
+    catalog: &CatalogContext<'_>,
     module: Option<&str>,
     out: &mut Vec<Violation>,
 ) {
-    let Some(list) = as_list(expr) else {
+    let Some((tag, _, children)) = deep_node_parts(expr) else {
         return;
     };
-    match tag(list) {
-        Some("module") => {
-            let module_name = children(list).first().and_then(sym_str);
-            for child in children(list).iter().skip(1) {
+    match tag {
+        DeepTag::Module => {
+            let module_name = children.first().and_then(sym_str);
+            for child in children.iter().skip(1) {
                 check_deep_expr(ctx, source, child, catalog, module_name, out);
             }
             return;
         }
-        Some("record") => {
-            if let Some(name) = children(list).first().and_then(sym_str)
+        DeepTag::Record => {
+            if let Some(name) = children.first().and_then(sym_str)
                 && is_outside_opaque_module(name, module, catalog)
             {
                 push_violation(
@@ -474,8 +568,8 @@ fn check_deep_expr(
                 );
             }
         }
-        Some("cast") => {
-            if let Some(target) = children(list).get(1).and_then(type_name_from_type_expr)
+        DeepTag::Cast => {
+            if let Some(target) = children.get(1).and_then(type_name_from_type_expr)
                 && is_outside_opaque_module(target, module, catalog)
             {
                 push_violation(
@@ -489,9 +583,9 @@ fn check_deep_expr(
                 );
             }
         }
-        Some("record-update") => {
-            let typed_target = type_name_from_meta(list)
-                .or_else(|| children(list).first().and_then(type_name_from_meta_expr));
+        DeepTag::RecordUpdate => {
+            let typed_target = type_name_from_meta(expr)
+                .or_else(|| children.first().and_then(type_name_from_meta_expr));
             if let Some(target) = typed_target
                 && is_outside_opaque_module(target, module, catalog)
             {
@@ -516,7 +610,7 @@ fn check_deep_expr(
         }
         _ => {}
     }
-    for child in children(list) {
+    for child in children {
         check_deep_expr(ctx, source, child, catalog, module, out);
     }
 }
@@ -534,7 +628,7 @@ fn check_deep_expr(
 fn is_outside_opaque_module(
     type_name: &str,
     current_module: Option<&str>,
-    catalog: &Catalog,
+    catalog: &CatalogContext<'_>,
 ) -> bool {
     let leaf = type_leaf(type_name);
     // Local declaration shadows: the bare name resolves to this
@@ -553,22 +647,26 @@ fn is_outside_opaque_module(
     if shadowed {
         return false;
     }
-    // No local shadow: flag iff an opaque same-leaf type is defined in
-    // another module (the genuine out-of-module forge).
-    catalog
-        .opaque
-        .iter()
-        .any(|opaque| type_leaf(&opaque.name) == leaf && opaque.module.as_deref() != current_module)
+    // No local shadow: use the leaf index to determine whether at least one
+    // opaque definition belongs to another module. This remains constant-time
+    // with respect to unrelated opaque declarations.
+    let Some(defining_modules) = catalog.opaque_modules_by_leaf.get(leaf) else {
+        return false;
+    };
+    match current_module {
+        Some(module) => defining_modules.len() > usize::from(defining_modules.contains(module)),
+        None => !defining_modules.is_empty(),
+    }
 }
 
 /// Whether `current_module` is outside the defining module of EVERY
 /// opaque type (used for the fail-closed untyped Deep `record-update`
 /// arm). True when the current module declares no opaque type itself.
-fn is_outside_all_opaque_modules(current_module: Option<&str>, catalog: &Catalog) -> bool {
-    !catalog
-        .opaque
-        .iter()
-        .any(|opaque| opaque.module.as_deref() == current_module)
+fn is_outside_all_opaque_modules(
+    current_module: Option<&str>,
+    catalog: &CatalogContext<'_>,
+) -> bool {
+    current_module.is_none_or(|module| !catalog.opaque_defining_modules.contains(module))
 }
 
 fn type_leaf(name: &str) -> &str {
@@ -610,52 +708,39 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn as_list(expr: &deep::Expr) -> Option<&deep::List> {
+fn deep_node_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::MetaMap, &[deep::Expr])> {
     match expr {
-        deep::Expr::List(list, _) => Some(list),
+        deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
+        deep::Expr::List(list, _) => {
+            let tag = list.tag()?;
+            let meta = match list.elements.get(1)? {
+                deep::Expr::Map(meta, _) => meta,
+                _ => return None,
+            };
+            Some((tag, meta, list.elements.get(2..)?))
+        }
         _ => None,
-    }
-}
-
-fn tag(list: &deep::List) -> Option<&str> {
-    match list.elements.first()? {
-        deep::Expr::Atom(deep::Atom::Symbol(tag), _) => Some(tag.as_str()),
-        _ => None,
-    }
-}
-
-fn meta(list: &deep::List) -> Option<&deep::MetaMap> {
-    match list.elements.get(1)? {
-        deep::Expr::Map(map, _) => Some(map),
-        _ => None,
-    }
-}
-
-fn children(list: &deep::List) -> &[deep::Expr] {
-    if list.elements.len() <= 2 {
-        &[]
-    } else {
-        &list.elements[2..]
     }
 }
 
 fn sym_str(expr: &deep::Expr) -> Option<&str> {
     match expr {
-        deep::Expr::Atom(deep::Atom::Symbol(value), _) => Some(value.as_str()),
+        deep::Expr::Atom(deep::Atom::Name(value), _) => Some(value.as_str()),
         _ => None,
     }
 }
 
-fn meta_bool(list: &deep::List, key: &str) -> bool {
-    meta(list).is_some_and(|map| {
+fn meta_bool(expr: &deep::Expr, key: &str) -> bool {
+    deep_node_parts(expr).is_some_and(|(_, map, _)| {
         map.entries.iter().any(|(entry_key, value)| {
             entry_key == key && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
         })
     })
 }
 
-fn type_name_from_meta(list: &deep::List) -> Option<&str> {
-    let value = meta(list)?
+fn type_name_from_meta(expr: &deep::Expr) -> Option<&str> {
+    let (_, meta, _) = deep_node_parts(expr)?;
+    let value = meta
         .entries
         .iter()
         .find_map(|(key, value)| (key == "type").then_some(value))?;
@@ -664,7 +749,7 @@ fn type_name_from_meta(list: &deep::List) -> Option<&str> {
 
 fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
     match expr {
-        deep::Expr::List(list, _) => type_name_from_meta(list),
+        deep::Expr::Node(..) | deep::Expr::List(..) => type_name_from_meta(expr),
         deep::Expr::MetaExpr(meta, _) => meta
             .entries
             .iter()
@@ -675,13 +760,13 @@ fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
 }
 
 fn type_name_from_type_expr(expr: &deep::Expr) -> Option<&str> {
-    let list = as_list(expr)?;
-    match tag(list) {
-        Some("t-prim") => children(list).first().and_then(sym_str),
-        Some("t-adt") => children(list)
+    let (tag, _, children) = deep_node_parts(expr)?;
+    match tag {
+        DeepTag::TPrim => children.first().and_then(sym_str),
+        DeepTag::TAdt => children
             .iter()
             .find_map(sym_str)
-            .or_else(|| children(list).first().and_then(sym_str)),
+            .or_else(|| children.first().and_then(sym_str)),
         _ => None,
     }
 }
@@ -763,7 +848,8 @@ def bad(x: f32) -> Probability = Probability { value: x }
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
-  (record-update {type: (t-adt {} Probability)} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+  (def {} update
+    (record-update {type: (t-adt {} Probability)} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0)))))
 "#;
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
@@ -776,7 +862,8 @@ def bad(x: f32) -> Probability = Probability { value: x }
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
-  (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0))))
+  (def {} update
+    (record-update {} (var {} p) (kv {} value (lit {type: (t-prim {} f32)} 2.0)))))
 "#;
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
@@ -793,7 +880,7 @@ def bad(x: f32) -> Probability = Probability { value: x }
 (module {} whale.types
   (deftype {opaque: true} Probability () (variant {} Probability (field {} value (t-prim {} f32)))))
 (module {} agent.strategy
-  (cast {} (var {} x) (t-adt {} Probability)))
+  (def {} coerce (cast {} (var {} x) (t-adt {} Probability))))
 "#;
         let violations = run_deep(src);
         assert_eq!(violations.len(), 1);
@@ -883,6 +970,47 @@ type Probability = | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
 "#;
         assert!(run_surf(src).is_empty());
+    }
+
+    #[test]
+    fn catalog_indexes_opaque_definitions_by_leaf_and_module() {
+        let mut catalog = Catalog::default();
+        for index in 0..256 {
+            let source = format!(
+                "module Domain{index}\n@opaque\ntype Type{index} = | Type{index} {{ value: f32 }}\n"
+            );
+            let decls = chelis_surf::parser::parse_str(&source).expect("parse indexed type");
+            collect_surf_decls_catalog(&decls, None, &mut catalog);
+        }
+        for module in ["First.Domain", "Second.Domain"] {
+            let source =
+                format!("module {module}\n@opaque\ntype Shared = | Shared {{ value: f32 }}\n");
+            let decls = chelis_surf::parser::parse_str(&source).expect("parse shared type");
+            collect_surf_decls_catalog(&decls, None, &mut catalog);
+        }
+
+        assert_eq!(catalog.opaque_modules_by_leaf.len(), 257);
+        assert_eq!(catalog.opaque_defining_modules.len(), 258);
+        assert_eq!(
+            catalog
+                .opaque_modules_by_leaf
+                .get("Type173")
+                .expect("leaf index")
+                .to_sorted()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["Domain173"]
+        );
+        assert_eq!(
+            catalog
+                .opaque_modules_by_leaf
+                .get("Shared")
+                .expect("shared leaf index")
+                .len(),
+            2,
+            "same-leaf opaque definitions retain each defining module without a corpus scan"
+        );
     }
 
     // ── CR2-7: module-less files must not share one None shadow bucket ──
@@ -1036,5 +1164,322 @@ def bad(x: f32) -> Secret = Secret { value: x }
             "a named-module @opaque must still catalog and flag the forge; got {violations:?}"
         );
         assert!(violations[0].message.contains("direct record construction"));
+    }
+
+    fn lint_root(root: &Path) -> Vec<Violation> {
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(OpaqueDomainConstruction)];
+        crate::lint(root, &rules).expect("lint root")
+    }
+
+    #[test]
+    fn catalog_ignores_surf_sources_in_every_canonical_skipped_tree() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("spec")).expect("create policy spec dir");
+        std::fs::write(
+            temp.path().join("spec/lint.md"),
+            "# Test lint policy\n\n### 12.2 Traversal exclusions\n",
+        )
+        .expect("write policy spec");
+        std::fs::write(
+            temp.path().join("chelis-lint.toml"),
+            "version = 1\nspec = \"spec/lint.md\"\n\n[[exclude]]\npattern = \"tests/corpus/opaque_invariants/programs/\"\nclass = \"generated\"\ncross_ref = \"§12.2\"\n",
+        )
+        .expect("write repository traversal policy");
+        let skipped = [
+            ("target", "TargetSecret", "target_secret"),
+            (".git", "GitSecret", "git_secret"),
+            ("node_modules", "NodeSecret", "node_secret"),
+            ("__pycache__", "PySecret", "py_secret"),
+            (".venv-issue-603", "VenvSecret", "venv_secret"),
+            (
+                ".claude/worktrees/generated",
+                "WorktreeSecret",
+                "worktree_secret",
+            ),
+            (
+                "tests/corpus/opaque_invariants/programs",
+                "CorpusSecret",
+                "corpus_secret",
+            ),
+        ];
+        let mut agent = String::from("module Agent.Strategy\n");
+        for (index, (directory, type_name, function_name)) in skipped.iter().enumerate() {
+            let directory = temp.path().join(directory);
+            std::fs::create_dir_all(&directory).expect("create skipped directory");
+            std::fs::write(
+                directory.join(format!("opaque_{index}.ch")),
+                format!(
+                    "module Hidden.Types\n@opaque\ntype {type_name} = | {type_name} {{ value: f32 }}\n"
+                ),
+            )
+            .expect("write skipped opaque declaration");
+            agent.push_str(&format!(
+                "def {function_name}(x: f32) -> {type_name} = {type_name} {{ value: x }}\n"
+            ));
+        }
+        std::fs::write(temp.path().join("agent.ch"), agent).expect("write admitted source");
+
+        let violations = lint_root(temp.path());
+        assert!(
+            violations.is_empty(),
+            "skipped Surf declarations must not influence the opaque catalog: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn admitted_surf_declaration_still_contributes_to_catalog() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("whale.ch"),
+            "module Whale.Types\n@opaque\ntype Secret = | Secret { value: f32 }\n",
+        )
+        .expect("write opaque declaration");
+        std::fs::write(
+            temp.path().join("agent.ch"),
+            "module Agent.Strategy\ndef forge(x: f32) -> Secret = Secret { value: x }\n",
+        )
+        .expect("write forge");
+
+        let violations = lint_root(temp.path());
+        assert_eq!(violations.len(), 1, "admitted declaration must catalog");
+        assert!(violations[0].message.contains("direct record construction"));
+    }
+
+    #[test]
+    fn catalog_parses_each_admitted_surf_candidate_once_per_invocation() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("first.ch"), "def first() = 1\n")
+            .expect("write first source");
+        std::fs::write(temp.path().join("second.ch"), "def second() = 2\n")
+            .expect("write second source");
+        std::fs::write(temp.path().join("third.ch"), "def third() = 3\n")
+            .expect("write third source");
+
+        reset_catalog_parse_count();
+        let violations = lint_root(temp.path());
+        assert!(violations.is_empty());
+        assert_eq!(
+            catalog_parse_count(),
+            3,
+            "three admitted Surf candidates must produce three catalog parses, not one corpus parse per checked file"
+        );
+    }
+
+    #[test]
+    fn repeated_lint_invocations_rebuild_opaque_catalog_state() {
+        let temp = tempdir().expect("tempdir");
+        let agent = temp.path().join("agent.ch");
+        let whale = temp.path().join("whale.ch");
+        std::fs::write(
+            &agent,
+            "module Agent.Strategy\ndef forge(x: f32) -> Secret = Secret { value: x }\n",
+        )
+        .expect("write forge");
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(OpaqueDomainConstruction)];
+
+        assert!(
+            crate::lint(temp.path(), &rules)
+                .expect("initial lint")
+                .is_empty()
+        );
+        std::fs::write(
+            &whale,
+            "module Whale.Types\n@opaque\ntype Secret = | Secret { value: f32 }\n",
+        )
+        .expect("add opaque declaration");
+        assert_eq!(
+            crate::lint(temp.path(), &rules)
+                .expect("lint after addition")
+                .len(),
+            1,
+            "later invocation must observe a newly added opaque declaration"
+        );
+        std::fs::write(
+            &whale,
+            "module Whale.Types\n@opaque\ntype RenamedSecret = | RenamedSecret { value: f32 }\n",
+        )
+        .expect("edit opaque declaration");
+        assert!(
+            crate::lint(temp.path(), &rules)
+                .expect("lint after edit")
+                .is_empty(),
+            "later invocation must observe an edited opaque declaration"
+        );
+        std::fs::write(
+            &whale,
+            "module Whale.Types\n@opaque\ntype Secret = | Secret { value: f32 }\n",
+        )
+        .expect("restore opaque declaration");
+        assert_eq!(
+            crate::lint(temp.path(), &rules)
+                .expect("lint after restoring edit")
+                .len(),
+            1,
+            "later invocation must observe a second edit with the same rule objects"
+        );
+        std::fs::remove_file(&whale).expect("remove opaque declaration");
+        assert!(
+            crate::lint(temp.path(), &rules)
+                .expect("lint after removal")
+                .is_empty(),
+            "later invocation must not retain a removed opaque declaration"
+        );
+    }
+
+    #[test]
+    fn invocation_path_preserves_single_file_module_less_and_deep_semantics() {
+        let temp = tempdir().expect("tempdir");
+        let single = temp.path().join("single.ch");
+        std::fs::write(
+            &single,
+            "module Victim.Types\n@opaque\ntype Secret = | Secret { value: f32 }\ndef make_secret(x: f32) -> Secret = Secret { value: x }\n",
+        )
+        .expect("write single-file corpus");
+        assert!(
+            lint_root(&single).is_empty(),
+            "single-file root must catalog itself while allowing defining-module construction"
+        );
+        std::fs::write(
+            temp.path().join("victim.ch"),
+            "module Victim.Types\n@opaque\ntype Local = | Local { value: f32 }\n",
+        )
+        .expect("write module-less parity declaration");
+        std::fs::write(
+            temp.path().join("local.ch"),
+            "type Local = | Local { value: f32 }\ndef make_local(x: f32) -> Local = Local { value: x }\n",
+        )
+        .expect("write module-less local source");
+        std::fs::write(
+            temp.path().join("module_less_forge.ch"),
+            "def forge_local(x: f32) -> Local = Local { value: x }\n",
+        )
+        .expect("write separate module-less forge");
+        std::fs::write(temp.path().join("malformed.ch"), "module ???\n")
+            .expect("write malformed candidate");
+        let root_violations = lint_root(temp.path());
+        assert_eq!(
+            root_violations.len(),
+            1,
+            "one module-less file's local type must not suppress a different module-less file's forge, while defining-module construction, own-file shadow, and malformed candidates remain accepted: {root_violations:?}"
+        );
+        assert!(
+            root_violations[0]
+                .message
+                .contains("direct record construction")
+        );
+        assert_eq!(
+            root_violations[0]
+                .path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("module_less_forge.ch"),
+            "the own-file module-less shadow must be allowed while only the other-file forge is rejected"
+        );
+
+        let deep = temp.path().join("opaque.dp");
+        std::fs::write(
+            &deep,
+            "(module {} victim.types\n  (deftype {opaque: true} Token () (variant {} Token (field {} value (t-prim {} f32)))))\n(module {} agent.strategy\n  (def {} forge (record {} Token (kv {} value (lit {type: (t-prim {} f32)} 1.0)))))\n",
+        )
+        .expect("write Deep source");
+        assert_eq!(
+            lint_root(&deep).len(),
+            1,
+            "Deep checking remains source-local"
+        );
+    }
+
+    #[test]
+    fn empty_catalog_and_malformed_candidates_are_fail_soft_for_multiple_surf_files() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("first.ch"), "def first() = 1\n")
+            .expect("write first source");
+        std::fs::write(temp.path().join("second.ch"), "def second() = 2\n")
+            .expect("write second source");
+        std::fs::write(temp.path().join("malformed.ch"), "module ???\n")
+            .expect("write malformed source");
+
+        reset_catalog_parse_count();
+        let violations = lint_root(temp.path());
+        assert!(
+            violations.is_empty(),
+            "an empty opaque catalog and malformed candidate must remain fail-soft: {violations:?}"
+        );
+        assert_eq!(
+            catalog_parse_count(),
+            3,
+            "every admitted candidate is attempted once even when the catalog remains empty"
+        );
+    }
+
+    #[test]
+    fn malformed_candidate_does_not_hide_another_files_valid_opaque_declaration() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("malformed.ch"), "module ???\n")
+            .expect("write malformed source");
+        std::fs::write(
+            temp.path().join("victim.ch"),
+            "module Victim.Types\n@opaque\ntype Secret = | Secret { value: f32 }\n",
+        )
+        .expect("write valid opaque declaration");
+        let forge = temp.path().join("forge.ch");
+        std::fs::write(
+            &forge,
+            "module Agent.Strategy\ndef forge(x: f32) -> Secret = Secret { value: x }\n",
+        )
+        .expect("write forge");
+
+        let violations = lint_root(temp.path());
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].path, forge);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_surf_candidate_is_fail_soft_without_hiding_valid_catalog_entries() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("tempdir");
+        symlink(
+            temp.path().join("missing-source"),
+            temp.path().join("unreadable.ch"),
+        )
+        .expect("create broken Surf symlink");
+        std::fs::write(
+            temp.path().join("victim.ch"),
+            "module Victim.Types\n@opaque\ntype Secret = | Secret { value: f32 }\n",
+        )
+        .expect("write valid opaque declaration");
+        let forge = temp.path().join("forge.ch");
+        std::fs::write(
+            &forge,
+            "module Agent.Strategy\ndef forge(x: f32) -> Secret = Secret { value: x }\n",
+        )
+        .expect("write forge");
+
+        let violations = lint_root(temp.path());
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].path, forge);
+    }
+
+    #[test]
+    fn deep_checks_ignore_a_prepared_surf_catalog_in_the_same_directory_lint() {
+        let temp = tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("surf_opaque.ch"),
+            "module Victim.Types\n@opaque\ntype Token = | Token { value: f32 }\n",
+        )
+        .expect("write Surf opaque declaration");
+        std::fs::write(
+            temp.path().join("deep_record.dp"),
+            "(module {} agent.strategy\n  (record {} Token (kv {} value (lit {type: (t-prim {} f32)} 1.0))))\n",
+        )
+        .expect("write Deep record without a Deep opaque declaration");
+
+        let violations = lint_root(temp.path());
+        assert!(
+            violations.is_empty(),
+            "Deep checks must not consume the prepared repository-wide Surf catalog: {violations:?}"
+        );
     }
 }

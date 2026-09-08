@@ -276,7 +276,7 @@ fn positional_reduce_on_sole_spread_rejected() {
         check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, int32))\n");
     assert_rejected_with(
         &json,
-        "positional integer axis",
+        "positional axes require a concrete-rank operand",
         "positional sum on a sole ..r spread",
     );
 }
@@ -284,8 +284,9 @@ fn positional_reduce_on_sole_spread_rejected() {
 /// `reshape` (the other op that shares `&tv -> tv` with `relu`) is rejected.
 #[test]
 fn reshape_in_rank_poly_body_rejected() {
-    let json =
-        check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2, 3])\n");
+    let json = check_json(
+        "def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2i64, 3i64])\n",
+    );
     assert_body_discipline_rejected(&json, "reshape", "reshape in ..r body");
 }
 
@@ -301,7 +302,7 @@ fn reshape_in_rank_poly_body_rejected() {
 fn vmap_transform_in_rank_poly_body_rejected() {
     let json = check_json(
         "def inner(x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
-         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner, axis=0)\n",
+         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner)\n",
     );
     assert_rank_rejected(&json, "vmap transform in ..r body");
 }

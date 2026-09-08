@@ -1,4 +1,4 @@
-use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use crate::ast::Expr;
 use crate::lexer::{self, Token, TokenKind};
 use thiserror::Error;
 
@@ -27,6 +27,26 @@ fn forbidden_byte_repr(b: u8) -> String {
         0x0D => "\\r".to_string(),
         other => format!("\\x{other:02x}"),
     }
+}
+
+fn validate_surf_metadata_key(key: &str, offset: usize) -> Result<(), ParseError> {
+    if key.starts_with("surf_")
+        && !matches!(
+            key,
+            "surf_path"
+                | "surf_dim_group_size"
+                | "surf_pipe_stage"
+                | "surf_literal_style"
+                | "surf_binding_type"
+        )
+    {
+        return Err(ParseError::Expected {
+            expected: "a key in the closed Surf metadata namespace (`surf_path`, `surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, or `surf_binding_type`)".to_string(),
+            found: key.to_string(),
+            offset,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -69,12 +89,18 @@ pub enum ParseError {
     },
 }
 
-struct Parser<'a> {
+// ═══════════════════════════════════════════════════════════════════
+// Raw parser: emits RawExpr (untyped, no tag decode, no role gate)
+// ═══════════════════════════════════════════════════════════════════
+
+use crate::raw::{RawAtom, RawExpr};
+
+struct RawParser<'a> {
     tokens: &'a [Token],
     pos: usize,
 }
 
-impl<'a> Parser<'a> {
+impl<'a> RawParser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
         Self { tokens, pos: 0 }
     }
@@ -91,7 +117,6 @@ impl<'a> Parser<'a> {
         tok
     }
 
-    /// Current byte offset for error reporting (uses last token end if at EOF).
     fn current_offset(&self) -> usize {
         if let Some(tok) = self.tokens.get(self.pos) {
             tok.span.offset
@@ -123,7 +148,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_exprs(&mut self) -> Result<Vec<Expr>, ParseError> {
+    fn parse_exprs(&mut self) -> Result<Vec<RawExpr>, ParseError> {
         let mut exprs = Vec::new();
         while self.peek().is_some() {
             exprs.push(self.parse_expr()?);
@@ -131,7 +156,7 @@ impl<'a> Parser<'a> {
         Ok(exprs)
     }
 
-    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+    fn parse_expr(&mut self) -> Result<RawExpr, ParseError> {
         let tok = self.peek().ok_or(ParseError::UnexpectedEof {
             offset: self.current_offset(),
         })?;
@@ -154,29 +179,34 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+    fn parse_atom(&mut self) -> Result<RawExpr, ParseError> {
         let offset = self.current_offset();
         let tok = self.advance().ok_or(ParseError::UnexpectedEof { offset })?;
         let span = tok.span;
         let atom = match &tok.kind {
-            TokenKind::Symbol(s) => Atom::Symbol(s.clone()),
-            TokenKind::Int(n) => Atom::Int(*n),
-            TokenKind::Float(f) => Atom::Float(*f),
-            // Typed-suffix literals (spec/03-deep-syntax.md §6.4.1): the
-            // producer-friendly shape `(lit {} 1.0f64)` is canonicalized
-            // into `(lit {type: (t-prim {} f64)} 1.0)`. When a typed
-            // suffix appears as a bare atom, expand it into a synthetic
-            // `(lit {type: ...} N)` list so the type checker sees the
-            // suffix as an explicit type ascription.
+            TokenKind::Symbol(s) => RawAtom::Symbol(s.clone()),
+            TokenKind::Int(n) => RawAtom::Int(*n),
+            TokenKind::Float(f) => RawAtom::Float(*f),
             TokenKind::TypedInt(n, suffix) => {
-                return Ok(typed_literal_lit_expr(Atom::Int(*n), *suffix, span));
+                return Ok(raw_typed_literal_lit_expr(RawAtom::Int(*n), *suffix, span));
             }
             TokenKind::TypedFloat(f, suffix) => {
-                return Ok(typed_literal_lit_expr(Atom::Float(*f), *suffix, span));
+                return Ok(raw_typed_literal_lit_expr(
+                    RawAtom::Float(*f),
+                    *suffix,
+                    span,
+                ));
             }
-            TokenKind::Str(s) => Atom::Str(s.clone()),
-            TokenKind::Keyword(k) => Atom::Keyword(k.clone()),
-            TokenKind::Bool(b) => Atom::Bool(*b),
+            TokenKind::Str(s) => RawAtom::Str(s.clone()),
+            TokenKind::Keyword(_) => {
+                return Err(ParseError::Expected {
+                    expected: "expression (bare :keyword is valid only as a metadata map key)"
+                        .to_string(),
+                    found: format!("{:?}", tok.kind),
+                    offset: span.offset,
+                });
+            }
+            TokenKind::Bool(b) => RawAtom::Bool(*b),
             other => {
                 return Err(ParseError::Expected {
                     expected: "atom".to_string(),
@@ -185,24 +215,18 @@ impl<'a> Parser<'a> {
                 });
             }
         };
-        Ok(Expr::Atom(atom, span))
+        Ok(RawExpr::Atom(atom, span))
     }
 
-    fn parse_list(&mut self) -> Result<Expr, ParseError> {
-        let lparen = self.advance().unwrap(); // consume '('
+    fn parse_list(&mut self) -> Result<RawExpr, ParseError> {
+        let lparen = self.advance().unwrap();
         let start_span = lparen.span;
 
-        // Check for empty list — now allowed (e.g., () as empty guard)
         if let Some(tok) = self.peek() {
             if tok.kind == TokenKind::RParen {
                 let end_span = tok.span;
                 self.advance();
-                return Ok(Expr::List(
-                    List {
-                        elements: Vec::new(),
-                    },
-                    start_span.merge(end_span),
-                ));
+                return Ok(RawExpr::List(Vec::new(), start_span.merge(end_span)));
             }
         } else {
             return Err(ParseError::UnexpectedEof {
@@ -210,41 +234,50 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // Read all elements until ')'
         let mut elements = Vec::new();
+        let mut third_child_was_typed_literal_token = false;
         loop {
             let tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
             })?;
             if tok.kind == TokenKind::RParen {
                 let end_span = tok.span;
-                self.advance(); // consume ')'
+                self.advance();
                 let full_span = start_span.merge(end_span);
-                return Ok(Expr::List(List { elements }, full_span));
+                return Ok(normalize_typed_literal_wrapper(
+                    elements,
+                    full_span,
+                    third_child_was_typed_literal_token,
+                ));
             }
+            let is_typed_literal_token = matches!(
+                &tok.kind,
+                TokenKind::TypedInt(..) | TokenKind::TypedFloat(..)
+            );
+            let child_index = elements.len();
             elements.push(self.parse_expr()?);
+            if child_index == 2 && is_typed_literal_token {
+                third_child_was_typed_literal_token = true;
+            }
         }
     }
 
-    fn parse_meta_expr(&mut self) -> Result<Expr, ParseError> {
-        let caret = self.advance().unwrap(); // consume '^'
+    fn parse_meta_expr(&mut self) -> Result<RawExpr, ParseError> {
+        let caret = self.advance().unwrap();
         let start_span = caret.span;
 
-        // Expect '{'
         self.expect(&TokenKind::LBrace)?;
 
-        // Read key-value pairs until '}'
         let mut entries = Vec::new();
         loop {
             let tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
             })?;
             if tok.kind == TokenKind::RBrace {
-                self.advance(); // consume '}'
+                self.advance();
                 break;
             }
 
-            // Key must be a keyword
             let key_offset = self.current_offset();
             let key_tok = self
                 .advance()
@@ -259,16 +292,13 @@ impl<'a> Parser<'a> {
                     });
                 }
             };
+            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
-            // Value is any expression
             let value = self.parse_expr()?;
 
-            // Span-charset enforcement (spec §1.1.1): same rule as in
-            // `parse_map`, applied to the legacy `^{:span "..."}` prefix
-            // metadata form so producers cannot bypass the forbidden-char
-            // check via this entry point.
+            // Span-charset enforcement (spec §1.1.1)
             if key == "span"
-                && let Expr::Atom(Atom::Str(s), value_span) = &value
+                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
                 && let Some((idx, b)) = s
                     .as_bytes()
                     .iter()
@@ -287,31 +317,27 @@ impl<'a> Parser<'a> {
             entries.push((key, value));
         }
 
-        // Parse the annotated expression
         let expr = self.parse_expr()?;
         let end_span = expr.span();
         let full_span = start_span.merge(end_span);
 
-        Ok(Expr::MetaExpr(
-            MetaExpr {
-                entries,
-                expr: Box::new(expr),
-            },
-            full_span,
-        ))
+        Ok(RawExpr::MetaExpr {
+            entries,
+            expr: Box::new(expr),
+            span: full_span,
+        })
     }
 
-    fn parse_map(&mut self) -> Result<Expr, ParseError> {
-        let lbrace = self.advance().unwrap(); // consume '{'
+    fn parse_map(&mut self) -> Result<RawExpr, ParseError> {
+        let lbrace = self.advance().unwrap();
         let start_span = lbrace.span;
 
-        // Check for empty map
         if let Some(tok) = self.peek()
             && tok.kind == TokenKind::RBrace
         {
             let end_span = tok.span;
             self.advance();
-            return Ok(Expr::Map(MetaMap::default(), start_span.merge(end_span)));
+            return Ok(RawExpr::Map(Vec::new(), start_span.merge(end_span)));
         }
 
         let mut entries = Vec::new();
@@ -322,10 +348,9 @@ impl<'a> Parser<'a> {
             if tok.kind == TokenKind::RBrace {
                 let end_span = tok.span;
                 self.advance();
-                return Ok(Expr::Map(MetaMap { entries }, start_span.merge(end_span)));
+                return Ok(RawExpr::Map(entries, start_span.merge(end_span)));
             }
 
-            // Key: a symbol
             let key_offset = self.current_offset();
             let key_tok = self
                 .advance()
@@ -340,8 +365,8 @@ impl<'a> Parser<'a> {
                     });
                 }
             };
+            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
-            // Expect ':'
             let colon_tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
             })?;
@@ -358,17 +383,11 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            // Value: any expression
             let value = self.parse_expr()?;
 
-            // Span-charset enforcement (spec §1.1.1): when the key is
-            // `span` and the value is a string atom, reject any forbidden
-            // ASCII control character. The constraint exists so backend
-            // emitters can interpolate spans into `//` line comments
-            // without a forbidden byte (notably `\n`) terminating the
-            // comment and turning the rest of the value into live code.
+            // Span-charset enforcement (spec §1.1.1)
             if key == "span"
-                && let Expr::Atom(Atom::Str(s), value_span) = &value
+                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
                 && let Some((idx, b)) = s
                     .as_bytes()
                     .iter()
@@ -386,7 +405,6 @@ impl<'a> Parser<'a> {
 
             entries.push((key, value));
 
-            // Optional comma between entries
             if let Some(tok) = self.peek()
                 && tok.kind == TokenKind::Comma
             {
@@ -396,287 +414,285 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Collapse the producer-friendly shape `(lit {meta} <typed-lit>)` (where
-/// `<typed-lit>` is the synthetic node created by `typed_literal_lit_expr`
-/// from a suffixed literal token) into the canonical
-/// `(lit {meta + type: ...} <value>)` form per `spec/03-deep-syntax.md`
-/// §6.4.1.
-///
-/// Errors when the outer `lit` already carries a `type` metadata key that
-/// disagrees with the suffix; the suffix is the user-facing intent and
-/// silent overwrite would violate the "no implicit precision promotion"
-/// rule.
-///
-/// Performance note: this is called only on `lit`-tagged lists (the
-/// caller pre-filters), so the per-call cost is bounded. Marked
-/// `#[inline(never)]` so the parse_list hot path keeps a small stack
-/// frame and the deep-recursion test (1000 nested apps) does not bloat.
-#[inline(never)]
-fn collapse_typed_literal_lit(list: List, span: crate::Span) -> Result<List, ParseError> {
-    // Cheap pre-checks: must be exactly 3 elements, tag must be `lit`,
-    // child must itself be a synthetic typed-`lit` of the exact shape
-    // `typed_literal_lit_expr` produces.
-    if list.elements.len() != 3 {
-        return Ok(list);
-    }
-    let is_outer_lit = matches!(
-        &list.elements[0],
-        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
-    );
-    if !is_outer_lit {
-        return Ok(list);
-    }
-    let outer_is_map = matches!(&list.elements[1], Expr::Map(_, _));
-    if !outer_is_map {
-        return Ok(list);
-    }
-    let inner_list = match &list.elements[2] {
-        Expr::List(inner, _) => inner,
-        _ => return Ok(list),
-    };
-    if inner_list.elements.len() != 3 {
-        return Ok(list);
-    }
-    let inner_is_lit = matches!(
-        &inner_list.elements[0],
-        Expr::Atom(Atom::Symbol(s), _) if s == "lit"
-    );
-    if !inner_is_lit {
-        return Ok(list);
-    }
-    let inner_meta = match &inner_list.elements[1] {
-        Expr::Map(m, _) => m,
-        _ => return Ok(list),
-    };
-    // Inner must carry exactly the synthetic single `type` key our
-    // `typed_literal_lit_expr` produces. Be conservative: only collapse
-    // when the inner meta is exactly one `type: (t-prim {} <prim>)` entry
-    // and the inner child is an `Atom::Int` or `Atom::Float`.
-    if inner_meta.entries.len() != 1 || inner_meta.entries[0].0 != "type" {
-        return Ok(list);
-    }
-    let inner_type_ok = matches!(
-        &inner_meta.entries[0].1,
-        Expr::List(t_prim_list, _)
-            if t_prim_list.elements.len() == 3
-                && matches!(
-                    &t_prim_list.elements[0],
-                    Expr::Atom(Atom::Symbol(s), _) if s == "t-prim"
-                )
-    );
-    if !inner_type_ok {
-        return Ok(list);
-    }
-    if !matches!(
-        &inner_list.elements[2],
-        Expr::Atom(Atom::Int(_) | Atom::Float(_), _)
-    ) {
-        return Ok(list);
-    }
-
-    // Committed to collapsing — destructure to take ownership without
-    // cloning the deep subtree.
-    let mut iter = list.elements.into_iter();
-    let outer_tag = iter.next().expect("checked above");
-    let outer_meta_expr = iter.next().expect("checked above");
-    let inner_expr = iter.next().expect("checked above");
-    let outer_meta = match outer_meta_expr {
-        Expr::Map(m, _) => m,
-        _ => unreachable!("checked above"),
-    };
-    let inner_list = match inner_expr {
-        Expr::List(l, _) => l,
-        _ => unreachable!("checked above"),
-    };
-    let mut inner_iter = inner_list.elements.into_iter();
-    let _inner_tag = inner_iter.next();
-    let inner_meta_expr = inner_iter.next();
-    let inner_value = inner_iter.next().expect("checked above");
-    let inner_meta = match inner_meta_expr {
-        Some(Expr::Map(m, _)) => m,
-        _ => unreachable!("checked above"),
-    };
-    let inner_type_owned = inner_meta
-        .entries
-        .into_iter()
-        .next()
-        .expect("checked above")
-        .1;
-
-    // If the outer already declares a `type`, it must match the inner
-    // synthetic type exactly. A mismatch is a parse error per the
-    // no-implicit-promotion rule.
-    if let Some((_, outer_type_expr)) = outer_meta.entries.iter().find(|(k, _)| k == "type") {
-        if *outer_type_expr != inner_type_owned {
-            return Err(ParseError::Expected {
-                expected: "consistent literal type (outer `lit` declares one type but \
-                     inner suffix declares another); see spec/03-deep-syntax.md §6.4.1"
-                    .to_string(),
-                found: "conflicting type metadata in nested `lit`".to_string(),
-                offset: span.offset,
-            });
-        }
-        // Outer already has a matching type entry; just unwrap.
-        return Ok(List {
-            elements: vec![outer_tag, Expr::Map(outer_meta, span), inner_value],
-        });
-    }
-    // Merge: extend outer entries with the synthetic `type` entry.
-    let mut merged_entries = outer_meta.entries;
-    merged_entries.push(("type".to_string(), inner_type_owned));
-    Ok(List {
-        elements: vec![
-            outer_tag,
-            Expr::Map(
-                MetaMap {
-                    entries: merged_entries,
-                },
-                span,
-            ),
-            inner_value,
-        ],
-    })
-}
-
-/// Build the canonical Deep `lit`-with-type-metadata expression for a
-/// suffixed literal token per `spec/03-deep-syntax.md` §6.4.1. The
-/// producer-friendly bare `1.0f64` token expands into
-/// `(lit {type: (t-prim {} f64)} 1.0)` so the type checker sees the
-/// suffix as an explicit type ascription.
-fn typed_literal_lit_expr(value: Atom, suffix: lexer::LiteralSuffix, span: crate::Span) -> Expr {
+/// Build a raw typed-literal `(lit {type: (t-prim {} <prim>)} <value>)` for
+/// suffixed literal tokens, mirroring `typed_literal_lit_expr` but in the
+/// `RawExpr` domain.
+fn raw_typed_literal_lit_expr(
+    value: RawAtom,
+    suffix: lexer::LiteralSuffix,
+    span: crate::Span,
+) -> RawExpr {
     let prim_name = suffix.t_prim_name();
-    // (t-prim {} <prim_name>)
-    let t_prim = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Symbol("t-prim".to_string()), span),
-                Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Symbol(prim_name.to_string()), span),
-            ],
-        },
+    let integer_spelled_float =
+        matches!(value, RawAtom::Int(_)) && matches!(prim_name, "f32" | "f64" | "bf16" | "f16");
+    let t_prim = RawExpr::List(
+        vec![
+            RawExpr::Atom(RawAtom::Symbol("t-prim".to_string()), span),
+            RawExpr::Map(vec![], span),
+            RawExpr::Atom(RawAtom::Symbol(prim_name.to_string()), span),
+        ],
         span,
     );
-    let meta = Expr::Map(
-        MetaMap {
-            entries: vec![("type".to_string(), t_prim)],
-        },
-        span,
-    );
-    // (lit {type: (t-prim {} <prim_name>)} <value>)
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Symbol("lit".to_string()), span),
-                meta,
-                Expr::Atom(value, span),
-            ],
-        },
+    let mut entries = vec![("type".to_string(), t_prim)];
+    if integer_spelled_float {
+        // Retain the exact i64 payload until target-width finalization. Turning
+        // it into f64 here can double-round f32/f16/bf16 literals above 2^53.
+        entries.push((
+            "literal_source".to_string(),
+            RawExpr::Atom(RawAtom::Symbol("integer".to_string()), span),
+        ));
+    }
+    let meta = RawExpr::Map(entries, span);
+    RawExpr::List(
+        vec![
+            RawExpr::Atom(RawAtom::Symbol("lit".to_string()), span),
+            meta,
+            RawExpr::Atom(value, span),
+        ],
         span,
     )
 }
 
-/// Walk the parsed tree and apply `collapse_typed_literal_lit` to every
-/// `lit`-tagged list. Done as a post-pass so it does not bloat the
-/// `parse_list` stack frame on the deep-recursion hot path.
+/// A suffixed TOKEN already expands to a complete typed `lit`. When that token
+/// appears in the producer-friendly spelling `(lit {} 7f32)`, avoid leaving
+/// the expansion nested as the outer literal's value. The token-origin bit is
+/// essential: after parsing, a hand-authored nested `(lit {} (lit ...))` has
+/// the same tree shape and must remain malformed input for the checker.
+fn normalize_typed_literal_wrapper(
+    elements: Vec<RawExpr>,
+    span: crate::Span,
+    third_child_was_typed_literal_token: bool,
+) -> RawExpr {
+    if !third_child_was_typed_literal_token {
+        return RawExpr::List(elements, span);
+    }
+    let expanded = match elements.as_slice() {
+        [
+            RawExpr::Atom(RawAtom::Symbol(outer_tag), _),
+            RawExpr::Map(outer_meta, _),
+            RawExpr::List(inner, _),
+        ] if outer_tag == "lit" && outer_meta.is_empty() => inner,
+        _ => return RawExpr::List(elements, span),
+    };
+
+    let is_typed_literal_expansion = matches!(
+        expanded.as_slice(),
+        [
+            RawExpr::Atom(RawAtom::Symbol(inner_tag), _),
+            RawExpr::Map(inner_meta, _),
+            RawExpr::Atom(_, _),
+        ] if inner_tag == "lit" && inner_meta.iter().any(|(key, _)| key == "type")
+    );
+
+    if is_typed_literal_expansion {
+        RawExpr::List(expanded.to_vec(), span)
+    } else {
+        RawExpr::List(elements, span)
+    }
+}
+
+/// Parse a token stream into raw (untyped) expressions.
 ///
-/// Implemented as an explicit work-stack iteration rather than a
-/// recursive walk. This is foundational: the iterative collapse keeps
-/// the post-pass's stack growth O(1) per AST level, so the post-pass
-/// does not stack on top of the (already-recursive) `parse_list` and
-/// `print_canonical` walks for deeply-nested inputs (e.g. the
-/// 1000-nested-apps regression test). The previous recursive
-/// implementation pushed total stack use over the macOS Smoke CI
-/// thread-stack budget at depth ~1000.
-fn normalize_typed_literals(exprs: &mut [Expr]) -> Result<(), ParseError> {
-    for expr in exprs {
-        normalize_typed_literals_in_expr(expr)?;
-    }
-    Ok(())
-}
-
-fn normalize_typed_literals_in_expr(expr: &mut Expr) -> Result<(), ParseError> {
-    // Iterative post-order traversal: each work item is a raw pointer to
-    // an `Expr` along with a visited flag. On first visit we push the
-    // node back as visited and then push all of its children (so they
-    // are processed before we revisit the parent). On second visit we
-    // apply the per-node collapse, by which point every descendant has
-    // already been normalized — matching the post-order semantics of
-    // the prior recursive walk.
-    //
-    // Safety: we hold a unique `&mut Expr` borrow at entry and the only
-    // mutation we perform on a node is via `mem::replace` on the inner
-    // `List` of an `Expr::List` variant (the enum tag stays `List`, and
-    // the parent's Vec slot that addresses this node is not touched).
-    // Pointers to descendants are only used for their initial visit and
-    // their post-order revisit, both of which are scheduled before any
-    // ancestor mutation. After an ancestor's collapse runs, no pointers
-    // into that ancestor's subtree remain on the stack.
-    let mut stack: Vec<(*mut Expr, bool)> = Vec::new();
-    stack.push((expr as *mut Expr, false));
-
-    while let Some((ptr, visited)) = stack.pop() {
-        // SAFETY: the pointer was derived from a unique `&mut Expr` we
-        // own for the duration of this function. No aliasing borrows
-        // exist; no ancestor mutation has invalidated the slot (see the
-        // post-order argument above).
-        let node = unsafe { &mut *ptr };
-        if !visited {
-            // Re-enqueue self for post-order processing, then enqueue
-            // children for pre-order descent.
-            stack.push((ptr, true));
-            match node {
-                Expr::List(list, _) => {
-                    for child in list.elements.iter_mut() {
-                        stack.push((child as *mut Expr, false));
-                    }
-                }
-                Expr::Map(map, _) => {
-                    for (_, v) in map.entries.iter_mut() {
-                        stack.push((v as *mut Expr, false));
-                    }
-                }
-                Expr::MetaExpr(me, _) => {
-                    stack.push((&mut *me.expr as *mut Expr, false));
-                    for (_, v) in me.entries.iter_mut() {
-                        stack.push((v as *mut Expr, false));
-                    }
-                }
-                Expr::Atom(_, _) => {}
-            }
-        } else if let Expr::List(list, span) = node {
-            // All descendants already normalized. Check shape and
-            // collapse if applicable.
-            let needs_collapse = list.elements.len() == 3
-                && matches!(
-                    &list.elements[0],
-                    Expr::Atom(Atom::Symbol(s), _) if s == "lit"
-                );
-            if needs_collapse {
-                let span_copy = *span;
-                let taken = std::mem::replace(
-                    list,
-                    List {
-                        elements: Vec::new(),
-                    },
-                );
-                *list = collapse_typed_literal_lit(taken, span_copy)?;
-            }
-        }
-        // Atoms, Maps, and MetaExprs need no per-node action on the
-        // post-order revisit; their children have been handled above.
-    }
-    Ok(())
-}
-
-/// Parse a token stream into a list of expressions.
+/// Parse a token stream into a list of typed expressions.
+///
+/// Routes through the raw parser + `stamp_to_typed` pipeline. All production
+/// goes through `RawParser` → `stamp_to_typed`, which produces `Expr::Node`,
+/// `Expr::BareList`, and `Expr::UnknownForm`.
 pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
-    let mut parser = Parser::new(tokens);
-    let mut exprs = parser.parse_exprs()?;
-    normalize_typed_literals(&mut exprs)?;
-    Ok(exprs)
+    let raw_exprs = parse_raw(tokens)?;
+    let typed = crate::stamp_to_typed::stamp_exprs_lenient(raw_exprs).map_err(|e| {
+        ParseError::Expected {
+            expected: "valid Deep structure".to_string(),
+            found: format!("{e}"),
+            offset: 0,
+        }
+    })?;
+    Ok(typed)
+}
+
+/// Decode-once stamping for hand-built `Expr::List` trees in tests.
+///
+/// **DEPRECATED**: Only needed by test code that manually constructs
+/// `Expr::List`. New test code should use `Expr::node()` or parse via
+/// `parse_str()` instead.
+pub fn stamp_tags(exprs: &mut [Expr]) {
+    use crate::ast::Atom;
+    fn stamp(expr: &mut Expr) {
+        match expr {
+            Expr::List(list, _) => {
+                if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
+                    && let Atom::Name(symbol) = &*atom
+                    && let Some(tag) = crate::tag::DeepTag::parse(symbol)
+                {
+                    *atom = Atom::Tag(tag);
+                }
+                for child in list.elements.iter_mut() {
+                    stamp(child);
+                }
+            }
+            Expr::Map(map, _) => {
+                for (_, value) in map.entries.iter_mut() {
+                    stamp(value);
+                }
+            }
+            Expr::MetaExpr(meta, _) => {
+                stamp(&mut meta.expr);
+                for (_, value) in meta.entries.iter_mut() {
+                    stamp(value);
+                }
+            }
+            Expr::Atom(_, _) => {}
+            Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+        }
+    }
+    for expr in exprs.iter_mut() {
+        stamp(expr);
+    }
+}
+
+/// The raw parser mirrors the typed parser but constructs `RawExpr`/`RawAtom`
+/// instead of `Expr`/`Atom`. No tag stamping, no typed-literal collapse.
+pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
+    let mut parser = RawParser::new(tokens);
+    parser.parse_exprs()
+}
+
+/// Parse a source string into raw expressions (lex + parse_raw).
+pub fn parse_raw_str(source: &str) -> Result<Vec<RawExpr>, ParseError> {
+    let tokens = lexer::lex(source)?;
+    parse_raw(&tokens)
+}
+
+/// Error from `parse_and_stamp` — wraps both parse errors and stamp errors.
+#[derive(Debug)]
+pub enum StampOrParseError {
+    Parse(ParseError),
+    Stamp(crate::stamp_to_typed::StampError),
+}
+
+impl std::fmt::Display for StampOrParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StampOrParseError::Parse(e) => write!(f, "parse error: {e}"),
+            StampOrParseError::Stamp(e) => write!(f, "stamp error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for StampOrParseError {}
+
+impl From<ParseError> for StampOrParseError {
+    fn from(e: ParseError) -> Self {
+        StampOrParseError::Parse(e)
+    }
+}
+
+impl From<crate::stamp_to_typed::StampError> for StampOrParseError {
+    fn from(e: crate::stamp_to_typed::StampError) -> Self {
+        StampOrParseError::Stamp(e)
+    }
+}
+
+/// Lex, parse to `RawExpr`, then stamp via `stamp_to_typed` to produce
+/// typed `Expr` nodes. This is the preferred entry point for new code
+/// that wants the role-directed AST.
+///
+/// Every top-level form must be a *declaration*: this is the entry point for
+/// a declaration-bundle fragment (`new_decls`, a replacement `defsig`), not
+/// for a whole `.dp` file. Use [`parse_and_stamp_file`] when a top-level
+/// `(module ...)` wrapper is also admissible.
+pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_to_typed(raw_exprs)?;
+    Ok(typed)
+}
+
+/// Lex, parse, then stamp via `stamp_deep_file` — the entry point for `.dp`
+/// file ingestion. Accepts both a single top-level `(module ...)` and bare
+/// declarations.
+pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
+        // [03-PROG-3] puts the zero-form rejection at the position where a
+        // top-level form was required, the end of the input.
+        // `stamp_deep_file` sees only the form vector, so the byte offset is
+        // supplied here, where the source text is in hand.
+        if matches!(
+            error.kind,
+            crate::stamp_to_typed::StampErrorKind::EmptyProgram
+        ) {
+            error.span = crate::span::Span::new(source.len(), 0);
+        }
+        error
+    })?;
+    Ok(typed)
+}
+
+/// Lex, parse, then stamp every top-level form as a RuntimeExpr
+/// (chelis#1088).
+///
+/// The role-directed ingress for an *expression* text fragment. A bare name
+/// is rejected here exactly as it would be inside a declaration body, so a
+/// caller that accepts an expression from outside the process never has to
+/// re-diagnose an untyped `Atom::Name`.
+pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_runtime_exprs(raw_exprs)?;
+    Ok(typed)
+}
+
+/// Lex, parse, then stamp exactly one expression in a type position.
+///
+/// This is the role-directed ingress for a serialized type representation.
+/// Type syntax is closed: a list whose head is not a type-vocabulary tag is
+/// rejected rather than retained as an untyped bare list.
+pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let mut raw_exprs = parse_raw(&tokens)?;
+    if raw_exprs.len() != 1 {
+        return Err(ParseError::Expected {
+            expected: "exactly one type expression".to_string(),
+            found: format!("{} top-level expressions", raw_exprs.len()),
+            offset: source.len(),
+        }
+        .into());
+    }
+    Ok(crate::stamp_to_typed::stamp_serialized_type(
+        raw_exprs.pop().expect("length checked above"),
+    )?)
+}
+
+/// Lex, parse, then require every top-level form to carry `expected` as its
+/// head tag (chelis#1088).
+///
+/// The role-directed ingress for a text fragment whose contract names one
+/// exact Deep tag, such as a replacement `(params {} ...)`.
+pub fn parse_and_stamp_tagged(
+    source: &str,
+    expected: crate::tag::DeepTag,
+) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_as_tagged(raw_exprs, expected)?;
+    Ok(typed)
 }
 
 /// Convenience: lex and parse a source string in one step.
+///
+/// **Not an ingress boundary** (chelis#1088). Every top-level form is
+/// stamped as a bare/syntax position, with no declaration requirement, so a
+/// top-level non-declaration reaches the caller as an `Expr::BareList` or
+/// `Expr::Atom`. That is the weaker of the two strengths this repository
+/// used to run side by side. A public text boundary uses the role-directed
+/// entry point that names what it actually accepts: [`parse_and_stamp_file`]
+/// for a `.dp` program, [`parse_and_stamp`] for a declaration bundle,
+/// [`parse_and_stamp_runtime_exprs`] for an expression, or
+/// [`parse_and_stamp_type`] for one type, or [`parse_and_stamp_tagged`] for
+/// one named tag. This spelling survives for
+/// in-crate fixtures that build a fragment in no particular role.
 pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
     let exprs = parse(&tokens)?;
@@ -685,6 +701,13 @@ pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
 
 /// Strict parse: lex, parse, then validate tag vocabulary.
 /// Returns error if any unknown tags are found.
+///
+/// **Not an ingress boundary** (chelis#1088). "Strict" here means the tag
+/// vocabulary only: the top-level stamp is [`parse_str`]'s lenient one, so
+/// this admits a top-level non-declaration too. See [`parse_str`] for the
+/// role-directed entry point to use instead; a caller that wants the
+/// vocabulary sweep as well runs `crate::validate::validate` over the
+/// stamped result.
 pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
     let exprs = parse(&tokens)?;
@@ -731,6 +754,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_suffixed_literal_inside_explicit_lit_without_nesting() {
+        let exprs = p("(lit {} 7f32)");
+        match &exprs[0] {
+            Expr::Node(node, _) => {
+                assert_eq!(node.tag(), crate::tag::DeepTag::Lit);
+                assert_eq!(node.child_count(), 1);
+                assert!(matches!(
+                    node.children_slice()[0],
+                    Expr::Atom(Atom::Int(7), _)
+                ));
+                assert!(node.meta().entries.iter().any(|(key, _)| key == "type"));
+                assert!(node.meta().entries.iter().any(|(key, value)| {
+                    key == "literal_source"
+                        && matches!(value, Expr::Atom(Atom::Name(name), _) if name == "integer")
+                }));
+            }
+            other => panic!("expected lit Node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hand_authored_nested_typed_lit_is_not_token_normalized() {
+        let exprs = p("(lit {} (lit {type: (t-prim {} f32)} 7.5))");
+        match &exprs[0] {
+            Expr::Node(outer, _) => {
+                assert_eq!(outer.tag(), crate::tag::DeepTag::Lit);
+                assert_eq!(outer.child_count(), 1);
+                assert!(
+                    matches!(&outer.children_slice()[0], Expr::Node(inner, _) if inner.tag() == crate::tag::DeepTag::Lit),
+                    "a hand-authored nested lit must remain malformed input for the checker"
+                );
+            }
+            other => panic!("expected outer lit Node, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_string() {
         let exprs = p(r#""hello""#);
         match &exprs[0] {
@@ -743,18 +803,19 @@ mod tests {
     fn parse_symbol() {
         let exprs = p("foo");
         match &exprs[0] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
+            Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "foo"),
             other => panic!("expected Symbol, got {:?}", other),
         }
     }
 
     #[test]
-    fn parse_keyword() {
-        let exprs = p(":axis");
-        match &exprs[0] {
-            Expr::Atom(Atom::Keyword(k), _) => assert_eq!(k, "axis"),
-            other => panic!("expected Keyword, got {:?}", other),
-        }
+    fn parse_bare_keyword_is_error() {
+        let err = parse_str(":axis")
+            .expect_err("bare :keyword outside metadata map must be a parse error");
+        assert_eq!(
+            err.to_string(),
+            "expected expression (bare :keyword is valid only as a metadata map key), found Keyword(\"axis\") at byte 0"
+        );
     }
 
     #[test]
@@ -775,41 +836,42 @@ mod tests {
 
     #[test]
     fn parse_simple_list() {
+        // `add` is not in the closed vocabulary, so this becomes a BareList.
         let exprs = p("(add 1 2)");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 3);
-                match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+            Expr::BareList(elems, _) => {
+                assert_eq!(elems.len(), 3);
+                match &elems[0] {
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                     other => panic!("expected Symbol(add), got {:?}", other),
                 }
-                match &list.elements[1] {
+                match &elems[1] {
                     Expr::Atom(Atom::Int(1), _) => {}
                     other => panic!("expected Int(1), got {:?}", other),
                 }
-                match &list.elements[2] {
+                match &elems[2] {
                     Expr::Atom(Atom::Int(2), _) => {}
                     other => panic!("expected Int(2), got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
     }
 
     #[test]
     fn parse_list_no_children() {
-        // A list with just a tag and no children is valid.
+        // `nop` is not in the closed vocabulary, so a single-element list becomes BareList.
         let exprs = p("(nop)");
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 1);
-                match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "nop"),
+            Expr::BareList(elems, _) => {
+                assert_eq!(elems.len(), 1);
+                match &elems[0] {
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "nop"),
                     other => panic!("expected Symbol(nop), got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
     }
 
@@ -819,29 +881,23 @@ mod tests {
         let exprs = p("(def {} f (fn {} (params {} x) (var {} x)))");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 4); // def, {}, f, (fn ...)
-                match &list.elements[0] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "def"),
-                    other => panic!("expected Symbol(def), got {:?}", other),
-                }
-                match &list.elements[1] {
-                    Expr::Map(m, _) => assert!(m.entries.is_empty()),
-                    other => panic!("expected empty Map, got {:?}", other),
-                }
-                match &list.elements[2] {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f"),
+            Expr::Node(node, _) => {
+                assert_eq!(node.tag(), crate::tag::DeepTag::Def);
+                assert!(node.meta().entries.is_empty());
+                // Def has 2 children: the name binder and the (fn ...) node
+                assert_eq!(node.child_count(), 2);
+                match &node.children_slice()[0] {
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f"),
                     other => panic!("expected Symbol(f), got {:?}", other),
                 }
-                match &list.elements[3] {
-                    Expr::List(func, _) => match &func.elements[0] {
-                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "fn"),
-                        other => panic!("expected Symbol(fn), got {:?}", other),
-                    },
-                    other => panic!("expected fn list, got {:?}", other),
+                match &node.children_slice()[1] {
+                    Expr::Node(fn_node, _) => {
+                        assert_eq!(fn_node.tag(), crate::tag::DeepTag::Fn);
+                    }
+                    other => panic!("expected fn Node, got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected Node, got {:?}", other),
         }
     }
 
@@ -856,11 +912,11 @@ mod tests {
                 assert_eq!(meta.entries.len(), 1);
                 assert_eq!(meta.entries[0].0, "type");
                 match &meta.entries[0].1 {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "f32"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f32"),
                     other => panic!("expected Symbol(f32), got {:?}", other),
                 }
                 match meta.expr.as_ref() {
-                    Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "x"),
+                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "x"),
                     other => panic!("expected Symbol(x), got {:?}", other),
                 }
             }
@@ -878,11 +934,11 @@ mod tests {
                 assert_eq!(meta.entries[0].0, "type");
                 assert_eq!(meta.entries[1].0, "pure");
                 match meta.expr.as_ref() {
-                    Expr::List(list, _) => match &list.elements[0] {
-                        Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+                    Expr::BareList(elems, _) => match &elems[0] {
+                        Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                         other => panic!("expected Symbol(add), got {:?}", other),
                     },
-                    other => panic!("expected List, got {:?}", other),
+                    other => panic!("expected BareList, got {:?}", other),
                 }
             }
             other => panic!("expected MetaExpr, got {:?}", other),
@@ -900,14 +956,14 @@ mod tests {
             other => panic!("expected Int(42), got {:?}", other),
         }
         match &exprs[1] {
-            Expr::List(list, _) => match &list.elements[0] {
-                Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "add"),
+            Expr::BareList(elems, _) => match &elems[0] {
+                Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
                 other => panic!("expected Symbol(add), got {:?}", other),
             },
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
         match &exprs[2] {
-            Expr::Atom(Atom::Symbol(s), _) => assert_eq!(s, "foo"),
+            Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "foo"),
             other => panic!("expected Symbol(foo), got {:?}", other),
         }
     }
@@ -944,8 +1000,8 @@ mod tests {
         let exprs = parse_str("()").unwrap();
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => assert!(list.elements.is_empty()),
-            other => panic!("expected empty list, got: {:?}", other),
+            Expr::BareList(elems, _) => assert!(elems.is_empty()),
+            other => panic!("expected empty BareList, got: {:?}", other),
         }
     }
 
@@ -955,14 +1011,14 @@ mod tests {
         let exprs = p("(42 a b)");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
-            Expr::List(list, _) => {
-                assert_eq!(list.elements.len(), 3);
-                match &list.elements[0] {
+            Expr::BareList(elems, _) => {
+                assert_eq!(elems.len(), 3);
+                match &elems[0] {
                     Expr::Atom(Atom::Int(42), _) => {}
                     other => panic!("expected Int(42), got {:?}", other),
                 }
             }
-            other => panic!("expected List, got {:?}", other),
+            other => panic!("expected BareList, got {:?}", other),
         }
     }
 

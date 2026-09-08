@@ -1,10 +1,10 @@
 module Std.Tests.Tensor.Compare
-import Std.Test (assert_eq_bool)
+import Std.Test (assert_eq)
 def check_bool_tensor(name: string, t: tensor[3, bool], v0: bool, v1: bool, v2: bool) -> unit ! { Test } = {
   xs = to_list(t)
-  _ = assert_eq_bool(index(xs, cast(0, int64)), v0, string_concat(name, "[0]"))
-  _ = assert_eq_bool(index(xs, cast(1, int64)), v1, string_concat(name, "[1]"))
-  assert_eq_bool(index(xs, cast(2, int64)), v2, string_concat(name, "[2]"))
+  _ = assert_eq(index(xs, cast(0, int64)), v0, string_concat(name, "[0]"))
+  _ = assert_eq(index(xs, cast(1, int64)), v1, string_concat(name, "[1]"))
+  assert_eq(index(xs, cast(2, int64)), v2, string_concat(name, "[2]"))
 }
 def test_eq_tensor_tensor_elementwise() -> unit ! { Test } = {
   a = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])

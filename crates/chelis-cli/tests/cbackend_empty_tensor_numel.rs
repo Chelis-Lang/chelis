@@ -84,7 +84,12 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
     // exec-style tests in parallel; they all materialize the same
     // canonical path) do not race on a shared tmp filename and trip
     // ENOENT on rename when a peer renames it away first.
-    let tmp = canonical.with_extension(format!("a.tmp.{}", std::process::id()));
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = canonical.with_extension(format!(
+        "a.tmp.{}.{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     fs::copy(&hashed, &tmp)?;
     match fs::rename(&tmp, canonical) {
         Ok(()) => Ok(()),
@@ -179,9 +184,10 @@ fn cbackend_numel_empty_tensor_matches_eval() {
     let (build_dir, kernel_c) = chelis_build_c(source, name);
     let c_out = gcc_compile_and_run(build_dir.path(), &kernel_c, name);
 
+    // Issue #912 [05-OBS-6]: eval now labels single roots too.
     assert_eq!(
         eval_out.trim(),
-        "0",
+        "result = 0",
         "eval stdout for numel(empty) must be 0 not 1 (Runtime-EmptyTensorNumel-F1); got {eval_out}"
     );
     assert_eq!(

@@ -271,12 +271,12 @@ def f(table: tensor[10, 4, f32], ids: tensor[3, int64]) -> tensor[3, 4, f32] = g
 // Spec: each axis must be in [-rank, rank).
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `trace(m, cast(9, int32), cast(0, int32))` on a rank-2
+/// EXPECT: `trace(m, cast(9, int32), cast(1, int32))` on a rank-2
 /// matrix is rejected with an OOB axis diagnostic.
 #[test]
 fn issue216_trace_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(m: tensor[4, 4, f32]) -> f32 = trace(m, cast(9, int32), cast(1, int32))
+def f(m: tensor[4, 4, f32]) -> tensor[f32] = trace(m, cast(9, int32), cast(1, int32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);

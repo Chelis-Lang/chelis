@@ -207,10 +207,10 @@ fn check_score_and_output(program: &str, ext: &str) -> (f64, String) {
 /// `chelis build --target hip` on an int64 `neg` is REJECTED with the
 /// branded section C2 diagnostic - `elem_kind`'s former `_ =>
 /// ElemKind::F32` wildcard is deleted (census row 5, chelis#689;
-/// runtime-confirmed corrupt on gfx1151). The permissive CLI gate still
-/// admits int64 (row 18's chelis#698 half, Phase 3 territory); the
-/// EMITTER channel is what refuses now - the enforcement-ladder rung the
-/// plan demands. Emission-only; no hipcc needed.
+/// runtime-confirmed corrupt on gfx1151). The shared typed gate admits
+/// int64 because the HIP target has typed integer kernels; the EMITTER
+/// remains responsible for refusing this unsupported op/dtype cell - the
+/// enforcement-ladder rung the plan demands. Emission-only; no hipcc needed.
 #[test]
 fn hip_int64_neg_is_rejected_with_the_branded_diagnostic() {
     let (ok, stderr, emitted) = build_target(
@@ -236,25 +236,24 @@ fn hip_int64_neg_is_rejected_with_the_branded_diagnostic() {
 }
 
 // ===========================================================================
-// Census row 4 (chelis#714 symptom) - LIVE evidence lock.
+// Census row 4 (chelis#714 symptom) - Phase 3 positive transition lock.
 // ===========================================================================
 
-/// **Rejection lock (replaced the Phase 0 evidence lock at Phase 1):**
-/// the compiled f16 scalar `floor` program is REJECTED at build with the
-/// branded diagnostic - the row 4 `<value>` print arms and the row 2
-/// builtin stub are both errors now, so the chelis#714 Unknown chain
-/// terminates loudly instead of printing a placeholder.
+/// The compiled f16 scalar `floor` program now computes through the exact
+/// Phase 3 ABI. This replaces Phase 1's rejection lock while retaining the
+/// original no-placeholder assertion as an exact value check.
 #[test]
-fn c_f16_floor_is_rejected_not_value_placeholder() {
-    let err = c_run_outcome(
+fn c_f16_floor_computes_not_value_placeholder() {
+    let (_, stdout, stderr) = c_run_outcome(
         "def run() -> f16 = floor(cast(1.5, f16))\nout = run()\n",
         ".ch",
         "f16_floor_value",
     )
-    .expect_err("census row 4: the f16 floor program must fail the build loudly");
-    assert!(
-        err.contains("unsupported:"),
-        "the rejection must carry the branded section C2 diagnostic; got: {err}"
+    .expect("census row 4: f16 floor must build and run through the exact ABI");
+    assert_eq!(
+        stdout.trim(),
+        "run = 1.0\nout = 1.0",
+        "the pure nullary root and explicit value root are both owed in source order; stderr: {stderr}"
     );
 }
 
@@ -272,10 +271,17 @@ const BOGUS_CAST_TPRIM: &str = "(def {}\n  out\n  (app {}\n    (var {} print)\n 
 const BOGUS_CAST_BARE: &str = "(def {}\n  out\n  (app {}\n    (var {} print)\n    (cast {}\n      \
      (lit {type: (t-prim {} f32)} 1.5)\n      bogus_dtype)))\n";
 
-/// **Canary (green): the eval-lane guard holds.** Both bogus-cast spellings
-/// are rejected loudly by eval before the F32 fallback can matter (the
-/// audit-backlog item 6 refutation, re-executed at P0). The build lane is
-/// the live half - see `dp_bogus_cast_target_must_not_build_silently`.
+/// **Canary (green): a bogus cast target is rejected loudly, never computed
+/// with an F32 fallback.** Both spellings are rejected before eval can matter
+/// (the audit-backlog item 6 refutation, re-executed at P0). As of chelis#756
+/// (chelis#731 Phase 2) the CHECK lane now guards this ahead of the eval-lane
+/// guard: the deep-type converter no longer reduces an unknown/malformed cast
+/// target to a silent `Type::Error`, so `infer_cast` reports "cast target
+/// `<name>` is not a recognized primitive type" at check, and `eval_first_line`
+/// (which runs check before eval) surfaces that rejection. The census intent
+/// -- loud rejection, no silent F32 fallback -- is preserved and strengthened.
+/// The build lane is the live half - see
+/// `dp_bogus_cast_target_must_not_build_silently`.
 ///
 /// lower.rs:9833's sibling default (input precision when a DAG node lookup
 /// fails) has no user-facing driver at all (an internal desync is required),
@@ -283,16 +289,15 @@ const BOGUS_CAST_BARE: &str = "(def {}\n  out\n  (app {}\n    (var {} print)\n  
 /// at Phase 1 regardless.
 #[test]
 fn canary_dp_cast_bogus_dtype_is_guarded() {
-    for (dp, expect) in [
-        (BOGUS_CAST_TPRIM, "not a recognized primitive type"),
-        (BOGUS_CAST_BARE, "cast missing target type"),
-    ] {
+    // chelis#756: both spellings now name the bogus target and are rejected at
+    // check ("not a recognized primitive type"), ahead of the eval guard.
+    for dp in [BOGUS_CAST_TPRIM, BOGUS_CAST_BARE] {
         let eval_err = eval_first_line(dp, ".dp")
-            .expect_err("census row 13: eval must reject a bogus cast target, not compute");
+            .expect_err("census row 13: a bogus cast target must be rejected, not computed");
         assert!(
-            eval_err.contains(expect),
-            "the eval guard must reject with the clean diagnostic {expect:?}; \
-             got: {eval_err}"
+            eval_err.contains("not a recognized primitive type")
+                || eval_err.contains("cast missing target type"),
+            "the guard must reject a bogus cast target loudly; got: {eval_err}"
         );
     }
 }
@@ -333,7 +338,7 @@ fn canary_vmap_int64_roots_keep_integer_precision() {
         "module M.Main\n\
          def f(xs: tensor[3, 1, int64]) -> tensor[3, int64] = \
          vmap(fn (r: tensor[1, int64]) -> \
-         add(tensor_to_scalar(sum(r, 0)), cast(1, int64)), axis=0)(xs)\n\
+         add(tensor_to_scalar(sum(r, 0)), cast(1, int64)))(xs)\n\
          out = print(to_list(f(cast(to_tensor([[1.0], [2.0], [3.0]]), int64))))\n",
         ".ch",
     )
@@ -371,17 +376,32 @@ fn canary_unknown_deep_tag_is_rejected() {
 }
 
 /// **Canary (guard 2 of 3):** a bare keyword atom in expression position is
-/// a clean runtime error, not the `Const 0.0` placeholder (audit-backlog
-/// item 4 refutation, re-executed).
+/// a clean parse error, not the `Const 0.0` placeholder (audit-backlog item 4
+/// refutation, re-executed).
+///
+/// chelis#908 moved the first rejection to the earliest competent stage:
+/// `:keyword` is metadata-key syntax and is not representable as a parsed Deep
+/// expression. Both CLI rungs are asserted: the check score must fall below
+/// 1.0 (chelis#710 form 4), and eval must refuse to produce a value with the
+/// same parse diagnostic.
 #[test]
 fn canary_bare_keyword_atom_fails_cleanly() {
     let dp = deep_of("module M.Main\nout = print(1.5)\n");
     let dp = replace_first_balanced_node(&dp, "(lit", "1.5", ":oops");
-    let err = eval_first_line(&dp, ".dp")
-        .expect_err("census row 16: a bare keyword atom must not evaluate to a value");
+
+    let (score, output) = check_score_and_output(&dp, ".dp");
     assert!(
-        err.contains("bare atom") || err.contains("not a runtime expression"),
-        "the rejection must be the clean bare-atom diagnostic; got: {err}"
+        score < 1.0,
+        "chelis#908 / census row 16: a bare keyword token must not score 1.0 at \
+         check; a clean score means the parser guard moved. Output: {output}"
+    );
+
+    let err = eval_first_line(&dp, ".dp")
+        .expect_err("census row 16: a bare keyword token must not evaluate to a value");
+    assert!(
+        err.contains("expected expression")
+            && err.contains("bare :keyword is valid only as a metadata map key"),
+        "the rejection must be the clean bare-keyword parse diagnostic; got: {err}"
     );
 }
 

@@ -3,51 +3,58 @@
 //! [04-TOT-2] (spec/04-type-system.md §10) / §C4.1 of
 //! `spec/design/checker_totality.md`: if a check completes with an empty
 //! error vector, the typed result SHALL contain no error-typed expression.
-//! chelis#709 and chelis#710 violate this today; this harness makes the
-//! violation executable ahead of the Phase 1 fix and stays as the
-//! test-side mirror until Phase 2 promotes the validation into
-//! `check_ir_with_signature_context_inner` itself.
+//! chelis#709 and chelis#710 violated this before Phase 1; this harness makes
+//! the violation executable. Phase 2 (chelis#731) PROMOTED [04-TOT-2] to an
+//! on-by-default `finalize_checked_program` validation for fresh checker
+//! results, so a missing authoritative owner stamp under an otherwise empty
+//! error vector becomes a pushed internal error. `Type::Error` itself is
+//! unconstructible without an authoritative diagnostic (the §C3
+//! `ErrorWitness` token). This harness remains as the independent test-side
+//! mirror: it drives both public checker funnels and asserts the same property.
 //!
 //! ## How a silent `Type::Error` is detected from the outside
 //!
 //! The checker's public typed result is `CheckedProgram::annotated_exprs`.
-//! The annotation pass stamps a `type:` metadata entry on every node whose
-//! tag passes `should_attach_type_metadata` (infer.rs), EXCEPT when the
-//! node's scoped re-inference returns `Type::Error`
-//! (`annotated_meta_map_with_override` skips the stamp exactly then), and
-//! `type_to_deep_expr` encodes `Type::Error` as `(t-var {} _)`. So in an
-//! `Ok(CheckedProgram)` - which by construction means the error vector was
-//! empty - a stamp-eligible node with a missing `type:` entry or a
-//! `(t-var {} _)` entry is precisely a silent `Type::Error` verdict.
-//! Signature metadata carries `Type` values directly and is scanned as-is.
+//! The inference pass records canonical owner types in the root's
+//! `InferenceProduct`, applies the final substitution at `finish_root`, and
+//! annotation consumes the retained types for stamp-required owners. It never
+//! semantically re-infers a node. `type_to_deep_expr` encodes `Type::Error` as
+//! `(t-var {} _)`, so an `Ok(CheckedProgram)` with either a missing required
+//! stamp or that encoding violates the public result invariant. Signature
+//! metadata carries `Type` values directly and is scanned as an independent
+//! backstop.
 //!
-//! DETECTION SURFACE (limitation, on the record - PR #757 review): this
-//! harness sees a silent `Type::Error` only where it surfaces as (a) a
-//! stamp on a stamp-eligible EXPRESSION node or (b) a `Type` value in
-//! the signature-inference table. A silent Error confined to an ADT
-//! field-type DECLARATION (the chelis#756 `deftype` family, produced in
-//! `deep_type_to_type_with_params` and stored in the AdtRegistry)
-//! surfaces in neither and is invisible here. The red set below is
-//! exactly the four expression-level holes; GLOBAL restoration of
-//! [04-TOT-2] over all census sites is Phase 2's `ErrorWitness`
-//! migration, not this harness.
+//! This harness observes the public checked tree plus signature metadata. It
+//! does not replace the structural Phase 2 guarantees: fresh errors can be
+//! created only through the authoritative diagnostic sink, Deep type
+//! resolution is fallible and witnessed, and the in-checker finalizer validates
+//! the complete annotated result before success.
 //!
-//! Two funnels are driven, both returning `Result<CheckedProgram, _>`
-//! with the same empty-errors gate: `chelis_types::check_ir_program`
-//! (the `check_ir_with_signature_context_inner` route named by §C4.1,
-//! used by `chelis build`) and `chelis_types::check_typed_program` (the
-//! `chelis check` CLI's typed-program route).
+//! Two funnels are driven, both returning `Result<CheckedProgram, _>` through
+//! the same diagnostic-session and finalization boundary:
+//! `chelis_types::check_ir_program` (used by `chelis build`) and
+//! `chelis_types::check_typed_program` (used by `chelis check`).
 //!
 //! ## Red set and boundary law
 //!
 //! The four known holes - a `with seed` body, a `with device` body
-//! (chelis#709), and the two chelis#710 forms (`(def {} orphan)`,
+//! (chelis#709), and two of the chelis#710 forms (`(def {} orphan)`,
 //! `(cast {} expr)` with no target) - were `#[ignore]`d red at Phase 0 and
 //! are flipped to green here by chelis#731 Phase 1 (the handle-effect case
 //! and the `MalformedForm` guard sweep). Per B2.1/B2.2 of the design doc
 //! the flip was ONLY by deleting the `#[ignore]` attribute; the assertions
 //! never weakened. The full corpus runs in the default suite. A new hole
 //! EXTENDS the census and gets filed - it does not edit this set silently.
+//!
+//! chelis#710 filed FOUR forms, not two. Phase 1 closed forms 1-3 (the two
+//! named above plus a `(t-prim {} bogus_dtype)` cast target, covered by
+//! `issue_756_cast_type_totality.rs`). Form 4 - a bare `Symbol` / `Keyword`
+//! atom in expression position - stayed live until chelis#873 threaded a
+//! diagnostic sink through `infer_atom`; its score-surface coverage lives in
+//! `issue_731_fitness_honesty_corpus.rs`
+//! (`bare_atom_expression_position_scores_below_one`, with the
+//! over-application guard in `structural_symbol_positions_still_score_one`).
+//! Naming the count here so the census does not understate the filed set.
 
 use chelis_deep::ast as deep;
 use chelis_types::types::Type;
@@ -111,7 +118,7 @@ const NON_TYPE_STAMPED_TAGS: &[&str] = &[
 
 fn tag_of(list: &deep::List) -> Option<&str> {
     match list.elements.first() {
-        Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) => Some(s.as_str()),
+        Some(deep::Expr::Atom(deep::Atom::Name(s), _)) => Some(s.as_str()),
         _ => None,
     }
 }
@@ -124,7 +131,7 @@ fn is_error_type_stamp(expr: &deep::Expr) -> bool {
     tag_of(list) == Some("t-var")
         && matches!(
             list.elements.get(2),
-            Some(deep::Expr::Atom(deep::Atom::Symbol(s), _)) if s == "_"
+            Some(deep::Expr::Atom(deep::Atom::Name(s), _)) if s == "_"
         )
 }
 
@@ -186,15 +193,24 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
                 );
             }
         }
+        // Bridge: reconstruct List so type-stamp checking works unchanged (#908)
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            collect_tree_traces(&bridged, path, check_stamp, out);
+        }
+        deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {}
     }
 }
 
 fn type_contains_error(ty: &Type) -> bool {
     match ty {
-        Type::Error => true,
+        Type::Error(_) => true,
         Type::Fn(args, ret) => args.iter().any(type_contains_error) || type_contains_error(ret),
         Type::Ref(inner) => type_contains_error(inner),
         Type::Adt(_, args) => args.iter().any(type_contains_error),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(type_contains_error)),
         Type::Tuple(elems) => elems.iter().any(type_contains_error),
         Type::Prim(_) | Type::Tensor(_, _) | Type::Var(_) | Type::Unit => false,
     }
@@ -361,7 +377,7 @@ fn dp_to_deep(source: &str) -> Vec<deep::Expr> {
 /// are PARSE-rejected Surf, so those canary rows score below 1 via the
 /// parser, not the checker. This corpus uses the spec/02 forms (block
 /// bindings, `fn (v: f32) -> body`, `List[f32]`, `match ... with`,
-/// example-style `vmap(f, axis=0)`), all verified parse-clean; the
+/// example-style `vmap(f)`), all verified parse-clean; the
 /// census records that the ill-typed variants of these corrected forms
 /// ARE caught by the checker (precision mismatch, score < 1).
 #[test]
@@ -382,7 +398,7 @@ fn control_wrapper_battery_checks_clean_and_total() {
         ),
         (
             "pipe_stage",
-            "def f() -> f32 = 1.0 |> fn (v: f32) -> add(v, cast(2.0, f32))\n".to_string(),
+            "def f() -> f32 = 1.0 |> add(cast(2.0, f32))\n".to_string(),
         ),
         (
             "tuple_elem",
@@ -405,7 +421,7 @@ fn control_wrapper_battery_checks_clean_and_total() {
         (
             "vmap_named",
             "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
-             def f(xs: tensor[2, 4, f32]) -> tensor[2, 4, f32] = xs |> vmap(process, axis=0)\n"
+             def f(xs: tensor[2, 4, f32]) -> tensor[2, 4, f32] = xs |> vmap(process)\n"
                 .to_string(),
         ),
         (
@@ -499,18 +515,25 @@ fn totality_holds_for_with_device_body() {
 /// Type::Error, so the malformed def is reported.
 #[test]
 fn totality_holds_for_dp_def_missing_body() {
-    assert_totality(
-        "dp_def_missing_body",
-        &dp_to_deep("(module {} m.main (def {} orphan))"),
+    // #908: wrong-arity Deep now fails at the stamp pass (arity validation),
+    // not at the checker. The invariant still holds: the malformed form cannot
+    // produce a vacuous pass.
+    let result = chelis_deep::parser::parse_str_strict("(module {} m.main (def {} orphan))");
+    assert!(
+        result.is_err(),
+        "a def with missing body must fail at the stamp pass (arity violation)"
     );
 }
 
 /// chelis#710 hole 2 (closed by chelis#731 Phase 1): `(cast {} expr)` with no
-/// target type - the infer_cast arity guard now pushes `MalformedForm`.
+/// target type - now caught at the stamp pass arity check.
 #[test]
 fn totality_holds_for_dp_cast_missing_target() {
-    assert_totality(
-        "dp_cast_missing_target",
-        &dp_to_deep("(module {} m.main (def {} out (cast {} (lit {type: (t-prim {} f32)} 42.0))))"),
+    let result = chelis_deep::parser::parse_str_strict(
+        "(module {} m.main (def {} out (cast {} (lit {type: (t-prim {} f32)} 42.0))))",
+    );
+    assert!(
+        result.is_err(),
+        "a cast with missing target type must fail at the stamp pass (arity violation)"
     );
 }

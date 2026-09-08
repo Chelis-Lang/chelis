@@ -41,7 +41,7 @@ fn assert_linearity_clean(source: &str) {
 fn alias_chain_three_levels_propagates_consume() {
     let errors = linearity_errors(
         r#"
-def f(x: tensor[4, f32]): tensor[4, f32] =
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = x
     z: tensor[4, f32] = y
@@ -63,7 +63,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 fn alias_chain_four_levels_propagates_consume() {
     let errors = linearity_errors(
         r#"
-def f(x: tensor[4, f32]): tensor[4, f32] =
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     a: tensor[4, f32] = x
     b: tensor[4, f32] = a
@@ -88,7 +88,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 fn alias_chain_four_levels_consume_at_tail_only_passes() {
     assert_linearity_clean(
         r#"
-def f(x: tensor[4, f32]): tensor[4, f32] =
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     a: tensor[4, f32] = x
     b: tensor[4, f32] = a
@@ -116,7 +116,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 fn alias_then_pipe_stage_consume_propagates() {
     let errors = linearity_errors(
         r#"
-def f(x: tensor[4, f32]): tensor[4, f32] =
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = x
     r: tensor[4, f32] = y |> realize
@@ -138,7 +138,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 fn alias_then_app_arg_consume_propagates() {
     let errors = linearity_errors(
         r#"
-def f(x: tensor[4, f32]): tensor[4, f32] =
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = x
     r: tensor[4, f32] = realize(y)
@@ -169,7 +169,7 @@ def f(x: tensor[4, f32]): tensor[4, f32] =
 fn nested_tuple_destructure_double_realize_errors() {
     let errors = linearity_errors(
         r#"
-def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
+def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
   {
     (inner, c) = p
     (a, b) = inner
@@ -193,7 +193,7 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
 fn nested_tuple_destructure_single_consume_each_passes() {
     assert_linearity_clean(
         r#"
-def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
+def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
   {
     (inner, c) = p
     (a, b) = inner
@@ -211,7 +211,7 @@ def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
 fn triple_nested_destructure_double_consume_errors() {
     let errors = linearity_errors(
         r#"
-def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
+def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
   {
     (mid, w) = p
     (inner, c) = mid
@@ -240,7 +240,7 @@ def f(p: (((tensor[4, f32], tensor[4, f32]), tensor[4, f32]), tensor[4, f32])): 
 fn nested_destructure_alias_consume_errors() {
     let errors = linearity_errors(
         r#"
-def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])): tensor[4, f32] =
+def f(p: ((tensor[4, f32], tensor[4, f32]), tensor[4, f32])) -> tensor[4, f32] =
   {
     (inner, c) = p
     (a, b) = inner

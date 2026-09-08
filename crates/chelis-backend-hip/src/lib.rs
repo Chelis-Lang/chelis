@@ -3,12 +3,26 @@
 //! Generates C host code with embedded HIP kernel source strings.
 //! At runtime, `hiprtc` JIT-compiles the kernels and dispatches them to GPU.
 
-use std::collections::HashMap;
+/// Primitive types the HIP backend's tensor-DAG path can realize.
+/// Declared from hardware spec + local HIP environment verification.
+/// Declaration-only in CI (no HIP toolchain) — verified in the field via
+/// [05-UNS-1] wiring when the backend rejection path fires.
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
+    chelis_types::types::Prim::F32,
+    chelis_types::types::Prim::F64,
+    chelis_types::types::Prim::Bool,
+    chelis_types::types::Prim::Bf16,
+    chelis_types::types::Prim::F16,
+    chelis_types::types::Prim::Int32,
+    chelis_types::types::Prim::Int64,
+];
+
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::DimExpr;
 
 pub mod blas;
-pub mod emit;
+mod emit;
 pub(crate) mod fusion;
 pub mod kernels;
 pub mod launch;
@@ -39,7 +53,10 @@ pub struct HipCodegenResult {
 }
 
 impl HipCodegenResult {
-    pub fn peak_device_bytes_at(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
+    pub fn peak_device_bytes_at(
+        &self,
+        bindings: &UnordMap<String, usize>,
+    ) -> Result<usize, String> {
         self.peak_device_bytes_terms
             .iter()
             .try_fold(self.peak_device_bytes_static_extra, |acc, term| {
@@ -63,19 +80,44 @@ pub fn runtime_dir() -> &'static str {
 ///
 /// Inputs arrive as host tensors, are transferred to GPU, processed via
 /// HIP kernels, and results are transferred back to host tensors in outputs.
+///
+/// ```compile_fail
+/// # use chelis_ir::dag::Dag;
+/// fn bypass(raw: &Dag) {
+///     let _ = chelis_backend_hip::codegen_hip(raw, "unchecked");
+/// }
+/// ```
 pub fn codegen_hip(
-    dag: &chelis_ir::dag::Dag,
+    dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
 ) -> Result<HipCodegenResult, chelis_types::unsupported::Unsupported> {
-    let specialized = chelis_ir::specialize::specialize_for_blas(dag);
-    let dag = &specialized;
-    let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(dag, func_name)?;
+    // chelis#1277 C4.1/C4.5: derived after the last rewrite, so this runs on
+    // the specialized DAG the emitter actually consumes.
+    dag.emission()
+        .check_axis_sources(chelis_types::unsupported::Stage::Codegen("hip"))?;
     let h_header = format!(
         "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
-    let input_labels = emit::HipEmitter::input_labels(dag);
-    let output_labels = emit::HipEmitter::output_labels(dag);
-    let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
+    let (input_labels, output_labels, symbolic_dims) = {
+        let emission = dag.emission();
+        (
+            emit::HipEmitter::input_labels(emission),
+            emit::HipEmitter::output_labels(emission),
+            emission.symbolic_params(),
+        )
+    };
+    let plan = chelis_ir::ownership::plan_hip_storage(dag).map_err(|error| {
+        chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Op("storage planning".to_string()),
+            error.to_string(),
+            chelis_types::unsupported::Stage::Codegen("hip"),
+            chelis_types::deliberate_rejection!(
+                "[04-SHAPE-1]",
+                "HIP storage placement requires the verified exact-capacity plan"
+            ),
+        )
+    })?;
+    let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(plan, func_name)?;
     let mut link_flags = vec!["-lhiprtc".to_string()];
     // WS-A3: bf16 / f16 matmul also routes through hipBLAS (via
     // `hipblasGemmEx`). Add `-lhipblas` whenever any hipblas wrapper
@@ -104,4 +146,21 @@ pub fn codegen_hip(
         peak_device_bytes_terms: peak_device_bytes.terms,
         peak_device_bytes_static_extra: peak_device_bytes.extra_bytes,
     })
+}
+
+/// Apply HIP's final BLAS selection before ownership lowering.
+pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag {
+    chelis_ir::specialize::specialize_for_blas(&dag)
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+
+    pub(crate) fn verified_dag(
+        dag: &chelis_ir::dag::Dag,
+    ) -> Result<VerifiedDagProgram, OwnershipError> {
+        let selected = crate::prepare_dag_for_codegen(dag.clone());
+        chelis_ir::ownership::verify_ownership(chelis_ir::ownership::lower_dag_ownership(selected)?)
+    }
 }

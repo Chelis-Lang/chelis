@@ -110,6 +110,35 @@ For a fixture corpus that all imports the same bundled stdlib, Layer 1 is one
 shared cross-process hit; Layer 2 is small (just the user package); Layer 3 is
 the entry file. That is the ~200-worker win.
 
+### Build-lane Layer 2: a separate `LibraryContext` (chelis#1168/#1176)
+
+The layering above is the eval / `chelis test` shape, whose Layer 2 IS the whole
+`CompiledContext` (`context.rs::build_library_triple_layered`). The `chelis
+build` lane deliberately uses a SEPARATE Layer 2 — `LibraryContext`
+(`crates/chelis-compiler-api/src/library_cache.rs`), a distinct on-disk family
+(`chelis-lib-*.tc`) — rather than reusing the `CompiledContext` `.ctx`. Why they
+stay separate rather than fold:
+
+- **Cache key.** The `CompiledContext` `.ctx` is keyed on the digests of EVERY
+  source file in the package graph, *including the entry* (`context.rs`
+  `source_digests`), so an entry-only edit mints a new `.ctx` — a full recompile
+  on exactly the edit→build loop the build cache exists to accelerate.
+  `LibraryContext` is keyed on the *dependency* decls only (the entry stays out
+  of the key), so an entry edit is a warm hit.
+- **Split boundary.** The eval Layer 2 splits at the stdlib/non-stdlib boundary
+  (the entry is Layer 3, checked in-context per call). Build has no separate
+  in-context entry surface, so it splits `non_stdlib_decls` at the entry-module
+  offset (`PreparedProgram::dependency_entry_partition`): dependency prefix
+  cached, entry suffix re-analyzed. It carries the dependency expansion boundary
+  + a hygiene digest so the split stays byte-identical to the monolithic path.
+  (This prefix/suffix split only caches dependencies that sort before the entry
+  module — see chelis#1182.)
+
+The cost is two near-identical three-layer stackings. Folding them would need the
+build lane to adopt an entry-out-of-key `CompiledContext` variant (or the eval
+lane to adopt the entry-module split); until one lands, they are kept separate
+with divergent keys by design, not oversight.
+
 ### Concurrency
 
 ~200 nextest processes race on the first miss. Writes are atomic: a temp file in
@@ -128,14 +157,15 @@ up while staying byte-identical:
 
 1. A context-aware `check_ir_fitness_with_context` runs the fitness pass
    `_with_context` against the cached layers so it does not re-infer stdlib.
-2. The in-context fitness report reconstitutes the **whole-program** node counts.
-   Today `check_in_context` (`crates/chelis-compiler-api/src/compiler.rs:552`)
-   reports new-code-only counts, so its JSON is *not* byte-identical to the
-   monolithic path. `count_nodes` and `structure_score` are pure structural
-   walks, so the stdlib + package contributions are computed once and stored in
-   the cached contexts (`StdLibContext`, `CompiledContext`); the in-context
-   report adds them back so `total_nodes` / `typed_nodes` / the `structure`
-   component match the monolithic output exactly.
+2. The in-context fitness report reconstitutes the **whole-program** metrics.
+   Since chelis#858, `typed_nodes` / `total_nodes` are the inference product's
+   honest checker-visit counters rather than structural AST counts. Each
+   serialized `CheckedProgram` retains those counters, and the layered report
+   adds them across the stdlib / non-stdlib partition. `count_nodes` and
+   `structure_score` remain separate pure structural walks whose cached
+   partition sums reconstruct only the `structure` component. This keeps the
+   layered and monolithic JSON byte-identical without fabricating either metric
+   (chelis#973).
 
 ## Acceptance oracle
 

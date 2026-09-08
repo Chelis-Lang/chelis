@@ -197,6 +197,67 @@ def eval_record(hull_eval_value):
 
 
 class EvalClassificationTests(unittest.TestCase):
+    def test_eval_float32_shortest_decimal_is_read_at_its_tagged_width(self):
+        # Rust serializes an f32 using the shortest decimal that round-trips
+        # at f32 width. Reading that token as an f64 changes the represented
+        # value and creates a false Hull disagreement for large values.
+        rec = eval_record("1318815744")
+        r = rc.classify_program(
+            rec,
+            0,
+            eval_json({"type": "float32", "value": 1318815700.0}),
+        )
+        self.assertEqual(r.bucket, "agree")
+
+    def test_eval_tensor_float32_shortest_decimal_is_read_at_its_tagged_width(self):
+        rec = eval_record("3269017.25")
+        r = rc.classify_program(
+            rec,
+            0,
+            eval_json(
+                {
+                    "type": "tensor",
+                    "value": {
+                        "shape": [],
+                        "data": {"dtype": "f32", "values": [3269017.2]},
+                    },
+                }
+            ),
+        )
+        self.assertEqual(r.bucket, "agree")
+
+    def test_eval_float64_decimal_is_not_rounded_to_float32(self):
+        self.assertEqual(
+            rc._read_root_scalar({"type": "float64", "value": 1318815700.0}),
+            1318815700.0,
+        )
+
+    def test_eval_v2_integer_scalar_tags_are_read_without_dtype_substitution(self):
+        for tag in ("int8", "int16", "int32", "int64"):
+            with self.subTest(tag=tag):
+                self.assertEqual(rc._read_root_scalar({"type": tag, "value": -24}), -24)
+
+    def test_eval_int64_above_binary64_exact_range_stays_an_integer(self):
+        value = 9_007_199_254_740_993
+        decoded = rc._read_root_scalar({"type": "int64", "value": value})
+        self.assertIsInstance(decoded, int)
+        self.assertEqual(decoded, value)
+
+    def test_eval_int64_above_binary64_exact_range_compares_exactly(self):
+        reference = "9007199254740993"
+        exact = rc.classify_program(
+            eval_record(reference),
+            0,
+            eval_json({"type": "int64", "value": 9_007_199_254_740_993}),
+        )
+        adjacent = rc.classify_program(
+            eval_record(reference),
+            0,
+            eval_json({"type": "int64", "value": 9_007_199_254_740_992}),
+        )
+        self.assertEqual(exact.bucket, "agree")
+        self.assertEqual(adjacent.bucket, "disagree")
+
     def test_eval_agree_within_tol(self):
         rec = eval_record("2.0")
         r = rc.classify_program(rec, 0, eval_json({"type": "float64", "value": 2.001}))
@@ -213,11 +274,28 @@ class EvalClassificationTests(unittest.TestCase):
         self.assertEqual(r.bucket, "agree")
 
     def test_eval_tensor_scalar(self):
+        # Execution wire v2 (chelis#729): tagged per-dtype payload.
         rec = eval_record("3.0")
         r = rc.classify_program(
-            rec, 0, eval_json({"type": "tensor", "value": {"shape": [], "data": [3.0]}})
+            rec,
+            0,
+            eval_json(
+                {
+                    "type": "tensor",
+                    "value": {"shape": [], "data": {"dtype": "f32", "values": [3.0]}},
+                }
+            ),
         )
         self.assertEqual(r.bucket, "agree")
+
+    def test_eval_tensor_scalar_v1_legacy_shape_is_rejected(self):
+        # The pre-v2 bare-array branch was deleted at the chelis#729
+        # rework: a v1 payload is a stale producer, and replaying it
+        # silently would launder exactly the dtype-erased shape the v2
+        # wire break exists to end.
+        with self.assertRaises(ValueError) as ctx:
+            rc._read_root_scalar({"type": "tensor", "value": {"shape": [], "data": [3.0]}})
+        self.assertIn("legacy v1", str(ctx.exception))
 
     def test_eval_nan_reconciliation_both_nonfinite(self):
         # Compiler renders non-finite as JSON null; Hull reference is NaN.

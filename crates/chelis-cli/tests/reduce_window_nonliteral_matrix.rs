@@ -4,6 +4,8 @@
 //! with the wrong shape while `chelis check` scores 1 and eval pools
 //! correctly. With only ONE list non-literal, the emitter's length
 //! assertion (emit.rs:4509) panics the compiler instead.
+//! The site now rejects loudly; chelis#1058 owns implementing compiled
+//! runtime-valued window and stride lists.
 //!
 //! This settled the last open item (item 5) of
 //! `docs/investigations/silent_substitution_audit_backlog.md` - and unlike
@@ -122,7 +124,7 @@ fn partition_agrees_across_lanes() {
 #[test]
 fn literal_window_pools_correctly_in_both_lanes() {
     let program = "module M.Main\n\
-         def f(x: tensor[6, f32]) -> tensor[5, f32] = reduce_window_max(x, [2], [1])\n\
+         def f(x: tensor[6, f32]) -> tensor[5, f32] = reduce_window_max(x, [2i64], [1i64])\n\
          out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0])))\n";
     assert_eq!(eval_first_line(program).expect("eval"), POOLED);
     if c_toolchain_available() {
@@ -137,9 +139,9 @@ fn literal_window_pools_correctly_in_both_lanes() {
 #[test]
 fn eval_pools_correctly_with_nonliteral_window_and_strides() {
     let program = "module M.Main\n\
-         def f(x: tensor[6, f32], w: int32, s: int32) -> tensor[5, f32] = \
+         def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
-         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2, 1))\n";
+         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64))\n";
     assert_eq!(eval_first_line(program).expect("eval"), POOLED);
 }
 
@@ -157,9 +159,9 @@ fn c_nonliteral_window_and_strides_pool_or_reject() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(x: tensor[6, f32], w: int32, s: int32) -> tensor[5, f32] = \
+         def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
-         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2, 1))\n";
+         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64))\n";
     let (ok, stderr, stdout) = c_outcome(program, "rw_both_var");
     assert!(
         !stderr.contains("panicked"),
@@ -192,9 +194,9 @@ fn c_nonliteral_window_does_not_panic_the_compiler() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def f(x: tensor[6, f32], w: int32) -> tensor[5, f32] = \
-         reduce_window_max(x, [w], [1])\n\
-         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2))\n";
+         def f(x: tensor[6, f32], w: int64) -> tensor[5, f32] = \
+         reduce_window_max(x, [w], [1i64])\n\
+         out = print(f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64))\n";
     let (_, stderr, _) = c_outcome(program, "rw_one_var");
     assert!(
         !stderr.contains("panicked"),

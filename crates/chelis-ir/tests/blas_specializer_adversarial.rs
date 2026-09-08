@@ -28,7 +28,7 @@
 //! commit extends the cleanup to handle these cases, the test will fail
 //! deliberately so the spec/owning docs can be updated in the same change.
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::specialize::specialize_for_blas;
 use chelis_types::types::Prim;
 
@@ -62,7 +62,12 @@ fn dead_intermediates_pruned(dag: &Dag) -> bool {
 /// (Expand → Cast → Mul → Sum or Cast → Expand → Mul → Sum) so adversarial
 /// perturbations can be injected at known positions.
 fn add_const_mat(dag: &mut Dag, prim: Prim, r: usize, c: usize) -> chelis_ir::dag::NodeId {
-    dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat(prim, r, c), None)
+    dag.add_node(
+        RiscOp::synth_const(mat(prim, r, c).precision, 1.0),
+        vec![],
+        mat(prim, r, c),
+        None,
+    )
 }
 
 /// ADV-1: A *non-identity* cast pair f32→f64→f32 between Expand and Mul
@@ -77,7 +82,7 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 2, 3, 4),
@@ -86,7 +91,7 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(Prim::F32, 2, 3, 4),
@@ -156,7 +161,7 @@ fn int_float_int_cast_round_trip_misses_specialization() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::Int32, 2, 3, 4),
@@ -165,7 +170,7 @@ fn int_float_int_cast_round_trip_misses_specialization() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(Prim::Int32, 2, 3, 4),
@@ -228,7 +233,7 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 2, 3, 4),
@@ -237,7 +242,7 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(Prim::F32, 2, 3, 4),
@@ -246,7 +251,11 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     // Reshape pair: [2,3,4] → [3,2,4] → [2,3,4]. Neither step is identity.
     let rs_a_up = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(3), RtDim::Lit(2), RtDim::Lit(4)],
+            new_shape: vec![
+                chelis_ir::dag::RtDim::Lit(3),
+                chelis_ir::dag::RtDim::Lit(2),
+                chelis_ir::dag::RtDim::Lit(4),
+            ],
         },
         vec![ea],
         t3(Prim::F32, 3, 2, 4),
@@ -254,7 +263,11 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     );
     let rs_a_down = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(2), RtDim::Lit(3), RtDim::Lit(4)],
+            new_shape: vec![
+                chelis_ir::dag::RtDim::Lit(2),
+                chelis_ir::dag::RtDim::Lit(3),
+                chelis_ir::dag::RtDim::Lit(4),
+            ],
         },
         vec![rs_a_up],
         t3(Prim::F32, 2, 3, 4),
@@ -300,7 +313,7 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 2, 3, 4),
@@ -309,7 +322,7 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(Prim::F32, 2, 3, 4),
@@ -364,7 +377,7 @@ fn single_identity_permute_does_collapse_to_blas() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(Prim::F32, 2, 3, 4),
@@ -373,7 +386,7 @@ fn single_identity_permute_does_collapse_to_blas() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(Prim::F32, 2, 3, 4),
@@ -428,14 +441,19 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
         ],
         precision: Prim::F32,
     };
-    let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], a_ty.clone(), None);
+    let a = dag.add_node(
+        RiscOp::synth_const(a_ty.precision, 1.0),
+        vec![],
+        a_ty.clone(),
+        None,
+    );
 
     // Reshape into all-Lit form: even though same numeric values, the
     // dims vector is structurally distinct -> not an identity Reshape.
     let lit_ty = mat(Prim::F32, 2, 3);
     let reshaped = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
         },
         vec![a],
         lit_ty.clone(),
@@ -446,7 +464,7 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![reshaped],
         t3(Prim::F32, 2, 3, 4),
@@ -455,7 +473,7 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(Prim::F32, 2, 3, 4),

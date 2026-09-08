@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rewrite a shell's `reef.toml` compiler pin to a target chelis version.
+"""Rewrite a shell's compiler pins to a target chelis version.
 
 Used by the ecosystem drift canary (.github/workflows/ecosystem-drift.yml).
 
@@ -23,7 +23,11 @@ touches them. So when handed a directory this script repins EVERY
 compiler pin (e.g. workspace-style stubs, negative-test fixtures) are
 skipped, not treated as errors — but a run that repins nothing at all
 (no `reef.toml` found, or none carrying a pin) fails loudly, because that
-silent no-op is exactly the canary-blindness this guards against.
+silent no-op is exactly the canary-blindness this guards against. Shell CI
+also enforces that workflow `CHELIS_TAG` / `CHELIS_VERSION` values agree with
+the manifest. Directory mode therefore rewrites those two env keys in every
+`.github/workflows/*.yml` and `*.yaml` file as part of the same throwaway pin
+bump. Other YAML and other version keys are left untouched.
 
 This is a canary-only, in-CI mutation of a throwaway checkout. It is
 never committed and never run against a developer working tree.
@@ -59,6 +63,12 @@ _PIN_RE = re.compile(
     r'(?m)^(?P<key>[ \t]*compiler[ \t]*=[ \t]*"=)\d+\.\d+\.\d+(?P<tail>".*)$'
 )
 
+_WORKFLOW_PIN_RE = re.compile(
+    r"(?m)^(?P<prefix>[ \t]*(?P<key>CHELIS_TAG|CHELIS_VERSION)[ \t]*:[ \t]*)"
+    r"(?P<quote>['\"]?)(?P<version>v?\d+\.\d+\.\d+)(?P=quote)"
+    r"(?P<tail>[ \t]*(?:#.*)?)$"
+)
+
 
 def repin(manifest_text: str, target_version: str) -> str:
     """Return `manifest_text` with its compiler pin set to `target_version`.
@@ -91,6 +101,49 @@ def _repin_file(manifest_path: Path, target_version: str) -> bool:
     return True
 
 
+def repin_workflow(workflow_text: str, target_version: str) -> tuple[str, int]:
+    """Rewrite Chelis workflow env pins and return (text, replacements)."""
+
+    def replacement(match: re.Match[str]) -> str:
+        version = (
+            f"v{target_version}"
+            if match.group("key") == "CHELIS_TAG"
+            else target_version
+        )
+        return (
+            f'{match.group("prefix")}{match.group("quote")}{version}'
+            f'{match.group("quote")}{match.group("tail")}'
+        )
+
+    return _WORKFLOW_PIN_RE.subn(replacement, workflow_text)
+
+
+def _repin_workflows(root: Path, target_version: str) -> tuple[int, int]:
+    """Repin workflow files under the conventional GitHub workflow path."""
+    workflow_root = root / ".github" / "workflows"
+    files = sorted(
+        path
+        for pattern in ("*.yml", "*.yaml")
+        for path in workflow_root.glob(pattern)
+        if path.is_file()
+    )
+    rewritten_files = 0
+    replacements = 0
+    for workflow_path in files:
+        original = workflow_path.read_text(encoding="utf-8")
+        rewritten, count = repin_workflow(original, target_version)
+        if count == 0:
+            continue
+        workflow_path.write_text(rewritten, encoding="utf-8")
+        rewritten_files += 1
+        replacements += count
+        print(
+            f"[drift-repin] {workflow_path}: set {count} Chelis env pin(s) "
+            f"to {target_version}"
+        )
+    return rewritten_files, replacements
+
+
 def repin_tree(root: Path, target_version: str) -> tuple[int, int]:
     """Repin every `reef.toml` under `root`. Return (repinned, skipped).
 
@@ -112,6 +165,7 @@ def repin_tree(root: Path, target_version: str) -> tuple[int, int]:
         else:
             skipped += 1
             print(f"[drift-repin] {manifest_path}: no compiler pin, skipped")
+    _repin_workflows(root, target_version)
     return repinned, skipped
 
 

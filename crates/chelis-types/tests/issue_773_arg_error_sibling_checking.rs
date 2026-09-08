@@ -68,7 +68,7 @@ type P =
   | P { v: tensor[2, f32] }
 type V =
   | V { v: tensor[2, f32] }
-def take_two(a: P, b: V) -> f32 = { cast(0.0, f32) }
+def take_two(a: P, b: V) -> f32 = cast(0.0, f32)
 ";
 
 fn src(body: &str) -> String {
@@ -150,7 +150,7 @@ fn error_tuple_projection_stays_single_diagnostic() {
     // sibling diagnostics: exactly the one unbound-variable error.
     let msgs = reject_messages(
         &src("\
-def use_p(x: P) -> f32 = { cast(0.0, f32) }
+def use_p(x: P) -> f32 = cast(0.0, f32)
 def driver() -> f32 = {
   pair = (missing_val, cast(1.0, f32))
   sink = use_p(pair.0)

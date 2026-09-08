@@ -32,21 +32,17 @@
 //! range. This mirrors [`crate::graph_extract::box_range_goals_from_source`],
 //! which fans a multi-output FORWARD program out the same way.
 //!
-//! ## When two gradient targets share a root (sound CSE collapse)
+//! ## Equal gradients still have named canonical roots
 //!
-//! Fan-out goals carry DISTINCT root indices only WHEN their gradients are
-//! structurally distinct. Distinctness is NOT an invariant this rail enforces:
-//! it follows the gradient DAG the compiler emits. When two targets have
-//! structurally-IDENTICAL adjoints, the compiler's common-subexpression
-//! elimination legitimately collapses them to ONE gradient root, so
-//! `grad_nodes_by_name` maps both target names to the SAME index. For example
-//! d/dx and d/dy of `mean(x + y)` are both the constant `1/4`, so
-//! `grad_nodes_by_name == {"x": 8, "y": 8}` and the two [`GradGoal`]s share a
-//! root index AND the one gradient-DAG hash, differing only by target name and
-//! requested output range. This is SOUND -- both Greeks are genuinely equal, so
-//! one bounded interval discharges both -- and it never aliases a FORWARD node:
-//! the shared index is always a gradient root, not a forward value. A consumer
-//! must therefore key goals by target NAME, not by assuming one root per target.
+//! Numerical equality does not imply root-index equality. The canonical
+//! accumulation tree in `spec/06` §2.4 gives each forward value's adjoint its
+//! own exact positive-zero base leaf. For example, d/dx and d/dy of
+//! `mean(x + y)` are both `1/4`, and they share the same contribution tail, but
+//! their final `add(+0, contribution)` nodes are distinct roots associated with
+//! `x` and `y`. A later semantics-preserving pass may share structure where its
+//! own contract permits that, so consumers must key goals by target NAME and
+//! follow `grad_nodes_by_name`; they must not infer either equality or
+//! distinctness from target count.
 //!
 //! ## The no-in-tree-fit path (what this wave actually lands)
 //!
@@ -144,7 +140,7 @@ pub enum AdRailError {
     },
 
     /// Building the per-target box/range goal failed at the WI-3 producer
-    /// boundary: a non-v1 gradient `WireDag`, a non-finite float in the
+    /// boundary: a non-current gradient `WireDag`, a non-finite float in the
     /// gradient DAG, or an ill-formed (inverted/NaN) output range. The gradient
     /// DAG flows through the same fail-closed boundary checks as a forward DAG.
     #[error("box/range goal construction failed: {0}")]
@@ -161,7 +157,7 @@ pub struct GradGoal {
     pub target: String,
     /// The box/range goal (with a populated [`crate::discharge::IrHandle`]
     /// addressing the gradient DAG by content hash + this target's root index)
-    /// and the serialized gradient `WireDag` v1 bytes.
+    /// and the serialized exact-version gradient `WireDag` v6 bytes.
     pub extracted: ExtractedGoal,
 }
 

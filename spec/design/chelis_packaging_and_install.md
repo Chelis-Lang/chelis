@@ -246,6 +246,45 @@ The toolchain may additionally be *described* as a `[artifacts]` entry for
 reproducibility, but its installer of record is chelisup, not `reef install`.
 This keeps two installers from fighting over the toolchain.
 
+### 5.7 Nix source package
+
+The Nix `chelisup` package has a launcher at `bin/chelisup` and the real binary
+at `libexec/chelisup`. Before an install, the launcher creates the staging root
+`$CHELIS_HOME/nix-gcroots/chelisup.next`.
+
+After a successful install, the launcher promotes
+`$CHELIS_HOME/nix-gcroots/chelisup` and removes the staging root. A failed
+install always preserves the prior stable root.
+
+If the failed install copied a new binary, the launcher promotes
+`$CHELIS_HOME/nix-gcroots/chelisup.partial`. This partial root protects that
+binary. The launcher then removes the staging root.
+
+If an interrupted install left a staging root, the next attempt compares its
+package with both installed copies. It promotes the partial root only for a
+matching copy. Then it removes the stale staging root.
+
+The real installer copies itself into both executable paths. After each
+successful copy, the Nix launcher replaces `$CHELIS_HOME/bin/chelisup` with
+itself. `$CHELIS_HOME/bin/chelis` remains the real shim.
+
+The stable GC root points to the complete Nix package output. It preserves the
+shim dependencies and every store reference in the installed launcher.
+
+The real installer contains no Nix root path or cleanup logic. The installed
+Nix launcher intercepts `self uninstall`. It delegates executable cleanup to
+the real installer and then removes the stable, staging, and partial roots.
+
+A direct real-binary copy has no Nix root management. Nix does not scan files
+outside the store, so garbage collection can remove its store dependencies.
+
+The launcher is generated shell: it runs where only the package closure exists,
+so Python is not available to it. The `chelisupLauncherLint` flake check runs
+`bash -n` plus `shellcheck` over the built launcher, but since chelis#1450 it
+fires only on `workflow_dispatch` or a published release, so it gates nothing
+pre-merge. The bootstrap installer has no counterpart static gate at all: the
+`shellcheck` hook that selects it is disabled.
+
 ## 6. Layer 1 — binary distribution (chelis#468)
 
 Specified in full as Item 11 of [`reef_distribution.md`](reef_distribution.md).
@@ -256,6 +295,20 @@ binary at `~/.chelis/bin/<name>`, and records it in `reef.lock` via a new
 `LockSource::Binary` variant so it is as reproducible as a source package. It
 reuses `install_validated_artifact_pair`, the shipped SHA-256 helpers,
 `install_from_github`, and `try_github_token` (added in chelis#571).
+
+Installed source packages also feed the cross-process prepared-graph and
+compiled-context caches (chelis#924). A registry package retains its extracted
+source root and its archive/shell identities in `PreparedReefGraph`; cache
+determinants additionally cover compiler version, canonical project root,
+manifests, `reef.lock`, and the relative path plus exact bytes of every `.ch`
+file in every declared source root. Add/delete/rename operations are therefore
+cache-invalidating events. Prepared graphs are built between equal pre/post
+live-inventory snapshots, and loads independently recompute that inventory;
+concurrent mutation retries rather than pairing v1 declarations with a v2
+hash. Source-root symlinks escaping the canonical package root fail closed.
+Both caches use versioned, integrity-checked envelopes and rebuild on
+corruption or staleness. A changed published or editable dependency therefore
+cannot reuse compiled state from the previous graph.
 
 ## 7. Layer 2 — orchestration: `chelis reef setup`
 

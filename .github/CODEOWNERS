@@ -1,0 +1,25 @@
+# Guard artifacts of the chelis#729 capacity ratchet
+# (spec/design/dtype_semantics.md C6): editing a guard to pass it is never
+# the fix, so changes to these files always route to a human owner.
+# chelis#733 Phase 0 owns the broader spec/** signoff and may absorb these
+# rows when it lands.
+/spec/design/capacity_census.json @rlronan
+/spec/design/capacity_census_wire.json @rlronan
+/spec/design/capacity_census_bindings.json @rlronan
+/crates/chelis-cli/tests/capacity_census_tripwire.rs @rlronan
+/crates/chelis-compiler-api/tests/capacity_census_wire.rs @rlronan
+/crates/chelis-python/tests/capacity_census_bindings.rs @rlronan
+/scripts/capacity_census_typed.py @rlronan
+/scripts/test_capacity_census_typed.py @rlronan
+/scripts/capacity_census_liveness.py @rlronan
+/scripts/test_capacity_census_liveness.py @rlronan
+
+# Guard artifacts of the chelis#730 [05-UNS-5] rejection-authority ratchet.
+# Registry and validator edits are review-routed in addition to their
+# executable byte-agreement and live-state controls.
+/spec/design/loud_unsupported_issue_manifest.json @rlronan
+/crates/chelis-types/src/rejection_registry_generated.rs @rlronan
+/scripts/generate_rejection_registries.py @rlronan
+/scripts/test_generate_rejection_registries.py @rlronan
+/scripts/validate_rejection_issue_manifest.py @rlronan
+/scripts/test_validate_rejection_issue_manifest.py @rlronan

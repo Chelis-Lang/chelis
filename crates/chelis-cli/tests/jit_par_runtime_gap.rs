@@ -105,14 +105,16 @@ fn parse_anonymous_scalar(stdout: &str) -> Option<f32> {
         }
         return Some(elements[0]);
     }
-    // [05-OBS-4] (chelis#732 P1): a scalar/rank-0 root renders bare, so the
-    // anonymous single-root output is the value line itself.
+    // [05-OBS-6] (chelis#912): roots are now labelled `name = value`.
+    // Strip the label prefix before parsing.
     stdout
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())?
-        .parse::<f32>()
-        .ok()
+        .find(|l| !l.is_empty())
+        .and_then(|l| {
+            let value_str = l.split(" = ").last().unwrap_or(l);
+            value_str.parse::<f32>().ok()
+        })
 }
 
 // ── eval (runtime evaluator) ─────────────────────────────────────────────────

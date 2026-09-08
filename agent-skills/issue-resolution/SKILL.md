@@ -45,10 +45,16 @@ and even when a PR for the issue already exists.
 
 - Follow the repo contract (`AGENTS.md`) for the change itself:
   spec-first tests, negative-test parity, public-surface sync.
-- PR bodies use `Closes #N` only when the PR fully resolves the issue;
-  otherwise `Part of #N` plus an explicit statement of what remains.
-- Keep the assignee in place while the PR is open; merging or closing
-  the issue releases the claim naturally.
+- Automatic issue closure is disabled for this repository: `Closes #N`
+  in a PR body or commit message does nothing. Say `Closes #N` only when
+  the PR fully resolves the issue, and `Part of #N` plus an explicit
+  statement of what remains otherwise. Either way the sentence is a claim
+  for the reviewer, not an instruction to GitHub.
+- Merging does not close the issue. After the PR merges, close it as a
+  separate step once the work is verified (`gh issue close <N>` with a
+  comment naming the PR), or leave it open and say what remains.
+- Keep the assignee in place while the PR is open; closing the issue
+  releases the claim naturally.
 
 ## Release Stale Claims
 

@@ -57,6 +57,25 @@ call site:
 def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
 ```
 
+A binder may carry a dtype-family bound, written after the name. The families are `Float`,
+`Int`, and `Numeric`; a `sig` takes the same clause in the same position:
+
+```chelis-surf
+sig scale_ints[p: Int]: p -> p -> p
+def scale_ints(x, k) = mul(x, k)
+```
+
+Direct calls are flat: write `f(x, y)`. If an expression itself returns a
+function value, group that callee explicitly: `(make_adder(x))(y)`. The
+ungrouped `f(x)(y)` spelling is rejected because v0.18 treated it as an alias
+for the flat multi-argument call `f(x, y)`.
+
+Empty brackets are not decorative syntax: write `Option` and `def f(x)`, not
+`Option[]` or `def f[](x)`. A constructor value such as `None` is bare;
+`None()` is the distinct zero-argument application, and `Empty {}` specifically
+represents a zero-field Deep record. Formatting and round-trip normalization do
+not collapse any of these three structures.
+
 A standalone signature with `sig` can precede a `def`. It must appear directly before the
 function it describes:
 
@@ -71,8 +90,8 @@ sig predict:
 ## Local bindings and blocks
 
 There is no `let` keyword. Inside a block, `name = expr` introduces a binding; bindings are
-separated by a newline or `;`, and the final bare expression is the block's value. Blocks
-are themselves expressions.
+separated by newlines, and the final bare expression is the block's value. Semicolons are
+reserved for `do` and `par`; blocks are themselves expressions.
 
 ```chelis-surf-fragment
 {
@@ -99,19 +118,31 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 
 ## Literals
 
-- Integers: `42`, `1_000_000`, `0xFF`, `0xCAFE_BABE`. Default type `int32`.
-- Floats: `1.0`, `3.141_592_6`, `1e-5`, `3.14e10`. Default type `f32`.
+- Integers: canonical decimal such as `42` and `1000000`. Default type `int32`.
+- Floats: finite shortest round-trippable spellings such as `1.0`, `1e-5`, and
+  `31400000000.0`. Default type `f32`.
 - A literal can carry a precision suffix that binds it exactly: float suffixes `f32 f64
-  bf16 f16` (attach to int or float tokens, e.g. `42f32`, `1.0f64`), integer suffixes `i8
+  bf16 f16` (for example `42.0f32`, `1.0f64`), integer suffixes `i8
   i16 i32 i64` (int tokens only). The suffix must follow the digits with no space.
+  Literal patterns are unsuffixed because Deep patterns preserve only the raw value.
 - Strings: `"hello"` with escapes `\" \\ \n \t \r \0`.
 - Booleans: `true`, `false`.
-- Unit: `()` is both the unit value and the unit type.
-- Tuples: `(a, b, c)`. `(a)` is grouping, not a tuple; there is no one-element tuple.
+- Unit: `()` is the unit value; `unit` is the unit type.
+- Tuples: `(a, b, c)`. `(a)` is grouping; a one-element tuple is `(a,)`.
 - Bracket literals: `[1.0, 2.0, 3.0]` builds a tensor, and bracket lists also pass list
   arguments to operators, for example the window and stride lists in
-  `reduce_window_max(grid, [2, 2], [1, 1])`. A negative numeral is unary minus applied to a
+  `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`. A negative numeral is unary minus applied to a
   literal, so write `f(-42)` to pass a negative argument.
+
+Delimited nonempty lists may carry one trailing comma (or a trailing semicolon in
+`par`/`do`). The parser discards it and the formatter omits it; the comma in `(a,)`
+remains because it distinguishes a one-element tuple from grouping.
+
+The parser accepts value-preserving digit separators, hexadecimal/binary integers,
+equivalent finite exponent spellings, and equivalent valid Unicode escapes. `chelis fmt`
+prints their canonical decimal/string spelling; `fmt --check` rejects the resulting source
+diff. Padded non-exponent decimals, malformed separators, invalid escapes, and semantic
+suffix/adoption changes remain errors.
 
 In a position with a known element type (a tensor-typed argument, a tensor return body, or
 the first argument of `cast`), bracket-literal elements adopt that element type. So
@@ -146,15 +177,16 @@ lambda:
 
 ```chelis-surf-fragment
 hidden = matmul(x, w1)
-  |> fn (z) -> add(z, b1)
+  |> add(b1)
   |> relu
 ```
 
 ## Function application
 
 Application is `f(x, y)`. The standard call surface is positional. Two transforms take a
-named argument: `grad(f, wrt=w)` selects parameters to differentiate, and `vmap(f, axis=0)`
-selects the batch axis. There is no general keyword-argument surface beyond these.
+named argument: `grad(f, wrt=w)` selects parameters to differentiate, and `vmap(f, axis=1)`
+selects a nonzero batch axis. Axis zero uses the sole default form `vmap(f)`. There is no
+general keyword-argument surface beyond these.
 
 ## Tuples and projection
 
@@ -206,6 +238,9 @@ match n with {
   | _          => zero_case
 }
 ```
+
+Negative numeric patterns are written directly (`-42`, `-1.5`, or `-0.0`);
+unlike expression position, pattern position has no unary-expression node.
 
 ## Types and constructors
 
@@ -279,6 +314,9 @@ A function's effects can be annotated with a `! { ... }` suffix on the signature
 `def`. The handled effects are `Random` and `Resource("device")`; `IO` is inferred from
 host operations such as `print`. Handlers are introduced by `with`:
 
+An explicit empty effect row `! {}` declares a pure upper bound. It is distinct
+from omitting the clause, which leaves effects inferred.
+
 ```chelis-surf-fragment
 with seed(42i64) {
   dropout(x, 0.5)
@@ -297,7 +335,7 @@ They must always be applied, and they compose.
 ```chelis-surf-fragment
 (dw, db) = grad(loss_fn, wrt=(w, b))(w, b)
 
-batched = vmap(process, axis=0)(xs)
+batched = vmap(process)(xs)
 ```
 
 `cast(e, p)` changes precision, and `copy(e)` produces an owned duplicate of a value. See

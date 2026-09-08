@@ -12,8 +12,8 @@
 //! would catch it without rejecting the legitimate compound-tag use.
 
 use crate::{Context, Rule, Surface, Violation};
+use chelis_unord::UnordSet;
 use regex::Regex;
-use std::collections::HashSet;
 use std::sync::OnceLock;
 
 static SYMBOL_RE: OnceLock<Regex> = OnceLock::new();
@@ -116,7 +116,7 @@ impl Rule for DeepUserSymbolCharset {
         let Some(source) = ctx.source else {
             return Vec::new();
         };
-        let closed: HashSet<&str> = CLOSED_TAGS.iter().copied().collect();
+        let closed: UnordSet<&str> = CLOSED_TAGS.iter().copied().collect();
         let mut out = Vec::new();
         // Deep is line-oriented enough for our purposes; tokenize per-line
         // to get accurate line numbers.

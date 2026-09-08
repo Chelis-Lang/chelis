@@ -13,18 +13,31 @@ use super::*;
 
 /// Run a single-module Surf source through the obligation engine at the
 /// given tier and return the outcomes.
-fn run(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
-    let opts = ObligationRunOptions {
+fn options(tier: &str) -> ObligationRunOptions {
+    ObligationRunOptions {
         seed: 0,
         samples: 16,
         smt_timeout_ms: 2000,
         tier: tier.to_string(),
         only: None,
         invariant_min_rate: 0.01,
-    };
-    match run_surf_source_obligations(surf, &opts).expect("engine run") {
+    }
+}
+
+fn run(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
+    match run_surf_source_obligations(surf, &options(tier)).expect("engine run") {
         ObligationRunResult::Ran(o) => o,
         other => panic!("expected a clean module to run, got {other:?}"),
+    }
+}
+
+fn run_deep(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
+    let declarations = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
+    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let source = chelis_deep::printer::print_canonical(&expressions);
+    match run_deep_source_obligations(&source, &options(tier)).expect("engine run") {
+        ObligationRunResult::Ran(outcomes) => outcomes,
+        other => panic!("expected a clean Deep module to run, got {other:?}"),
     }
 }
 
@@ -163,6 +176,26 @@ fn u1_clean_scalar_producer_still_passes() {
         only_outcome(&outcomes).status,
         ObligationStatus::Passed,
         "a clean scalar producer still passes under the unified chokepoint"
+    );
+}
+
+#[test]
+fn typed_deep_clean_scalar_producer_still_passes() {
+    let outcomes = run_deep(SCALAR_CLEAN, "fuzz-only");
+    assert_eq!(
+        only_outcome(&outcomes).status,
+        ObligationStatus::Passed,
+        "typed Deep input retains the clean producer obligation"
+    );
+}
+
+#[test]
+fn typed_deep_nonfinite_scalar_producer_still_fails() {
+    let outcomes = run_deep(SCALAR_INF_INEQ, "fuzz-only");
+    assert_eq!(
+        only_outcome(&outcomes).status,
+        ObligationStatus::Failed,
+        "typed Deep input retains the failing producer obligation"
     );
 }
 
@@ -312,4 +345,39 @@ fn w5_int_sample_bounds_are_width_clamped_single_source() {
         None,
         "a non-integer prim has no integer sample bounds"
     );
+}
+
+#[test]
+fn tier_c_tensor_argument_preserves_int64_payload_and_dtype() {
+    let exact = scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993)
+        .expect("value is representable as int64");
+    let arg = obligation_tensor_arg("xs", &[1], "int64", &[exact]);
+
+    assert_eq!(arg.json[0].as_i64(), Some(9_007_199_254_740_993));
+    let deep = chelis_deep::printer::print_canonical(&[arg.expr]);
+    assert!(deep.contains("(t-prim {} int64)"), "{deep}");
+    assert!(!deep.contains("(t-prim {} f32)"), "{deep}");
+}
+
+#[test]
+fn tier_c_integer_tensor_parameter_runs_at_its_declared_dtype() {
+    for width in ["int8", "int16", "int32", "int64"] {
+        let surf = format!(
+            "module M
+export (make)
+@opaque
+@invariant(c) c.n == (0 : {width})
+type Counter =
+  | Counter {{ n: {width} }}
+def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: (0 : {width}) }}
+"
+        );
+        let outcomes = run(&surf, "fuzz-only");
+        let outcome = only_outcome(&outcomes);
+        assert_eq!(
+            outcome.status,
+            ObligationStatus::Passed,
+            "integer tensor argument must be sampled at `{width}`: {outcome:?}"
+        );
+    }
 }

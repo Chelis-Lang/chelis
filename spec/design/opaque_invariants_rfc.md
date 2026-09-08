@@ -264,9 +264,12 @@ language semantics, like `type`/`eff`/`lin`):
   lexical `(module ...)` nesting (joined with `.`) and the reef
   internal-name stem (`Pkg__<pkg>__<Module>__<Name>`). Top-level
   decls outside any module key as `None`, which is its own module.
-- A thread-local `OpacityContext` (install-guard pattern, precedent
-  `DECLARED_SIG_PARAM_TYPES`) carries the opaque map, current
-  module, current decl, and the producer enumeration for error text.
+- A thread-local `OpacityContext` install guard carries the opaque map,
+  current module, current decl, and the producer enumeration for error text.
+  This opacity-only mechanism is not a precedent for type binders: declaration
+  type/dimension/rank binders live in the explicit, serde-skipped
+  `TypeResolutionScope` field on `Env` and follow lexical `Env` clones; there
+  is no ambient `DECLARED_SIG_PARAM_TYPES` state.
 - The rejection set, each a `CheckErrorKind::OpaqueTypeViolation`
   returning the **true type** (no error cascades): record literal;
   positional constructor application; bare constructor reference

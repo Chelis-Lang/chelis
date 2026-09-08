@@ -23,6 +23,8 @@ execs it with a short timeout:
 
 ```sh
 .venv/bin/python scripts/preflight_exec_probe.py
+# Inside an active Devenv shell:
+chelis-exec-preflight
 ```
 
 Expected when healthy:
@@ -43,6 +45,52 @@ the hour once a workspace build mass-launched fresh binaries).
 
 The sections below explain the symptom, the diagnosis, and the mitigations;
 read them when the loop looks wedged, not on the happy path.
+
+## Managed tree-sitter compiler check
+
+The Devenv shell sets `CC_aarch64_apple_darwin` and
+`CXX_aarch64_apple_darwin` to the pinned, SDK-aware Nixpkgs compiler wrapper.
+It also sets `CRATE_CC_NO_DEFAULTS=1`, so the `cc` crate does not inject the
+redundant `arm64-apple-macosx` alias for an already-native build. This retains
+the wrapper's macOS SDK and C++ headers without emitting a multi-target warning.
+
+`devenv test` runs the clean compiler and parser-agreement control. To run that
+leg directly from an active shell:
+
+```sh
+.devenv/state/venv/bin/python scripts/darwin_tree_sitter_smoke.py
+```
+
+Success means a fresh target builds all three tree-sitter C/C++ sources with
+no target-mismatch warning and the complete `tree-sitter-chelis` test suite
+passes.
+
+## Domain-oracle child timeout
+
+The repository-owned cause of chelis#1429 was path amplification before the
+compiler child reached its semantic work: `chelis check <fixture>` ran advisory
+lint over the fixture's parent directory. Oracle fixtures live in the shared
+system temporary directory, so one check could recursively inspect unrelated
+temporary trees. The check path now gives advisory lint the explicit input file
+as both its traversal scope and fixability-probe target.
+
+The unrepresentable-domain oracle runs each `chelis check` and `chelis
+validate --deep` fixture as a bounded child. A timeout is not a semantic
+rejection. The oracle kills and reaps the whole child process group and reports
+the exact obligation, command, PID, state, elapsed time, timeout, termination,
+stdout, and stderr.
+
+When this fails on macOS, keep the `chelis-exec-preflight` result as a separate
+control: a small C executable can be admitted while a newly linked large Rust
+binary is still delayed. Sample the named PID before the 60-second bound when
+possible. `_dyld_start` with negligible child CPU points to the first-exec
+failure class below; frames in Chelis or a filesystem/compiler call identify a
+different stall and should be investigated from that frame rather than by
+raising the timeout.
+
+The acceptance sequence is recorded in [`manual_gates.md`](manual_gates.md):
+two direct oracle passes, the planted hung-child termination test, the exec
+preflight, and the orphan reaper must all agree.
 
 ## Symptom
 
@@ -184,11 +232,25 @@ In order of preference:
 
 ## CI Is the Fallback Oracle
 
-When local exec is wedged, do not block on the local run: the
-`macos-smoke` CI job (`.github/workflows/ci.yml`) runs the full workspace
-test suite on macOS and serves as the macOS signal. Push the branch and
-let CI serve as the oracle, noting in the PR or phase docs that local
-validation was blocked by this failure mode.
+When local exec is wedged, do not block on the local run. The
+`macos-workspace-shard` matrix runs the full workspace test suite on
+macOS across two disjoint hash partitions. Shard 2 also runs the Metal smoke
+probe. The stable `macos-smoke` aggregate requires both shards and serves as
+the macOS signal. Push the branch and let CI serve as the oracle, noting in
+the PR or phase docs that local validation was blocked by this failure mode.
+
+## Gate Preflight
+
+`python3 scripts/gate.py --fast` and `python3 scripts/gate.py --local` run the
+probe below automatically on macOS, as a subprocess, before their first
+command. Probe exit 0 proceeds. Exit 1 (the wedge classification) stops the
+gate with exit 3 and the termination class `preflight-stop`, naming this
+runbook; push and let macOS Smoke serve as the oracle. Exit 3 (slow admission)
+and exit 2 (the probe could not run) print a warning and continue. The
+verdict, exit code, and first output line are recorded under `preflight.probe`
+in the run's summary JSON (`target/gate-reports/<timestamp>-<pid>-<mode>.json`),
+so a stop is evidence, not a lost terminal line. CI stage runs never run the
+preflight.
 
 ## Preflight Probe Details
 
@@ -209,7 +271,9 @@ runbook. It:
 - exits 2 when the probe could not run at all (`cc` missing, the compile
   failed, the probe binary was not executable, or it exited non-zero) — an
   environment problem, not a degradation verdict;
-- always cleans up its temp dir, so it is safe to run from anywhere.
+- always cleans up its temp dir, so it is safe to run from anywhere;
+- is invoked automatically by the gate's preflight (`--fast`, `--local`, and
+  the bare full gate) on macOS, with the exit mapping in Gate Preflight above.
 
 Tests: `scripts/test_preflight_exec_probe.py`
 (`.venv/bin/python scripts/test_preflight_exec_probe.py`).

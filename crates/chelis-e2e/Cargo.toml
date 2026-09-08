@@ -14,6 +14,8 @@ repository.workspace = true
 hip-local-gpu = []
 
 [dependencies]
+chelis-unord.workspace = true
+chelis-compiler-api.workspace = true
 chelis-deep.workspace = true
 chelis-macros.workspace = true
 chelis-surf.workspace = true
@@ -29,5 +31,7 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
-chelis-compiler-api = { path = "../chelis-compiler-api" }
 predicates = "3"
+
+[lints]
+workspace = true

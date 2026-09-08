@@ -4,6 +4,8 @@ use serde_json::json;
 mod replace_fixtures;
 
 const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
+#[cfg(feature = "smt")]
+const INDUCTION_BOND: &str = include_str!("../../../examples/induction_bond.ch");
 const MATMUL_PROGRAM: &str = r#"a = (a : tensor[2, 3, f32])
 b = (b : tensor[3, 4, f32])
 out = (matmul(a, b) : tensor[2, 4, f32])
@@ -768,7 +770,7 @@ fn each_tool_dispatches_successfully() {
             json!({
                 "source_kind":"surf",
                 "source":LOSS_PROGRAM,
-                "bindings":{"x":{"shape":[4],"data":[1.0,2.0,3.0,4.0]}}
+                "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
             }),
         ),
         (
@@ -1245,6 +1247,58 @@ def square(x: f32) -> f32 = x * x
     }
 }
 
+#[cfg(feature = "smt")]
+#[test]
+fn issue_978_tide_discloses_the_same_induction_obligations() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":978,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source": INDUCTION_BOND,
+            "tier":"induction-only", "seed":0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    let props = structured["properties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing properties: {structured}"));
+    assert_eq!(props.len(), 1, "{structured}");
+    assert_eq!(props[0]["status"], "passed", "{structured}");
+    assert_eq!(props[0]["proof_tier"], "induction", "{structured}");
+    assert_eq!(props[0]["arith_model"], "real", "{structured}");
+    assert_eq!(
+        props[0]["induction"]["base"]["status"], "proved",
+        "{structured}"
+    );
+    assert_eq!(
+        props[0]["induction"]["step"]["status"], "proved",
+        "{structured}"
+    );
+    assert_eq!(structured["ok"], true, "{structured}");
+}
+
+#[test]
+fn issue_978_tide_deep_induction_is_terminal_without_fuzz_laundering() {
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0", "id":979, "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"deep", "source": DEEP_PROPERTY_MODULE,
+            "tier":"induction-only", "samples":32, "seed":0
+        }}
+    }))
+    .expect("prove response");
+    let structured = &response["result"]["structuredContent"];
+    let props = structured["properties"].as_array().expect("properties");
+    assert_eq!(props.len(), 1, "{structured}");
+    assert_eq!(props[0]["status"], "unsupported", "{structured}");
+    assert_eq!(props[0]["proof_tier"], "induction", "{structured}");
+    assert_eq!(props[0]["samples"], 0, "{structured}");
+    assert!(props[0].get("sampling_method").is_none(), "{structured}");
+    assert_eq!(structured["ok"], false, "{structured}");
+}
+
 /// F8 (review 4): a zero-sample `@property` (a vacuous fuzz pass, NOT a
 /// genuine pass) must report status "unsupported" through tide -- matching
 /// the CLI's is_pass-bucketed render -- and lower `ok`. The tide render
@@ -1434,7 +1488,7 @@ fn f6_cli_and_tide_agree_on_deep_user_property_verdicts() {
         .collect();
 
     // Same property set, same per-property status, across surfaces.
-    let cli_by_name: std::collections::HashMap<String, String> = cli_props
+    let cli_by_name: std::collections::BTreeMap<String, String> = cli_props
         .iter()
         .map(|p| {
             (
@@ -1604,4 +1658,200 @@ def broken(x: f32) -> f32 = to_tensor([x])
             .any(|o| o["kind"] == "error" && o["stage"] == "check"),
         "a type-broken deep module surfaces a stage:\"check\" error record: {structured}"
     );
+}
+
+#[test]
+fn issue_977_tide_and_cli_match_full_constraint_sampling_evidence() {
+    let source = "module Risk.Guards
+@property confidence_tail_order forall(alpha1: f32, alpha2: f32)
+where alpha1 > 0.99, alpha1 < alpha2, alpha2 < 1.0:
+  ((1.0 - alpha2) < (1.0 - alpha1))
+";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":977,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source": source, "tier":"fuzz-only",
+            "samples":8, "seed":42
+        }}
+    }))
+    .expect("prove response");
+    let tide = response["result"]["structuredContent"]["properties"][0].clone();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("risk.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "8",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .expect("run CLI prove");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["kind"] == "property")
+        .expect("CLI property record");
+
+    for key in [
+        "name",
+        "status",
+        "composite_verdict",
+        "qualifiers",
+        "proof_tier",
+        "samples",
+        "seed",
+        "sampling_method",
+        "accepted_samples",
+        "attempted_samples",
+        "rejected_samples",
+        "assumptions",
+    ] {
+        assert_eq!(tide[key], cli[key], "field `{key}` differs");
+    }
+    assert_eq!(
+        tide["assumptions"][0]["non_vacuity"]["evidence"]["sampling_method"],
+        "constraint_directed"
+    );
+}
+
+#[test]
+fn issue_979_tide_and_cli_fail_closed_without_linked_nautilus_call() {
+    let source = "module Risk.Quantile\n@property no_trusted_quantile forall(p: f32, q: f32) where p <= q:\n  p <= q\n  with contract = \"std.quantile.monotonicity\"\n";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":979,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source":source, "tier":"smt-only"
+        }}
+    }))
+    .expect("prove response");
+    let tide = response["result"]["structuredContent"]["properties"][0].clone();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("quantile.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "smt-only",
+        ])
+        .output()
+        .expect("run CLI prove");
+    assert_eq!(output.status.code(), Some(2));
+    let cli = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["kind"] == "property")
+        .expect("CLI property record");
+
+    for key in [
+        "name",
+        "status",
+        "composite_verdict",
+        "qualifiers",
+        "proof_tier",
+        "samples",
+        "seed",
+        "assumptions",
+        "reason",
+    ] {
+        assert_eq!(tide[key], cli[key], "field `{key}` differs");
+    }
+    assert_eq!(tide["status"], "unsupported");
+    assert!(
+        tide["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Nautilus.Stats.quantile_vec"))
+    );
+}
+
+#[test]
+fn issue_977_tide_and_cli_match_exhausted_sampling_evidence() {
+    let source = "module Risk.Guards\n@property narrow forall(x: f32)\nwhere x > 0.99, x < 1.0:\n  (x == x)\n";
+    let response = handle_message(&json!({
+        "jsonrpc":"2.0",
+        "id":978,
+        "method":"tools/call",
+        "params":{"name":"chelis_prove","arguments":{
+            "source_kind":"surf", "source": source, "tier":"fuzz-only",
+            "samples":8, "max_attempts":3, "seed":42
+        }}
+    }))
+    .expect("prove response");
+    let tide = response["result"]["structuredContent"]["properties"][0].clone();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("risk.ch");
+    std::fs::write(&path, source).expect("write fixture");
+    let output = assert_cmd::Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("utf-8 path"),
+            "--json",
+            "--tier",
+            "fuzz-only",
+            "--samples",
+            "8",
+            "--max-attempts",
+            "3",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .expect("run CLI prove");
+    assert_eq!(output.status.code(), Some(3));
+    let cli = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["kind"] == "property")
+        .expect("CLI property record");
+
+    for key in [
+        "name",
+        "status",
+        "composite_verdict",
+        "qualifiers",
+        "proof_tier",
+        "samples",
+        "seed",
+        "sampling_method",
+        "accepted_samples",
+        "attempted_samples",
+        "rejected_samples",
+        "assumptions",
+        "reason",
+        "goal",
+    ] {
+        assert_eq!(tide[key], cli[key], "field `{key}` differs");
+    }
+    assert_eq!(cli["proof_tier"], "none");
+    assert_eq!(cli["accepted_samples"], 3);
+    assert_eq!(cli["attempted_samples"], 3);
+    assert_eq!(cli["rejected_samples"], 0);
+    assert_eq!(cli["samples"], 0);
 }

@@ -56,7 +56,11 @@ fn eval_scalar(source: &str) -> f64 {
         .trim()
         .lines()
         .last()
-        .and_then(|l| l.trim().parse::<f64>().ok())
+        .and_then(|l| {
+            let trimmed = l.trim();
+            let value_str = trimmed.split(" = ").last().unwrap_or(trimmed);
+            value_str.parse::<f64>().ok()
+        })
         .unwrap_or_else(|| panic!("no scalar in forward output: {stdout}"))
 }
 
@@ -256,11 +260,12 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
         .iter()
         .map(|r| {
             format!(
-                "    {{ int shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32); \
-                 for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
-                 chelis_tensor* g = out(x); \
-                 for (int i = 0; i < g->size; i++) printf(\"%.6f\\n\", g->data[i]); \
-                 printf(\"---\\n\"); }}",
+                "    {{ int64_t shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32); \
+                 chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
+                 for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
+                 chelis_tensor* g = out(x); chelis_read_view g_view = chelis_tensor_read_view(g); \
+                 for (int64_t i = 0; i < g_view.count; i++) printf(\"%.6f\\n\", ((const float *)g_view.data)[i]); \
+                 printf(\"---\\n\"); chelis_tensor_release(g); chelis_tensor_release(x); }}",
                 n = r * 2
             )
         })
@@ -371,11 +376,12 @@ fn issue_558_shape_value_forward_matches_c() {
 // ---------------------------------------------------------------------------
 
 // A RUNTIME (metadata-derived, non-literal) shape axis. `ax = shape(x, 0) - 3`
+// (narrowed to int32: `shape` reads an int64 extent, the axis slot is int32)
 // is `0` for a `tensor[3, 2]` input (in range), but it is a data-flow VALUE,
 // so `extract_int_for_dim` cannot fold it to a literal and the DAG lowering
 // has no representable axis. The `def`-body is shared by the two tests below.
 const RUNTIME_AXIS_BODY: &str = "\
-  ax = sub(shape(&x, cast(0, int32)), cast(3, int32))\n\
+  ax = cast(sub(shape(&x, cast(0, int32)), cast(3, int64)), int32)\n\
   n = cast(shape(x, ax), f32)\n\
   s = sum(sum(&x, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
   mul(s, n)";
@@ -440,8 +446,9 @@ fn issue_558_runtime_axis_shape_forward_uses_host_lane() {
 // c` emits it directly (covered above). Under `--target hip`, a `grad`
 // export host-falls-back to the C emitter (the grad-in-host-position lane),
 // so it works there too; a `Shape` node reaching the HIP DEVICE-kernel path
-// is defensively rejected by `reject_unsupported_hip_ops` (compiler-api + CLI
-// mirror) with an `unsupported_feature` diagnostic citing chelis#513/#558.
+// is defensively rejected by the shared compiler-api
+// `reject_unsupported_hip_ops` gate with an `unsupported_feature` diagnostic
+// citing chelis#513/#558.
 // The HIP device-path rejection is not exercised here because it needs a GPU
 // toolchain (hipcc) that CI does not guarantee; the mandatory lanes are eval
 // + C, which the oracles above lock end to end.

@@ -16,24 +16,22 @@ Core assertion functions:
 
 ```chelis
 -- Equality
-def assert_eq(actual: f32, expected: f32, label: String) -> () ! { Test }
-def assert_eq_int(actual: int64, expected: int64, label: String) -> () ! { Test }
-def assert_eq_bool(actual: bool, expected: bool, label: String) -> () ! { Test }
-def assert_eq_string(actual: String, expected: String, label: String) -> () ! { Test }
+def assert_eq[q](actual: q, expected: q, label: string) -> unit ! { Test }
 
 -- Approximate equality (for floating point)
-def assert_close(actual: f32, expected: f32, tol: f32, label: String) -> () ! { Test }
-def assert_close_tensor(actual: tensor[n, f32], expected: tensor[n, f32], tol: f32, label: String) -> () ! { Test }
+def assert_close(actual: f32, expected: f32, tol: f32, label: String) -> unit ! { Test }
+def assert_close_tensor[p_float](actual: &tensor[..r, p_float], expected: &tensor[..r, p_float], tol: p_float, label: string) -> unit ! { Test }
+def assert_eq_tensor[p](actual: &tensor[..r, p], expected: &tensor[..r, p], label: string) -> unit ! { Test }
 
 -- Boolean
-def assert_true(cond: bool, label: String) -> () ! { Test }
-def assert_false(cond: bool, label: String) -> () ! { Test }
+def assert_true(cond: bool, label: string) -> unit ! { Test }
+def assert_false(cond: bool, label: string) -> unit ! { Test }
 
 -- Tensor shape / properties
-def assert_shape(t: tensor[n, f32], expected_n: int64, label: String) -> () ! { Test }
+def assert_shape[p](t: &tensor[..r, p], expected: List[int64], label: string) -> unit ! { Test }
 
 -- Failure (unconditional)
-def fail(msg: String) -> () ! { Test }
+def fail(msg: string) -> unit ! { Test }
 ```
 
 The `Test` effect is a new algebraic effect. Assertion functions perform the `Test` effect. The `chelis test` CLI command handles `Test` by collecting pass/fail results. This means:
@@ -197,13 +195,13 @@ Currently, the entire test suite is Python (golden generation via pandas, runtim
 
 ```chelis
 import Coral.Frame (from_pairs, get_float_col, filter, nrows, ncols, with_column, columns)
-import Std.Test (assert_eq_int, assert_close_tensor, assert_true)
+import Std.Test (assert_eq, assert_close_tensor, assert_true)
 
 def test_construction() = {
   prices = to_tensor([100.0, 200.0, 300.0])
   df = from_pairs([("price", FloatCol(prices))])
-  assert_eq_int(nrows(df), 3, "nrows = 3")
-  assert_eq_int(ncols(df), 1, "ncols = 1")
+  assert_eq(nrows(df), 3, "nrows = 3")
+  assert_eq(ncols(df), 1, "ncols = 1")
 }
 
 def test_filter_by_mask() = {
@@ -211,7 +209,7 @@ def test_filter_by_mask() = {
   df = from_pairs([("price", FloatCol(prices))])
   mask = gt(get_float_col(df, "price"), 150.0)
   filtered = filter(df, mask)
-  assert_eq_int(nrows(filtered), 2, "filter keeps 2 rows")
+  assert_eq(nrows(filtered), 2, "filter keeps 2 rows")
 }
 
 def test_with_column_preserves_existing() = {
@@ -219,7 +217,7 @@ def test_with_column_preserves_existing() = {
   vols = to_tensor([0.1, 0.2, 0.3])
   df = from_pairs([("price", FloatCol(prices))])
   df2 = with_column(df, "vol", FloatCol(vols))
-  assert_eq_int(ncols(df2), 2, "added column")
+  assert_eq(ncols(df2), 2, "added column")
   -- Original price column unchanged
   assert_close_tensor(get_float_col(df2, "price"), prices, 1e-10, "price preserved")
 }
@@ -425,17 +423,90 @@ with `cargo test` and `pytest` ergonomics.
 
 Directory runs use `--batch-mode auto` by default. The parent builds the shared package
 context once, groups batch-eligible test files into a suite batch, compiles that batch
-once, and evaluates every selected test root from the shared handle. Files with top-level
-module-init bindings or top-level name collisions use the per-file worker path instead.
-
-If the batch worker crashes, times out, or cannot produce complete ordered rows, the
-parent falls back to the existing per-file subprocess workers for that batch. Plain text
-and NDJSON output remain deterministic in discovery order. Use `--batch-mode file` to
-force per-file workers while debugging. `--jobs auto` still caps worker concurrency on
-paths that use file workers.
+once, and evaluates every selected test root from the shared handle. Sharing the package
+and evaluator does not merge source scope: before combination, each test file and its
+synthetic roots are rewritten as an independent module under a deterministic reserved
+identity, and the combined unit contains only exact internal names. A declaration in one
+test file is therefore invisible to another unless the language's ordinary import rule
+made it visible. Files with top-level module-init bindings or conservatively detected
+top-level name collisions may still use the per-file worker path instead.
 
 If the shared package context fails to compile, `chelis test` fails fast and does not fan
 out identical per-worker errors.
+
+#### Batch admission is not scope authority
+
+The parent keeps a conservative admission guard so obviously conflicting files can take
+the established per-file path without constructing a batch that will fail. It recognizes
+these conditions:
+
+- two files declare the same name (including ADT variant constructors, which share one
+  namespace before isolated rewriting);
+- one file declares a name that another file explicitly imported, in either order. This
+  is the chelis#1261 collision that the original raw merge misresolved;
+- two files import the same name from different modules;
+- a file carries a wildcard import, whose name set the runner cannot enumerate without
+  resolving the package graph.
+
+Importing the same name from the same module is agreement, not collision, and must not
+demote either file: nearly every suite shares one assertion helper import, and demoting
+on that would delete the batch path entirely. A file that repeats a name internally
+(a `sig` beside its `def`) is likewise not colliding with itself.
+
+The parent's eligibility classifier and the batch worker's own duplicate guard admit
+files through one shared rule. A worker guard stricter than the classifier rejects
+manifests the parent already built, which surfaces only as an unexplained fallback.
+That rule is a performance/admission policy, not proof of language scope. It cannot
+enumerate a file's unresolved bare references, and a future declaration shape must not
+be able to confer scope merely because the guard has no arm for it. Correctness comes
+from independently rewriting each file through the ordinary module resolver, then
+combining only the rewritten declarations and exact synthetic-root identities. The
+cached-context and legacy prepared-graph workers consume the same isolated rewrite
+product, and neither re-runs the eval-entry rewriter over that product.
+
+Demotion is the sanctioned per-file path, not a degradation, and is not reported by
+default: `--batch-mode file` produces the same rows and the same exit code. The reason is
+computed anyway, so it is available on demand. Setting `CHELIS_TEST_EXPLAIN_BATCHING=1`
+prints one stderr line per demoted file naming the collision (or the read, parse,
+enumeration, or module-init reason). Without it, a maintainer whose suite quietly lost the
+batch path has to bisect the colliding names by hand.
+
+`--batch-mode auto` and `--batch-mode file` are verdict-equivalent: they emit the same
+file/test pass-fail rows and the same exit status for the same sources. A resolver or
+checker failure in an attempted batch may use the reported per-file fallback to recover
+source attribution, but it must remain a failing `<file>` row rather than becoming green
+after scope flattening. The fallback record and summary marker are additional execution-
+mode evidence and do not change that row/verdict equivalence.
+
+#### Reporting an abandoned batch
+
+If the batch worker cannot be run, crashes, times out, or exits without a usable row set,
+the parent falls back to the existing per-file subprocess workers for that batch. The
+runner is also total against a worker that returns rows it cannot attribute, though no
+current worker path reaches that state; the `status` table below marks which triggers are
+reachable. Plain text and NDJSON output remain deterministic in discovery order. Use
+`--batch-mode file` to force per-file workers while debugging. `--jobs auto` still caps
+worker concurrency on paths that use file workers.
+
+An abandoned batch is a degraded execution mode and must be reported on every channel a
+reader might be capturing, naming the reason and every file the batch had claimed. The
+batch worker's stderr is inherited rather than captured, so any diagnostic it emitted is
+already on the terminal; without an attributed note from the parent it is an orphan line
+that no reader can tie to a file, to the batch, or to the fact that batching was dropped
+at all (chelis#1261). Three channels carry it:
+
+- **stderr**, in every mode: the attributed note with the reason and the file list.
+- **plain stdout**, on the summary line: ` (batch abandoned: ran per-file)`. A CI job
+  that captures only stdout is the common shape, and without this it reads a degraded run
+  as identical to a clean one. A clean run's summary line is unchanged, and the
+  supervisor's summary parser sees through the marker.
+- **`--json` stdout**: the record and summary flag described below.
+
+The exit code stays keyed to test outcomes: every selected test still ran, and a
+fallback is not a test failure. The report is what carries the degradation, which is why
+the summary gains a marker rather than the exit code gaining a state. A consumer that
+reads only the summary can still tell a clean batched run from a fallback run, so
+"perfect success" remains distinguishable from "perfect results, degraded path".
 
 ### Machine-readable output with `--json`
 
@@ -452,6 +523,63 @@ $ chelis test tests/ --json
 Failing rows carry an additional `"message"` field with the assertion's label and
 expected/got values (e.g. `"assert failed: assert_close (double(1.5) ~ 3.0): expected 3.01, got 3, tol 0.000001"`).
 
+An abandoned suite batch adds one `batch_fallback` record ahead of the rows, and one
+`batch_fallback` flag on the summary. Both additions are additive: the record is a new
+top-level record kind beside the existing `suite` record, and the summary field is absent
+unless a batch was abandoned, so the bytes a consumer parses today are unchanged.
+
+```text
+$ chelis test tests/ --json
+{"batch_fallback":{"files":["tests/a.ch","tests/b.ch"],"message":"batch worker exited with status 2","status":"worker-failed"}}
+{"file":"tests/a.ch","test":"test_one","status":"pass"}
+{"file":"tests/b.ch","test":"test_two","status":"pass"}
+{"summary":{"passed":2,"failed":0,"batch_fallback":true}}
+```
+
+`message` is the human sentence and `files` lists the batch's files in discovery order.
+The record appears once per run, because the runner attempts at most one batch. The
+incomplete-suite renderer emits only rows, verdicts, and its own `suite` record, so a run
+that also hit the suite deadline reports the deadline rather than the fallback, and drops
+the plain-summary marker with it. The human note still reaches the operator there,
+because leader stderr is forwarded verbatim.
+
+`status` is one of five values, three of which a user can currently reach:
+
+| `status` | reachable | trigger |
+|---|---|---|
+| `worker-unavailable` | yes | the runner could not spawn or drive the batch worker process |
+| `timeout` | yes | the worker outlived the derived batch window and was terminated |
+| `worker-failed` | yes | the worker exited nonzero without a usable row set, or died on a signal |
+| `malformed-output` | defensive | a worker stdout line that is not a well-formed row record |
+| `incomplete-rows` | defensive | a complete-looking row set that does not match the batch manifest |
+
+The two defensive branches have no reachable trigger today: the worker's only stdout
+writer emits well-formed rows, and every row-losing path kills the worker first, so
+`worker-failed` wins the race. They stay because the parser and the row-attribution step
+must still be total, and a future worker change could reach either. `status` is a closed
+vocabulary regardless of reachability, pinned by an exhaustive unit test rather than by a
+CLI test that cannot construct the unreachable cases.
+
+### Expected-failure files
+
+`chelis test <path> --expect neg|blocked` classifies each `.ch` file against
+its same-stem `.expect` sidecar. Line 1 pins the required diagnostic
+substring. `blocked` additionally requires an auditable citation
+(`chelis#NNN`, `docs/issue_drafts/`, or `docs/UPSTREAM_BUGS.md`). Each file is
+isolated and yields one verdict record plus the final mode-specific summary.
+
+The expected-failure adapter consumes both ordinary failing `test_*` rows and
+synthetic `<file>` rows from file-level compile/check failures. The worker
+must therefore run the file-level compile and full checker preparation before
+classifying a file with no `test_*` functions as recordless; it must preserve
+the resulting diagnostic for sidecar substring matching and mismatch
+reporting (chelis#967). A genuinely clean file with neither test records nor
+a compile/check failure remains a fail-closed `config-error`. This additional
+file preparation is exclusive to `--expect`; ordinary testless files retain
+the legacy zero-record behavior. Machine-facing `wrong-diagnostic` and
+`drifted` verdicts SHALL include the actual diagnostic messages in a `"got"`
+array as well as the expected-substring detail.
+
 ### Bounding wall time with `--timeout`
 
 `--timeout <seconds>` caps per-test wall-clock time. The default is 30 seconds;
@@ -462,6 +590,56 @@ $ chelis test tests/ --timeout 5
 ```
 
 A test that exceeds the budget fails with a timeout message and the run exits `1`.
+
+`--suite-timeout <seconds>` independently caps the complete public command,
+including Reef/context preparation, batch or file-worker execution, output
+collection, and finalization. The default is 600 seconds. When this deadline
+expires, the supervisor terminates the suite worker and every descendant,
+exits `1`, and reports an explicit incomplete-suite failure. It must not retry
+the same work through another execution mode after the suite deadline. Zero is
+not a valid suite timeout. Any cooperative termination grace is part of, rather
+than additional to, the advertised wall-clock deadline.
+
+In `--json` mode, every stdout line remains valid JSON. Completed test rows and
+completed `--expect` verdict records are retained, any child-produced summary
+is replaced, and the stream ends with an explicit timeout record plus a
+mode-correct summary whose `incomplete` field is `true` and whose failure count
+includes the suite timeout. A timed-out or killed suite must never emit a
+perfect-success summary. Batch workers must forward each flushed row to the
+suite supervisor before worker exit; collecting batch stdout only after exit
+does not satisfy this retention requirement.
+
+The public `test` subcommand always enters the supervisor. On Unix it forks the
+suite directly before creating reader threads; there is no externally
+addressable suite-worker subcommand and no environment variable may turn a
+public invocation into an unsupervised worker. A private inherited lifecycle
+pipe makes the child remove the exact progress file and kill its process group
+if the public supervisor disappears. Conversely, the public supervisor must
+kill the remaining process group on any suite-leader exit before joining
+captured-output readers. A signaled leader produces an explicit incomplete
+JSON or plain result, even if it died before emitting a row. Flushed
+batch rows travel through a supervisor-owned temporary NDJSON progress file,
+not stdout or stderr. Batch stderr remains a separate byte stream and is
+forwarded unchanged on success, fallback, and timeout. Plain-mode counts are
+derived from rendered result-row structure, never from `PASS`/`FAIL`
+substrings in filenames or diagnostic text.
+
+Captured-output forwarding is part of the whole-command deadline. If a
+consumer stops draining stdout or stderr, the public process exits `1` instead
+of waiting forever and reports the incomplete forwarding failure on any
+stream that remains writable. Timeout-report emission itself has a bounded
+one-second best-effort grace so backpressure cannot recreate the hang it is
+reporting. Normal captured stderr is delivered before normal stdout, so a
+blocked diagnostic stream can never leave a perfect-success summary on the
+machine stream; recovery is written only through the opposite stream.
+Deadline arithmetic uses checked `Instant` operations; every syntactically
+accepted `u64` timeout is non-panicking.
+
+Whole-suite deadline supervision currently requires Unix process-group
+semantics (the supported Linux and macOS release targets). On non-Unix targets,
+the public `chelis test` command fails closed before starting a suite rather
+than claiming descendant cleanup that the platform implementation cannot
+provide.
 
 ### Reef layout rule (hard)
 

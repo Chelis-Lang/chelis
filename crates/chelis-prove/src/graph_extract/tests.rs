@@ -10,7 +10,7 @@
 //!   and whose serialized bytes hash to exactly the handle's hash;
 //! - a multi-output case fans out into N goals with DISTINCT root indices
 //!   sharing one DAG hash;
-//! - a non-v1 `WireDag` is REJECTED at the producer boundary, not silently
+//! - a non-current `WireDag` is REJECTED at the producer boundary, not silently
 //!   hashed (the negative twin for the cross-process consume gate).
 
 use std::collections::BTreeMap;
@@ -101,7 +101,7 @@ fn real_source_yields_box_range_goal_with_populated_handle() {
         "the handle's hash must be the sha256 of the serialized WireDag bytes"
     );
 
-    // The serialized artifact is a v1 WireDag that round-trips.
+    // The serialized artifact is an exact-version v6 WireDag that round-trips.
     let parsed: WireDag = serde_json::from_slice(&extracted.wire_dag_bytes)
         .expect("the serialized bytes parse back as a WireDag");
     assert_eq!(parsed.schema_version, WIRE_DAG_SCHEMA_VERSION);
@@ -262,7 +262,7 @@ fn future_version_wire_dag() -> WireDag {
 }
 
 #[test]
-fn non_v1_wire_dag_is_rejected_at_the_producer_boundary() {
+fn non_current_wire_dag_is_rejected_at_the_producer_boundary() {
     let mut named_roots = BTreeMap::new();
     named_roots.insert("out".to_string(), 0usize);
     let err = box_range_goal_from_wire_dag(
@@ -279,7 +279,7 @@ fn non_v1_wire_dag_is_rejected_at_the_producer_boundary() {
 }
 
 #[test]
-fn v1_wire_dag_passes_the_boundary_and_hashes() {
+fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
     // The positive twin of the boundary check: a supported-version DAG is
     // hashed and produces a populated goal.
     let mut named_roots = BTreeMap::new();
@@ -308,6 +308,49 @@ fn v1_wire_dag_passes_the_boundary_and_hashes() {
     .expect("a supported-version DAG passes the boundary");
     assert!(extracted.goal.ir.is_populated());
     assert_eq!(extracted.goal.ir.root_index(), Some(0));
+}
+
+#[test]
+fn invalid_exact_v6_count_is_rejected_without_panicking() {
+    let mut named_roots = BTreeMap::new();
+    named_roots.insert("out".to_string(), 1usize);
+    let dag = WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        nodes: vec![
+            WireDagNode {
+                id: 0,
+                op: WireRiscOp::Load {
+                    name: "x".to_string(),
+                },
+                inputs: vec![],
+                output_type: WireTensorType {
+                    dims: vec![WireDimInfo::Lit { size: 4 }],
+                    precision: "f32".to_string(),
+                },
+            },
+            WireDagNode {
+                id: 1,
+                op: WireRiscOp::Count { axes: vec![0] },
+                inputs: vec![0],
+                output_type: WireTensorType {
+                    dims: vec![],
+                    precision: "int64".to_string(),
+                },
+            },
+        ],
+        roots: vec![1],
+    };
+    let err = box_range_goal_from_wire_dag(
+        &dag,
+        &named_roots,
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 4.0),
+    )
+    .expect_err("Count over a non-bool input must return a typed wire-contract rejection");
+    assert!(
+        matches!(err, GraphExtractError::WireContractRejected(_)),
+        "expected a typed wire-contract rejection, got {err:?}"
+    );
 }
 
 #[test]
@@ -380,7 +423,7 @@ fn unlowerable_source_surfaces_a_lower_failure() {
 // hash. The producer must REJECT such a DAG at the boundary, before hashing.
 // ===========================================================================
 
-/// A single-node `WireDag` v1 carrying `op`, rooted at node 0, output `out`.
+/// A single-node exact-version `WireDag` v6 carrying `op`, rooted at node 0, output `out`.
 fn single_op_dag(op: WireRiscOp) -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
@@ -410,20 +453,37 @@ fn extract_single_op(op: WireRiscOp) -> Result<ExtractedGoal, GraphExtractError>
 
 #[test]
 fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
-    // `1.0e400` overflows f64 to +inf and lowers to Const(inf). Before the
-    // guard, this produced an artifact whose bytes serialize the inf as
-    // `null` -- a self-consistent hash over UNPARSEABLE bytes (silent
-    // corruption). It must now be rejected with the typed error.
+    // `1e400` overflows f64 to +inf. Canonical Surf rejects non-finite
+    // literals before lowering, so this real-source path must fail closed
+    // without producing corrupt artifact bytes. The direct WireDag sibling
+    // above still locks GraphExtractError::NonFiniteValue at its boundary.
     let err = box_range_goal_from_source(
-        "out = (1.0e400 : tensor[f32])\n",
+        "out = (1e400 : tensor[f32])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
     )
     .expect_err("a non-finite Const from real source must be rejected, not corrupted");
     assert!(
+        matches!(&err, GraphExtractError::LowerFailed(message) if message.contains("non-finite")),
+        "expected the canonical Surf non-finite rejection, got {err:?}"
+    );
+
+    // chelis#729 rework: the sealed payload finalizes at the ascribed
+    // dtype, so a value that overflows ITS OWN dtype (1e300 at f32 is
+    // +inf per [04-NUM-2]) is honestly non-finite and takes the same
+    // rejection; the pre-sealed payload carried the finite f64 fiction
+    // and slipped past this guard.
+    let err = box_range_goal_from_source(
+        "out = (1e300 : tensor[f32])\n",
+        SourceKind::Surf,
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 1.0),
+    )
+    .expect_err("an f32-overflowing const finalizes to inf and must be rejected");
+    assert!(
         matches!(err, GraphExtractError::NonFiniteValue { .. }),
-        "expected NonFiniteValue, got {err:?}"
+        "expected NonFiniteValue for the finalized f32 inf, got {err:?}"
     );
 }
 
@@ -431,8 +491,14 @@ fn non_finite_const_from_real_source_is_rejected_not_corrupted() {
 fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
     // The positive twin: a finite extreme (1e300) is NOT non-finite, so it
     // serializes as a real JSON number and produces a populated goal.
+    // RE-AUTHORED at the chelis#729 rework (chelis#856): the fixture was
+    // `1.0e300 : tensor[f32]`, which only passed because the pre-sealed
+    // payload carried the un-finalized f64 image; the honest f32 value
+    // of 1e300 is +inf ([04-NUM-2] overflow), which the guard now
+    // correctly rejects (see the rejected twin below). A finite extreme
+    // needs a dtype that can hold it, so the fixture moves to f64.
     let extracted = box_range_goal_from_source(
-        "out = (1.0e300 : tensor[f32])\n",
+        "out = (1e300 : tensor[f64])\n",
         SourceKind::Surf,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
@@ -452,8 +518,11 @@ fn each_non_finite_const_variant_is_rejected() {
     // +inf, -inf, and NaN would all serialize to the same `null` (the
     // collision). Each must be rejected so the collision is never reachable.
     for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-        let err = extract_single_op(WireRiscOp::Const { value })
-            .expect_err("a non-finite Const must be rejected");
+        let err = extract_single_op(WireRiscOp::Const {
+            value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, value)
+                .expect("float finalize is total"),
+        })
+        .expect_err("a non-finite Const must be rejected");
         match err {
             GraphExtractError::NonFiniteValue { node, field } => {
                 assert_eq!(node, 0);
@@ -497,13 +566,23 @@ fn every_f64_bearing_op_field_is_guarded() {
         (
             WireRiscOp::Pad {
                 padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
-                fill: f64::NAN,
+                fill: chelis_types::scalar_from_f64(
+                    "test",
+                    chelis_types::types::Prim::F32,
+                    f64::NAN,
+                )
+                .expect("f32 accepts NaN"),
             },
             "fill",
         ),
         (
             WireRiscOp::Const {
-                value: f64::INFINITY,
+                value: chelis_types::scalar_from_f64(
+                    "test",
+                    chelis_types::types::Prim::F64,
+                    f64::INFINITY,
+                )
+                .expect("float finalize is total"),
             },
             "value",
         ),
@@ -547,9 +626,13 @@ fn finite_f64_bearing_ops_pass_the_finite_guard() {
         WireRiscOp::Dropout { rate: 0.5, seed: 0 },
         WireRiscOp::Pad {
             padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
-            fill: 0.0,
+            fill: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F32, 0.0)
+                .expect("finite f32"),
         },
-        WireRiscOp::Const { value: 3.5 },
+        WireRiscOp::Const {
+            value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5)
+                .expect("finite f64"),
+        },
     ];
     for op in finite_ops {
         let extracted =
@@ -660,7 +743,7 @@ fn entry_scoped_extraction_prunes_the_unrelated_fn_and_yields_a_populated_goal()
         "the handle's hash must be the sha256 of the serialized WireDag bytes"
     );
 
-    // The serialized artifact is a v1 WireDag that round-trips, and the
+    // The serialized artifact is an exact-version v6 WireDag that round-trips, and the
     // name-resolved `priced` root indexes a real root of it.
     let parsed: WireDag = serde_json::from_slice(&extracted.wire_dag_bytes)
         .expect("the serialized bytes parse back as a WireDag");
@@ -747,8 +830,8 @@ fn entry_scoping_does_not_change_an_already_lowerable_program() {
     // (The bytes need not be identical to the unscoped form -- pruning may
     // drop unreachable roots -- but the target entry must still extract.)
     let scoped = box_range_goal_from_source_entry(
-        "out = (mul(x, x) : tensor[f32])\n\
-         x = (x : tensor[f32])\n",
+        "x = (x : tensor[f32])\n\
+         out = (mul(x, x) : tensor[f32])\n",
         SourceKind::Surf,
         "out",
         input_box(&[("x", -1.0, 1.0)]),

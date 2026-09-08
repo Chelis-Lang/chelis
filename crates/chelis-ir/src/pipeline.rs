@@ -47,6 +47,7 @@ fn fuse_grad_result(grad_result: GradResult) -> GradResult {
     let fused = fuse_with_remap(&grad_result.dag);
     let grad_nodes = grad_result
         .grad_nodes
+        .into_sorted()
         .into_iter()
         .map(|(wrt_id, grad_id)| {
             let remapped = *fused
@@ -79,7 +80,7 @@ mod tests {
     use crate::dag::{DimInfo, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
     use chelis_types::types::Prim;
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -92,7 +93,7 @@ mod tests {
         }
     }
 
-    fn eval_roots(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+    fn eval_roots(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
         let roots = dag.roots().to_vec();
         let values = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
             .expect("evaluation should succeed");
@@ -103,8 +104,10 @@ mod tests {
         assert_eq!(actual.len(), expected.len(), "root count mismatch");
         for (actual_tensor, expected_tensor) in actual.iter().zip(expected.iter()) {
             assert_eq!(actual_tensor.shape, expected_tensor.shape, "shape mismatch");
-            for (actual_value, expected_value) in
-                actual_tensor.data.iter().zip(expected_tensor.data.iter())
+            for (actual_value, expected_value) in actual_tensor
+                .to_f64_lossy_vec()
+                .iter()
+                .zip(expected_tensor.to_f64_lossy_vec().iter())
             {
                 assert!(
                     (actual_value - expected_value).abs() <= tol,
@@ -118,7 +121,12 @@ mod tests {
     fn grad_then_fuse_matches_unfused_grad() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let c = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(4), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
         let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
         let sum = dag.add_node(
@@ -135,7 +143,7 @@ mod tests {
         let unfused_grad = grad_dag(&dag, sum, &[x]).expect("grad should succeed");
         let fused_grad = grad_then_fuse(&dag, sum, &[x]).expect("grad_then_fuse should succeed");
 
-        let inputs = HashMap::from([(
+        let inputs = UnordMap::from([(
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, -2.0, 3.5, 0.25]),
         )]);
@@ -158,7 +166,12 @@ mod tests {
     fn grad_rejects_fused_input_but_grad_then_fuse_succeeds() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let c = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(4), None);
+        let c = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 1.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
         let neg = dag.add_node(RiscOp::Neg, vec![add], vec_f32(4), None);
         let sum = dag.add_node(

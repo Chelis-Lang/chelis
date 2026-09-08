@@ -19,13 +19,14 @@
 //!
 //! The codegen-only tests do not need a GPU and are not `#[ignore]`d.
 
-use chelis_backend_hip::codegen_hip;
+mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::codegen_hip;
 
 // -----------------------------------------------------------------------------
 // Shape helpers
@@ -101,13 +102,13 @@ fn f16_matmul_with_explicit_f16_accumulator_is_rejected_by_ir() {
 fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
     let mut dag = Dag::new();
     let a = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(matrix(2, 3, Prim::Bf16).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
-        RiscOp::Const { value: 1.0 },
+        RiscOp::synth_const(matrix(2, 3, Prim::F32).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::F32),
         None,
@@ -360,9 +361,10 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    let include = cpu_runtime_include_dir();
+    let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
         "chelis_math.h",
@@ -370,7 +372,8 @@ fn copy_runtime_artifacts(dst: &Path) {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include_dir.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
@@ -389,27 +392,27 @@ fn require_hipcc() {
 }
 
 /// Storage element width in bytes for the dtype constants emitted by
-/// `dtype_macro`. Mirrors `chelis_gpu_dtype_size` in
-/// `chelis_hip_runtime.h`.
+/// `dtype_macro`.
+///
+/// Read from the dtype's physical representation rather than restated. This
+/// was a fourth hand-written copy of the width table and said `bool` was four
+/// bytes; chelis#1360 is the drift that copies like it produce.
 fn dtype_bytes(p: Prim) -> usize {
-    match p {
-        Prim::F32 | Prim::Int32 | Prim::Bool => 4,
-        Prim::F64 | Prim::Int64 => 8,
-        Prim::Bf16 | Prim::F16 => 2,
-        other => panic!("ws_a3 harness does not size dtype {}", other.name()),
-    }
+    p.runtime_dtype()
+        .unwrap_or_else(|error| panic!("ws_a3 harness does not size dtype {}: {error}", p.name()))
+        .byte_width()
 }
 
 /// C macro name for a dtype, matching `HipEmitter::dtype_macro`.
 fn dtype_macro(p: Prim) -> &'static str {
     match p {
-        Prim::F32 => "CHELIS_F32",
-        Prim::F64 => "CHELIS_F64",
-        Prim::Int32 => "CHELIS_I32",
-        Prim::Int64 => "CHELIS_I64",
-        Prim::Bool => "CHELIS_BOOL",
-        Prim::Bf16 => "CHELIS_BF16",
-        Prim::F16 => "CHELIS_F16",
+        Prim::F32 => "CHELIS_DTYPE_F32",
+        Prim::F64 => "CHELIS_DTYPE_F64",
+        Prim::Int32 => "CHELIS_DTYPE_I32",
+        Prim::Int64 => "CHELIS_DTYPE_I64",
+        Prim::Bool => "CHELIS_DTYPE_BOOL",
+        Prim::Bf16 => "CHELIS_DTYPE_BF16",
+        Prim::F16 => "CHELIS_DTYPE_F16",
         other => panic!("ws_a3 harness has no dtype macro for {}", other.name()),
     }
 }
@@ -437,10 +440,16 @@ fn emit_input_setup(
         .collect::<Vec<_>>()
         .join(", ");
     let mut lines = vec![
-        format!("    int {prefix}_shape_{slot}[{ndim}] = {{ {dim_str} }};"),
+        format!("    int64_t {prefix}_shape_{slot}[{ndim}] = {{ {dim_str} }};"),
         format!(
             "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
             dtype = dtype_macro(dtype),
+        ),
+        format!(
+            "    chelis_tensor_write *{prefix}_input_guard_{slot} = chelis_tensor_begin_write({prefix}_input_storage[{slot}]);"
+        ),
+        format!(
+            "    chelis_write_view {prefix}_input_view_{slot} = chelis_tensor_write_view({prefix}_input_guard_{slot});"
         ),
     ];
     let elem_bytes = dtype_bytes(dtype);
@@ -462,7 +471,7 @@ fn emit_input_setup(
                 // already emit exact `to_bits()` patterns.
                 let bits = value.to_bits();
                 lines.push(format!(
-                    "    {prefix}_input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    "    ((float *){prefix}_input_view_{slot}.data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
         }
@@ -470,7 +479,7 @@ fn emit_input_setup(
             for (idx, value) in data.iter().enumerate() {
                 let bits = half::bf16::from_f32(*value).to_bits();
                 lines.push(format!(
-                    "    ((uint16_t*){prefix}_input_storage[{slot}]->data)[{idx}] = (uint16_t)0x{bits:04x};"
+                    "    ((uint16_t*){prefix}_input_view_{slot}.data)[{idx}] = (uint16_t)0x{bits:04x};"
                 ));
             }
         }
@@ -478,12 +487,15 @@ fn emit_input_setup(
             for (idx, value) in data.iter().enumerate() {
                 let bits = half::f16::from_f32(*value).to_bits();
                 lines.push(format!(
-                    "    ((uint16_t*){prefix}_input_storage[{slot}]->data)[{idx}] = (uint16_t)0x{bits:04x};"
+                    "    ((uint16_t*){prefix}_input_view_{slot}.data)[{idx}] = (uint16_t)0x{bits:04x};"
                 ));
             }
         }
         other => panic!("ws_a3 harness cannot fill input dtype {}", other.name()),
     }
+    lines.push(format!(
+        "    chelis_tensor_end_write({prefix}_input_guard_{slot});"
+    ));
     let _ = elem_bytes;
     lines
 }
@@ -526,16 +538,22 @@ fn build_main_cpp(
         input_labels.len()
     ));
     lines.push("    for (int o = 0; o < ".to_string() + &n_out.to_string() + "; o++) {");
-    lines.push("        for (int i = 0; i < case0_outputs[o]->size; i++) {".to_string());
+    lines.push(
+        "        chelis_read_view case0_output_view = chelis_tensor_read_view(case0_outputs[o]);"
+            .to_string(),
+    );
+    lines.push(
+        "        for (int i = 0; i < chelis_tensor_numel(case0_outputs[o]); i++) {".to_string(),
+    );
     lines.push("            if (i > 0) printf(\" \");".to_string());
     let read_expr = match case.output_dtype {
-        Prim::F32 => "case0_outputs[o]->data[i]".to_string(),
+        Prim::F32 => "((const float *)case0_output_view.data)[i]".to_string(),
         Prim::Bf16 => {
             // Reinterpret 2-byte slot as bf16 → f32 by left-shifting the
             // bf16 bit pattern into the upper half of a uint32 and
             // bit-casting to float (the standard bf16→f32 rule).
             "({\
-              uint16_t b = ((uint16_t*)case0_outputs[o]->data)[i]; \
+              uint16_t b = ((const uint16_t*)case0_output_view.data)[i]; \
               union { uint32_t u; float f; } cv; \
               cv.u = ((uint32_t)b) << 16; \
               cv.f; })"
@@ -547,7 +565,7 @@ fn build_main_cpp(
             // conversion via __half_as_float-compatible path.
             // Implementation: build a __half from the bit pattern and
             // convert with __half2float.
-            "__half2float(*(const __half*)((const uint16_t*)case0_outputs[o]->data + i))"
+            "__half2float(*(const __half*)((const uint16_t*)case0_output_view.data + i))"
                 .to_string()
         }
         other => panic!("ws_a3 harness cannot read output dtype {}", other.name()),
@@ -557,10 +575,12 @@ fn build_main_cpp(
     ));
     lines.push("        }".to_string());
     lines.push("        printf(\"\\n\");".to_string());
-    lines.push("        chelis_free(case0_outputs[o]);".to_string());
+    lines.push("        chelis_tensor_release(case0_outputs[o]);".to_string());
     lines.push("    }".to_string());
     for slot in 0..input_labels.len() {
-        lines.push(format!("    chelis_free(case0_input_storage[{slot}]);"));
+        lines.push(format!(
+            "    chelis_tensor_release(case0_input_storage[{slot}]);"
+        ));
     }
 
     let f16_include = if matches!(case.output_dtype, Prim::F16) {

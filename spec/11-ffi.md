@@ -35,7 +35,39 @@ The Phase 3 Python path is split into two cuts:
   that ABI
 - GIL release during native compile/build and compiled host/device execution
 - NumPy DLPack guarantee as a documented/tested promise
-- compiled execution currently limited to fully concrete `f32` tensors
+- compiled execution currently limited to fully concrete `f32` / `f64` tensors on the C
+  target, and to fully concrete `f32` tensors on the HIP target (chelis#919, chelis#920).
+  The per-target admit-list is `supported_execution_dtypes` in `chelis-python`; the
+  marshalling layer derives the NumPy dtype and the DLPack element width from it rather
+  than assuming f32, and rejects any dtype it cannot describe
+- reef dependency resolution via `project_root=` on `compile_and_load` and `eval`
+  (chelis#816): with a reef package root, imports of reef-declared dependencies resolve
+  against the package's linked library context instead of failing with `unbound
+  variable`. `compile_and_load` auto-discovers the root by walking up from the source
+  file, but only when the (Surf) source contains an `import` declaration; an import-free
+  or non-Surf source, or `project_root=False`, takes the bare self-contained path. An
+  explicit `project_root=` path forces in-context resolution regardless (an
+  empty/whitespace `project_root=""` is rejected outright). `eval` (raw
+  text) requires an explicit `project_root=`. With no applicable root the bare
+  self-contained behavior is unchanged **except** that a rank-0 (scalar-out) tensor
+  entry is now rejected with wrap-as-`tensor[1, f32]` guidance on every path, bare
+  included (rather than emitting an unbuildable scalar kernel), and that when
+  auto-discovery found no root for an importing source, a failing bare compile's
+  error gains a hint naming `project_root=` (error text only; same failure). Default in-context entry
+  selection prefers a tensor def named `main`. A scalar-signature entry has no callable
+  tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it. The
+  in-context lane is entry-scoped where the monolithic lane is whole-program: a
+  top-level (non-`def`) value binding in the new source does not decline compilation
+  (monolithically it does, `HasGlobals`) — the artifact is scoped to the selected
+  entry, and an unreferenced sibling global's computation is simply not part of it.
+  Run `eval` for whole-program semantics. Only the compiled source's own defs
+  are selectable as entries, by their bare names; imported library defs are
+  callable from the entry's body but are not themselves selectable via
+  `entry_name`. Reef-context resolution is **C-target
+  only**: a HIP reef-context compile (`target="hip"` with a `project_root=`) is rejected
+  as unsupported (chelis#829) rather than silently mis-scoped, and the rejection
+  fires before the reef context is compiled, so it does not cost the first
+  context build.
 
 ### Phase 5a
 
@@ -52,10 +84,69 @@ separate host-language embedding model first.
 After Phase `3m`, that C-facing surface is expected to come from `chelis_runtime.h`
 plus the shipped Rust static runtime library rather than a generated `chelis_runtime.c`
 implementation file.
-When object-mode host emission needs to export a source-level `def main(...)`, the
-generated C symbol should be renamed to a file-stem-derived helper such as
-`<program>__main` so downstream C or C++ drivers can still define their own
-process entry `main(void)`.
+
+### 2.1 Compiled value ownership
+
+A compiled entry borrows every input runtime value for the complete call and returns
+one owned runtime value for every owned result, following [04-LIN-7]. The callee never
+releases or mutates an input's storage, including when a result is value-equal to that
+input. Two returned roots that denote the same value are independently owned and may
+be released in either order. Exact public C carrier and callable identities remain the
+ones governed by [05-OP-31..33], and the heap-kind, strong-owner, tagged-value
+conversion, option-node, entry-borrow, and guarded-access identities are the ones
+governed by [05-OP-44]. (The compiled ownership requirement is not
+fully implemented; see chelis#1286.)
+
+The compiler-api pipeline behind this surface serves two products with different
+entry contracts:
+
+- **The callable surface** (`compile_for_execution`, backing Python's
+  `compile_and_load`) treats `entry_name` STRICTLY as a def selector. An unknown
+  `entry_name`, an ambiguous default (multiple tensor defs, none named `main`),
+  a program with top-level (non-`def`) value bindings, or a `grad`/`vmap`
+  transform entry that cannot be entry-scoped is a loud error; this surface
+  never returns metadata merged from every def (the chelis#817 defect class)
+  and never silently ignores the requested entry.
+- **The C-source surface** (`compile`, backing tide's `/compile`, cove's live
+  pane, and Python's `chelis.compile()`) keeps the legacy whole-program
+  contract: with no unambiguous entry it emits the whole program, and an
+  `entry_name` naming no def is the sanitized OUTPUT SYMBOL, not a selector
+  error. When the entry lane does claim a program (an unambiguous tensor
+  entry), both surfaces emit the same entry-scoped kernel.
+
+When compiled-execution emission scopes an artifact to a selected `def`, the
+emitted C symbol is decoupled from the def name: the artifact always emits the
+fixed symbol `chelis_main`. Because each artifact is scoped to exactly one entry
+def there is exactly one emitted entry per translation unit, so a single fixed
+symbol suffices and is collision-free by construction — a def literally named
+`main` no longer redefines the reserved process entry
+`int main(int, char**, char**)`, a def named after a libc symbol (`free`,
+`malloc`) no longer collides at link time, and neither does a def named after a
+runtime symbol in the `chelis_*` namespace (`chelis_runtime.h` declares
+`chelis_free`, `chelis_tuple_get`, …). The artifact manifest's `host_entry_name`
+carries `chelis_main` so the loader (`dlsym`) and generated header stay consistent.
+
+Outside the entry-scoped lane — the host-program lane that owns top-level globals
+and scalar/`grad` entries, the free-form pure-DAG path taken by a program that
+lowers no host program (such as a single fully-DAG-lowerable `def`), and the
+C-source surface's whole-program fallback when the entry lane declines —
+`entry_name` becomes the output symbol after sanitization only: `main` maps to
+`chelis_main`, non-identifier characters map to `_`, and a digit-leading or
+empty name gains a `chelis_` prefix. Any other name passes through unchanged, so
+these paths guard neither libc nor the runtime's own `chelis_*` namespace: a
+single-def pure program whose def is named `free` still emits `void free(...)`,
+and an `entry_name` of `chelis_free` is emitted verbatim. Those are pre-existing
+gaps of the legacy symbol mapping, accepted on the C-source surface where the
+caller owns the symbol choice; the strict callable surface is immune because it
+always emits `chelis_main`.
+
+The `chelis build` object-mode lane is a separate emitter with its own symbol
+rule, unchanged by the above: when object-mode host emission exports a
+source-level `def main(...)`, the generated C symbol is renamed to the
+file-stem-derived `<program>__main` so downstream C or C++ drivers can still
+define their own process entry `main(void)`; other def names route through the
+chelis#840 `c_ident` mapping (`emitted_function_name` in
+`chelis-backend-c/src/host_emit.rs`).
 
 ## 3. Embedding the Compiler
 

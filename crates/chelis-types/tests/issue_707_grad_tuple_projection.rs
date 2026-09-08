@@ -90,23 +90,17 @@ type G =
   | G { v: tensor[2, f32] }
 type V =
   | V { v: tensor[2, f32] }
-def e_loss(p: P, s: tensor[2, f32]) -> f32 = {
-  match p with {
-    | P { v: v } => sum(add(v, s), cast(0, int32)) |> tensor_to_scalar
-  }
+def e_loss(p: P, s: tensor[2, f32]) -> f32 = match p with {
+  | P { v } => sum(add(v, s), cast(0, int32)) |> tensor_to_scalar
 }
-def g_of(x: P) -> G = {
-  match x with {
-    | P { v: v } => G { v: v }
-  }
+def g_of(x: P) -> G = match x with {
+  | P { v } => G { v }
 }
-def e_step(params: P, grads: G, vel: V) -> f32 = {
-  match params with {
-    | P { v: pv } => match grads with {
+def e_step(params: P, grads: G, vel: V) -> f32 = match params with {
+  | P { v: pv } => match grads with {
     | G { v: gv } => match vel with {
     | V { v: vv } => sum(add(add(pv, gv), vv), cast(0, int32)) |> tensor_to_scalar
   } } }
-}
 ";
 
 fn src(body: &str) -> String {
@@ -164,7 +158,7 @@ fn grad_tuple_projection_into_wrong_param_rejects() {
     // projection's carried type at a call boundary.
     assert_rejects_naming(
         &src("\
-def take_v(x: V) -> f32 = { cast(0.0, f32) }
+def take_v(x: V) -> f32 = cast(0.0, f32)
 def driver() -> f32 = {
   p0 = P { v: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
   s = to_tensor([cast(0.5, f32), cast(0.5, f32)])
@@ -188,9 +182,9 @@ fn cross_return_helper_seal_does_not_launder() {
         &src("\
 def mk_grads(p0: P, s: tensor[2, f32]) -> G = {
   gt = grad(e_loss)(p0, s)
-  match gt.0 with { | P { v: v } => G { v: v } }
+  match gt.0 with { | P { v } => G { v } }
 }
-def take_v(x: V) -> f32 = { cast(0.0, f32) }
+def take_v(x: V) -> f32 = cast(0.0, f32)
 def driver() -> f32 = {
   p0 = P { v: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
   s = to_tensor([cast(0.5, f32), cast(0.5, f32)])
@@ -215,12 +209,9 @@ def hop1(p0: P, s: tensor[2, f32]) -> G = {
   gt = grad(e_loss)(p0, s)
   g_of(gt.0)
 }
-def hop2(p0: P, s: tensor[2, f32]) -> G = {
-  hop1(p0, s)
-}
-def accum(grads: G) -> f32 = {
+def hop2(p0: P, s: tensor[2, f32]) -> G = hop1(p0, s)
+def accum(grads: G) -> f32 =
   match grads with { | V { v: vv } => sum(vv, cast(0, int32)) |> tensor_to_scalar }
-}
 def driver() -> f32 = {
   p0 = P { v: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
   s = to_tensor([cast(0.5, f32), cast(0.5, f32)])
@@ -357,9 +348,9 @@ fn cross_return_helper_into_matching_slot_checks() {
         &src("\
 def mk_grads(p0: P, s: tensor[2, f32]) -> G = {
   gt = grad(e_loss)(p0, s)
-  match gt.0 with { | P { v: v } => G { v: v } }
+  match gt.0 with { | P { v } => G { v } }
 }
-def take_g(x: G) -> f32 = { cast(0.0, f32) }
+def take_g(x: G) -> f32 = cast(0.0, f32)
 def driver() -> f32 = {
   p0 = P { v: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
   s = to_tensor([cast(0.5, f32), cast(0.5, f32)])

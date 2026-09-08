@@ -18,6 +18,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256};
 
+use chelis_compiler_api::schema::WIRE_DAG_SCHEMA_VERSION;
 use chelis_prove::composition::{CompositeVerdict, base_verdict_from_discharge};
 use chelis_prove::discharge::{
     Goal, GoalShape, IntervalBox, IrHandle, OutputRange, Qualifier, Soundness,
@@ -48,10 +49,10 @@ fn with_scenario(scenario: &str) -> MutexGuard<'static, ()> {
     guard
 }
 
-/// Synthetic serialized `WireDag` v1 bytes. The shim treats these opaquely
+/// Synthetic serialized exact-version `WireDag` bytes. The shim treats these opaquely
 /// (base64 + sha256); any deterministic byte string exercises transport.
 fn fake_wire_dag_bytes() -> Vec<u8> {
-    br#"{"schema_version":1,"nodes":[],"roots":[0]}"#.to_vec()
+    format!(r#"{{"schema_version":{WIRE_DAG_SCHEMA_VERSION},"nodes":[],"roots":[0]}}"#).into_bytes()
 }
 
 /// Lowercase-hex sha256 of `bytes` — the content-address key, computed the same
@@ -508,14 +509,14 @@ fn request_carries_exact_base64_bytes_and_expected_hash() {
     );
     assert_eq!(
         request.get("schema_version").and_then(|v| v.as_u64()),
-        Some(1)
+        Some(2)
     );
     assert_eq!(request.get("root_index").and_then(|v| v.as_u64()), Some(0));
 
     let b64 = request
-        .get("wire_dag_v1_base64")
+        .get("wire_dag_v6_base64")
         .and_then(|v| v.as_str())
-        .expect("wire_dag_v1_base64 present");
+        .expect("wire_dag_v6_base64 present");
     let decoded = BASE64.decode(b64).expect("base64 decodes");
     assert_eq!(
         decoded,
@@ -854,4 +855,57 @@ fn verified_zonotope_mode_does_not_launder_unverified_transport_or_invalid_repor
             "{class} scenario `{scenario}` must not project to proven"
         );
     }
+}
+
+// ===========================================================================
+// chelis_plan Task 2: beacon subprocess death path coverage (chelis#659).
+// These scenarios verify that EVERY way a beacon subprocess can die produces
+// an honest verdict, never a hang or silent pass.
+// ===========================================================================
+
+/// A process abort (SIGABRT / OOM kill) produces an honest error with the
+/// signal reason, not a hang or a silent pass.
+#[test]
+fn crash_signal_maps_to_untrusted_error_with_signal_reason() {
+    let _g = with_scenario("crash");
+    let start = std::time::Instant::now();
+    let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "a crashed beacon must return promptly (took {elapsed:?}), not hang"
+    );
+    assert!(matches!(discharge.result(), TierBResult::Error(_)));
+    assert_eq!(discharge.soundness(), Soundness::Untrusted);
+    assert!(discharge.qualifier_set().is_empty());
+    // The error reason must mention the nonzero/signal exit, not be an
+    // unparseable-report error (the child never produced output).
+    let err_str = match discharge.result() {
+        TierBResult::Error(s) => s.clone(),
+        _ => String::new(),
+    };
+    assert!(
+        err_str.contains("nonzero status") || err_str.contains("signal"),
+        "crash must report the signal/nonzero exit, got: {err_str:?}"
+    );
+    // Must NEVER be a proven badge.
+    let verdict = base_verdict_from_discharge(discharge.soundness(), discharge.qualifier_set());
+    assert_ne!(verdict, CompositeVerdict::Proven);
+    assert_ne!(verdict, CompositeVerdict::SoundApproximate);
+}
+
+/// Partial output (child exits successfully after writing incomplete JSON)
+/// is an honest unparseable-report error, not a hang or a proof.
+#[test]
+fn partial_output_maps_to_untrusted_error_unparseable() {
+    let _g = with_scenario("partial_output");
+    let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
+    assert!(matches!(discharge.result(), TierBResult::Error(_)));
+    assert_eq!(discharge.soundness(), Soundness::Untrusted);
+    assert!(discharge.qualifier_set().is_empty());
+    assert_eq!(
+        evidence_error(&discharge).as_deref(),
+        Some("unparseable_report"),
+        "partial output that is valid-exit but truncated JSON must fail as unparseable"
+    );
 }

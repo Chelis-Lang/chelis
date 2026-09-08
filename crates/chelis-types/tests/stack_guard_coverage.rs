@@ -1,19 +1,53 @@
 //! WS-5 Part B (walker-guard coverage): every self-recursive `deep::Expr` /
-//! `deep::Pat` walker in `infer.rs` must carry the `stack_guard!` macro so the
-//! recursive type checker bails before exhausting the native stack on a
-//! deeply-nested program (WI-1, spec/design/verification_stack_master_plan.md
-//! \u{00A7}4.1). This is a SOURCE-SCANNING invariant: it parses `infer.rs` with
+//! `deep::Pat` walker in the `infer` module tree must carry the `stack_guard!`
+//! macro so the recursive type checker bails before exhausting the native
+//! stack on a deeply-nested program (WI-1,
+//! spec/design/verification_stack_master_plan.md \u{00A7}4.1). This is a
+//! SOURCE-SCANNING invariant: it parses every module under `src/infer/` with
 //! `syn`, enumerates the functions that take a `&deep::Expr` / `&deep::Pat`
 //! argument and call themselves, and asserts each body invokes `stack_guard!`.
 //! A NEW unguarded recursive walker therefore fails this test rather than
 //! silently reintroducing an unbounded-recursion stack-overflow surface.
+//!
+//! The scan reads `src/infer/` at run time rather than `include_str!`-ing a
+//! fixed list of modules: a hand-maintained list would drop a whole module's
+//! walkers from coverage the moment someone added a file and forgot the entry,
+//! and that loss would be silent. [`scan_covers_the_whole_inference_tree`]
+//! pins that the directory walk actually found the tree.
+
+use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
-use syn::{Block, ExprMacro, File, ImplItemFn, ItemFn, Macro, Signature, Type};
+use syn::{
+    Block, Expr, ExprCall, ExprMacro, ExprMethodCall, File, ImplItemFn, ItemFn, Macro, Signature,
+    Type,
+};
 
-/// The Rust source under analysis. Compiled in at build time so the test has
-/// no filesystem dependency on the crate layout at run time.
-const INFER_SRC: &str = include_str!("../src/infer.rs");
+/// Root of the inference module tree under analysis.
+fn infer_src_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/infer")
+}
+
+/// Every `.rs` file in the inference module tree, sorted for a stable scan
+/// order.
+fn infer_source_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_rs_files(&infer_src_dir(), &mut files);
+    files.sort();
+    files
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("read dir entry").path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
 
 /// One analyzed walker function and the facts the scan derived about it.
 #[derive(Debug)]
@@ -77,16 +111,37 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
         visit::visit_expr_macro(self, node);
     }
 
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        // A self-call appears as a path whose final segment is the function's
-        // own name. This also matches a bare `name(...)` call (single-segment
-        // path) and a qualified `Self::name` / `module::name`.
-        if let Some(last) = path.segments.last()
-            && last.ident == self.own_name
+    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        if let Expr::Path(callee) = call.func.as_ref() {
+            let segments = &callee.path.segments;
+            let direct_call = segments.len() == 1;
+            let self_associated_call = segments.len() == 2
+                && segments
+                    .first()
+                    .is_some_and(|segment| segment.ident == "Self");
+            if (direct_call || self_associated_call)
+                && segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == self.own_name)
+            {
+                self.calls_own_name = true;
+            }
+        }
+        visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        if call.method == self.own_name
+            && matches!(
+                call.receiver.as_ref(),
+                Expr::Path(receiver)
+                    if receiver.path.segments.len() == 1
+                        && receiver.path.segments[0].ident == "self"
+            )
         {
             self.calls_own_name = true;
         }
-        visit::visit_path(self, path);
+        visit::visit_expr_method_call(self, call);
     }
 }
 
@@ -144,11 +199,16 @@ impl<'ast> Visit<'ast> for FnCollector {
 }
 
 fn collect_walkers() -> Vec<WalkerFn> {
-    let file: File = syn::parse_file(INFER_SRC).expect("infer.rs parses as Rust");
     let mut collector = FnCollector {
         walkers: Vec::new(),
     };
-    collector.visit_file(&file);
+    for path in infer_source_files() {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let file: File = syn::parse_file(&source)
+            .unwrap_or_else(|e| panic!("{} parses as Rust: {e}", path.display()));
+        collector.visit_file(&file);
+    }
     collector.walkers
 }
 
@@ -167,15 +227,6 @@ fn collect_walkers() -> Vec<WalkerFn> {
 /// test can lock the regression boundary today rather than silently asserting a
 /// completeness the tree does not have.
 const GUARD_EXEMPT_WALKERS: &[(&str, &str)] = &[
-    // FALSE-POSITIVE: not an AST-depth recursion. `visit` is a DFS over a
-    // name-keyed call graph with a `visiting`/`visited` HashSet cycle guard;
-    // its depth is bounded by the finite number of def names, not by AST
-    // nesting, and it takes `&deep::Expr` only in lookup maps. It cannot
-    // stack-overflow on a deep AST, so `stack_guard!` does not apply.
-    (
-        "visit",
-        "FALSE-POSITIVE: cycle-guarded call-graph DFS, not AST-depth",
-    ),
     // MODULE-ONLY: descends through `(module ...)` wrappers only (skips every
     // non-module node). Surf emits one module per file and reef strips
     // wrappers before inference, so these do not nest deeply in practice --
@@ -188,34 +239,6 @@ const GUARD_EXEMPT_WALKERS: &[(&str, &str)] = &[
     (
         "missing_shape_sensitive_app",
         "TEST-HELPER: lives in #[cfg(test)] mod tests",
-    ),
-    // AST-DEPTH: genuine arbitrary-depth production walkers that SHOULD carry
-    // `stack_guard!` (real WI-1 coverage gap, tracked for a follow-up). Listed
-    // explicitly so the gap is visible rather than hidden, and so adding the
-    // guard later simply removes the entry.
-    (
-        "type_expr_has_tensor_prec_var",
-        "AST-DEPTH gap: recurses over t-fn/t-tuple/t-adt children",
-    ),
-    (
-        "literal_static_value",
-        "AST-DEPTH gap: recurses on (lit ...) children",
-    ),
-    (
-        "tensor_dim_exprs_from_type_expr",
-        "AST-DEPTH gap: recurses through nested (t-ref ...) wrappers",
-    ),
-    (
-        "tensor_precision_expr",
-        "AST-DEPTH gap: recurses through nested (t-ref ...) wrappers",
-    ),
-    (
-        "tensor_dims_from_type_expr",
-        "AST-DEPTH gap: recurses through nested (t-ref ...) wrappers",
-    ),
-    (
-        "top_level_arm_is_irrefutable",
-        "AST-DEPTH gap: recurses on (pat-as ...) inner pattern",
     ),
 ];
 
@@ -249,7 +272,7 @@ fn every_self_recursive_deep_walker_carries_stack_guard() {
     // The allowlist must not rot: every exempt name must STILL be a flagged
     // walker. If a guard was added (or the function deleted/renamed), the stale
     // entry must be removed so the exemption set stays minimal and honest.
-    let flagged: std::collections::HashSet<&str> = walkers
+    let flagged: chelis_unord::UnordSet<&str> = walkers
         .iter()
         .filter(|w| w.must_be_guarded() && !w.has_stack_guard)
         .map(|w| w.name.as_str())
@@ -279,6 +302,26 @@ fn every_self_recursive_deep_walker_carries_stack_guard() {
          walkers (>= 20); found {guarded_walkers}. If walkers were intentionally \
          removed, lower this floor deliberately; a sudden drop means the scan \
          stopped recognizing them."
+    );
+}
+
+/// The directory walk must actually reach the inference tree. Without this,
+/// a wrong path or a renamed directory would make `collect_walkers` return an
+/// empty set and every coverage assertion above would pass vacuously.
+#[test]
+fn scan_covers_the_whole_inference_tree() {
+    let files = infer_source_files();
+    assert!(
+        !files.is_empty(),
+        "the scan found no Rust source under {}; the inference tree moved and this \
+         guard is no longer looking at it",
+        infer_src_dir().display()
+    );
+    assert!(
+        files
+            .iter()
+            .any(|p| p.file_name().is_some_and(|n| n == "mod.rs")),
+        "the inference tree must have a root `mod.rs`; found: {files:?}"
     );
 }
 
@@ -339,5 +382,29 @@ fn scan_ignores_a_non_recursive_deep_consumer() {
     assert!(
         !consumer.must_be_guarded(),
         "a non-recursive deep consumer needs no guard"
+    );
+}
+
+#[test]
+fn scan_ignores_a_qualified_delegation_with_the_same_terminal_name() {
+    let src = r#"
+        fn infer_program(exprs: &[deep::Expr]) -> Result {
+            crate::session::infer_program(exprs)
+        }
+    "#;
+    let file: File = syn::parse_file(src).expect("synthetic source parses");
+    let mut collector = FnCollector {
+        walkers: Vec::new(),
+    };
+    collector.visit_file(&file);
+    let wrapper = collector
+        .walkers
+        .iter()
+        .find(|walker| walker.name == "infer_program")
+        .expect("the synthetic wrapper was collected");
+    assert!(wrapper.walks_deep_ast);
+    assert!(
+        !wrapper.self_recurses,
+        "a qualified delegation is not a call to the wrapper itself"
     );
 }

@@ -1,10 +1,29 @@
 //! C code generation backend for the Chelis language.
 
 pub mod blas;
-pub mod emit;
-pub mod host_emit;
+mod emit;
+mod emitted_expr;
+mod host_abi;
+mod host_emit;
 pub mod memory;
 pub mod toolchain;
+
+/// Primitive types the C backend's tensor-DAG path can realize.
+/// A def whose declared return type or intermediates use a prim NOT in this
+/// set must route to the host lane. Verified by execution (issue #912 Task 1):
+/// int32/int64 DO lower through the DAG path as general tensor ops, not only
+/// as sparse indices. Only f64 is actually rejected.
+pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
+    chelis_types::types::Prim::F32,
+    chelis_types::types::Prim::Bool,
+    chelis_types::types::Prim::Bf16,
+    chelis_types::types::Prim::F16,
+    chelis_types::types::Prim::Int32,
+    chelis_types::types::Prim::Int64,
+];
+
+#[cfg(test)]
+mod host_abi_tests;
 
 /// Result of C code generation.
 pub struct CodegenResult {
@@ -83,19 +102,38 @@ pub struct CodegenOptions {
 /// Repeated `Load(name)` nodes share one input slot, surfaced via `input_labels`.
 /// `Store(name)` nodes are exported as named outputs in `output_labels`; any
 /// remaining DAG roots are appended afterward as `root{index}`.
+///
+/// ```compile_fail
+/// # use chelis_ir::dag::Dag;
+/// fn bypass(raw: &Dag) {
+///     let _ = chelis_backend_c::codegen(raw, "unchecked");
+/// }
+/// ```
 pub fn codegen(
-    dag: &chelis_ir::dag::Dag,
+    dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     codegen_with_options(dag, func_name, CodegenOptions::default())
 }
 
+/// Compile a sealed, verified host payload.
+///
+/// ```compile_fail
+/// # use chelis_ir::host::ConcreteHostProgram;
+/// fn bypass(raw: &ConcreteHostProgram) {
+///     let _ = chelis_backend_c::codegen_host_program(raw, "unchecked");
+/// }
+/// ```
 pub fn codegen_host_program(
-    program: &chelis_ir::host::HostProgram,
+    program: &chelis_ir::ownership::VerifiedHostProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let c_source = host_emit::emit_host_program(program, func_name)?;
-    let h_header = host_emit::emit_host_header(program, func_name);
+    // Resolve the backend capability boundary once.  All emission below is
+    // over the private, fully-resolved ABI vocabulary; neither source nor
+    // header generation can re-interpret logical types independently.
+    let abi_program = host_abi::project_program(program.emission())?;
+    let c_source = host_emit::emit_host_abi_program(&abi_program, func_name)?;
+    let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
         || c_source.contains("cblas_dgemm(")
@@ -115,29 +153,27 @@ pub fn codegen_host_program(
 
 /// Generate C source code from a RISC DAG with explicit backend options.
 pub fn codegen_with_options(
-    dag: &chelis_ir::dag::Dag,
+    dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
     options: CodegenOptions,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let specialized;
-    let dag = if options.use_blas {
-        specialized = chelis_ir::specialize::specialize_for_blas(dag);
-        &specialized
-    } else {
-        dag
-    };
-    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
-    let needs_blas = options.use_blas
-        && dag
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. }));
-    let input_labels = emit::CEmitter::input_labels(dag);
-    let output_labels = emit::CEmitter::output_labels(dag);
-    let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
+    let (needs_blas, input_labels, output_labels, symbolic_dims) = {
+        let emission = dag.emission();
+        (
+            options.use_blas
+                && emission
+                    .nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. })),
+            emit::CEmitter::input_labels(emission),
+            emit::CEmitter::output_labels(emission),
+            emission.symbolic_params(),
+        )
+    };
+    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
     Ok(CodegenResult {
         c_source,
         h_header,
@@ -151,6 +187,58 @@ pub fn codegen_with_options(
     })
 }
 
+/// Apply the C backend's payload-selection rewrites before ownership lowering.
+pub fn prepare_dag_for_codegen(
+    dag: chelis_ir::dag::Dag,
+    options: CodegenOptions,
+) -> chelis_ir::dag::Dag {
+    let dag = if options.use_blas {
+        chelis_ir::specialize::specialize_for_blas(&dag)
+    } else {
+        dag
+    };
+    emit::CEmitter::rename_anonymous_dims(dag)
+}
+
+/// Select the exact nested C helper DAGs before host ownership lowering.
+pub fn prepare_host_program_for_codegen(
+    mut program: chelis_ir::host::ConcreteHostProgram,
+) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_types::unsupported::Unsupported> {
+    fn prepare(
+        helper: &mut chelis_ir::host::HostTensorHelper,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
+        chelis_ir::check_axis_sources(
+            &specialized,
+            chelis_types::unsupported::Stage::Codegen("c"),
+        )?;
+        helper.dag = emit::CEmitter::rename_anonymous_dims(specialized);
+        Ok(())
+    }
+    for helper in &mut program.global_tensor_helpers {
+        prepare(helper)?;
+    }
+    for function in &mut program.functions {
+        for helper in &mut function.tensor_helpers {
+            prepare(helper)?;
+        }
+    }
+    Ok(program)
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+
+    pub(crate) fn verified_dag(
+        dag: &chelis_ir::dag::Dag,
+        options: crate::CodegenOptions,
+    ) -> Result<VerifiedDagProgram, OwnershipError> {
+        let selected = crate::prepare_dag_for_codegen(dag.clone(), options);
+        chelis_ir::ownership::verify_ownership(chelis_ir::ownership::lower_dag_ownership(selected)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +249,71 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::{env, fs};
+
+    fn codegen(
+        dag: &Dag,
+        name: &str,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        codegen_with_options(dag, name, CodegenOptions::default())
+    }
+
+    fn codegen_with_options(
+        dag: &Dag,
+        name: &str,
+        options: CodegenOptions,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        let verified = crate::testing::verified_dag(dag, options)
+            .expect("C backend unit-test DAG must verify ownership");
+        super::codegen_with_options(verified, name, options)
+    }
+
+    fn codegen_host_program(
+        program: &chelis_ir::host::ConcreteHostProgram,
+        name: &str,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        let source = program
+            .functions
+            .iter()
+            .map(|function| {
+                let params = function
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| format!("p{index}: f64"))
+                    .collect::<Vec<_>>();
+                let body = if params.is_empty() { "0.0f64" } else { "p0" };
+                format!(
+                    "def {}({}) -> f64 = {body}",
+                    function.name,
+                    params.join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let declarations = chelis_surf::parser::parse_str(&source)
+            .unwrap_or_else(|error| panic!("parse synthetic host signatures: {error:?}"));
+        let deep = chelis_surf::desugar::desugar_program(&declarations);
+        let checked = chelis_types::check_typed_program(&deep).unwrap_or_else(|errors| {
+            panic!("check synthetic host signatures: {:?}", errors.errors)
+        });
+        let checked = chelis_effects::check_program(&checked)
+            .unwrap_or_else(|error| panic!("effects synthetic host signatures: {error:?}"));
+        let checked = chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|error| panic!("linearity synthetic host signatures: {error:?}"));
+        let manifested = chelis_types::manifest::ManifestedProgram::new(
+            checked,
+            chelis_types::manifest::RootManifest {
+                entries: Vec::new(),
+            },
+            chelis_types::types::Target::C,
+        );
+        let selected = prepare_host_program_for_codegen(program.clone())?;
+        let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)
+            .expect("C backend unit-test host must lower ownership");
+        let verified = chelis_ir::ownership::verify_ownership(lowered)
+            .expect("C backend unit-test host must verify ownership");
+        super::codegen_host_program(&verified, name)
+    }
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -191,6 +344,11 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_runtime.h")
     }
 
+    fn runtime_dtype_header_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../chelis-runtime/include/chelis_runtime_dtype.h")
+    }
+
     fn runtime_blas_header_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include/chelis_blas.h")
     }
@@ -205,10 +363,23 @@ mod tests {
 
     fn runtime_library_path() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidates = [
-            manifest_dir.join("../../target/debug/deps"),
-            manifest_dir.join("../../target/release/deps"),
-        ];
+        let workspace_root = manifest_dir.join("../..");
+        let configured_target = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    workspace_root.join(path)
+                }
+            });
+        let mut candidates = Vec::new();
+        if let Some(target) = configured_target {
+            candidates.push(target.join("debug/deps"));
+            candidates.push(target.join("release/deps"));
+        }
+        candidates.push(workspace_root.join("target/debug/deps"));
+        candidates.push(workspace_root.join("target/release/deps"));
         // `cargo test` leaves many libchelis_runtime-<hash>.a artifacts from
         // historical builds in target/{debug,release}/deps. Using `find` on
         // that directory is nondeterministic and easily lands on a stale
@@ -241,8 +412,8 @@ mod tests {
         {
             return path;
         }
-        for dir in candidates {
-            if let Some(path) = newest_runtime_archive(&dir) {
+        for dir in &candidates {
+            if let Some(path) = newest_runtime_archive(dir) {
                 return path;
             }
         }
@@ -252,6 +423,8 @@ mod tests {
     fn copy_runtime_artifacts(dst: &std::path::Path) {
         let h_src = std::fs::read_to_string(runtime_header_path()).unwrap();
         write_temp_file(dst, "chelis_runtime.h", &h_src);
+        let dtype_h_src = std::fs::read_to_string(runtime_dtype_header_path()).unwrap();
+        write_temp_file(dst, "chelis_runtime_dtype.h", &dtype_h_src);
         let blas_h_src = std::fs::read_to_string(runtime_blas_header_path()).unwrap();
         write_temp_file(dst, "chelis_blas.h", &blas_h_src);
         let simd_h_src = std::fs::read_to_string(runtime_simd_header_path()).unwrap();
@@ -275,7 +448,12 @@ mod tests {
     #[test]
     fn codegen_returns_source_and_header() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let result = codegen(&dag, "my_func").unwrap();
         assert!(result.c_source.contains("void my_func("));
         assert!(result.h_header.contains("void my_func("));
@@ -293,7 +471,12 @@ mod tests {
     #[test]
     fn codegen_header_is_declaration() {
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let result = codegen(&dag, "test_fn").unwrap();
         assert!(result.h_header.ends_with(';'));
         assert!(!result.h_header.contains('{'));
@@ -304,7 +487,6 @@ mod tests {
     /// after` (the symbolic entry-wrapper concat mis-sizing) must be rejected
     /// loud at codegen, never emit the heap-corrupting copy loop.
     #[test]
-    #[should_panic(expected = "chelis#593")]
     fn codegen_rejects_mis_sized_leading_axis_pad() {
         let mut dag = Dag::new();
         let sym = TensorType {
@@ -315,18 +497,22 @@ mod tests {
         // Padded leading axis by (2,0): output SHOULD be [4, batch] but is
         // MIS-SIZED to the operand extent [2, batch] (the #593 wrapper clobber).
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![
+            RiscOp::zero_pad(
+                Prim::F32,
+                vec![
                     (RtDim::Lit(2), RtDim::Lit(0)),
                     (RtDim::Lit(0), RtDim::Lit(0)),
                 ],
-                fill: 0.0,
-            },
+            ),
             vec![x],
             sym,
             None,
         );
-        let _ = codegen(&dag, "mis_sized").unwrap();
+        let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+            Err(error) => error,
+            Ok(_) => panic!("a mis-sized pad must not become verified backend input"),
+        };
+        assert!(error.to_string().contains("expected 4"));
     }
 
     /// Positive parity: a CORRECTLY sized leading-axis Pad over a symbolic
@@ -345,13 +531,13 @@ mod tests {
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![
+            RiscOp::zero_pad(
+                Prim::F32,
+                vec![
                     (RtDim::Lit(2), RtDim::Lit(0)),
                     (RtDim::Lit(0), RtDim::Lit(0)),
                 ],
-                fill: 0.0,
-            },
+            ),
             vec![x],
             out_ty,
             None,
@@ -373,7 +559,12 @@ mod tests {
         // compilation) must emit an extern-linkage entry function.  Making it
         // `static` would prevent external callers from linking against the symbol.
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let result = codegen(&dag, "my_entry").unwrap();
         // The definition line must start with `void`, not `static void`.
         assert!(
@@ -392,16 +583,20 @@ mod tests {
         // When the caller explicitly requests static_entry (used internally for
         // HostTensorHelper DAG kernels), the function definition must be `static void`.
         let mut dag = Dag::new();
-        dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let result = emit::CEmitter::emit_dag_with_options(
-            &dag,
-            "internal_helper",
-            CodegenOptions {
-                static_entry: true,
-                ..CodegenOptions::default()
-            },
-        )
-        .unwrap();
+        dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let options = CodegenOptions {
+            static_entry: true,
+            ..CodegenOptions::default()
+        };
+        let verified = crate::testing::verified_dag(&dag, options)
+            .expect("static-entry test DAG must verify ownership");
+        let result =
+            emit::CEmitter::emit_dag_with_options(verified, "internal_helper", options).unwrap();
         assert!(
             result.contains("static void internal_helper("),
             "internal helper must be static; got source starting:\n{}",
@@ -414,14 +609,21 @@ mod tests {
         // For a HostProgram with a tensor helper, the emitted `.c` source must
         // mark the helper function as `static` (preventing PLT export) while
         // the user-facing HostFunction entry keeps external linkage.
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
-            HostType,
+            ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+            ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+            ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
 
         // Build a simple 1-element scalar DAG for the helper.
         let mut helper_dag = Dag::new();
-        helper_dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        helper_dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
 
         let helper = HostTensorHelper {
             name: "my_prog__my_fn__tensor_0".to_string(),
@@ -443,6 +645,7 @@ mod tests {
             // but the helper must still be emitted into the file.
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -482,9 +685,11 @@ mod tests {
 
     #[test]
     fn host_program_tensor_helper_blas_sets_toolchain_requirement() {
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
-            HostTensorInput, HostType,
+            ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+            ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+            ConcreteHostProgram as HostProgram, HostTensorHelper, HostTensorInput,
         };
 
         let a_ty = mat_f32(2, 3);
@@ -543,6 +748,7 @@ mod tests {
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -565,7 +771,12 @@ mod tests {
     #[test]
     fn codegen_surfaces_store_output_labels() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(
             RiscOp::Store { name: "out".into() },
             vec![a],
@@ -607,12 +818,22 @@ mod tests {
     #[test]
     fn codegen_does_not_surface_openblas_by_default() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+            vec![],
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -624,7 +845,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -659,12 +880,22 @@ mod tests {
     #[test]
     fn codegen_with_blas_surfaces_openblas_requirement_for_matmul_pattern() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+            vec![],
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -676,7 +907,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -889,15 +1120,16 @@ int main(void) {
         let main_c = r#"
 #include "chelis_runtime.h"
 int main(void) {
-    int shape[2] = {2, 3};
-    chelis_tensor *base = chelis_alloc(2, shape, CHELIS_F32);
-    base->data[4] = 7.0f;
-    chelis_tensor *view = chelis_alloc_view(2, shape, CHELIS_F32, base->data);
-    view->strides[0] = 0;
-    view->strides[1] = 1;
-    chelis_free(view);
-    if (base->data[4] != 7.0f) return 2;
-    chelis_free(base);
+    int64_t shape[2] = {2, 3};
+    float data[6] = {0};
+    data[4] = 7.0f;
+    chelis_tensor *base = chelis_tensor_entry_borrow(
+        2, shape, CHELIS_DTYPE_F32, data, sizeof(data)
+    );
+    chelis_tensor *view = chelis_contiguous(base);
+    chelis_tensor_release(view);
+    if (data[4] != 7.0f) return 2;
+    chelis_tensor_release(base);
     return 0;
 }
 "#;
@@ -930,8 +1162,18 @@ int main(void) {
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let result = codegen(&dag, "test_add").unwrap();
 
@@ -945,8 +1187,8 @@ void test_add(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_o
 int main() {
     chelis_tensor *outputs[1] = {0};
     test_add(NULL, 0, outputs, 1);
-    printf("%.1f\n", outputs[0]->data[0]);
-    chelis_free(outputs[0]);
+    printf("%.1f\n", ((const float*)chelis_tensor_read_view(outputs[0]).data)[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -998,16 +1240,35 @@ int main() {
         let main_c = format!(
             r#"
 #include "chelis_runtime.h"
+static double chelis_test_element_as_f64(const chelis_tensor *tensor, int64_t index) {{
+    chelis_read_view view = chelis_tensor_read_view(tensor);
+    switch (view.dtype) {{
+        case CHELIS_DTYPE_F32: return ((const float*)view.data)[index];
+        case CHELIS_DTYPE_F64: return ((const double*)view.data)[index];
+        case CHELIS_DTYPE_I8: return ((const int8_t*)view.data)[index];
+        case CHELIS_DTYPE_I16: return ((const int16_t*)view.data)[index];
+        case CHELIS_DTYPE_I32: return ((const int32_t*)view.data)[index];
+        case CHELIS_DTYPE_I64: return (double)((const int64_t*)view.data)[index];
+        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)view.data)[index]);
+        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)view.data)[index]);
+        case CHELIS_DTYPE_BOOL: {{
+            uint8_t value = ((const uint8_t*)view.data)[index];
+            if (value > UINT8_C(1)) abort();
+            return value;
+        }}
+        default: abort();
+    }}
+}}
 void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main() {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[0]->data[i]);
+        printf("%.6f", chelis_test_element_as_f64(outputs[0], i));
     }}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1075,7 +1336,16 @@ int main() {{
     /// f32 bits when the emitted C reparsed the literal.
     fn harness_input_fill_line(lhs: &str, value: f32) -> String {
         let bits = value.to_bits();
-        format!("{lhs} = chelis_f32_from_bits(0x{bits:08x}u);")
+        let (tensor, index) = lhs
+            .split_once('[')
+            .and_then(|(tensor, index)| index.strip_suffix(']').map(|index| (tensor, index)))
+            .expect("f32 harness destination must be a tensor data index");
+        format!(
+            "do {{ chelis_tensor_write *guard = chelis_tensor_begin_write({tensor}); \
+             chelis_write_view view = chelis_tensor_write_view(guard); \
+             ((float*)view.data)[{index}] = chelis_f32_from_bits(0x{bits:08x}u); \
+             chelis_tensor_end_write(guard); }} while (0);"
+        )
     }
 
     /// Issue #252: the test-harness fill must round-trip every f32 value
@@ -1095,7 +1365,7 @@ int main() {{
             f32::from_bits(0x1234_5678),
         ];
         for value in cases {
-            let line = harness_input_fill_line("dst->data[0]", value);
+            let line = harness_input_fill_line("dst[0]", value);
             let want_bits = value.to_bits();
             let needle = format!("chelis_f32_from_bits(0x{want_bits:08x}u)");
             assert!(
@@ -1112,7 +1382,7 @@ int main() {{
         // zero, but the bit pattern is nonzero and must survive.
         let denormal = 1e-40_f32;
         assert_ne!(denormal.to_bits(), 0);
-        let line = harness_input_fill_line("dst->data[0]", denormal);
+        let line = harness_input_fill_line("dst[0]", denormal);
         assert!(
             !line.contains("0.00000000f"),
             "denormal must not collapse to `0.00000000f`: {line}"
@@ -1164,15 +1434,15 @@ int main() {{
                     "NULL".to_string()
                 } else {
                     lines.push(format!(
-                        "int shape_{case_idx}_{slot}[{ndim}] = {{ {shape_vals} }};"
+                        "int64_t shape_{case_idx}_{slot}[{ndim}] = {{ {shape_vals} }};"
                     ));
                     format!("shape_{case_idx}_{slot}")
                 };
                 lines.push(format!(
-                    "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, {shape_arg}, CHELIS_F32);"
+                    "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, {shape_arg}, CHELIS_DTYPE_F32);"
                 ));
                 for (i, value) in input.data.iter().enumerate() {
-                    let lhs = format!("input_{case_idx}_{slot}->data[{i}]");
+                    let lhs = format!("input_{case_idx}_{slot}[{i}]");
                     lines.push(harness_input_fill_line(&lhs, *value));
                 }
                 lines.push(format!(
@@ -1188,21 +1458,23 @@ int main() {{
                 "for (int out_idx = 0; out_idx < {n_out}; out_idx++) {{"
             ));
             lines.push(format!(
-                "    for (int i = 0; i < outputs_{case_idx}[out_idx]->size; i++) {{"
+                "    for (int i = 0; i < chelis_tensor_numel(outputs_{case_idx}[out_idx]); i++) {{"
             ));
             lines.push("        if (out_idx > 0 || i > 0) printf(\" \");".to_string());
             lines.push(format!(
-                "        printf(\"%.6f\", outputs_{case_idx}[out_idx]->data[i]);"
+                "        printf(\"%.6f\", chelis_test_element_as_f64(outputs_{case_idx}[out_idx], i));"
             ));
             lines.push("    }".to_string());
             lines.push("    if (out_idx + 1 < n_out) printf(\" |\");".to_string());
             lines.push("}".to_string());
             lines.push("printf(\"\\n\");".to_string());
             for slot in 0..result.input_labels.len() {
-                lines.push(format!("chelis_free(input_{case_idx}_{slot});"));
+                lines.push(format!("chelis_tensor_release(input_{case_idx}_{slot});"));
             }
             for slot in 0..n_out {
-                lines.push(format!("chelis_free(outputs_{case_idx}[{slot}]);"));
+                lines.push(format!(
+                    "chelis_tensor_release(outputs_{case_idx}[{slot}]);"
+                ));
             }
             case_blocks.push(lines.join("\n    "));
         }
@@ -1214,6 +1486,25 @@ int main() {{
         let main_c = format!(
             r#"
 #include "chelis_runtime.h"
+static double chelis_test_element_as_f64(const chelis_tensor *tensor, int64_t index) {{
+    chelis_read_view view = chelis_tensor_read_view(tensor);
+    switch (view.dtype) {{
+        case CHELIS_DTYPE_F32: return ((const float*)view.data)[index];
+        case CHELIS_DTYPE_F64: return ((const double*)view.data)[index];
+        case CHELIS_DTYPE_I8: return ((const int8_t*)view.data)[index];
+        case CHELIS_DTYPE_I16: return ((const int16_t*)view.data)[index];
+        case CHELIS_DTYPE_I32: return ((const int32_t*)view.data)[index];
+        case CHELIS_DTYPE_I64: return (double)((const int64_t*)view.data)[index];
+        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)view.data)[index]);
+        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)view.data)[index]);
+        case CHELIS_DTYPE_BOOL: {{
+            uint8_t value = ((const uint8_t*)view.data)[index];
+            if (value > UINT8_C(1)) abort();
+            return value;
+        }}
+        default: abort();
+    }}
+}}
 void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
     int n_out = {n_out};
@@ -1321,8 +1612,18 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_add");
         assert_float_eq(&out, 3.0);
@@ -1334,7 +1635,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 5.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_neg");
         assert_float_eq(&out, -5.0);
@@ -1346,8 +1652,18 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 3.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 4.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_mul");
         assert_float_eq(&out, 12.0);
@@ -1359,7 +1675,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 0.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_exp");
         assert_float_eq(&out, 1.0);
@@ -1371,7 +1692,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 9.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 9.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Sqrt, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sqrt");
         assert_float_eq(&out, 3.0);
@@ -1385,9 +1711,7 @@ int main(void) {{
         // log(e) = 1.0
         let mut dag = Dag::new();
         let a = dag.add_node(
-            RiscOp::Const {
-                value: std::f64::consts::E,
-            },
+            RiscOp::synth_const(scalar_f32().precision, std::f64::consts::E),
             vec![],
             scalar_f32(),
             None,
@@ -1403,7 +1727,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 0.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Sin, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sin");
         assert_float_eq(&out, 0.0);
@@ -1415,9 +1744,27 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::CmpLt,
+            vec![a, b],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
         let out = compile_and_run(&dag, "test_cmplt");
         assert_float_eq(&out, 1.0);
     }
@@ -1428,9 +1775,27 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 5.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::CmpLt,
+            vec![a, b],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
         let out = compile_and_run(&dag, "test_cmplt_f");
         assert_float_eq(&out, 0.0);
     }
@@ -1442,7 +1807,12 @@ int main(void) {{
         }
         // sum([2, 2, 2]) = 6
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(3), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(3).precision, 2.0),
+            vec![],
+            vec_f32(3),
+            None,
+        );
         dag.add_node(
             RiscOp::Sum {
                 axis: 0,
@@ -1463,10 +1833,25 @@ int main(void) {{
         }
         // (1 + 2) * 4 = 12
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let d = dag.add_node(RiscOp::Const { value: 4.0 }, vec![], scalar_f32(), None);
+        let d = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 4.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_chain");
         assert_float_eq(&out, 12.0);
@@ -1479,8 +1864,18 @@ int main(void) {{
         }
         // max(3, 7) = 7
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 7.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 3.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 7.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::MaxElem, vec![a, b], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_maxe");
         assert_float_eq(&out, 7.0);
@@ -1492,11 +1887,16 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -3.0 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, -3.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let relu = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_relu");
         assert_float_eq(&out, 0.0);
-        assert!(matches!(dag.get(relu).unwrap().op, RiscOp::MaxElem));
+        assert!(matches!(dag.get(relu).unwrap().op, RiscOp::Relu));
     }
 
     #[test]
@@ -1505,7 +1905,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 0.0 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 0.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let _ = tier2::lower_sigmoid(&mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_sigmoid");
         assert_float_eq(&out, 0.5);
@@ -1518,7 +1923,12 @@ int main(void) {{
         }
         // max_reduce([5, 5, 5]) over axis 0 = 5
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 5.0 }, vec![], vec_f32(3), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(3).precision, 5.0),
+            vec![],
+            vec_f32(3),
+            None,
+        );
         dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_maxr");
         assert_float_eq(&out, 5.0);
@@ -1530,7 +1940,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 42.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 42.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(
             RiscOp::Cast {
                 new_precision: Prim::F32,
@@ -1550,10 +1965,25 @@ int main(void) {{
         }
         // vec of 3 ones + vec of 3 twos = [3,3,3], * vec of 3 threes = [9,9,9], sum = 27
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(3), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(3).precision, 1.0),
+            vec![],
+            vec_f32(3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(vec_f32(3).precision, 2.0),
+            vec![],
+            vec_f32(3),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(3), None);
-        let d = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(3), None);
+        let d = dag.add_node(
+            RiscOp::synth_const(vec_f32(3).precision, 3.0),
+            vec![],
+            vec_f32(3),
+            None,
+        );
         let e = dag.add_node(RiscOp::Mul, vec![c, d], vec_f32(3), None);
         dag.add_node(
             RiscOp::Sum {
@@ -1598,7 +2028,12 @@ int main(void) {{
         // Create a 1D tensor [1,1,1,1,1,1] (const fills all), reshape to 2x3
         // We use const value 1.0 for a vec of 6, reshape to 2x3 -> still 6 ones
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(6).precision, 1.0),
+            vec![],
+            vec_f32(6),
+            None,
+        );
         dag.add_node(
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
@@ -1617,7 +2052,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(6), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(6).precision, 1.0),
+            vec![],
+            vec_f32(6),
+            None,
+        );
         let reshaped = dag.add_node(
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
@@ -1626,7 +2066,12 @@ int main(void) {{
             mat_f32(2, 3),
             None,
         );
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(2, 3), None);
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![reshaped, b], mat_f32(2, 3), None);
         let out = compile_and_run(&dag, "test_reshape_add");
         assert_floats_eq(&out, &[3.0, 3.0, 3.0, 3.0, 3.0, 3.0]);
@@ -1640,17 +2085,27 @@ int main(void) {{
         // Create 1D tensor [3.0] (size 1), expand to size 3 (stride 0 broadcast),
         // add with a 1D tensor [1.0, 1.0, 1.0] -> [4.0, 4.0, 4.0]
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 3.0 }, vec![], vec_f32(1), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(1).precision, 3.0),
+            vec![],
+            vec_f32(1),
+            None,
+        );
         let expanded = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(3),
+                size: chelis_ir::dag::RtDim::Lit(3),
             },
             vec![a],
             vec_f32(3),
             None,
         );
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(3), None);
+        let b = dag.add_node(
+            RiscOp::synth_const(vec_f32(3).precision, 1.0),
+            vec![],
+            vec_f32(3),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![expanded, b], vec_f32(3), None);
         let out = compile_and_run(&dag, "test_expand_add");
         assert_floats_eq(&out, &[4.0, 4.0, 4.0]);
@@ -1664,7 +2119,12 @@ int main(void) {{
         // Create a 2x3 matrix (all 2.0), permute to 3x2 -> still all 2.0 but shape changes
         // Since const fills all elements with same value, we verify shape via size
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(2, 3), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
         let permuted = dag.add_node(
             RiscOp::Permute { axes: vec![1, 0] },
             vec![a],
@@ -1683,6 +2143,53 @@ int main(void) {{
         );
         let out = compile_and_run(&dag, "test_permute");
         assert_floats_eq(&out, &[6.0, 6.0]);
+    }
+
+    #[test]
+    fn checked_cast_identity_materializes_a_noncontiguous_source() {
+        if !gcc_available() {
+            return;
+        }
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load {
+                name: "input".into(),
+            },
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let permuted = dag.add_node(
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![input],
+            mat_f32(3, 2),
+            None,
+        );
+        let cast = dag.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![permuted],
+            mat_f32(3, 2),
+            None,
+        );
+        dag.add_root(cast);
+
+        let output = compile_and_run_input_cases(
+            &dag,
+            "checked_cast_identity_noncontiguous",
+            CodegenOptions::default(),
+            &[vec![TestInput::new(
+                "input",
+                &[2, 3],
+                &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            )]],
+        );
+        assert_eq!(
+            output,
+            ["1.000000 4.000000 2.000000 5.000000 3.000000 6.000000"]
+        );
     }
 
     #[test]
@@ -1750,40 +2257,49 @@ int main(void) {{
         for (slot, label) in result.input_labels.iter().enumerate() {
             match label.as_str() {
                 "values" => input_lines.push(
-                    r#"int shape_values[2] = { 4, 2 };
-    chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_F32);
+                    r#"int64_t shape_values[2] = { 4, 2 };
+    chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_DTYPE_F32);
     float values_data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-    for (int i = 0; i < 8; i++) values->data[i] = values_data[i];
+    chelis_tensor_write *values_guard = chelis_tensor_begin_write(values);
+    chelis_write_view values_view = chelis_tensor_write_view(values_guard);
+    for (int i = 0; i < 8; i++) ((float*)values_view.data)[i] = values_data[i];
+    chelis_tensor_end_write(values_guard);
     inputs[SLOT] = values;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
-                // #476: a CHELIS_I32 index tensor stores int32 values
+                // #476: a CHELIS_DTYPE_I32 index tensor stores int32 values
                 // bit-packed into the float-typed `data` buffer; they MUST be
                 // written through an `(int32_t*)` cast, not as floats. The
-                // pre-fix fixture wrote `indices->data[i] = 2.0f` (the FLOAT
+                // pre-fix fixture wrote an f32 through an i32 tensor (the FLOAT
                 // 2.0, whose int32 reinterpretation is 0x40000000), which only
                 // round-tripped because the buggy reader did `(int)data[i]` and
                 // truncated the float back. Writing the int32 value directly is
                 // what real generated input code and the runtime do.
                 "indices" => input_lines.push(
-                    r#"int shape_indices[1] = { 3 };
-    chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_I32);
-    int32_t *indices_i32 = (int32_t*)indices->data;
+                    r#"int64_t shape_indices[1] = { 3 };
+    chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_DTYPE_I32);
+    chelis_tensor_write *indices_guard = chelis_tensor_begin_write(indices);
+    chelis_write_view indices_view = chelis_tensor_write_view(indices_guard);
+    int32_t *indices_i32 = (int32_t*)indices_view.data;
     indices_i32[0] = 0; indices_i32[1] = 2; indices_i32[2] = 0;
+    chelis_tensor_end_write(indices_guard);
     inputs[SLOT] = indices;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
                 "target" => input_lines.push(
-                    r#"int shape_target[2] = { 4, 2 };
-    chelis_tensor *target = chelis_alloc(2, shape_target, CHELIS_F32);
+                    r#"int64_t shape_target[2] = { 4, 2 };
+    chelis_tensor *target = chelis_alloc(2, shape_target, CHELIS_DTYPE_F32);
     inputs[SLOT] = target;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
                 "updates" => input_lines.push(
-                    r#"int shape_updates[2] = { 3, 2 };
-    chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_F32);
+                    r#"int64_t shape_updates[2] = { 3, 2 };
+    chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_DTYPE_F32);
     float updates_data[6] = { 1, 10, 2, 20, 3, 30 };
-    for (int i = 0; i < 6; i++) updates->data[i] = updates_data[i];
+    chelis_tensor_write *updates_guard = chelis_tensor_begin_write(updates);
+    chelis_write_view updates_view = chelis_tensor_write_view(updates_guard);
+    for (int i = 0; i < 6; i++) ((float*)updates_view.data)[i] = updates_data[i];
+    chelis_tensor_end_write(updates_guard);
     inputs[SLOT] = updates;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
@@ -1798,19 +2314,21 @@ int main(void) {{
     {inputs}
     chelis_tensor *outputs[2] = {{0}};
     test_sparse(inputs, {n_in}, outputs, 2);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    chelis_read_view output0_view = chelis_tensor_read_view(outputs[0]);
+    chelis_read_view output1_view = chelis_tensor_read_view(outputs[1]);
+    for (int i = 0; i < output0_view.count; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[0]->data[i]);
+        printf("%.6f", ((const float*)output0_view.data)[i]);
     }}
     printf(" |");
-    for (int i = 0; i < outputs[1]->size; i++) {{
+    for (int i = 0; i < output1_view.count; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[1]->data[i]);
+        printf("%.6f", ((const float*)output1_view.data)[i]);
     }}
     printf("\n");
-    for (int i = 0; i < {n_in}; i++) chelis_free(inputs[i]);
-    chelis_free(outputs[0]);
-    chelis_free(outputs[1]);
+    for (int i = 0; i < {n_in}; i++) chelis_tensor_release(inputs[i]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(outputs[1]);
     return 0;
 }}
 "#,
@@ -1857,10 +2375,10 @@ int main(void) {{
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![(RtDim::Lit(1), RtDim::Lit(2))],
-                fill: -1.0,
-            },
+            RiscOp::pad(
+                vec![(RtDim::Lit(1), RtDim::Lit(2))],
+                chelis_types::scalar_from_f64("pad", Prim::F32, -1.0).unwrap(),
+            ),
             vec![x],
             vec_f32(6),
             None,
@@ -1931,8 +2449,18 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], vec_f32(1024), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], vec_f32(1024), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f32(1024).precision, 1.0),
+            vec![],
+            vec_f32(1024),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(vec_f32(1024).precision, 2.0),
+            vec![],
+            vec_f32(1024),
+            None,
+        );
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(1024), None);
         dag.add_node(
             RiscOp::Sum {
@@ -1959,7 +2487,12 @@ int main(void) {{
             scalar_f32(),
             None,
         );
-        let one = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let one = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![x, one], scalar_f32(), None);
         let lines = compile_and_run_input_cases(
             &dag,
@@ -1999,8 +2532,16 @@ int main(void) {{
 
         let result = codegen(&dag, "test_symbolic_batch").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
-        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
-        assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);")
+        );
+        assert!(
+            result
+                .c_source
+                .contains("chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 0)")
+        );
 
         let lines = compile_and_run_input_cases(
             &dag,
@@ -2054,7 +2595,11 @@ int main(void) {{
 
         let result = codegen(&dag, "test_symbolic_matmul").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
-        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);")
+        );
 
         let lines = compile_and_run_input_cases(
             &dag,
@@ -2126,13 +2671,17 @@ int main(void) {{
         )
         .unwrap();
         assert!(result.requirements.needs_blas);
-        assert!(result.c_source.contains("int seq = inputs[0]->shape[2];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t seq = chelis_tensor_shape(inputs[0], 2);")
+        );
         assert!(result.c_source.contains("cblas_sgemm"));
         assert!(result.c_source.contains("_batch_count = (batch * heads);"));
         assert!(
             !result
                 .c_source
-                .contains("(int[]){ batch, heads, seq, 3, 2 }"),
+                .contains("(int64_t[]){ batch, heads, seq, 3, 2 }"),
             "specialized batched BLAS must not allocate the dense product"
         );
 
@@ -2242,9 +2791,28 @@ int main(void) {{
         dag.add_root(xyz);
 
         let result = codegen(&dag, "test_symbolic_occurrences").unwrap();
-        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
-        assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
-        assert!(result.c_source.contains("inputs[2]->shape[0] != batch"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);")
+        );
+        // The guard reads BOTH operands from the class's own witnesses rather
+        // than comparing against the declared variable, so that a member
+        // scoped to one signature is never compared with a variable the
+        // occurrence walk declared for another (chelis#1277 C2.4). The
+        // property this row names - every non-canonical occurrence is checked
+        // against the canonical - is unchanged.
+        let canonical = "chelis_tensor_shape(inputs[0], 0)";
+        assert!(
+            result
+                .c_source
+                .contains(&format!("chelis_tensor_shape(inputs[1], 0) != {canonical}"))
+        );
+        assert!(
+            result
+                .c_source
+                .contains(&format!("chelis_tensor_shape(inputs[2], 0) != {canonical}"))
+        );
     }
 
     #[test]
@@ -2253,8 +2821,18 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_root(a);
         dag.add_root(b);
         let result = codegen(&dag, "test_multi").unwrap();
@@ -2268,9 +2846,11 @@ void test_multi(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n
 int main(void) {
     chelis_tensor *outputs[2] = {0};
     test_multi(NULL, 0, outputs, 2);
-    printf("%.1f %.1f\n", outputs[0]->data[0], outputs[1]->data[0]);
-    chelis_free(outputs[0]);
-    chelis_free(outputs[1]);
+    printf("%.1f %.1f\n",
+           ((const float*)chelis_tensor_read_view(outputs[0]).data)[0],
+           ((const float*)chelis_tensor_read_view(outputs[1]).data)[0]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(outputs[1]);
     return 0;
 }
 "#;
@@ -2310,20 +2890,23 @@ int main(void) {
 #include "chelis_runtime.h"
 void test_load_copy(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {
-    int shape[1] = {2};
-    chelis_tensor *input = chelis_alloc(1, shape, CHELIS_F32);
-    input->data[0] = 3.0f;
-    input->data[1] = 4.0f;
+    int64_t shape[1] = {2};
+    chelis_tensor *input = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(input);
+    chelis_write_view input_view = chelis_tensor_write_view(guard);
+    ((float*)input_view.data)[0] = 3.0f;
+    ((float*)input_view.data)[1] = 4.0f;
+    chelis_tensor_end_write(guard);
     chelis_tensor *inputs[1] = {input};
     chelis_tensor *outputs[1] = {0};
     test_load_copy(inputs, 1, outputs, 1);
     printf("%d %d %.1f %.1f\n",
            outputs[0] == input,
-           outputs[0]->data == input->data,
-           outputs[0]->data[0],
-           outputs[0]->data[1]);
-    chelis_free(outputs[0]);
-    chelis_free(input);
+           chelis_tensor_read_view(outputs[0]).data == chelis_tensor_read_view(input).data,
+           ((const float*)chelis_tensor_read_view(outputs[0]).data)[0],
+           ((const float*)chelis_tensor_read_view(outputs[0]).data)[1]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(input);
     return 0;
 }
 "#;
@@ -2343,7 +2926,11 @@ int main(void) {
             String::from_utf8_lossy(&out.stderr)
         );
         let run = Command::new(bin_path).output().unwrap();
-        assert!(run.status.success());
+        assert!(
+            run.status.success(),
+            "materialized-load harness failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         assert_eq!(String::from_utf8(run.stdout).unwrap().trim(), "0 0 3.0 4.0");
     }
 
@@ -2354,8 +2941,18 @@ int main(void) {
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
-        let b = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
         let out = compile_and_run_with_flags(&dag, "test_openmp", &["-fopenmp"]);
         assert_float_eq(&out, 3.0);
@@ -2368,12 +2965,22 @@ int main(void) {
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], mat_f32(3, 4), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
+            vec![],
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -2385,7 +2992,7 @@ int main(void) {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -2432,7 +3039,7 @@ void test_blas(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_
 int main(void) {
     chelis_tensor *outputs[1] = {0};
     test_blas(NULL, 0, outputs, 1);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -2462,12 +3069,22 @@ int main(void) {
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], mat_f32(3, 4), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(3, 4).precision, 0.5),
+            vec![],
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -2479,7 +3096,7 @@ int main(void) {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -2522,12 +3139,22 @@ int main(void) {
             return;
         }
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Const { value: 2.0 }, vec![], mat_f32(2, 3), None);
-        let b = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], mat_f32(3, 4), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(mat_f32(3, 4).precision, 0.5),
+            vec![],
+            mat_f32(3, 4),
+            None,
+        );
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -2539,7 +3166,7 @@ int main(void) {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -2751,22 +3378,28 @@ int main(void) {
 #include <math.h>
 void test_simd_compile(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
-    int shape[1] = {{ {n} }};
-    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
-    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
-    for (int i = 0; i < {n}; i++) {{ ta->data[i] = 0.5f; tb->data[i] = 0.5f; }}
+    int64_t shape[1] = {{ {n} }};
+    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *ta_guard = chelis_tensor_begin_write(ta);
+    chelis_tensor_write *tb_guard = chelis_tensor_begin_write(tb);
+    chelis_write_view ta_view = chelis_tensor_write_view(ta_guard);
+    chelis_write_view tb_view = chelis_tensor_write_view(tb_guard);
+    for (int i = 0; i < {n}; i++) {{ ((float*)ta_view.data)[i] = 0.5f; ((float*)tb_view.data)[i] = 0.5f; }}
+    chelis_tensor_end_write(ta_guard);
+    chelis_tensor_end_write(tb_guard);
     chelis_tensor *inputs[2] = {{ta, tb}};
     chelis_tensor *outputs[1] = {{0}};
     test_simd_compile(inputs, 2, outputs, 1);
     float expected = expf(1.0f);
     for (int i = 0; i < {n}; i++) {{
-        float diff = outputs[0]->data[i] - expected;
+        float diff = ((const float*)chelis_tensor_read_view(outputs[0]).data)[i] - expected;
         if (diff < 0) diff = -diff;
         if (diff > 1e-5f) {{ return 1; }}
     }}
-    chelis_free(ta);
-    chelis_free(tb);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(ta);
+    chelis_tensor_release(tb);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -2847,13 +3480,13 @@ int main(void) {{
         let a_init: String = a_data
             .iter()
             .enumerate()
-            .map(|(i, v)| harness_input_fill_line(&format!("ta->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("ta[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
         let b_init: String = b_data
             .iter()
             .enumerate()
-            .map(|(i, v)| harness_input_fill_line(&format!("tb->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("tb[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
@@ -2864,20 +3497,20 @@ int main(void) {{
 #include <stdio.h>
 void test_oracle(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
-    int shape[1] = {{ {n} }};
-    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
-    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
+    int64_t shape[1] = {{ {n} }};
+    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     {a_init}
     {b_init}
     chelis_tensor *inputs[2] = {{ta, tb}};
     chelis_tensor *outputs[1] = {{0}};
     test_oracle(inputs, 2, outputs, 1);
     for (int i = 0; i < {n}; i++) {{
-        printf("%.8f\n", outputs[0]->data[i]);
+        printf("%.8f\n", ((const float*)chelis_tensor_read_view(outputs[0]).data)[i]);
     }}
-    chelis_free(ta);
-    chelis_free(tb);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(ta);
+    chelis_tensor_release(tb);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -3001,7 +3634,7 @@ int main(void) {{
         let x_init = inputs
             .iter()
             .enumerate()
-            .map(|(i, v)| harness_input_fill_line(&format!("tx->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("tx[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
@@ -3012,17 +3645,17 @@ int main(void) {{
 #include <stdio.h>
 void test_single_exp_run(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
-    int shape[1] = {{ {n} }};
-    chelis_tensor *tx = chelis_alloc(1, shape, CHELIS_F32);
+    int64_t shape[1] = {{ {n} }};
+    chelis_tensor *tx = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     {x_init}
     chelis_tensor *inputs[1] = {{tx}};
     chelis_tensor *outputs[1] = {{0}};
     test_single_exp_run(inputs, 1, outputs, 1);
     for (int i = 0; i < {n}; i++) {{
-        printf("%.8f\n", outputs[0]->data[i]);
+        printf("%.8f\n", ((const float*)chelis_tensor_read_view(outputs[0]).data)[i]);
     }}
-    chelis_free(tx);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(tx);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -3073,19 +3706,25 @@ int main(void) {{
 
     // ---- ADVERSARIAL TESTS: static linkage, C compilation, and scalar builtin coverage ----
 
-    /// E: When globals are present (internal_linkage=true), user functions become
-    /// `static inline`. The tensor helper must remain `static void` (not `static inline`).
-    /// This case is NOT tested by `host_program_tensor_helpers_are_static_entry_not_exported`
-    /// which only tests the no-globals case.
+    /// E: Published authored functions retain external linkage when globals
+    /// cause `main` emission. Compiler-owned tensor helpers remain `static
+    /// void`, and monomorphized specializations remain translation-unit local.
     #[test]
-    fn adv_host_program_with_globals_fns_are_static_inline_helpers_remain_static_void() {
+    fn adv_host_program_with_globals_keeps_authored_exports_external() {
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostBinding, HostExpr, HostExprKind, HostFunction, HostParam, HostProgram,
-            HostTensorHelper, HostType,
+            ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
+            ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,
+            ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
 
         let mut helper_dag = Dag::new();
-        helper_dag.add_node(RiscOp::Const { value: 2.0 }, vec![], scalar_f32(), None);
+        helper_dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 2.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
 
         let helper = HostTensorHelper {
             name: "prog__fn__tensor_0".to_string(),
@@ -3105,15 +3744,17 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
 
-        // Adding a global binding triggers internal_linkage=true.
+        // Adding a global binding triggers `main` emission.
         let program = HostProgram {
             globals: vec![HostBinding {
                 name: "__g".to_string(),
                 display_name: None,
+                display_roots: Vec::new(),
                 ty: HostType::Int64,
                 value: HostExpr::new(HostExprKind::Int(1)),
             }],
@@ -3130,15 +3771,16 @@ int main(void) {{
             src.contains("static void my_func__tensor_0("),
             "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
         );
-        // User function in globals mode must be `static inline` (not plain void, not static void)
+        // The published header declares this authored function external, so
+        // the definition must have matching external linkage even with main.
         assert!(
-            src.contains("static inline"),
-            "user function in globals mode must carry `static inline` linkage;\ngenerated source:\n{src}"
+            src.contains("double my_func(double x)"),
+            "authored export must keep an external definition;\ngenerated source:\n{src}"
         );
-        // The exported entry must NOT be plain `static void` (it's `static inline`, not `static void`)
         assert!(
-            !src.contains("static void my_func("),
-            "user function must not be `static void`; must be `static inline`;\ngenerated source:\n{src}"
+            !src.contains("static inline double my_func(")
+                && !src.contains("static double my_func("),
+            "authored export must not become translation-unit local;\ngenerated source:\n{src}"
         );
     }
 
@@ -3150,13 +3792,20 @@ int main(void) {{
             eprintln!("skipping: gcc not available");
             return;
         }
+        use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
-            HostExpr, HostExprKind, HostFunction, HostParam, HostProgram, HostTensorHelper,
-            HostType,
+            ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+            ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+            ConcreteHostProgram as HostProgram, HostTensorHelper,
         };
 
         let mut helper_dag = Dag::new();
-        helper_dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        helper_dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
 
         let helper = HostTensorHelper {
             name: "lib__exported_fn__tensor_0".to_string(),
@@ -3176,6 +3825,7 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -3272,9 +3922,7 @@ int main(void) {{
         }
         let mut dag = Dag::new();
         let x = dag.add_node(
-            RiscOp::Const {
-                value: std::f64::consts::FRAC_PI_4,
-            },
+            RiscOp::synth_const(scalar_f32().precision, std::f64::consts::FRAC_PI_4),
             vec![],
             scalar_f32(),
             None,
@@ -3296,7 +3944,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: 1.0 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, 1.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Atan, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_atan_1");
         let val: f32 = out.trim().parse().expect("float output");
@@ -3314,7 +3967,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -1.3 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, -1.3),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Floor, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_floor_neg");
         let val: f32 = out.trim().parse().expect("float output");
@@ -3331,7 +3989,12 @@ int main(void) {{
             return;
         }
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Const { value: -1.7 }, vec![], scalar_f32(), None);
+        let x = dag.add_node(
+            RiscOp::synth_const(scalar_f32().precision, -1.7),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         dag.add_node(RiscOp::Ceil, vec![x], scalar_f32(), None);
         let out = compile_and_run(&dag, "test_ceil_neg");
         let val: f32 = out.trim().parse().expect("float output");
@@ -3349,9 +4012,7 @@ int main(void) {{
         }
         let mut dag = Dag::new();
         let x = dag.add_node(
-            RiscOp::Const {
-                value: -std::f64::consts::PI,
-            },
+            RiscOp::synth_const(scalar_f32().precision, -std::f64::consts::PI),
             vec![],
             scalar_f32(),
             None,
@@ -3372,7 +4033,7 @@ int main(void) {{
     // gcc compile, and numerical correctness at the ~15-digit precision that
     // the host f64 path reaches. Reading outputs as `double*` via the shared
     // data pointer relies on chelis_alloc sizing the allocation by 8 bytes
-    // for CHELIS_F64 (see chelis_alloc in chelis-runtime).
+    // for CHELIS_DTYPE_F64 (see chelis_alloc in chelis-runtime).
 
     fn vec_f64(n: usize) -> TensorType {
         TensorType {
@@ -3389,7 +4050,7 @@ int main(void) {{
     }
 
     /// Compile a DAG whose single root is an f64 tensor, drive it from a C main
-    /// that reinterprets outputs[0]->data as `double*`, and return the printed
+    /// that reads the output view as `double*`, and return the printed
     /// line-separated values with 17 significant digits each.
     fn compile_and_run_f64(dag: &Dag, func_name: &str, expected_size: usize) -> Vec<f64> {
         if !gcc_available() {
@@ -3409,11 +4070,11 @@ void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int 
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    double *d = (double*)outputs[0]->data;
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    const double *d = (const double*)chelis_tensor_read_view(outputs[0]).data;
+    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {{
         printf("%.17g\n", d[i]);
     }}
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -3485,8 +4146,18 @@ int main(void) {{
         // Const fills uniformly. Use Add chain of 4 scalars summed pointwise
         // instead: construct via (1.1 + 0.5) scalar, tile to [4], add to
         // [0.0, 0.0, 0.0, 0.0]. Simpler: just test one scalar per lane.
-        let a = dag.add_node(RiscOp::Const { value: 1.1 }, vec![], vec_f64(4), None);
-        let b = dag.add_node(RiscOp::Const { value: 0.5 }, vec![], vec_f64(4), None);
+        let a = dag.add_node(
+            RiscOp::synth_const(vec_f64(4).precision, 1.1),
+            vec![],
+            vec_f64(4),
+            None,
+        );
+        let b = dag.add_node(
+            RiscOp::synth_const(vec_f64(4).precision, 0.5),
+            vec![],
+            vec_f64(4),
+            None,
+        );
         dag.add_node(RiscOp::Add, vec![a, b], vec_f64(4), None);
 
         let out = compile_and_run_f64(&dag, "test_f64_add", 4);
@@ -3509,9 +4180,7 @@ int main(void) {{
         }
         let mut dag = Dag::new();
         let x = dag.add_node(
-            RiscOp::Const {
-                value: std::f64::consts::FRAC_PI_4,
-            },
+            RiscOp::synth_const(scalar_f64().precision, std::f64::consts::FRAC_PI_4),
             vec![],
             scalar_f64(),
             None,

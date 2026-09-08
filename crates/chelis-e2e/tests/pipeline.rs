@@ -8,7 +8,7 @@ fn has_any_root(result: &chelis_e2e::pipeline::PipelineResult, names: &[&str]) -
 
 #[test]
 fn pipeline_smoke_test_relu() {
-    let src = "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)";
+    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let result = compile_surf(src);
     assert!(result.is_ok(), "pipeline failed: {:?}", result.err());
     let dag = result.unwrap().dag;
@@ -89,28 +89,25 @@ fn pipeline_transformer_model_lowers() {
 }
 
 #[test]
-fn pipeline_tier2_relu_decomposes() {
-    // Verify relu desugars through the pipeline and lowers to MaxElem + Const
-    let src = "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)";
+fn pipeline_tier2_relu_preserves_identity() {
+    // ReLU reaches the DAG as the [05-OP-43] identity so AD can attach its
+    // zero-boundary convention before any backend lowering.
+    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let result = compile_surf(src).unwrap();
     let dag = result.dag;
 
-    // Should contain MaxElem (from relu decomposition) and Const(0)
-    let has_max_elem = dag
+    let has_relu = dag
         .nodes()
         .iter()
-        .any(|n| matches!(n.op, chelis_ir::dag::RiscOp::MaxElem));
-    assert!(
-        has_max_elem,
-        "relu should decompose to MaxElem but DAG has no MaxElem node"
-    );
+        .any(|n| matches!(n.op, chelis_ir::dag::RiscOp::Relu));
+    assert!(has_relu, "pipeline erased the dedicated ReLU identity");
 }
 
 #[test]
 fn pipeline_macro_composition_lowers() {
     let src = r#"
 macro residual_relu(x) = add(copy(x), relu(x))
-def f(x: tensor[n, f32]): tensor[n, f32] = residual_relu(x)
+def f(x: tensor[n, f32]) -> tensor[n, f32] = residual_relu(x)
 "#;
     let result = compile_surf(src).expect("macro program should compile");
     assert!(
@@ -134,8 +131,8 @@ fn pipeline_vmap_example_lowers() {
 #[test]
 fn pipeline_vmap_explicit_axis_lowers() {
     let src = r#"
-def process(x: tensor[features, f32]): tensor[features, f32] = relu(x)
-def batch_process(xs: tensor[features, batch, f32]): tensor[features, batch, f32] = vmap(process, axis=1)(xs)
+def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
+def batch_process(xs: tensor[features, batch, f32]) -> tensor[features, batch, f32] = vmap(process, axis=1)(xs)
 "#;
     let result = compile_surf(src).expect("axis=1 vmap example should compile");
     assert!(
@@ -182,4 +179,59 @@ def per_example_grads(
     assert!(result.root_nodes.contains_key("loss"));
     assert!(result.root_nodes.contains_key("per_example_grads.0"));
     assert!(result.root_nodes.contains_key("per_example_grads.1"));
+}
+
+#[test]
+fn pipeline_preserves_the_empty_host_only_root_product() {
+    let result = compile_surf("label = \"host only\"\n").expect("host-only source must compile");
+
+    assert!(result.dag.roots().is_empty());
+    assert!(result.root_nodes.is_empty());
+    assert!(result.deep_text.contains("host only"));
+}
+
+#[test]
+fn pipeline_preserves_canonical_root_order_and_node_mapping() {
+    let source = r#"
+def first(x: tensor[n, f32]) -> tensor[n, f32] = copy(x)
+def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)
+"#;
+    let result = compile_surf(source).expect("ordered tuple roots must lower");
+    let roots = result.dag.roots();
+
+    assert_eq!(roots.len(), 3);
+    assert_eq!(result.root_nodes["first"], roots[0]);
+    assert_eq!(result.root_nodes["pair.0"], roots[1]);
+    assert_eq!(result.root_nodes["pair.1"], roots[2]);
+}
+
+#[test]
+fn pipeline_preserves_rejection_stage_messages() {
+    let fixtures = [
+        ("def broken(\n", "Surf parse error:"),
+        ("def broken() -> int32 = missing\n", "Type errors:"),
+        (
+            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+            "Random",
+        ),
+        (
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n",
+            "consumed",
+        ),
+        (
+            "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=theta)\nout = grad_loss(to_tensor([1.5, 2.5]))\n",
+            "grad",
+        ),
+    ];
+
+    for (source, expected) in fixtures {
+        let error = match compile_surf(source) {
+            Ok(_) => panic!("the fixture must reject"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains(expected),
+            "expected `{expected}` in `{error}`"
+        );
+    }
 }

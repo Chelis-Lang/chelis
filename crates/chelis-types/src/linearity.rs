@@ -1,10 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use chelis_deep::DeepTag;
+use chelis_unord::{UnordMap, UnordSet};
+use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
+use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
 use crate::pipe_stage::resolve_pipe_stage_callee;
@@ -12,7 +17,7 @@ use crate::types::Type;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
-    reusable_inputs_by_offset: HashMap<usize, usize>,
+    reusable_inputs_by_offset: UnordMap<usize, usize>,
 }
 
 impl LinearityInfo {
@@ -34,7 +39,7 @@ impl LinearityInfo {
     /// they come from separately-parsed source regions.
     pub fn merged_with(&self, other: &LinearityInfo) -> LinearityInfo {
         let mut reusable_inputs_by_offset = self.reusable_inputs_by_offset.clone();
-        for (offset, input_index) in &other.reusable_inputs_by_offset {
+        for (offset, input_index) in other.reusable_inputs_by_offset.to_sorted() {
             reusable_inputs_by_offset
                 .entry(*offset)
                 .or_insert(*input_index);
@@ -82,143 +87,331 @@ struct ConsumeSite {
     kind: ConsumeKind,
 }
 
+/// What a single binding generation was introduced by.  One record per
+/// `LinearScope::declare`, keyed by the generation's `BindingId`.
+///
+/// All fields describe the *binding*, not the value's current state —
+/// `BindingState` owns that. They are separate concerns: a binding can be
+/// a destructured component and an alias at the same time (a component
+/// desugars to `p = (var __chelis_tmpN)`), and `pop` must drop both
+/// together.
+#[derive(Debug, Clone, Default)]
+struct BindingOrigin {
+    /// Alias chain link (Linearity-AliasedConsume-F1).  `Some(source)`
+    /// when `check_let` recorded a `let y = (var x)` binding as an
+    /// `Aliasing` consume; `consume_var_expr` walks the chain via
+    /// `resolve_alias_chain` and forwards a `Structural` consume to the
+    /// underlying source binding's record.  Multi-level chains
+    /// (`let z = y; let y = x`) are walked iteratively.
+    ///
+    /// The link is the *generation* the alias was taken against,
+    /// resolved when the alias bind is recorded, and it never
+    /// re-resolves (chelis#1209): re-binding the source's name neither
+    /// re-points this link at the new generation nor lets a later
+    /// destructure of that name capture the alias.
+    alias: Option<BindingId>,
+    /// Destructured-component mark (Linearity-F2, chelis#1200).  `true`
+    /// when this binding was introduced by a `destructure: true` bind
+    /// emitted by `chelis_surf::desugar` for a `let` whose pattern is not
+    /// a bare `Var` — i.e. the name denotes a tuple component, or one of
+    /// the `__chelis_tmpN` intermediates that carry components.  The
+    /// `consume_var_expr` already-consumed arm reads this to decide
+    /// whether a consume-after-consume is a hard Linearity-F2 error or
+    /// the ordinary implicit-Copy fallthrough.
+    ///
+    /// This is a per-binding mark rather than a block-scoped depth
+    /// counter on purpose.  A depth counter set by one destructuring
+    /// `let` covers that let's *body*, and in a block every later
+    /// statement is nested inside that body, so the gate fired for every
+    /// variable in the rest of the block — including ordinary bindings
+    /// with no relationship to the destructure (chelis#1200).
+    ///
+    /// This field is the *active F2 gate*, and it is region-relative:
+    /// `clear_destructured_marks` drops it on branch entry because a
+    /// branch body is a new declaration region.  It must never be used to
+    /// answer "which binding carries this value" — see `component`.
+    destructured: bool,
+    /// Permanent destructured-component identity (chelis#1200 review
+    /// finding 1).  Set with `destructured` when the bind is recorded, and
+    /// *never* cleared by region entry.
+    ///
+    /// The two facts are genuinely different.  Whether F2 is armed for a
+    /// name depends on where you are (a branch body is a fresh region);
+    /// whether the name denotes a tuple component whose value lives in a
+    /// `__chelis_tmpN` carrier is a property of the binding itself and is
+    /// true everywhere the binding is visible.  Reading the region-relative
+    /// mark to answer the identity question silently loses the carrier
+    /// inside any branch: the closure-capture path then consumed the
+    /// component's own entry, left the carrier `Consumed(Aliasing)`, and a
+    /// later `realize` of the component upgraded that to `Structural`
+    /// without a diagnostic — a consume inside a branch failed to survive
+    /// the join, contradicting `spec/design/implicit_linearity.md`.
+    component: bool,
+}
+
+/// Unique identity of one binding event (chelis#1209).
+///
+/// Minted by [`LinearScope::declare`], monotonically within one check
+/// invocation, and never reused: every `let` bind, function parameter,
+/// closure capture, match binder, and pre-declared top-level def gets
+/// its own generation. All checker state lives in the [`BindingRecord`]
+/// keyed by this id, so a name is only ever a lookup handle (`visible`
+/// resolves a use site to the innermost live generation) and re-binding
+/// a name cannot transfer or misroute state that belongs to an older
+/// generation. Mirrors the `TypeVar(u32)` / `VarGen` shape in
+/// `types.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BindingId(u32);
+
+/// Everything the checker tracks for one binding generation.
+#[derive(Debug, Clone)]
+struct BindingRecord {
+    /// The source-level name this generation was introduced under.
+    /// Diagnostics print the name the user wrote at the *use site*, not
+    /// this field; it exists for the `pop` LIFO check and debugging.
+    name: String,
+    ty: Option<Expr>,
+    state: BindingState,
+    origin: BindingOrigin,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LinearScope {
-    bindings: HashMap<String, Vec<BindingState>>,
-    types: HashMap<String, Vec<Option<Expr>>>,
-    /// Alias chain map (Linearity-AliasedConsume-F1).  When
-    /// `check_let` records a `let y = (var x)` binding as an
-    /// `Aliasing` consume, it also pushes `x` onto the alias stack
-    /// at `aliases["y"]`.  When `consume_var_expr` resolves a
-    /// `Structural` consume on `y` it walks the alias chain via
-    /// `resolve_alias_chain` and forwards the consume to the
-    /// underlying source name's scope entry.  Multi-level chains
-    /// (`let z = y; let y = x`) are walked iteratively until the
-    /// resolved name has no alias.  Stacks parallel `bindings` so
-    /// scoping (`pop`) keeps the alias map consistent with the
-    /// shadowing semantics already in place for names and types.
-    aliases: HashMap<String, Vec<Option<String>>>,
+    /// All checker state, keyed by binding generation.
+    records: UnordMap<BindingId, BindingRecord>,
+    /// Name -> stack of generations, innermost last. Shadowing pushes,
+    /// scope exit pops. This map answers "which binding does this use
+    /// site mean" and nothing else; every consumption mark, alias link,
+    /// and component mark lives on the id-keyed record it resolved to.
+    visible: UnordMap<String, Vec<BindingId>>,
+    /// Generation counter. Shared (`Rc`) across clones so branch and
+    /// closure scopes forked from one root cannot mint colliding ids;
+    /// `Default` mints a fresh zero counter, which is what makes each
+    /// check invocation pure (`check_linearity_with_context` purity
+    /// contract). One root scope is built per check invocation, and
+    /// every other scope must be a clone of it: a second
+    /// `LinearScope::default()` mid-check would fork the counter.
+    next: Rc<Cell<u32>>,
 }
 
 impl LinearScope {
-    fn declare<S: Into<String>>(&mut self, name: S, ty: Option<Expr>) {
-        let name = name.into();
-        self.bindings
-            .entry(name.clone())
-            .or_default()
-            .push(BindingState::Live {
-                borrow_sites: Vec::new(),
-            });
-        self.types.entry(name.clone()).or_default().push(ty);
-        // Push a `None` onto the alias stack so a re-let of `name`
-        // with a non-var RHS shadows any prior alias.  Callers that
-        // record an alias must follow with `record_alias` to flip
-        // the top of the stack from `None` to `Some(source)`.
-        self.aliases.entry(name).or_default().push(None);
+    fn mint(&self) -> BindingId {
+        let id = BindingId(self.next.get());
+        self.next.set(id.0 + 1);
+        id
     }
 
-    fn pop(&mut self, name: &str) -> Option<(Option<Expr>, BindingState)> {
-        let ty = if let Some(stack) = self.types.get_mut(name) {
-            let ty = stack.pop();
-            if stack.is_empty() {
-                self.types.remove(name);
-            }
-            ty
-        } else {
-            None
-        };
+    fn declare<S: Into<String>>(&mut self, name: S, ty: Option<Expr>) -> BindingId {
+        let name = name.into();
+        let id = self.mint();
+        // The origin starts blank: a re-`let` of `name` shadows any
+        // prior alias link and component mark because the new generation
+        // begins unmarked. Callers that establish either follow with
+        // `record_alias` / `mark_destructured`, which flip fields on the
+        // record this inserted.
+        self.records.insert(
+            id,
+            BindingRecord {
+                name: name.clone(),
+                ty,
+                state: BindingState::Live {
+                    borrow_sites: Vec::new(),
+                },
+                origin: BindingOrigin::default(),
+            },
+        );
+        self.visible.entry(name).or_default().push(id);
+        id
+    }
 
-        let state = if let Some(stack) = self.bindings.get_mut(name) {
-            let state = stack.pop();
-            if stack.is_empty() {
-                self.bindings.remove(name);
+    fn pop(&mut self, id: BindingId) -> Option<(Option<Expr>, BindingState)> {
+        let record = self.records.remove(&id)?;
+        if let Some(stack) = self.visible.get_mut(&record.name) {
+            debug_assert_eq!(
+                stack.last(),
+                Some(&id),
+                "scope exit must unwind LIFO per name"
+            );
+            if let Some(position) = stack.iter().rposition(|entry| *entry == id) {
+                stack.remove(position);
             }
-            state
-        } else {
-            None
-        };
-
-        if let Some(stack) = self.aliases.get_mut(name) {
-            stack.pop();
             if stack.is_empty() {
-                self.aliases.remove(name);
+                self.visible.remove(&record.name);
             }
         }
-
-        state.map(|state| (ty.flatten(), state))
+        Some((record.ty, record.state))
     }
 
-    fn top(&self, name: &str) -> Option<&BindingState> {
-        self.bindings.get(name).and_then(|stack| stack.last())
+    /// The innermost live generation for `name`, if any. This is the
+    /// single point where a use site's name becomes an identity; every
+    /// state read or write past it is id-keyed.
+    fn top_id(&self, name: &str) -> Option<BindingId> {
+        self.visible
+            .get(name)
+            .and_then(|stack| stack.last())
+            .copied()
+    }
+
+    fn record(&self, id: BindingId) -> Option<&BindingRecord> {
+        self.records.get(&id)
+    }
+
+    fn record_mut(&mut self, id: BindingId) -> Option<&mut BindingRecord> {
+        self.records.get_mut(&id)
+    }
+
+    fn state(&self, id: BindingId) -> Option<&BindingState> {
+        self.record(id).map(|record| &record.state)
     }
 
     fn ty(&self, name: &str) -> Option<&Expr> {
-        self.types
-            .get(name)
-            .and_then(|stack| stack.last())
-            .and_then(|ty| ty.as_ref())
+        self.top_id(name)
+            .and_then(|id| self.record(id))
+            .and_then(|record| record.ty.as_ref())
     }
 
-    fn consume(&mut self, name: &str, site: ConsumeSite) {
-        if let Some(stack) = self.bindings.get_mut(name)
-            && let Some(top) = stack.last_mut()
-        {
-            *top = BindingState::Consumed(site);
+    fn consume_id(&mut self, id: BindingId, site: ConsumeSite) {
+        if let Some(record) = self.record_mut(id) {
+            record.state = BindingState::Consumed(site);
         }
     }
 
     fn borrow(&mut self, name: &str, site: String) {
-        if let Some(stack) = self.bindings.get_mut(name)
-            && let Some(BindingState::Live { borrow_sites }) = stack.last_mut()
+        if let Some(id) = self.top_id(name)
+            && let Some(record) = self.record_mut(id)
+            && let BindingState::Live { borrow_sites } = &mut record.state
         {
             borrow_sites.push(site);
         }
     }
 
-    fn visible_names(&self) -> Vec<String> {
-        self.bindings.keys().cloned().collect()
+    /// Every generation on every visible stack, sorted for
+    /// deterministic iteration. Shadowed generations are included on
+    /// purpose: an alias recorded against an older generation can
+    /// consume it inside a branch even while its name is shadowed, so a
+    /// join that only saw stack tops would drop that consume
+    /// (chelis#1209).
+    fn all_visible_ids(&self) -> Vec<BindingId> {
+        let mut ids: Vec<BindingId> = self
+            .visible
+            .to_sorted()
+            .into_iter()
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
-    /// Record that the top-of-stack binding for `alias` is an
-    /// aliasing copy of `source`.  Must be called after `declare`
-    /// for `alias` (the alias stack carries a `None` at the top
-    /// after `declare`; this flips it to `Some(source)`).  Used by
-    /// the `Aliasing` consume producers in `check_let` and
-    /// `check_def_body` per Linearity-AliasedConsume-F1.
-    fn record_alias(&mut self, alias: &str, source: &str) {
-        if let Some(stack) = self.aliases.get_mut(alias)
-            && let Some(top) = stack.last_mut()
-        {
-            *top = Some(source.to_string());
+    /// Record that the binding generation `alias` is an aliasing copy
+    /// of the generation `source`.  The caller resolves `source` from
+    /// its name *before* declaring `alias`, so the link points at the
+    /// generation the alias was actually taken against — including for
+    /// a self-rebind `x = x`, where the source is the older `x`
+    /// (chelis#1209).  Used by the `Aliasing` consume producers in
+    /// `check_let` and the top-level `def name = (var x)` arm of
+    /// `check_top_level` per Linearity-AliasedConsume-F1.
+    fn record_alias(&mut self, alias: BindingId, source: BindingId) {
+        if let Some(record) = self.record_mut(alias) {
+            record.origin.alias = Some(source);
         }
     }
 
-    /// Walk the alias chain for `name` to the underlying non-alias
-    /// source.  Returns `None` if `name` is not an alias today;
-    /// returns `Some(source)` if `name` aliases `source` (possibly
-    /// through one or more intermediate names).  Bounded by chain
-    /// length, which is bounded by source-program nesting depth.
+    /// Record that the binding generation `id` is a destructured
+    /// component (Linearity-F2, chelis#1200).  Takes the id `declare`
+    /// returned for the bind, whose record starts unmarked.  Called by
+    /// `check_let` for every name introduced by a `destructure: true`
+    /// bind.
+    fn mark_destructured(&mut self, id: BindingId) {
+        if let Some(record) = self.record_mut(id) {
+            record.origin.destructured = true;
+            record.origin.component = true;
+        }
+    }
+
+    /// Whether the binding generation `id` currently carries the active
+    /// F2 gate.  Generations that are gone (popped) answer `false`,
+    /// matching the pre-#1200 behavior for anything outside a
+    /// destructure.
+    fn is_destructured_id(&self, id: BindingId) -> bool {
+        self.record(id)
+            .is_some_and(|record| record.origin.destructured)
+    }
+
+    /// Whether the binding generation `id` was introduced by a
+    /// destructure, regardless of declaration region (chelis#1200 review
+    /// finding 1).
     ///
-    /// Cycles are guarded against by a visited set; an alias chain
-    /// that closes a cycle is treated as terminating at the first
-    /// re-visited node (defensive guard; the desugarer should never
-    /// produce a cycle in practice).
-    fn resolve_alias_chain(&self, name: &str) -> Option<String> {
-        let mut current = name.to_string();
-        let mut visited: HashSet<String> = HashSet::new();
+    /// This is the identity question, and it is the one every
+    /// *carrier-resolution* site must ask.  `is_destructured_id` answers
+    /// the different, region-relative question of whether the F2 gate is
+    /// armed here, and a branch body clears that.  Asking the armed-here
+    /// question when you meant the identity question drops the carrier
+    /// inside every branch.  The permanent flag rides the record, so
+    /// this answer is stable across shadowing and region entry.
+    fn is_component_id(&self, id: BindingId) -> bool {
+        self.record(id)
+            .is_some_and(|record| record.origin.component)
+    }
+
+    /// Drop the destructured-component marks on every currently-visible
+    /// binding (Linearity-F2, chelis#1200 / reviewer ruling Q1).
+    ///
+    /// Called when entering a branch scope (`check_if`, `check_match`).
+    /// Per `spec/design/implicit_linearity.md` §"Destructured components",
+    /// entering a new declaration region re-declares the values it works
+    /// on, and a fresh declaration shadows the mark — that is already what
+    /// `check_fn` gets for free, because it `declare`s every capture in
+    /// the closure's inner scope. Branch scopes clone the enclosing scope
+    /// without re-declaring, so without this a component consumed twice
+    /// inside one arm errored while the identical closure body compiled.
+    /// The reviewer ruled the closure verdict correct, so branches drop
+    /// the marks on entry.
+    ///
+    /// Only the marks are dropped: `BindingState` and alias links are
+    /// untouched, so consume tracking across the branch boundary and
+    /// `join_branch_states` are unaffected, and a destructure *inside* the
+    /// branch marks its own components normally.
+    fn clear_destructured_marks(&mut self) {
+        let ids = self
+            .records
+            .to_sorted()
+            .into_iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            let record = self
+                .records
+                .get_mut(&id)
+                .expect("collected binding id remains present");
+            record.origin.destructured = false;
+        }
+    }
+
+    /// Walk the alias chain from the generation `id` to the underlying
+    /// non-alias source generation.  Returns `None` if `id` carries no
+    /// alias link; returns `Some(source)` if it aliases `source`
+    /// (possibly through one or more intermediate generations).
+    /// Bounded by chain length, which is bounded by source-program
+    /// nesting depth.
+    ///
+    /// Each hop follows the `BindingId` the alias was recorded against
+    /// (chelis#1209), so the walk cannot be re-routed by a later
+    /// re-binding of any name on the chain.  `let` aliases always point
+    /// at strictly older generations, but top-level `def a = (var b)`
+    /// aliases link pre-declared defs in program order and so can point
+    /// forward; the visited set stays as the cycle guard for a mutual
+    /// pair, treating a chain that closes a cycle as no alias at all.
+    fn resolve_alias_chain(&self, id: BindingId) -> Option<BindingId> {
+        let mut current = id;
+        let mut visited: UnordSet<BindingId> = UnordSet::new();
         let mut walked = false;
         loop {
-            if !visited.insert(current.clone()) {
+            if !visited.insert(current) {
                 return None;
             }
-            match self
-                .aliases
-                .get(&current)
-                .and_then(|stack| stack.last())
-                .and_then(|entry| entry.as_ref())
-            {
+            match self.record(current).and_then(|record| record.origin.alias) {
                 Some(source) => {
-                    current = source.clone();
+                    current = source;
                     walked = true;
                 }
                 None => return if walked { Some(current) } else { None },
@@ -230,7 +423,7 @@ impl LinearScope {
 struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
-    top_level_types: HashMap<String, Expr>,
+    top_level_types: BTreeMap<String, Expr>,
     /// Names of ADTs whose definitions (transitively) carry a tensor
     /// field. Computed once per `check_linearity` call by walking
     /// `deftype` declarations in `annotated_exprs`. Used by
@@ -248,13 +441,13 @@ struct Checker {
     /// linearity checker runs, every name in this set corresponds to
     /// exactly one `deftype`. That guarantee is what makes a bare
     /// `String` key safe here; without it the carrier set would be
-    /// order-dependent (last-write-wins via `HashMap::insert` in
+    /// order-dependent (last-write-wins via `UnordMap::insert` in
     /// `compute_tensor_carrying_adts`). Once Chelis gains qualified
     /// ADT names, this set should migrate to a `Set<AdtId>` queried
     /// off the shared `AdtRegistry` instead of reparsing `deftype`
     /// exprs here. See the function-level note on
     /// [`compute_tensor_carrying_adts`].
-    tensor_carrying_adts: HashSet<String>,
+    tensor_carrying_adts: UnordSet<String>,
     /// Snapshot of `signature_inference` from the program under check.
     /// Used by `arg_is_borrowed` to recognize call-site borrow
     /// classification on user-defined functions whose params were
@@ -264,18 +457,7 @@ struct Checker {
     /// inference that the inferencer already computed. Closes the
     /// chelis#229 sibling-sweep gap.
     signature_inference: SignatureInferenceMetadata,
-    /// Depth counter for desugarer-synthesized destructure scopes
-    /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
-    /// in their meta-map). Incremented by `check_let` when entering
-    /// a destructure-marked bind and decremented on return. The
-    /// `consume_var_expr` already-consumed arm uses this to gate
-    /// the Linearity-F2 use-after-consume diagnostic: implicit
-    /// Copy insertion does not apply to destructured components
-    /// (tuple-get produces a fresh owned value, not an aliased
-    /// borrow), so double-consume on a destructured name is a
-    /// hard error rather than the silent fallthrough used by
-    /// regular bindings.
-    destructure_scope_depth: usize,
+    type_headers: crate::deep_type::TypeResolutionEnv,
 }
 
 impl Checker {
@@ -295,7 +477,7 @@ impl Checker {
 /// wrapped defs participate in cross-statement linearity tracking.
 fn pre_declare_top_level_defs(
     exprs: &[Expr],
-    type_env: &HashMap<String, Expr>,
+    type_env: &BTreeMap<String, Expr>,
     scope: &mut LinearScope,
 ) {
     for expr in exprs {
@@ -303,19 +485,18 @@ fn pre_declare_top_level_defs(
     }
 }
 
-fn pre_declare_one(expr: &Expr, type_env: &HashMap<String, Expr>, scope: &mut LinearScope) {
-    let Expr::List(list, _) = expr else {
+fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut LinearScope) {
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    match get_tag(list) {
-        Some("module") => {
-            // `(module {} name children...)` — skip tag, meta, name.
-            for child in list.elements.iter().skip(3) {
+    match tag {
+        DeepTag::Module => {
+            for child in kids.iter().skip(1) {
                 pre_declare_one(child, type_env, scope);
             }
         }
-        Some("def") => {
-            if let Some(name) = children(list).first().and_then(symbol_name) {
+        DeepTag::Def => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
                 scope.declare(name, type_env.get(name).cloned());
             }
         }
@@ -331,13 +512,25 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         top_level_types: program.type_env().clone(),
         tensor_carrying_adts,
         signature_inference: program.signature_inference().clone(),
-        destructure_scope_depth: 0,
+        type_headers: program.type_headers().clone(),
     };
     let mut scope = LinearScope::default();
 
     pre_declare_top_level_defs(program.annotated_exprs(), program.type_env(), &mut scope);
 
+    // chelis#930: cooperative cancellation at top-level-declaration
+    // granularity — the same grain as the type checker's own schedule, and
+    // linearity is the third-largest front-end phase on a declaration-heavy
+    // program. Abandoning the walk proves nothing about the tail, so this is a
+    // hard failure rather than a partial `Ok` (covered-or-rejected).
+    let cancel = crate::cancel::current_cancel_token();
     for expr in program.annotated_exprs() {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            checker
+                .errors
+                .push(crate::cancel::cancellation_check_error());
+            break;
+        }
         checker.check_top_level(expr, &mut scope);
     }
 
@@ -383,20 +576,14 @@ pub fn check_linearity_with_context(
     // simply not feeding library exprs to `check_top_level` is what
     // enforces the "don't re-walk library bodies" invariant. The
     // pre-computation here is the documented contract surface.
-    let _library_callables: HashSet<String> = library_program
+    let _library_callables: UnordSet<String> = library_program
         .annotated_exprs()
         .iter()
         .filter_map(|expr| {
-            if let Expr::List(list, _) = expr
-                && get_tag(list) == Some("def")
-            {
-                children(list)
-                    .first()
-                    .and_then(symbol_name)
-                    .map(str::to_string)
-            } else {
-                None
-            }
+            tagged_children(expr, DeepTag::Def)?
+                .first()
+                .and_then(symbol_name)
+                .map(str::to_string)
         })
         .collect();
 
@@ -446,13 +633,15 @@ pub fn check_linearity_with_context(
             .functions
             .insert(name.clone(), sig.clone());
     }
+    let mut merged_type_headers = library_program.type_headers().clone();
+    merged_type_headers.extend_from(new_program.type_headers());
     let mut checker = Checker {
         errors: Vec::new(),
         info: LinearityInfo::default(),
         top_level_types: new_program.type_env().clone(),
         tensor_carrying_adts,
         signature_inference: merged_signature_inference,
-        destructure_scope_depth: 0,
+        type_headers: merged_type_headers,
     };
 
     let mut scope = LinearScope::default();
@@ -480,7 +669,15 @@ pub fn check_linearity_with_context(
 
     // Walk ONLY new-code bodies. Library bodies are never re-walked,
     // so library tensor parameters never enter the new-code scope.
+    // chelis#930: cancellable at the same grain as [`check_linearity`].
+    let cancel = crate::cancel::current_cancel_token();
     for expr in new_program.annotated_exprs() {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            checker
+                .errors
+                .push(crate::cancel::cancellation_check_error());
+            break;
+        }
         checker.check_top_level(expr, &mut scope);
     }
 
@@ -501,28 +698,21 @@ impl Checker {
         // channel and unified the severity with bare-top-level
         // violations, so all `push_diagnostic` calls route to
         // `Checker::errors`.
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("module")
-        {
-            // Skip tag, meta, name — walk every remaining child as a
-            // top-level expression.
-            for child in list.elements.iter().skip(3) {
+        if let Some((DeepTag::Module, _, kids)) = stamped_parts(expr) {
+            for child in kids.iter().skip(1) {
                 self.check_top_level(child, scope);
             }
             return;
         }
-        if let Expr::List(list, _) = expr
-            && get_tag(list) == Some("def")
-        {
-            let kids = children(list);
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) {
             if let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1))
                 && !(is_var_expr(body) && var_name(body) == Some(name))
             {
-                if matches!(get_tag_expr(body), Some("borrow")) {
+                if matches!(get_tag_expr(body), Some(DeepTag::Borrow)) {
                     self.invalid_borrow(body, "borrow cannot be returned from a function");
                     return;
                 }
-                // V2-F4: top-level `def name = x` where the body is a
+                // V2-F4: top-level `def name() = x` where the body is a
                 // bare `(var x)` of an owned-linear type is an
                 // aliasing binding consume; at the IR level
                 // `lower_var` returns the cached `bindings["x"]` node
@@ -540,6 +730,15 @@ impl Checker {
                 // record a `Structural` consume, which the tolerance
                 // does not match.
                 if is_var_expr(body) && self.expr_is_owned_linear(body, scope) {
+                    // Resolve both generations by name here: top-level
+                    // defs are pre-declared exactly once each, so the
+                    // stacks are static during this walk and the lookup
+                    // is the record-time resolution chelis#1209 wants.
+                    // A `def a = (var b)` alias can point at a def
+                    // declared *later* in program order; that is fine —
+                    // the id is already minted by pre-declaration.
+                    let alias_link = var_name(body)
+                        .and_then(|source| Some((scope.top_id(name)?, scope.top_id(source)?)));
                     self.consume_var_expr(
                         body,
                         scope,
@@ -548,8 +747,8 @@ impl Checker {
                             kind: ConsumeKind::Aliasing,
                         },
                     );
-                    if let Some(source) = var_name(body) {
-                        scope.record_alias(name, source);
+                    if let Some((alias_id, source_id)) = alias_link {
+                        scope.record_alias(alias_id, source_id);
                     }
                 } else {
                     self.check_expr(body, scope);
@@ -570,18 +769,18 @@ impl Checker {
             }
             Expr::MetaExpr(meta, _) => self.check_expr(&meta.expr, scope),
             Expr::List(list, _) => match get_tag(list) {
-                Some("var") => self.consume_var_expr(expr, scope, generic_site(expr)),
-                Some("copy") => self.check_copy(list, scope),
-                Some("realize") => self.check_realize(expr, list, scope),
-                Some("borrow") => {
+                Some(DeepTag::Var) => self.consume_var_expr(expr, scope, generic_site(expr)),
+                Some(DeepTag::Copy) => self.check_copy(list, scope),
+                Some(DeepTag::Realize) => self.check_realize(expr, list, scope),
+                Some(DeepTag::Borrow) => {
                     self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
                 }
-                Some("app") => self.check_app(expr, list, scope),
-                Some("pipe") => self.check_pipe(list, scope),
-                Some("let") => self.check_let(list, scope),
-                Some("fn") => self.check_fn(expr, list, scope),
-                Some("if") => self.check_if(list, scope),
-                Some("match") => self.check_match(list, scope),
+                Some(DeepTag::App) => self.check_app(expr, list, scope),
+                Some(DeepTag::Pipe) => self.check_pipe(list, scope),
+                Some(DeepTag::Let) => self.check_let(list, scope),
+                Some(DeepTag::Fn) => self.check_fn(expr, list, scope),
+                Some(DeepTag::If) => self.check_if(list, scope),
+                Some(DeepTag::Match) => self.check_match(list, scope),
                 // `tuple-get(t, i)` is a read of `t`, not a
                 // consume.  The implicit-linearity IR pass inserts a
                 // Copy where needed.  Pre Linearity-F2 the
@@ -592,13 +791,28 @@ impl Checker {
                 // would otherwise consume through `generic_site` and
                 // forward (via the alias chain) to the underlying
                 // tuple source.  Treat the var argument as a borrow.
-                Some("tuple-get") => self.check_tuple_get(list, scope),
+                Some(DeepTag::TupleGet) => self.check_tuple_get(list, scope),
                 _ => {
                     for child in children(list) {
                         self.check_expr(child, scope);
                     }
                 }
             },
+            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+            Expr::Node(node, span) => {
+                let bridged = Expr::List(node.to_list(*span), *span);
+                self.check_expr(&bridged, scope);
+            }
+            Expr::BareList(elems, _) => {
+                for elem in elems {
+                    self.check_expr(elem, scope);
+                }
+            }
+            Expr::UnknownForm(data) => {
+                for child in &data.children {
+                    self.check_expr(child, scope);
+                }
+            }
         }
     }
 
@@ -741,7 +955,7 @@ impl Checker {
             );
             return;
         }
-        if !self.expr_is_owned_or_borrow_linear(inner, scope) {
+        if !self.borrow_target_is_linear(borrow_expr, inner, scope) {
             self.invalid_borrow(
                 borrow_expr,
                 "borrowed arguments must be tensor or tensor-carrying values",
@@ -751,29 +965,72 @@ impl Checker {
         self.read_var_expr(inner, scope);
     }
 
+    /// chelis#1589: classify a borrow target, falling back to the
+    /// `borrow` node's own resolved stamp when the inner carries no
+    /// visible type.
+    ///
+    /// `expr_type` can see nothing at all for the inner of a borrow
+    /// whose parameter annotation was a synthesized inference hole:
+    /// `DeepTag::Var` is in `should_attach_type_metadata`'s deny list so
+    /// a `(var ..)` node never carries `:type`, and the scope entry that
+    /// `param_name_and_type` builds is empty because the parameter was
+    /// emitted as a bare name. `expr_is_owned_or_borrow_linear` is an
+    /// `is_some_and`, so absent information became a rejection: a
+    /// fail-closed, not a classification.
+    ///
+    /// `spec/04-type-system.md` §8.2 decides the rule on the type the
+    /// inner "must be — or must ultimately resolve to", and by the time
+    /// linearity runs that resolution has happened: the `borrow` node is
+    /// metadata-eligible and the annotate pass stamps it with the
+    /// resolved `&T`. Read that stamp instead of rejecting.
+    ///
+    /// This never weakens the deferred-borrow gate. `check_linearity`
+    /// runs only on a successful type analysis
+    /// (`chelis_pipeline_core::semantic::complete_checks_in_context`),
+    /// and `validate_deferred_borrow_vars` rejects an unsound deferral
+    /// during inference, so a borrow whose deferred classification
+    /// failed never reaches this function. The validator remains the
+    /// sole authority on the deferred path; this gate is a redundancy
+    /// check on the resolved type.
+    fn borrow_target_is_linear(
+        &self,
+        borrow_expr: &Expr,
+        inner: &Expr,
+        scope: &LinearScope,
+    ) -> bool {
+        if self.expr_type(inner, scope).is_some() {
+            return self.expr_is_owned_or_borrow_linear(inner, scope);
+        }
+        // Both predicates already recurse through `DeepTag::TRef`, so the
+        // stamped `(t-ref ..)` is passed through without peeling.
+        type_metadata(borrow_expr).is_some_and(|ty| {
+            type_expr_contains_tensor(ty, &self.tensor_carrying_adts)
+                || type_expr_is_unresolved_tvar(ty)
+        })
+    }
+
     fn check_let(&mut self, list: &List, scope: &mut LinearScope) {
         let kids = children(list);
         if kids.len() < 2 {
             return;
         }
         let mut pushed = Vec::new();
-        // Linearity-F2 destructure-scope tracking.  When the bind
-        // is one of the desugarer-synthesized destructure
-        // intermediates (`__chelis_tmp_N` or a user-visible
-        // destructure component, tagged with `destructure: true`),
-        // bump the destructure-scope depth so the
-        // `consume_var_expr` already-consumed arm fires as an
-        // error rather than the silent fallthrough used by regular
-        // bindings.
-        let bind_introduces_destructure = match &kids[0] {
-            Expr::List(bind_list, _) => bind_introduces_destructure_tmp(bind_list),
-            _ => false,
-        };
-        if bind_introduces_destructure {
-            self.destructure_scope_depth += 1;
-        }
-        if let Expr::List(bind_list, _) = &kids[0] {
-            let bind_kids = children(bind_list);
+        // Linearity-F2 component tracking (chelis#1200).  When the bind
+        // is one of the desugarer-synthesized destructure intermediates
+        // (`__chelis_tmpN` or a user-visible destructure component,
+        // tagged with `destructure: true`), mark the names it introduces
+        // as destructured components so the `consume_var_expr`
+        // already-consumed arm fires as an error *for those names* rather
+        // than the silent fallthrough used by regular bindings.
+        //
+        // The mark is per-binding and not a scope: the binding values below
+        // are checked in the enclosing scope and are ordinary variables
+        // (`_ = eat(v)` consumes `v`, which is not a component), and in a
+        // block every later statement is nested in this let's body, so a
+        // scope-shaped gate would classify the whole rest of the block as
+        // destructured.
+        let bind_introduces_destructure = bind_introduces_destructure_tmp(&kids[0]);
+        if let Some(bind_kids) = tagged_children(&kids[0], DeepTag::Bind) {
             let mut index = 0;
             while index + 1 < bind_kids.len() {
                 let Some(name) = symbol_name(&bind_kids[index]) else {
@@ -781,9 +1038,15 @@ impl Checker {
                     continue;
                 };
                 let value = &bind_kids[index + 1];
-                let mut alias_source: Option<String> = None;
+                // Resolve the alias source's generation BEFORE the
+                // `declare` below (chelis#1209): the link must point at
+                // the binding the alias was taken against.  Resolving
+                // after the declare would make a self-rebind `x = x`
+                // link the new generation to itself instead of to the
+                // older `x` it actually aliases.
+                let mut alias_source_id: Option<BindingId> = None;
                 if is_var_expr(value) && self.expr_is_owned_linear(value, scope) {
-                    alias_source = var_name(value).map(str::to_string);
+                    alias_source_id = var_name(value).and_then(|source| scope.top_id(source));
                     self.consume_var_expr(
                         value,
                         scope,
@@ -792,25 +1055,30 @@ impl Checker {
                             kind: ConsumeKind::Aliasing,
                         },
                     );
-                } else if matches!(get_tag_expr(value), Some("borrow")) {
+                } else if matches!(get_tag_expr(value), Some(DeepTag::Borrow)) {
                     self.invalid_borrow(value, "borrow cannot be stored in a binding");
                 } else {
                     self.check_expr(value, scope);
                 }
-                scope.declare(name, self.expr_type(value, scope).cloned());
-                if let Some(source) = alias_source {
-                    scope.record_alias(name, &source);
+                let id = scope.declare(name, self.expr_type(value, scope).cloned());
+                if let Some(source_id) = alias_source_id {
+                    scope.record_alias(id, source_id);
                 }
-                pushed.push(name.to_string());
+                // The marker governs the bindings introduced by this bind
+                // and nothing else.  The binding values were checked above
+                // in the enclosing scope, so an ordinary source variable
+                // appearing in a destructure's RHS is never classified as a
+                // component.
+                if bind_introduces_destructure {
+                    scope.mark_destructured(id);
+                }
+                pushed.push(id);
                 index += 2;
             }
         }
         self.check_expr(&kids[1], scope);
-        for name in pushed.into_iter().rev() {
-            self.pop_and_check(scope, &name, expr_scope_end(&kids[1]));
-        }
-        if bind_introduces_destructure {
-            self.destructure_scope_depth -= 1;
+        for id in pushed.into_iter().rev() {
+            self.pop_and_check(scope, id, expr_scope_end(&kids[1]));
         }
     }
 
@@ -824,7 +1092,7 @@ impl Checker {
         let captured = free_vars(&kids[1], &params);
         let mut inner_scope = outer_scope.clone();
         let body = &kids[1];
-        // Build a temporary `HashMap<String, Type>` of currently-known
+        // Build a temporary `UnordMap<String, Type>` of currently-known
         // user-fn display signatures so the closure-body consuming-use
         // probe can recognize user-defined borrow-arg callees inside
         // the body. The probe's secondary `type_env` lookup also
@@ -832,7 +1100,7 @@ impl Checker {
         // `available_signatures` matches by `Type` (the inferencer's
         // own metadata) so passing the inferred display signatures
         // covers user fns whose params were auto-borrow-inferred.
-        let available_signatures: HashMap<String, Type> = self
+        let available_signatures: UnordMap<String, Type> = self
             .signature_inference
             .functions
             .iter()
@@ -873,16 +1141,61 @@ impl Checker {
                 name.as_str(),
                 &available_signatures,
                 &self.top_level_types,
-            );
+                &self.type_headers,
+            )
+            .unwrap_or_else(|result| {
+                // The resolver diagnostic is part of linearity's
+                // authoritative error result. Classify conservatively while
+                // the walk finishes, but never expose that fallback as Ok.
+                self.errors.extend(result.errors);
+                true
+            });
             if body_consumes {
                 self.read_or_error(name.as_str(), expr, outer_scope);
-                outer_scope.consume(
-                    &name,
-                    ConsumeSite {
-                        description: format!("closure capture {}", diag_site(expr)),
-                        kind: ConsumeKind::Structural,
-                    },
-                );
+                // chelis#1200: forward the capture consume to a
+                // destructured component's carrier.
+                //
+                // A component is an alias of a `__chelis_tmpN` the user
+                // cannot name, and that carrier is the component's only
+                // identity — every other consume of the component resolves
+                // to it. Marking the component's own entry therefore left
+                // the carrier `Live`, and capture-then-reuse of a component
+                // was silently accepted while the same reuse without the
+                // closure errored.
+                //
+                // The forwarding is deliberately NOT general. For an
+                // ordinary `y = x` alias both names are user-visible
+                // bindings, and a capture has consumed the name it captured
+                // since before this issue: `x = ...; y = x; f = fn () ->
+                // eat(y); g = fn () -> eat(x)` compiles, and downstream
+                // code relies on that spelling to hand two closures their
+                // own name for one value (normatively pinned as
+                // spec/04-type-system.md [04-LIN-2]). Forwarding there
+                // would be an unrelated ecosystem-breaking tightening —
+                // the exact class of change chelis#1200 exists to undo —
+                // and it is not what the component misroute needs. A
+                // direct (unaliased) capture-then-reuse of an ordinary
+                // binding still errors, unchanged, through
+                // `read_or_error`.
+                // Identity, not the region-relative F2 gate: a branch body
+                // clears `destructured`, so reading it here lost the carrier
+                // for every capture inside an `if`/`match` arm (chelis#1200
+                // review finding 1).
+                let use_id = outer_scope.top_id(&name);
+                let capture_target = match use_id.and_then(|id| outer_scope.resolve_alias_chain(id))
+                {
+                    Some(carrier) if outer_scope.is_component_id(carrier) => Some(carrier),
+                    _ => use_id,
+                };
+                if let Some(target) = capture_target {
+                    outer_scope.consume_id(
+                        target,
+                        ConsumeSite {
+                            description: format!("closure capture {}", diag_site(expr)),
+                            kind: ConsumeKind::Structural,
+                        },
+                    );
+                }
                 inner_scope.declare(name.clone(), outer_scope.ty(&name).cloned());
             } else {
                 // Borrow capture: error if the outer is already
@@ -898,28 +1211,28 @@ impl Checker {
             }
         }
 
-        let mut pushed = Vec::new();
-        if let Some(params_list) = as_list(&kids[0]) {
-            for param in children(params_list) {
+        let mut pushed: Vec<(String, BindingId)> = Vec::new();
+        if let Some(params) = tagged_children(&kids[0], DeepTag::Params) {
+            for param in params {
                 if let Some((name, ty)) = param_name_and_type(param) {
-                    inner_scope.declare(name, ty.cloned());
-                    pushed.push(name.to_string());
+                    let id = inner_scope.declare(name, ty.cloned());
+                    pushed.push((name.to_string(), id));
                 }
             }
         }
         for param in params {
-            if !pushed.iter().any(|p| p == &param) {
-                inner_scope.declare(param.clone(), None);
-                pushed.push(param);
+            if !pushed.iter().any(|(name, _)| name == &param) {
+                let id = inner_scope.declare(param.clone(), None);
+                pushed.push((param, id));
             }
         }
-        if matches!(get_tag_expr(&kids[1]), Some("borrow")) {
+        if matches!(get_tag_expr(&kids[1]), Some(DeepTag::Borrow)) {
             self.invalid_borrow(&kids[1], "borrow cannot be returned from a function");
         } else {
             self.check_expr(&kids[1], &mut inner_scope);
         }
-        for name in pushed.into_iter().rev() {
-            self.pop_and_check_param(&mut inner_scope, &name, expr_scope_end(&kids[1]));
+        for (_, id) in pushed.into_iter().rev() {
+            self.pop_and_check_param(&mut inner_scope, id, expr_scope_end(&kids[1]));
         }
     }
 
@@ -929,12 +1242,17 @@ impl Checker {
             return;
         }
         self.check_expr(&kids[0], scope);
-        let visible_names = scope.visible_names();
+        let visible_ids = scope.all_visible_ids();
         let mut then_scope = scope.clone();
         let mut else_scope = scope.clone();
+        // chelis#1200 Q1: a branch body is a new declaration region, so
+        // the destructured-component mark does not cross into it. See
+        // `LinearScope::clear_destructured_marks`.
+        then_scope.clear_destructured_marks();
+        else_scope.clear_destructured_marks();
         self.check_expr(&kids[1], &mut then_scope);
         self.check_expr(&kids[2], &mut else_scope);
-        self.join_branch_states(scope, &visible_names, &[then_scope, else_scope]);
+        self.join_branch_states(scope, &visible_ids, &[then_scope, else_scope]);
     }
 
     fn check_match(&mut self, list: &List, scope: &mut LinearScope) {
@@ -955,53 +1273,121 @@ impl Checker {
             self.check_expr(&kids[0], scope);
         }
 
-        let visible_names = scope.visible_names();
+        let visible_ids = scope.all_visible_ids();
         let mut arm_scopes = Vec::new();
         for arm in kids.iter().skip(1) {
-            let Expr::List(arm_list, _) = arm else {
+            let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
                 continue;
             };
-            if get_tag(arm_list) != Some("arm") {
-                continue;
-            }
-            let arm_kids = children(arm_list);
             if arm_kids.len() < 3 {
                 continue;
             }
             let mut arm_scope = scope.clone();
+            // chelis#1200 Q1: an arm body is a new declaration region, so
+            // the destructured-component mark does not cross into it. The
+            // arm's own pattern binders were already covered by `declare`
+            // below; this covers the outer names the arm merely mentions,
+            // which is what made the arm reject where the equivalent
+            // closure body compiled. See
+            // `LinearScope::clear_destructured_marks`.
+            arm_scope.clear_destructured_marks();
             let pattern_bindings = pattern_named_types(&arm_kids[0]);
-            let pattern_names: Vec<String> = pattern_bindings
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
+            let mut pattern_ids = Vec::new();
             for (name, ty) in &pattern_bindings {
-                arm_scope.declare(name.clone(), ty.clone());
+                pattern_ids.push(arm_scope.declare(name.clone(), ty.clone()));
             }
             self.check_expr(&arm_kids[1], &mut arm_scope);
             self.check_expr(&arm_kids[2], &mut arm_scope);
-            for name in pattern_names.into_iter().rev() {
-                self.pop_and_check(&mut arm_scope, &name, expr_scope_end(&arm_kids[2]));
+            for id in pattern_ids.into_iter().rev() {
+                self.pop_and_check(&mut arm_scope, id, expr_scope_end(&arm_kids[2]));
             }
             arm_scopes.push(arm_scope);
         }
-        self.join_branch_states(scope, &visible_names, &arm_scopes);
+        self.join_branch_states(scope, &visible_ids, &arm_scopes);
     }
 
     fn join_branch_states(
         &mut self,
         scope: &mut LinearScope,
-        visible_names: &[String],
+        visible_ids: &[BindingId],
         branches: &[LinearScope],
     ) {
-        for name in visible_names {
-            let consumed_site = branches.iter().find_map(|branch| match branch.top(name) {
-                Some(BindingState::Consumed(site)) => Some(site.clone()),
-                _ => None,
-            });
-            if let Some(site) = consumed_site
-                && matches!(scope.top(name), Some(BindingState::Live { .. }))
-            {
-                scope.consume(name, site);
+        // The snapshot carries every generation visible at branch entry,
+        // shadowed ones included: branch clones share those ids with the
+        // parent, so a branch-body consume that resolved through an alias
+        // chain to a shadowed generation still merges back onto the same
+        // record here (chelis#1209).
+        for id in visible_ids {
+            // A branch's `Structural` consume is the one that destroys the
+            // value, so it is the one that must survive the join. Prefer it
+            // over an `Aliasing` record from another branch: an alias bind
+            // does not destroy anything, and letting it win would report the
+            // wrong site.
+            let consumed_site = branches
+                .iter()
+                .find_map(|branch| match branch.state(*id) {
+                    Some(BindingState::Consumed(site))
+                        if matches!(site.kind, ConsumeKind::Structural) =>
+                    {
+                        Some(site.clone())
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    branches.iter().find_map(|branch| match branch.state(*id) {
+                        Some(BindingState::Consumed(site)) => Some(site.clone()),
+                        _ => None,
+                    })
+                });
+            let Some(site) = consumed_site else {
+                continue;
+            };
+            // chelis#1200 Q2: propagate onto an outer entry that is already
+            // `Consumed(Aliasing)`, not only onto a `Live` one.
+            //
+            // A destructured component desugars to `p = (var __chelis_tmpN)`,
+            // which records an `Aliasing` consume on the temp. The temp is the
+            // carrier every later consume of `p` resolves to, so it is never
+            // `Live` by the time a branch runs. Gating the join on `Live`
+            // therefore dropped the branch's `Structural` consume outright, and
+            // "component consumed in one arm, then again after the join" was
+            // silently accepted — falsifying the true positive F2 exists to
+            // protect. An `Aliasing` record is not a destruction, so a
+            // `Structural` consume from a branch legitimately replaces it,
+            // exactly as `consume_var_expr`'s Aliasing-then-Structural arm does
+            // on the straight-line path.
+            // The rule (chelis#1200 review finding 2):
+            //
+            //   Live                      -> a branch consume always wins.
+            //   Consumed(Aliasing), and
+            //     the name is a component
+            //     carrier                 -> a branch Structural consume wins.
+            //   Consumed(Aliasing), and
+            //     the name is an ordinary
+            //     binding                 -> unchanged.
+            //
+            // The carve-out is deliberately narrow. The justification above
+            // is entirely about carriers: a component's `Aliasing` record is
+            // bookkeeping for `p = (var __chelis_tmpN)`, never a destruction,
+            // so a branch's real consume must replace it. An ordinary `y = x`
+            // alias records the same `Aliasing` shape for a completely
+            // different reason, and upgrading it there rejects
+            // `y = x; if c then { f = fn () -> realize(x) f() } else t;
+            // add(y, y)` — which released 0.18.4 accepts. Tightening ordinary
+            // aliases is exactly the class of ecosystem-breaking change
+            // chelis#1200 exists to undo, so the upgrade asks for component
+            // identity (permanent) rather than the region-relative F2 mark.
+            let replaces_outer = match scope.state(*id) {
+                Some(BindingState::Live { .. }) => true,
+                Some(BindingState::Consumed(outer)) => {
+                    matches!(outer.kind, ConsumeKind::Aliasing)
+                        && matches!(site.kind, ConsumeKind::Structural)
+                        && scope.is_component_id(*id)
+                }
+                None => false,
+            };
+            if replaces_outer {
+                scope.consume_id(*id, site);
             }
         }
     }
@@ -1037,39 +1423,45 @@ impl Checker {
         if !self.expr_is_owned_linear(expr, scope) {
             return;
         }
-        // Linearity-AliasedConsume-F1: a `Structural` consume on an
-        // aliased name forwards to the underlying source name's
-        // scope entry, so a later borrow of the source trips
-        // `read_or_error` correctly.  `Aliasing` consumes do not
-        // forward; they stay pinned to the alias's own entry because
-        // the alias bind itself is what introduces the aliasing
-        // relationship in the IR.
-        let target: String = match site.kind {
-            ConsumeKind::Structural => scope
-                .resolve_alias_chain(name)
-                .unwrap_or_else(|| name.to_string()),
-            ConsumeKind::Aliasing => name.to_string(),
+        // Resolve the use-site name to its innermost live generation
+        // exactly once; everything past this point is id-keyed
+        // (chelis#1209).  An unbound name matches the old `None` arm.
+        let Some(use_id) = scope.top_id(name) else {
+            return;
         };
-        match scope.top(&target) {
-            Some(BindingState::Live { .. }) => scope.consume(&target, site),
+        // Linearity-AliasedConsume-F1: a `Structural` consume on an
+        // aliased binding forwards to the underlying source generation's
+        // record, so a later borrow of the source trips `read_or_error`
+        // correctly.  `Aliasing` consumes do not forward; they stay
+        // pinned to the alias's own record because the alias bind itself
+        // is what introduces the aliasing relationship in the IR.
+        let target: BindingId = match site.kind {
+            ConsumeKind::Structural => scope.resolve_alias_chain(use_id).unwrap_or(use_id),
+            ConsumeKind::Aliasing => use_id,
+        };
+        match scope.state(target) {
+            Some(BindingState::Live { .. }) => scope.consume_id(target, site),
             Some(BindingState::Consumed(consumed_at))
                 if matches!(consumed_at.kind, ConsumeKind::Structural)
                     && (consumed_at.description.contains("closure capture")
                         || consumed_at.description.contains("match scrutinee")) =>
             {
                 let description = consumed_at.description.clone();
+                // chelis#1200: report the name the user wrote, not
+                // `target`. `target` is the alias chain's terminal, which
+                // for a destructured component is the desugarer's
+                // `__chelis_tmpN` — a name that appears nowhere in the
+                // user's source and that they cannot act on.
                 self.push_diagnostic(CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
                         format!(
-                            "variable `{target}` was already consumed by {description}; later use {} is invalid",
+                            "variable `{name}` was already consumed by {description}; later use {} is invalid",
                             diag_site(expr)
                         ),
                     ),
-                    vec![format!(
-                        "Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume"
-                    )],
+                    vec!["Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume".to_string()],
                 ));
             }
             Some(BindingState::Consumed(consumed_at))
@@ -1081,27 +1473,54 @@ impl Checker {
                 // `Structural` consume forwarded through the alias
                 // chain replaces the aliasing record so subsequent
                 // borrows of the target trip `read_or_error`.
-                scope.consume(&target, site);
+                scope.consume_id(target, site);
             }
-            Some(BindingState::Consumed(consumed_at)) if self.destructure_scope_depth > 0 => {
-                // Linearity-F2: inside a destructure-let scope a
-                // consume-after-consume on a destructured component
-                // is an error.  Implicit Copy insertion does not
-                // apply because tuple-get produces a fresh owned
-                // value rather than an aliased borrow, so reuse of
-                // a destructured tensor name must be made explicit
-                // via `copy()`.  Outside the destructure scope the
-                // implicit-linearity pass inserts a Copy for
-                // consuming fan-out, matching the spec's
-                // "Copy Insertion" semantics; per the existing
-                // baseline we do not flag that shape.
+            Some(BindingState::Consumed(consumed_at))
+                if matches!(site.kind, ConsumeKind::Structural)
+                    && scope.is_destructured_id(target) =>
+            {
+                // Linearity-F2: a consume-after-consume on a
+                // destructured component is an error.  Implicit Copy
+                // insertion does not apply because tuple-get produces
+                // a fresh owned value rather than an aliased borrow,
+                // so reuse of a destructured tensor name must be made
+                // explicit via `copy()`.  For every other binding the
+                // implicit-linearity pass inserts a Copy for consuming
+                // fan-out, matching the spec's "Copy Insertion"
+                // semantics; per the existing baseline we do not flag
+                // that shape.
+                //
+                // chelis#1200: the guard is membership on the consumed
+                // *target*, not a block-scoped depth.  `target` is the
+                // alias chain's terminal generation, so consuming a
+                // component through an alias still lands on the
+                // component's marked record, while an ordinary binding
+                // that merely appears after a destructuring `let` in the
+                // same block does not.
+                //
+                // Only a `Structural` consume can trip this. An
+                // `Aliasing` consume — a second `let y = p` bind of the
+                // same component — destroys nothing: `lower_let` maps
+                // both names onto the component's node, so `(a, b) = p;
+                // y = a; z = a` is a fan-out of borrows, which
+                // Copy Insertion covers. Gating it here rejected that
+                // shape, which 0.18.3 accepted.
                 let description = consumed_at.description.clone();
+                // Name the binding the user wrote. When that name is
+                // itself the component, say so; when it is an ordinary
+                // binding that aliases one, say that instead rather than
+                // calling the user's own `let` a destructured binding.
+                let origin_phrase = if scope.is_destructured_id(use_id) {
+                    " (from a destructured binding)"
+                } else {
+                    " (an alias of a destructured binding)"
+                };
                 self.push_diagnostic(CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
                         format!(
-                            "variable `{name}` (from a destructured binding) was already consumed by {description}; later use {} is invalid",
+                            "variable `{name}`{origin_phrase} was already consumed by {description}; later use {} is invalid",
                             diag_site(expr)
                         ),
                     ),
@@ -1134,13 +1553,14 @@ impl Checker {
         // Linearity-AliasedConsume-F1: when `name` is an alias, the
         // structural consume on it would have forwarded to the
         // underlying source (see `consume_var_expr`).  Check the
-        // alias chain's terminal source first so borrows of either
-        // the alias or the source surface the violation
-        // symmetrically.
-        let resolved = scope
-            .resolve_alias_chain(name)
-            .unwrap_or_else(|| name.to_string());
-        let Some(BindingState::Consumed(site)) = scope.top(&resolved) else {
+        // alias chain's terminal generation first so borrows of either
+        // the alias or the source surface the violation symmetrically.
+        // An unbound name matches the old missing-entry no-op.
+        let Some(use_id) = scope.top_id(name) else {
+            return;
+        };
+        let resolved = scope.resolve_alias_chain(use_id).unwrap_or(use_id);
+        let Some(BindingState::Consumed(site)) = scope.state(resolved) else {
             return;
         };
         // Var-RHS let-bindings (`alias = x`) are `ConsumeKind::Aliasing`
@@ -1192,22 +1612,22 @@ impl Checker {
         ));
     }
 
-    fn pop_and_check(&mut self, scope: &mut LinearScope, name: &str, end_offset: usize) {
-        self.pop_and_check_inner(scope, name, end_offset, false);
+    fn pop_and_check(&mut self, scope: &mut LinearScope, id: BindingId, end_offset: usize) {
+        self.pop_and_check_inner(scope, id, end_offset, false);
     }
 
-    fn pop_and_check_param(&mut self, scope: &mut LinearScope, name: &str, end_offset: usize) {
-        self.pop_and_check_inner(scope, name, end_offset, true);
+    fn pop_and_check_param(&mut self, scope: &mut LinearScope, id: BindingId, end_offset: usize) {
+        self.pop_and_check_inner(scope, id, end_offset, true);
     }
 
     fn pop_and_check_inner(
         &mut self,
         scope: &mut LinearScope,
-        name: &str,
+        id: BindingId,
         end_offset: usize,
         allow_param_boundary_drop: bool,
     ) {
-        let Some((ty, state)) = scope.pop(name) else {
+        let Some((ty, state)) = scope.pop(id) else {
             return;
         };
         if !ty
@@ -1304,11 +1724,8 @@ impl Checker {
     }
 }
 
-fn get_tag(list: &List) -> Option<&str> {
-    match list.elements.first() {
-        Some(Expr::Atom(Atom::Symbol(tag), _)) => Some(tag.as_str()),
-        _ => None,
-    }
+fn get_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn with_macro_provenance(expr: &Expr, message: String) -> String {
@@ -1319,12 +1736,7 @@ fn with_macro_provenance(expr: &Expr, message: String) -> String {
 }
 
 fn macro_source(expr: &Expr) -> Option<String> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    let Expr::Map(meta, _) = list.elements.get(1)? else {
-        return None;
-    };
+    let (_, meta, _) = stamped_parts(expr)?;
     let source = meta
         .entries
         .iter()
@@ -1334,11 +1746,24 @@ fn macro_source(expr: &Expr) -> Option<String> {
     Some(rendered.replace('\n', " ").trim().to_string())
 }
 
-fn get_tag_expr(expr: &Expr) -> Option<&str> {
+fn get_tag_expr(expr: &Expr) -> Option<DeepTag> {
+    stamped_parts(expr).map(|(tag, _, _)| tag)
+}
+
+fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
     match expr {
-        Expr::List(list, _) => get_tag(list),
+        Expr::List(list, _) => {
+            let tag = get_tag(list)?;
+            let meta = get_meta(list)?;
+            Some((tag, meta, children(list)))
+        }
+        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
         _ => None,
     }
+}
+
+fn tagged_children(expr: &Expr, expected: DeepTag) -> Option<&[Expr]> {
+    stamped_parts(expr).and_then(|(tag, _, children)| (tag == expected).then_some(children))
 }
 
 fn children(list: &List) -> &[Expr] {
@@ -1351,68 +1776,48 @@ fn children(list: &List) -> &[Expr] {
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Atom(Atom::Symbol(name), _) => Some(name.as_str()),
-        _ => None,
-    }
-}
-
-fn as_list(expr: &Expr) -> Option<&List> {
-    match expr {
-        Expr::List(list, _) => Some(list),
+        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
 }
 
 fn is_var_expr(expr: &Expr) -> bool {
-    matches!(expr, Expr::List(list, _) if get_tag(list) == Some("var"))
+    get_tag_expr(expr) == Some(DeepTag::Var)
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("var") {
-        return None;
-    }
-    children(list).first().and_then(symbol_name)
+    tagged_children(expr, DeepTag::Var)?
+        .first()
+        .and_then(symbol_name)
 }
 
 fn borrow_inner(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("borrow") {
-        return None;
-    }
-    children(list).first()
+    tagged_children(expr, DeepTag::Borrow)?.first()
 }
 
 /// True when `expr` is a `(grad ...)`, `(vmap ...)`, or nested
 /// composition thereof.  Used by `arg_is_borrowed` to mark grad-app and
 /// vmap-app call sites as observational at the linearity level.
 fn callee_is_observational_higher_order(expr: &Expr) -> bool {
-    let Expr::List(list, _) = expr else {
-        return false;
-    };
-    matches!(get_tag(list), Some("grad") | Some("vmap"))
+    matches!(get_tag_expr(expr), Some(DeepTag::Grad | DeepTag::Vmap))
 }
 
 fn param_names(expr: &Expr) -> Vec<String> {
-    let Expr::List(list, _) = expr else {
+    let Some(params) = tagged_children(expr, DeepTag::Params) else {
         return Vec::new();
     };
-    if get_tag(list) != Some("params") {
-        return Vec::new();
-    }
-    children(list)
+    params
         .iter()
         .filter_map(|param| match param {
-            Expr::Atom(Atom::Symbol(name), _) => Some(name.clone()),
+            Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
             Expr::List(param_list, _) => param_list
                 .elements
                 .first()
                 .and_then(symbol_name)
                 .map(str::to_string),
+            Expr::BareList(elements, _) => {
+                elements.first().and_then(symbol_name).map(str::to_string)
+            }
             // chelis#343: a typed param whose name collides with a Deep tag
             // is desugared to the caret-metadata wrapper `^{:type T} name`
             // (a `MetaExpr`); recover the name from its inner symbol.
@@ -1429,17 +1834,16 @@ fn pattern_names(expr: &Expr) -> Vec<String> {
 }
 
 fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
-    let Expr::List(list, _) = expr else {
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    match get_tag(list) {
-        Some("pat-var") => {
-            if let Some(name) = children(list).first().and_then(symbol_name) {
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
                 names.push(name.to_string());
             }
         }
-        Some("pat-as") => {
-            let kids = children(list);
+        DeepTag::PatAs => {
             if let Some(name) = kids.first().and_then(symbol_name) {
                 names.push(name.to_string());
             }
@@ -1448,7 +1852,7 @@ fn collect_pattern_names(expr: &Expr, names: &mut Vec<String>) {
             }
         }
         _ => {
-            for child in children(list) {
+            for child in kids {
                 collect_pattern_names(child, names);
             }
         }
@@ -1468,17 +1872,16 @@ fn pattern_named_types(expr: &Expr) -> Vec<(String, Option<Expr>)> {
 }
 
 fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<Expr>)>) {
-    let Expr::List(list, _) = expr else {
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    match get_tag(list) {
-        Some("pat-var") => {
-            if let Some(name) = children(list).first().and_then(symbol_name) {
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
                 bindings.push((name.to_string(), type_metadata(expr).cloned()));
             }
         }
-        Some("pat-as") => {
-            let kids = children(list);
+        DeepTag::PatAs => {
             if let Some(name) = kids.first().and_then(symbol_name) {
                 bindings.push((name.to_string(), type_metadata(expr).cloned()));
             }
@@ -1487,33 +1890,51 @@ fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<E
             }
         }
         _ => {
-            for child in children(list) {
+            for child in kids {
                 collect_pattern_named_types(child, bindings);
             }
         }
     }
 }
 
+/// Free variables of `expr`, in a DETERMINISTIC (sorted) order.
+///
+/// chelis#1200: `check_fn` walks this list mutating `outer_scope` as it
+/// goes — it consumes or borrows each capture and can raise
+/// `UseAfterConsume`. When two captures are on one alias chain
+/// (`y = x; fn () -> add(realize(x), realize(y))`), the verdict depends
+/// on which is visited first, so a `UnordSet`'s iteration order made the
+/// same program compile or fail run to run (measured: 11/12 reject,
+/// 1/12 accept). Sorting is the cheap half of the fix; forwarding the
+/// capture consume through the alias chain in `check_fn` is the half
+/// that makes both orders agree.
+///
+/// chelis#1209's generation ids did NOT remove this order-sensitivity:
+/// `check_fn` deliberately does not forward an ordinary alias's capture
+/// to its source ([04-LIN-2] — two user-visible bindings of one value
+/// are distinct for capture), so when two captures sit on one alias
+/// chain the verdict still depends on which capture consumes first.
+/// The sort stays semantically necessary, not merely cosmetic.
 fn free_vars(expr: &Expr, params: &[String]) -> Vec<String> {
-    let mut bound = vec![params.iter().cloned().collect::<HashSet<_>>()];
-    let mut free = HashSet::new();
+    let mut bound = vec![params.iter().cloned().collect::<UnordSet<_>>()];
+    let mut free = UnordSet::new();
     collect_free_vars(expr, &mut bound, &mut free);
-    free.into_iter().collect()
+    free.into_sorted()
 }
 
-fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut HashSet<String>) {
+fn collect_free_vars(expr: &Expr, bound: &mut Vec<UnordSet<String>>, free: &mut UnordSet<String>) {
     match expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
         Expr::MetaExpr(meta, _) => collect_free_vars(&meta.expr, bound, free),
         Expr::List(list, _) => match get_tag(list) {
-            Some("var") => {
+            Some(DeepTag::Var) => {
                 if let Some(name) = children(list).first().and_then(symbol_name)
                     && !bound.iter().rev().any(|scope| scope.contains(name))
                 {
                     free.insert(name.to_string());
                 }
             }
-            Some("fn") => {
+            Some(DeepTag::Fn) => {
                 let kids = children(list);
                 if kids.len() >= 2 {
                     bound.push(param_names(&kids[0]).into_iter().collect());
@@ -1521,14 +1942,13 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                     bound.pop();
                 }
             }
-            Some("let") => {
+            Some(DeepTag::Let) => {
                 let kids = children(list);
                 if kids.len() < 2 {
                     return;
                 }
-                let mut let_scope = HashSet::new();
-                if let Expr::List(bind_list, _) = &kids[0] {
-                    let bind_kids = children(bind_list);
+                let mut let_scope = UnordSet::new();
+                if let Some(bind_kids) = tagged_children(&kids[0], DeepTag::Bind) {
                     let mut index = 0;
                     while index + 1 < bind_kids.len() {
                         collect_free_vars(&bind_kids[index + 1], bound, free);
@@ -1542,20 +1962,16 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                 collect_free_vars(&kids[1], bound, free);
                 bound.pop();
             }
-            Some("match") => {
+            Some(DeepTag::Match) => {
                 let kids = children(list);
                 if kids.is_empty() {
                     return;
                 }
                 collect_free_vars(&kids[0], bound, free);
                 for arm in kids.iter().skip(1) {
-                    let Expr::List(arm_list, _) = arm else {
+                    let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
                         continue;
                     };
-                    if get_tag(arm_list) != Some("arm") {
-                        continue;
-                    }
-                    let arm_kids = children(arm_list);
                     if arm_kids.len() < 3 {
                         continue;
                     }
@@ -1571,15 +1987,31 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                 }
             }
         },
+        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_free_vars(&bridged, bound, free);
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_free_vars(elem, bound, free);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_free_vars(child, bound, free);
+            }
+        }
     }
 }
 
 fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
     // Tensor→host conversions read the tensor without taking ownership — the
     // runtime implementations (`chelis_list_from_tensor`, `chelis_tensor_to_f64`,
-    // `chelis_print_f32`, `chelis_tensor_rank`, `chelis_tensor_shape`,
+    // `chelis_tensor_rank`, `chelis_tensor_shape`,
     // `chelis_tensor_numel`, `tensor_to_string`) all read via the pointer and
-    // never call `chelis_free`, so the caller still owns the input afterwards.
+    // never call `chelis_tensor_release`, so the caller still owns the input
+    // afterwards.
     // Keeping these observational avoids forcing callers to sprinkle
     // `copy(x)` before every query or host-lane conversion.
     //
@@ -1618,7 +2050,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
             | "where"
             | "clamp"
             | "test_assert_close_tensor"
-            | "test_assert_eq_tensor_int64"
+            | "test_assert_eq_tensor"
     ) || matches!(
         (name, arg_index),
         (
@@ -1653,6 +2085,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "reshape"
                 | "permute"
                 | "expand"
+                | "insert"
                 | "pad"
                 | "shrink"
                 | "stride"
@@ -1680,16 +2113,11 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
 }
 
 fn type_metadata(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    match list.elements.get(1) {
-        Some(Expr::Map(MetaMap { entries }, _)) => entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| value),
-        _ => None,
-    }
+    let (_, meta, _) = stamped_parts(expr)?;
+    meta.entries
+        .iter()
+        .find(|(key, _)| key == "type")
+        .map(|(_, value)| value)
 }
 
 /// Render the source site of `expr` for linearity diagnostics.
@@ -1714,29 +2142,35 @@ fn diag_site(expr: &Expr) -> String {
 
 /// Extract the `span: "surf:a..b"` metadata entry, when present.
 fn span_metadata_id(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    match list.elements.get(1) {
-        Some(Expr::Map(MetaMap { entries }, _)) => {
-            entries.iter().find_map(|(key, value)| match value {
-                Expr::Atom(Atom::Str(id), _) if key == "span" => Some(id.as_str()),
-                _ => None,
-            })
-        }
+    let (_, meta, _) = stamped_parts(expr)?;
+    meta.entries.iter().find_map(|(key, value)| match value {
+        Expr::Atom(Atom::Str(id), _) if key == "span" => Some(id.as_str()),
         _ => None,
-    }
+    })
 }
 
 fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
     match param {
-        Expr::Atom(Atom::Symbol(name), _) => Some((name.as_str(), None)),
+        Expr::Atom(Atom::Name(name), _) => Some((name.as_str(), None)),
         Expr::List(param_list, _) => Some((
             param_list.elements.first().and_then(symbol_name)?,
             get_meta(param_list)
                 .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
                 .map(|(_, value)| value),
         )),
+        Expr::BareList(elements, _) => {
+            let name = elements.first().and_then(symbol_name)?;
+            let ty = elements.get(1).and_then(|meta| {
+                let Expr::Map(meta, _) = meta else {
+                    return None;
+                };
+                meta.entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value)
+            });
+            Some((name, ty))
+        }
         // chelis#343: a typed param whose name collides with a Deep tag
         // (`params`, `fn`, `let`, ...) cannot use the `(name {type: T})`
         // list form — `(params {type: T})` is indistinguishable from a
@@ -1748,7 +2182,7 @@ fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
         // spurious "borrowed arguments must be tensor or tensor-carrying
         // values". Mirrors infer.rs `extract_params`'s MetaExpr arm.
         Expr::MetaExpr(meta, _) => {
-            let Expr::Atom(Atom::Symbol(name), _) = meta.expr.as_ref() else {
+            let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
             Some((
@@ -1781,51 +2215,47 @@ fn tuple_get_element_type<'a>(
     scope: &'a LinearScope,
     checker: &'a Checker,
 ) -> Option<&'a Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("tuple-get") {
-        return None;
-    }
-    let kids = children(list);
+    let kids = tagged_children(expr, DeepTag::TupleGet)?;
     let tuple_expr = kids.first()?;
     let tuple_ty = type_metadata(tuple_expr).or_else(|| {
         var_name(tuple_expr)
             .and_then(|name| scope.ty(name).or_else(|| checker.top_level_types.get(name)))
     })?;
     let index_expr = kids.get(1)?;
-    let index = match index_expr {
-        Expr::List(idx_list, _) if get_tag(idx_list) == Some("lit") => {
-            children(idx_list).first().and_then(|child| match child {
-                Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
-                _ => None,
-            })
-        }
-        Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
-        _ => None,
+    let index = match tagged_children(index_expr, DeepTag::Lit) {
+        Some(literal_children) => literal_children.first().and_then(|child| match child {
+            Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
+            _ => None,
+        }),
+        None => match index_expr {
+            Expr::Atom(Atom::Int(n), _) => Some(*n as usize),
+            _ => None,
+        },
     }?;
-    let Expr::List(tuple_ty_list, _) = tuple_ty else {
-        return None;
-    };
-    if get_tag(tuple_ty_list) != Some("t-tuple") {
-        return None;
-    }
-    let tys = children(tuple_ty_list);
+    let tys = tagged_children(tuple_ty, DeepTag::TTuple)?;
     tys.get(index)
 }
 
-/// Linearity-F2 destructure-scope gate.  Returns `true` if `bind_list`
-/// is a `(bind {meta} name value ...)` whose meta-map contains the
-/// `destructure: true` marker injected by `chelis_surf::desugar`
-/// when synthesizing the `__chelis_tmp_N` intermediates for
-/// `let (a, b) = ...` patterns.  Used by `Checker::check_let` to
-/// bump `destructure_scope_depth`, which gates the
-/// `consume_var_expr` already-consumed arm so use-after-consume on
-/// a destructured component surfaces as an error rather than the
-/// silent fallthrough used by regular bindings (where implicit
-/// Copy insertion covers consuming fan-out).
-fn bind_introduces_destructure_tmp(bind_list: &List) -> bool {
-    let Some(meta) = get_meta(bind_list) else {
+/// Linearity-F2 destructured-component marker.  Returns `true` if
+/// `bind_list` is a `(bind {meta} name value ...)` whose meta-map
+/// contains the `destructure: true` marker injected by
+/// `chelis_surf::desugar` when synthesizing the `__chelis_tmpN`
+/// intermediates and component binds for a `let` whose pattern is not
+/// a bare `Var`.  Used by `Checker::check_let` to call
+/// `LinearScope::mark_destructured` on the generations the bind
+/// introduces; the `consume_var_expr` already-consumed arm reads that
+/// per-binding mark so use-after-consume on a destructured component
+/// surfaces as an error rather than the silent fallthrough used by
+/// regular bindings (where implicit Copy insertion covers consuming
+/// fan-out).
+///
+/// chelis#1200: this marker previously drove a block-scoped depth
+/// counter, which made the F2 error fire for every variable in the
+/// remainder of an enclosing block.  The marker itself was never the
+/// defect and is unchanged; only its consumer moved to per-binding
+/// marks.
+fn bind_introduces_destructure_tmp(bind_expr: &Expr) -> bool {
+    let Some((DeepTag::Bind, meta, _)) = stamped_parts(bind_expr) else {
         return false;
     };
     meta.entries.iter().any(|(key, value)| {
@@ -1833,19 +2263,19 @@ fn bind_introduces_destructure_tmp(bind_list: &List) -> bool {
     })
 }
 
-fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
-    let Expr::List(list, _) = expr else {
+fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &UnordSet<String>) -> bool {
+    let Some((tag, _, children)) = stamped_parts(expr) else {
         return false;
     };
-    match get_tag(list) {
-        Some("t-tensor") => true,
-        Some("t-ref") => children(list)
+    match tag {
+        DeepTag::TTensor => true,
+        DeepTag::TRef => children
             .iter()
             .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
-        Some("t-tuple") => children(list)
+        DeepTag::TTuple => children
             .iter()
             .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts)),
-        Some("t-adt") => {
+        DeepTag::TAdt => {
             // An ADT is tensor-carrying if EITHER one of its type
             // arguments is (the original behavior — e.g. `Wrapper[a]`
             // where `a` is `tensor[..]`), OR the ADT's own definition
@@ -1853,23 +2283,23 @@ fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>
             // chelis#153 fix for `&BatchNormParams { weight: tensor[..],
             // ... }`). The pre-computed set in `tensor_carrying_adts`
             // already accounts for transitive ADT-field tensor-carry.
-            let name_carries = children(list)
+            let name_carries = children
                 .first()
                 .and_then(symbol_name)
                 .is_some_and(|n| tensor_carrying_adts.contains(n));
             name_carries
-                || children(list)
+                || children
                     .iter()
                     .skip(1) // skip the name; only check type args
                     .any(|c| type_expr_contains_tensor(c, tensor_carrying_adts))
         }
-        Some("t-fn") => false,
+        DeepTag::TFn => false,
         _ => false,
     }
 }
 
 fn type_expr_is_ref(expr: &Expr) -> bool {
-    matches!(get_tag_expr(expr), Some("t-ref"))
+    matches!(get_tag_expr(expr), Some(DeepTag::TRef))
 }
 
 /// Issue #256: detect a stamped `(t-var ...)` (or `(t-ref (t-var ...))`)
@@ -1893,21 +2323,15 @@ fn type_expr_is_ref(expr: &Expr) -> bool {
 /// `Type::Unit`, `Type::Fn`, etc.), so this leniency cannot leak.
 fn type_expr_is_unresolved_tvar(expr: &Expr) -> bool {
     match get_tag_expr(expr) {
-        Some("t-var") => true,
-        Some("t-ref") => {
-            if let Expr::List(list, _) = expr {
-                children(list)
-                    .first()
-                    .is_some_and(type_expr_is_unresolved_tvar)
-            } else {
-                false
-            }
-        }
+        Some(DeepTag::TVar) => true,
+        Some(DeepTag::TRef) => stamped_parts(expr)
+            .and_then(|(_, _, children)| children.first())
+            .is_some_and(type_expr_is_unresolved_tvar),
         _ => false,
     }
 }
 
-fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
+fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &UnordSet<String>) -> bool {
     type_expr_contains_tensor(expr, tensor_carrying_adts) && !type_expr_is_ref(expr)
 }
 
@@ -1961,7 +2385,7 @@ fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>
 /// checker gains direct access to a shared `AdtRegistry`, this helper
 /// retires in favor of querying that registry's variant-field types
 /// (which already know about aliases too).
-fn compute_tensor_carrying_adts<'a, I>(exprs: I) -> HashSet<String>
+fn compute_tensor_carrying_adts<'a, I>(exprs: I) -> UnordSet<String>
 where
     I: IntoIterator<Item = &'a Expr>,
 {
@@ -1974,44 +2398,38 @@ where
     // and new-code so cross-package field references (a new-code ADT
     // wrapping a library tensor-carrying ADT) are resolved by the same
     // fixed-point pass instead of two independent ones.
-    let mut adt_field_types: HashMap<String, Vec<Expr>> = HashMap::new();
-    fn collect(expr: &Expr, out: &mut HashMap<String, Vec<Expr>>) {
-        let Expr::List(list, _) = expr else {
+    let mut adt_field_types: UnordMap<String, Vec<Expr>> = UnordMap::new();
+    fn collect(expr: &Expr, out: &mut UnordMap<String, Vec<Expr>>) {
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             return;
         };
-        let tag = get_tag(list);
         match tag {
-            Some("module") => {
+            DeepTag::Module => {
                 // `(module {} name body...)` — `children()` skips tag
                 // and meta, leaving `[name, body...]`; skip the name
                 // for the same shape the `deftype` branch below uses.
-                for child in children(list).iter().skip(1) {
+                for child in kids.iter().skip(1) {
                     collect(child, out);
                 }
             }
-            Some("deftype") => {
-                let kids = children(list);
+            DeepTag::Deftype => {
                 let Some(name) = kids.first().and_then(symbol_name) else {
                     return;
                 };
                 let mut field_tys: Vec<Expr> = Vec::new();
                 for child in kids.iter().skip(1) {
-                    let Expr::List(inner, _) = child else {
+                    let Some(variant_children) = tagged_children(child, DeepTag::Variant) else {
                         continue;
                     };
-                    if get_tag(inner) != Some("variant") {
-                        continue;
-                    }
                     // variant children: name, then either `(field name ty)`
                     // entries (record-style) or bare type exprs (positional).
-                    for v in children(inner).iter().skip(1) {
-                        match v {
-                            Expr::List(vlist, _) if get_tag(vlist) == Some("field") => {
-                                if let Some(ty) = children(vlist).get(1) {
-                                    field_tys.push(ty.clone());
-                                }
+                    for value in variant_children.iter().skip(1) {
+                        if let Some(field_children) = tagged_children(value, DeepTag::Field) {
+                            if let Some(ty) = field_children.get(1) {
+                                field_tys.push(ty.clone());
                             }
-                            other => field_tys.push(other.clone()),
+                        } else {
+                            field_tys.push(value.clone());
                         }
                     }
                 }
@@ -2030,10 +2448,10 @@ where
     // the in-progress carrier set, so the recursive `t-adt` lookup
     // walks the same code path used at check time. Stop when a pass
     // adds no new names; bounded by the ADT count.
-    let mut carriers: HashSet<String> = HashSet::new();
+    let mut carriers: UnordSet<String> = UnordSet::new();
     loop {
         let mut grew = false;
-        for (name, field_tys) in &adt_field_types {
+        for (name, field_tys) in adt_field_types.to_sorted() {
             if carriers.contains(name) {
                 continue;
             }
@@ -2053,13 +2471,7 @@ where
 }
 
 fn type_expr_fn_arg(expr: &Expr, index: usize) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some("t-fn") {
-        return None;
-    }
-    let kids = children(list);
+    let kids = tagged_children(expr, DeepTag::TFn)?;
     if index >= kids.len().saturating_sub(1) {
         return None;
     }
@@ -2132,7 +2544,7 @@ mod tests {
     }
 
     fn sym(name: &str) -> Expr {
-        Expr::Atom(Atom::Symbol(name.to_string()), span())
+        Expr::Atom(Atom::Name(name.to_string()), span())
     }
 
     fn meta(entries: Vec<(&str, Expr)>) -> Expr {
@@ -2149,7 +2561,11 @@ mod tests {
 
     /// Build `(tag {meta} children...)`.
     fn node(tag: &str, meta_entries: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
-        let mut elements = vec![sym(tag), meta(meta_entries)];
+        let head = match DeepTag::parse(tag) {
+            Some(tag) => Expr::Atom(Atom::Tag(tag), span()),
+            None => sym(tag),
+        };
+        let mut elements = vec![head, meta(meta_entries)];
         elements.extend(children);
         Expr::List(List { elements }, span())
     }
@@ -2259,5 +2675,41 @@ mod tests {
         let pat = node("pat-wild", vec![], vec![]);
         let bindings = pattern_named_types(&pat);
         assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn malformed_callee_type_reaches_linearity_exactly_once() {
+        let captured = node("x", vec![("type", tensor_4_f32())], vec![]);
+        let inner_body = node(
+            "app",
+            vec![],
+            vec![
+                node("var", vec![], vec![sym("poison")]),
+                node("var", vec![], vec![sym("x")]),
+            ],
+        );
+        let inner_fn = node(
+            "fn",
+            vec![],
+            vec![node("params", vec![], vec![]), inner_body],
+        );
+        let outer_fn = node(
+            "fn",
+            vec![],
+            vec![node("params", vec![], vec![captured]), inner_fn],
+        );
+        let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
+            vec![node("def", vec![], vec![sym("outer"), outer_fn])],
+            BTreeMap::from([("poison".to_string(), node("t-fn", vec![], vec![]))]),
+        );
+
+        let errors = check_linearity(&program)
+            .expect_err("malformed callee metadata must make linearity fail");
+        assert_eq!(
+            errors.len(),
+            1,
+            "the resolver diagnostic must join the authoritative linearity result exactly once: {errors:?}"
+        );
+        assert!(errors[0].message.contains("malformed `t-fn`"));
     }
 }

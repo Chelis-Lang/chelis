@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chelis_compiler_api::compiler::{eval, prepare_eval};
-use chelis_compiler_api::schema::{EvalRequest, EvaluatedRoot, SourceKind};
+use chelis_compiler_api::schema::{CompileTarget, EvalRequest, EvaluatedRoot, SourceKind};
 use chelis_compiler_api::{
     COMPILER_VERSION, CompiledContext, check_in_context, compile_reef_context, eval_in_context,
     eval_many_in_context,
@@ -57,7 +57,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
     // test stands in for the user-supplied entry decls.
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
 
@@ -140,19 +140,19 @@ fn eval_in_context_matches_prepare_eval_for_int_snippets() {
         (
             "int_add",
             "module App.Eval\nimport Mylib.Math (add)\n\n\
-             def main_value -> int32 = add(3, 4)\n",
+             def main_value() -> int32 = add(3, 4)\n",
             "main_value",
         ),
         (
             "int_double",
             "module App.Eval\nimport Mylib.Math (double)\n\n\
-             def doubled -> int32 = double(21)\n",
+             def doubled() -> int32 = double(21)\n",
             "doubled",
         ),
         (
             "int_square_compose",
             "module App.Eval\nimport Mylib.Math (square)\nimport Mylib.Math (add)\n\n\
-             def composed -> int32 = add(square(5), square(3))\n",
+             def composed() -> int32 = add(square(5), square(3))\n",
             "composed",
         ),
     ];
@@ -193,7 +193,7 @@ fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
     let _linked = chelis_compiler_api::install_linked_program_guard();
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (host_len)\n\n\
-                   def length_from_host -> int64 = host_len(to_tensor([1.0, 2.0]))\n";
+                   def length_from_host() -> int64 = host_len(to_tensor([1.0, 2.0]))\n";
 
     let formatted = format_library_plus_snippet(&root, snippet);
     let baseline = eval(EvalRequest {
@@ -224,7 +224,7 @@ fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
@@ -242,7 +242,7 @@ fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
 #[test]
 fn eval_many_in_context_per_root_isolation_matches_independent_calls() {
     // Use let-bindings (no `def`, no params) so the values are tensor
-    // roots that the host evaluator carries through. `def name -> int32`
+    // roots that the host evaluator carries through. `def name() -> int32`
     // becomes a 0-arg fn under desugar and is NOT eagerly evaluated by
     // the runtime; bare `name: int32 = ...` is a value binding that is.
     //
@@ -251,8 +251,8 @@ fn eval_many_in_context_per_root_isolation_matches_independent_calls() {
     // with `chelis test`'s actual entry-file shape.
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (square)\n\n\
-                   def isolated_a -> int32 = square(3)\n\
-                   def isolated_b -> int32 = square(4)\n";
+                   def isolated_a() -> int32 = square(3)\n\
+                   def isolated_b() -> int32 = square(4)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -317,7 +317,7 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
@@ -333,9 +333,9 @@ fn eval_in_context_resolves_library_string_call_in_host_runtime() {
     .expect("write text.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
 
-    // Use a NON-fn top-level binding (`name = expr`, not `def name -> T = expr`)
+    // Use a NON-fn top-level binding (`name = expr`, not `def name() -> T = expr`)
     // so the host evaluator's `top_level_order` includes it for eager
-    // resolution. `def name -> T = body` desugars to a 0-arg fn and is
+    // resolution. `def name() -> T = body` desugars to a 0-arg fn and is
     // explicitly excluded from `top_level_order`, so it never triggers
     // the runtime lookup that surfaces this bug. The `chelis test`
     // worker's synthesized `__chelis_test_k = test_k()` shape (see
@@ -383,7 +383,7 @@ fn eval_in_context_resolves_library_string_call_after_bincode_round_trip() {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
@@ -425,7 +425,7 @@ fn check_in_context_accepts_well_typed_snippet() {
     let (_dir, root) = library_fixture();
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def ok -> int32 = add(1, 2)\n";
+                   def ok() -> int32 = add(1, 2)\n";
     let result = check_in_context(&ctx, snippet).expect("check ok");
     assert!(
         result.errors.is_empty(),
@@ -440,7 +440,7 @@ fn check_in_context_rejects_unbound_library_reference() {
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     // Reference to a name that exists in NEITHER the library nor the new code.
     let snippet = "module App.Eval\n\n\
-                   def bad -> int32 = nonexistent_function(1, 2)\n";
+                   def bad() -> int32 = nonexistent_function(1, 2)\n";
     let outcome = check_in_context(&ctx, snippet);
     assert!(
         outcome.is_err(),
@@ -452,7 +452,7 @@ fn check_in_context_rejects_unbound_library_reference() {
 fn compiled_context_round_trips_through_bincode() {
     let (_dir, root) = library_fixture();
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def eight -> int32 = add(3, 5)\n";
+                   def eight() -> int32 = add(3, 5)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let pre = eval_in_context(&ctx, snippet).expect("pre-encode eval");
@@ -485,7 +485,7 @@ fn microbench_fixture() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
 
@@ -577,5 +577,45 @@ fn microbench_in_context_is_at_least_10x_faster_than_prepare_eval_for_50_snippet
          baseline {} ms, in-context {} ms)",
         baseline_elapsed.as_millis(),
         in_context_elapsed.as_millis(),
+    );
+}
+
+/// The HIP arm does not yet apply entry-scoped DAG selection to a
+/// reef-linked context, so `compile_for_execution_in_context` with
+/// `target=hip` must refuse loudly -- and as an `unsupported_feature`
+/// carrying the section C2 `unsupported:` brand, not as a
+/// `compile_error` (which this file reserves for internal desync).
+/// The #730 sweeps match on both the kind and the brand; this test
+/// pins them so the rejection stays visible to those sweeps (chelis#829).
+#[test]
+fn compile_in_context_hip_rejects_as_branded_unsupported_feature() {
+    let (_dir, root) = library_fixture();
+    let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
+    let err = chelis_compiler_api::compiler::compile_for_execution_in_context(
+        &ctx,
+        "module App.Main\nimport Mylib.Math (add)\n\n\
+         def main_value() -> int32 = add(3, 4)\n",
+        CompileTarget::Hip,
+        None,
+    )
+    .expect_err("reef-context HIP compile must be refused");
+    assert_eq!(err.stage, "compile");
+    let diag = &err.errors[0];
+    assert_eq!(
+        diag.kind(),
+        chelis_vocab::DiagnosticKind::UnsupportedFeature,
+        "HIP reef-context rejection must be kind-visible to the #730 sweep, got {}: {}",
+        diag.kind().as_str(),
+        diag.message
+    );
+    assert!(
+        diag.message.starts_with("unsupported:"),
+        "must carry the frozen section C2 `unsupported:` brand, got: {}",
+        diag.message
+    );
+    assert!(
+        diag.message.contains("chelis#829"),
+        "remediation must cite the tracking issue, got: {}",
+        diag.message
     );
 }

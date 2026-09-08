@@ -3,7 +3,7 @@
 **Status:** Implemented (chelis#405). Forward-mode dual numbers, per the
 locked design below. `grad(f, wrt=...)(args)` over a scalar `f32 -> f32`
 (or multi-scalar-param) top-level def now lowers on the host lane and builds
-to C. The previous `__unresolved_grad` rejection is retained for the cases
+to C. The previous unresolved-transform-marker rejection (chelis#841: now the unspellable `HOST_UNRESOLVED_TRANSFORM_MARKER`) is retained for the cases
 the dual transform does not cover (container `wrt`, unsupported scalar ops);
 the tensor-lane reverse-mode AD path is untouched.
 
@@ -23,7 +23,7 @@ This is enough to differentiate the Black-Scholes scalar Greeks named in the
 issue (`delta`, `vega` over a `call_price` built from `d1`/`d2`/`normal_cdf`,
 `let`-blocks, and `log`/`sqrt`/`exp`). A `(mutually) recursive scalar callee
 fails closed at `MAX_DUAL_INLINE_DEPTH` — the transform returns `None` and the
-build falls through to the same `__unresolved_grad` rejection rather than
+build falls through to the same unresolved-transform-marker rejection rather than
 looping.
 
 Implementation: `try_lower_scalar_grad_app` / `dual_eval` / `dual_eval_let` /
@@ -70,7 +70,7 @@ def jac_row[n](
   theta: tensor[n, f32], x: f32, y: f32
 ) -> tensor[n, f32] = {
   target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)
-  grad(target, wrt=(theta_local))(theta)
+  grad(target, wrt=theta_local)(theta)
 }
 ```
 
@@ -98,7 +98,7 @@ The two sections above describe the original deferral. With the implementation
 shipped, the canonical `grad(top_level_scalar_fn)(scalar_arg)` shape — and the
 `let`-block / user-defined-call composition the Black-Scholes Greeks need —
 now lower. The remaining gaps the dual transform does not cover (it returns
-`None`, falling through to the `__unresolved_grad` rejection):
+`None`, falling through to the unresolved-transform-marker rejection):
 
 - `grad` where `wrt` is a host container (`List`/`dict`/ADT/tuple) parameter —
   the genuine container-AD escalation in step 5 below. Rejected, with a test.

@@ -70,7 +70,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     )
     .expect("write main.ch");
 
@@ -107,7 +107,7 @@ fn collect_named_roots_json(roots: &[EvaluatedRoot], names: &[&str]) -> BTreeMap
 }
 
 const SNIPPET: &str =
-    "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value -> int32 = add(3, 4)\n";
+    "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value() -> int32 = add(3, 4)\n";
 
 // ---- (a) cold-build-then-load round-trip ----------------------------------
 
@@ -143,7 +143,7 @@ fn cold_build_then_load_round_trips_eval_result() {
         "eval_in_context on a freshly-loaded cache must match the pre-save eval"
     );
     // Strengthening: pre and post root counts must match. We can't
-    // unconditionally require non-empty roots — `def name -> int32 = ...`
+    // unconditionally require non-empty roots — `def name() -> int32 = ...`
     // is a 0-arg fn under desugar and the runtime treats it as a tensor-
     // unlowerable root in some paths (see Phase G's comment in
     // `eval_many_in_context_per_root_isolation_matches_independent_calls`)
@@ -420,7 +420,7 @@ fn library_fixture_alt() -> (TempDir, PathBuf) {
     fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml alt");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder_alt -> int32 = cast(1, int32)\n",
+        "module App.Main\n\ndef placeholder_alt() -> int32 = cast(1, int32)\n",
     )
     .expect("write main.ch alt");
 
@@ -632,15 +632,21 @@ fn cache_entry_from_a_different_compiler_build_is_a_clean_miss() {
     // built from different compiler source but the same resolved package
     // produced the same source_hash, so a newer binary could read an
     // older binary's cached context and apply stale compiler semantics.
-    // CacheIdentity folds COMPILER_VERSION in; an entry whose stored
-    // identity carries a different compiler version must be a clean miss.
+    // CacheIdentity folds the BUILD fingerprint in; an entry whose stored
+    // identity carries a different one must be a clean miss.
+    //
+    // chelis#1156 sharpened this: the identity previously carried
+    // `COMPILER_VERSION`, which is a RELEASE identity, not a build one;
+    // two binaries from different commits share it until the next version
+    // bump, so they shared cache entries and checked programs under each
+    // other's type semantics. The identity now carries
+    // `build_fingerprint()`, which changes on every rebuild.
     //
     // We cannot rebuild the compiler mid-test, so we construct an
     // envelope whose stored identity carries the SAME package_root but a
-    // bumped compiler version, save it, and confirm load_if_fresh treats
-    // it as a miss because the live identity (real COMPILER_VERSION) does
-    // not match.
-    use chelis_compiler_api::CacheIdentity;
+    // different build fingerprint, save it, and confirm load_if_fresh
+    // treats it as a miss because the live identity does not match.
+    use chelis_compiler_api::{CacheIdentity, build_fingerprint};
 
     let (_dir, root) = library_fixture();
     let cache_path = root.join(".cache/compiled/compiler-skew.ctx");
@@ -649,15 +655,20 @@ fn cache_entry_from_a_different_compiler_build_is_a_clean_miss() {
     let mut ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let live_identity = ctx.identity.clone();
     assert_eq!(
-        live_identity.compiler_version, COMPILER_VERSION,
-        "test setup: a fresh context must carry the running compiler version"
+        live_identity.compiler_version,
+        build_fingerprint(),
+        "test setup: a fresh context must carry the running build fingerprint"
+    );
+    assert!(
+        live_identity.compiler_version.starts_with(COMPILER_VERSION),
+        "the build fingerprint must still extend the release version"
     );
 
     // Forge an identity that looks like it came from a DIFFERENT compiler
-    // build (same package root, bumped compiler version).
+    // build (same package root, different build fingerprint).
     let stale_identity = CacheIdentity {
         package_root: live_identity.package_root.clone(),
-        compiler_version: format!("{COMPILER_VERSION}-stale-other-build"),
+        compiler_version: format!("{}-stale-other-build", build_fingerprint()),
     };
     assert_ne!(stale_identity, live_identity);
     ctx.identity = stale_identity;

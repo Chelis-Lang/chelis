@@ -6,13 +6,15 @@
 //! compiler-api crate does NOT depend on chelis-prove). The public decode
 //! chokepoint lives in `crate::decode`; it calls into this machinery.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
+use chelis_deep::Span;
+use chelis_deep::ast::Atom;
 use chelis_deep::ast::Expr;
 use chelis_types::types::Prim;
 
 use super::host_ops::render_value;
-use super::transforms::{as_list, extract_prim_from_type_expr, prim_from_name, var_name};
+use super::transforms::{extract_prim_from_type_expr, prim_from_name, var_name};
 // Brings the parent module's runtime types (`EvalContext`, `RuntimeValue`,
 // `RuntimeTensorValue`) and the private Deep-shape helpers (`tag`, `children`,
 // `get_meta`, `symbol_name`, `top_level_items`) into scope, mirroring the
@@ -107,6 +109,13 @@ pub(crate) enum InvariantViolation {
         invariant: String,
         reason: String,
     },
+    /// The enclosing evaluation was cancelled while the predicate was
+    /// running. NOT a property of the user's opaque type: attributing the
+    /// cancellation sentinel to the type as a `PredicateError` would be a
+    /// section C1.1 substituted response, so the sentinel passes through
+    /// verbatim and stays matchable by `chelis_types::is_cancellation`
+    /// (chelis#914 review).
+    Cancelled { reason: String },
     /// The deftype declared an invariant whose metadata is malformed (not
     /// the `(fn {} (params {} <binder>) <body>)` shape). The predicate
     /// cannot be evaluated, so the value cannot be safely materialized
@@ -148,6 +157,10 @@ impl std::fmt::Display for InvariantViolation {
                 "decode rejected for opaque type `{type_name}`: the declared invariant `{invariant}` \
                  could not be evaluated on the value ({reason})"
             ),
+            // Verbatim: the sentinel must survive so downstream
+            // `is_cancellation` checks and the CLI/pyo3 mappers see a
+            // cancellation, not a decode failure of the user's type.
+            InvariantViolation::Cancelled { reason } => write!(f, "{reason}"),
             InvariantViolation::MalformedInvariant { type_name } => write!(
                 f,
                 "decode rejected for opaque type `{type_name}`: the declared invariant metadata is \
@@ -177,45 +190,66 @@ impl std::fmt::Display for InvariantViolation {
 ///   well-formedness (RFC D-WF) rejects malformed metadata before it can
 ///   reach a chelis-compiled module, but the decode chokepoint is the
 ///   contract for the next external/hand-built codec and must fail closed.
+/// - When the type-name child is NOT a readable symbol (chelis#1305), the
+///   entry is [`InvariantEntry::Malformed`] under the
+///   [`UNREADABLE_DEFTYPE_NAME`] placeholder. Dropping the whole deftype
+///   was the same fail-open reached through a different door: the absent
+///   entry was indistinguishable from "no declared invariant".
 ///
 /// A deftype with NO `invariant` entry is simply absent from the table:
 /// there is no invariant to check for its constructors, which is
 /// legitimate, not a failure.
-pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, InvariantEntry> {
-    let mut out = HashMap::new();
+/// The placeholder type name recorded when an invariant-declaring `deftype`'s
+/// type-name child is not a readable symbol (chelis#1305). It is diagnostic
+/// wire data on a fail-closed path, not a [03-PROG-2] rejection
+/// identification, so the angle-bracket spelling follows the
+/// `UNKNOWN_FORM_NON_SYMBOL_HEAD` convention.
+pub(crate) const UNREADABLE_DEFTYPE_NAME: &str = "<unreadable deftype name>";
+
+pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> UnordMap<String, InvariantEntry> {
+    let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
-            continue;
-        };
-        if tag(list) != Some("deftype") {
-            continue;
-        }
-        let Some(meta) = get_meta(list) else {
+        let Some((DeepTag::Deftype, meta, kids)) = expr_parts(expr) else {
             continue;
         };
         let Some((_, inv_value)) = meta.entries.iter().find(|(key, _)| key == "invariant") else {
             // No declared invariant: this type contributes no table entry.
             continue;
         };
-        let kids = children(list);
-        let Some(type_name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
+        // chelis#1305 (fail-closed): a deftype that DECLARES an invariant
+        // but whose type-name child is not a readable symbol must not
+        // contribute zero entries. `revalidate_adt_value` treats an absent
+        // entry as "no declared invariant; nothing to check", so a
+        // `continue` here was the same fail-open the malformed-metadata arm
+        // below already closed, reached through a different door. The
+        // unreadable-name declaration is malformed as a whole, so every
+        // extractable constructor records `Malformed` under the placeholder
+        // name, whatever the invariant metadata itself parses to.
+        let readable_type_name = kids.first().and_then(symbol_name);
         // The deftype DECLARES an invariant, so it always contributes an
         // entry. Parse the metadata once; a malformed metadata becomes a
         // `Malformed` entry rather than being skipped (fail-closed).
-        let parsed = parse_invariant_fn(inv_value);
+        let parsed = match readable_type_name {
+            Some(_) => parse_invariant_fn(inv_value),
+            None => None,
+        };
+        let type_name = readable_type_name.unwrap_or(UNREADABLE_DEFTYPE_NAME);
         // Key by every record-variant constructor of the type. The RFC's
         // single-record-variant representation means there is exactly one
         // in V1, but iterating keeps the table honest if that widens.
         for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
+            let Some((DeepTag::Variant, _, variant_kids)) = expr_parts(variant) else {
+                // Not a fail-open: a non-`variant` child declares no
+                // constructor, so there is no key this table could record
+                // (chelis#1305).
                 continue;
             };
-            if tag(variant_list) != Some("variant") {
-                continue;
-            }
-            let Some(ctor) = children(variant_list).first().and_then(symbol_name) else {
+            let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
+                // Not a fail-open, but only because of the backstop: with no
+                // readable ctor name there is no key to insert under, and
+                // the same unreadable name is also absent from the
+                // field-type table, so `decode_adt`'s unknown-constructor
+                // guard rejects every payload claiming it (chelis#1305).
                 continue;
             };
             let entry = match &parsed {
@@ -248,7 +282,7 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
 ///
 /// - **Fn-wrapped form** `(def {} <name> (fn {} (params {}) <inner>))`. The
 ///   Surf desugarer wraps *every* def body in a `fn`, so both
-///   `def eps() -> f32 = 0.001` and `def eps = 0.001` desugar to this shape
+///   `def eps() -> f32 = 0.001` and `def eps() = 0.001` desugar to this shape
 ///   with empty params. The constant's value is the evaluation of `<inner>`,
 ///   so the UNWRAPPED inner body is registered.
 /// - **Bare value-binding form** `(def {} <name> <value>)` where `<value>`
@@ -271,34 +305,30 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
 /// non-foldable expression) is NOT a constant and must not pollute the
 /// table -- registering it would map the name to an unresolved or wrong
 /// value at predicate evaluation time.
-pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr> {
+pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> UnordMap<String, Expr> {
     // Phase 1: collect candidate constant bodies keyed by name. A candidate
     // is the unwrapped value body of either the fn-wrapped zero-arg form or
     // the bare value-binding form. Parameterized fn defs are not candidates.
-    let mut candidates: HashMap<String, Expr> = HashMap::new();
+    let mut candidates: UnordMap<String, Expr> = UnordMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, _, kids)) = expr_parts(expr) else {
             continue;
         };
-        if tag(list) != Some("def") {
-            continue;
-        }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         let Some(body) = kids.get(1) else {
             continue;
         };
-        let candidate_body = match as_list(body) {
+        let candidate_body = match expr_parts(body) {
             // Fn-wrapped form: keep only the empty-params (zero-arg) case,
             // and take the unwrapped inner value body.
-            Some(fn_list) if tag(fn_list) == Some("fn") => {
-                let fn_kids = children(fn_list);
-                let Some(params_list) = fn_kids.first().and_then(as_list) else {
+            Some((DeepTag::Fn, _, fn_kids)) => {
+                let Some((DeepTag::Params, _, params_kids)) = fn_kids.first().and_then(expr_parts)
+                else {
                     continue;
                 };
-                if tag(params_list) != Some("params") || !children(params_list).is_empty() {
+                if !params_kids.is_empty() {
                     // Non-empty params => a parameterized function, not a
                     // constant. Not in the predicate grammar as a value.
                     continue;
@@ -320,9 +350,10 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
     // constant aliases and chains while excluding references to
     // non-constant or unbound names.
     candidates
-        .iter()
+        .to_sorted()
+        .into_iter()
         .filter(|(_, body)| {
-            let mut visiting = HashSet::new();
+            let mut visiting = UnordSet::new();
             is_constant_foldable(body, &candidates, &mut visiting)
         })
         .map(|(name, body)| (name.clone(), body.clone()))
@@ -333,23 +364,23 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
 /// (review-3): a literal, an application of an admitted arithmetic /
 /// intrinsic / comparison / boolean op over constant-foldable arguments, or
 /// a `(var name)` reference to another constant in `candidates`. `visiting`
-/// guards against cyclic constant references (e.g. `def a = b; def b = a`),
+/// guards against cyclic constant references (e.g. `def a() = b; def b() = a`),
 /// which are not foldable.
 fn is_constant_foldable(
     expr: &Expr,
-    candidates: &HashMap<String, Expr>,
-    visiting: &mut HashSet<String>,
+    candidates: &UnordMap<String, Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
-    let Some(list) = as_list(expr) else {
+    let Some((node_tag, _, kids)) = expr_parts(expr) else {
         // A bare atom (not wrapped in a Deep node) is not a value form.
         return false;
     };
-    match tag(list) {
+    match node_tag {
         // A literal value is the base constant.
-        Some("lit") => true,
+        DeepTag::Lit => true,
         // A reference folds only to another genuine constant; chase it.
-        Some("var") => {
-            let Some(name) = children(list).first().and_then(symbol_name) else {
+        DeepTag::Var => {
+            let Some(name) = kids.first().and_then(symbol_name) else {
                 return false;
             };
             if visiting.contains(name) {
@@ -367,8 +398,7 @@ fn is_constant_foldable(
         }
         // An application folds when the callee is an admitted predicate-
         // grammar op and every argument is itself constant foldable.
-        Some("app") => {
-            let kids = children(list);
+        DeepTag::App => {
             let Some(callee) = kids.first() else {
                 return false;
             };
@@ -398,7 +428,7 @@ fn is_constant_foldable(
 /// stable D-WF set and any drift is locked by the constant-folding tests.
 fn is_constant_grammar_op(op: &str) -> bool {
     const ARITH: &[&str] = &["add", "sub", "mul", "div", "neg"];
-    const COMPARISON: &[&str] = &["eq", "neq", "cmplt", "lte", "gte"];
+    const COMPARISON: &[&str] = &["eq", "neq", "cmplt", "gt", "lte", "gte"];
     const BOOL: &[&str] = &["and", "or", "not"];
     const INTRINSICS: &[&str] = &["abs", "min", "max", "sqrt", "exp", "log", "sin", "cos"];
     ARITH.contains(&op)
@@ -435,36 +465,24 @@ pub(crate) struct DecodeField {
 /// [`collect_type_invariants`]). The decode chokepoint uses this for the
 /// structural check (arity, names, scalar-vs-tensor-vs-adt field types)
 /// before invariant revalidation.
-pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<DecodeField>> {
-    let mut out = HashMap::new();
+pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> UnordMap<String, Vec<DecodeField>> {
+    let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Deftype, _, kids)) = expr_parts(expr) else {
             continue;
         };
-        if tag(list) != Some("deftype") {
-            continue;
-        }
-        let kids = children(list);
         for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
+            let Some((DeepTag::Variant, _, variant_kids)) = expr_parts(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some("variant") {
-                continue;
-            }
-            let variant_kids = children(variant_list);
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
             let mut fields = Vec::new();
             for field in variant_kids.iter().skip(1) {
-                let Some(field_list) = as_list(field) else {
+                let Some((DeepTag::Field, _, field_kids)) = expr_parts(field) else {
                     continue;
                 };
-                if tag(field_list) != Some("field") {
-                    continue;
-                }
-                let field_kids = children(field_list);
                 let Some(name) = field_kids.first().and_then(symbol_name) else {
                     continue;
                 };
@@ -492,18 +510,18 @@ pub(crate) fn collect_ctor_field_types(exprs: &[Expr]) -> HashMap<String, Vec<De
 /// (function types, generics, type variables) -- the chokepoint treats a
 /// field with no classifiable type as outside the decodable surface.
 fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
-    let list = as_list(expr)?;
-    match tag(list) {
-        Some("t-prim") => children(list)
+    let (tag, _, kids) = expr_parts(expr)?;
+    match tag {
+        DeepTag::TPrim => kids
             .first()
             .and_then(symbol_name)
             .and_then(prim_from_name)
             .map(DecodeFieldType::Prim),
-        Some("t-tensor") => children(list)
+        DeepTag::TTensor => kids
             .last()
             .and_then(extract_prim_from_type_expr)
             .map(DecodeFieldType::Tensor),
-        Some("t-adt") => children(list)
+        DeepTag::TAdt => kids
             .first()
             .and_then(symbol_name)
             .map(|name| DecodeFieldType::Adt(name.to_string())),
@@ -513,18 +531,26 @@ fn decode_field_type(expr: &Expr) -> Option<DecodeFieldType> {
 
 /// Parse `(fn {} (params {} <binder>) <body>)` into `(binder, body)`.
 fn parse_invariant_fn(expr: &Expr) -> Option<(String, Expr)> {
-    let list = as_list(expr)?;
-    if tag(list) != Some("fn") {
+    let (tag, _, kids) = expr_parts(expr)?;
+    if tag != DeepTag::Fn {
         return None;
     }
-    let kids = children(list);
-    let params = as_list(kids.first()?)?;
-    if tag(params) != Some("params") {
+    let (params_tag, _, params_kids) = expr_parts(kids.first()?)?;
+    if params_tag != DeepTag::Params {
         return None;
     }
-    let binder = children(params).first().and_then(symbol_name)?;
+    let binder = params_kids.first().and_then(symbol_name)?;
     let body = kids.get(1)?;
     Some((binder.to_string(), body.clone()))
+}
+
+/// Borrow the common stamped shape without reconstructing a legacy `List`.
+fn expr_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+    match expr {
+        Expr::List(list, _) => Some((tag(list)?, get_meta(list)?, children(list))),
+        Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
+        _ => None,
+    }
 }
 
 /// Render a [`InvariantPredicate`] body for a violation message. Uses the
@@ -562,6 +588,33 @@ fn strip_span_meta(expr: &mut Expr) {
             strip_span_meta(&mut meta.expr);
         }
         Expr::Atom(_, _) => {}
+        Expr::Node(..) => {
+            // Bridge: convert Node to List in place so mutable meta stripping works (#908).
+            let placeholder = Expr::Atom(Atom::Bool(false), Span::new(0, 0));
+            match std::mem::replace(expr, placeholder) {
+                Expr::Node(node, span) => {
+                    *expr = Expr::List(node.to_list(span), span);
+                    strip_span_meta(expr);
+                }
+                _ => unreachable!(),
+            }
+        }
+        // chelis#1087: span metadata inside either transitional variant
+        // would otherwise leak into the rendered invariant text.
+        Expr::BareList(elements, _) => {
+            for element in elements {
+                strip_span_meta(element);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            data.meta.entries.retain(|(key, _)| key != "span");
+            for (_, value) in &mut data.meta.entries {
+                strip_span_meta(value);
+            }
+            for child in &mut data.children {
+                strip_span_meta(child);
+            }
+        }
     }
 }
 
@@ -577,13 +630,13 @@ fn check_representation_finite(
     value: &RuntimeValue,
     type_name: &str,
     ctor: &str,
-    invariants: &HashMap<String, InvariantEntry>,
-    adt_fields: &HashMap<String, Vec<String>>,
+    invariants: &UnordMap<String, InvariantEntry>,
+    adt_fields: &UnordMap<String, Vec<String>>,
     path: &str,
 ) -> Result<(), InvariantViolation> {
     match value {
         RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-            let v = payload.bits().as_f64();
+            let v = payload.as_f64_lossy();
             if !v.is_finite() {
                 return Err(InvariantViolation::NonFiniteRepresentation {
                     type_name: type_name.to_string(),
@@ -594,12 +647,12 @@ fn check_representation_finite(
             Ok(())
         }
         RuntimeValue::Tensor(tensor) => {
-            for (index, elem) in tensor.value.data.iter().enumerate() {
+            for (index, elem) in tensor.value.to_f64_lossy_vec().into_iter().enumerate() {
                 if !elem.is_finite() {
                     return Err(InvariantViolation::NonFiniteRepresentation {
                         type_name: type_name.to_string(),
                         field_path: format!("{path}[{index}]"),
-                        detail: describe_non_finite(*elem),
+                        detail: describe_non_finite(elem),
                     });
                 }
             }
@@ -689,9 +742,9 @@ fn describe_non_finite(v: f64) -> String {
 /// See [`collect_zero_arg_constants`].
 pub(crate) fn revalidate_adt_value(
     value: &RuntimeValue,
-    invariants: &HashMap<String, InvariantEntry>,
-    adt_fields: &HashMap<String, Vec<String>>,
-    module_constants: &HashMap<String, Expr>,
+    invariants: &UnordMap<String, InvariantEntry>,
+    adt_fields: &UnordMap<String, Vec<String>>,
+    module_constants: &UnordMap<String, Expr>,
 ) -> Result<(), InvariantViolation> {
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
         // Non-ADT values carry no opaque invariant; structural decode has
@@ -748,23 +801,28 @@ pub(crate) fn revalidate_adt_value(
     // In-module zero-argument constants (CR-3) are registered as
     // top_level_defs so a predicate referencing e.g. a tolerance `eps`
     // resolves it to its value instead of dying on "unknown runtime name".
-    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
-        bindings: HashMap::new(),
-        binding_types: HashMap::new(),
-        named_axis_route_cache: HashMap::new(),
-        named_axis_route_visiting: HashSet::new(),
+        bindings: UnordMap::new(),
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
         top_level_defs: module_constants.clone(),
-        type_env: HashMap::new(),
+        declared_signatures: UnordMap::new(),
+        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        type_env: UnordMap::new(),
         adt_fields: adt_fields.clone(),
-        // Invariant predicates never route through grad marshalling, so
-        // the rejection map is not needed here.
-        adt_grad_rejections: HashMap::new(),
         tensor_bindings: &empty_tensors,
+        program: None,
+        def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
+        // Invariant predicates run inside an enclosing evaluation, so they
+        // honour whatever token that evaluation installed (chelis#914).
+        cancel: chelis_types::current_cancel_token(),
     };
     ctx.bindings.insert(pred.binder.clone(), value.clone());
 
@@ -781,10 +839,117 @@ pub(crate) fn revalidate_adt_value(
             invariant: invariant_text,
             reason: format!("predicate did not evaluate to a boolean (got {other:?})"),
         }),
+        // Cancellation is the enclosing evaluation's state, not a defect in
+        // this predicate: pass the sentinel through before the attributing
+        // arm below can claim it (chelis#914 review).
+        Err(reason) if chelis_types::is_cancellation(&reason) => {
+            Err(InvariantViolation::Cancelled { reason })
+        }
         Err(reason) => Err(InvariantViolation::PredicateError {
             type_name: pred.type_name.clone(),
             invariant: invariant_text,
             reason,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_deep::ast::{MetaMap, UnknownFormData};
+
+    fn sp() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn span_entry() -> (String, Expr) {
+        (
+            "span".to_string(),
+            Expr::Atom(Atom::Str("surf:0..1".to_string()), sp()),
+        )
+    }
+
+    /// True when any metadata map anywhere in `expr` still carries a `span`
+    /// entry.
+    fn mentions_span_key(expr: &Expr) -> bool {
+        match expr {
+            Expr::Atom(_, _) => false,
+            Expr::Map(map, _) => {
+                map.entries.iter().any(|(key, _)| key == "span")
+                    || map
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+            }
+            Expr::MetaExpr(meta, _) => {
+                meta.entries.iter().any(|(key, _)| key == "span")
+                    || meta
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || mentions_span_key(&meta.expr)
+            }
+            Expr::List(list, _) => list.elements.iter().any(mentions_span_key),
+            Expr::Node(node, _) => {
+                node.meta().entries.iter().any(|(key, _)| key == "span")
+                    || node
+                        .meta()
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || node.children_slice().iter().any(mentions_span_key)
+            }
+            Expr::BareList(elements, _) => elements.iter().any(mentions_span_key),
+            Expr::UnknownForm(data) => {
+                data.meta.entries.iter().any(|(key, _)| key == "span")
+                    || data
+                        .meta
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || data.children.iter().any(mentions_span_key)
+            }
+        }
+    }
+
+    /// chelis#1087: `strip_span_meta` must reach span metadata inside both
+    /// transitional variants, or the rendered invariant text leaks
+    /// span-annotated desugar output.
+    #[test]
+    fn strip_span_meta_reaches_bare_list_and_unknown_form() {
+        let mut expr = Expr::BareList(
+            vec![
+                Expr::Map(
+                    MetaMap {
+                        entries: vec![span_entry()],
+                    },
+                    sp(),
+                ),
+                Expr::UnknownForm(Box::new(UnknownFormData {
+                    head: "mystery".to_string(),
+                    meta: MetaMap {
+                        entries: vec![span_entry()],
+                    },
+                    children: vec![Expr::BareList(
+                        vec![Expr::Map(
+                            MetaMap {
+                                entries: vec![span_entry()],
+                            },
+                            sp(),
+                        )],
+                        sp(),
+                    )],
+                    span: sp(),
+                })),
+            ],
+            sp(),
+        );
+        assert!(mentions_span_key(&expr), "fixture carries span metadata");
+        strip_span_meta(&mut expr);
+        assert!(
+            !mentions_span_key(&expr),
+            "span metadata inside transitional variants must be stripped \
+             (a span key survived under a BareList or UnknownForm child)"
+        );
     }
 }
