@@ -19,17 +19,12 @@ pub(super) enum SchedulePoint {
 
 #[derive(Debug)]
 struct ExpandedCfg {
-    #[allow(
-        dead_code,
-        reason = "retained as a sealed expanded-CFG scheduling fact"
-    )]
     successors: BTreeMap<SchedulePoint, BTreeSet<SchedulePoint>>,
     #[allow(
         dead_code,
         reason = "retained as a sealed expanded-CFG scheduling fact"
     )]
     predecessors: BTreeMap<SchedulePoint, BTreeSet<SchedulePoint>>,
-    postdominators: BTreeMap<SchedulePoint, BTreeSet<SchedulePoint>>,
 }
 
 #[derive(Debug)]
@@ -51,8 +46,7 @@ impl ScheduleFacts {
     ) -> bool {
         self.cfgs
             .get(&unit)
-            .and_then(|cfg| cfg.postdominators.get(&point))
-            .is_some_and(|set| set.contains(&candidate))
+            .is_some_and(|cfg| point_postdominates(cfg, candidate, point))
     }
 
     #[cfg(test)]
@@ -371,47 +365,28 @@ fn expanded_cfg(unit: &Unit) -> Result<ExpandedCfg, OwnershipError> {
             "expanded CFG contains an unreachable scheduling point",
         ));
     }
-    let mut postdominators = successors
-        .keys()
-        .map(|point| {
-            (
-                *point,
-                if *point == SchedulePoint::Exit {
-                    BTreeSet::from([SchedulePoint::Exit])
-                } else {
-                    all.clone()
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    loop {
-        let mut changed = false;
-        for (&point, next) in &successors {
-            if point == SchedulePoint::Exit {
-                continue;
-            }
-            let mut intersection = all.clone();
-            for successor in next {
-                intersection = intersection
-                    .intersection(&postdominators[successor])
-                    .copied()
-                    .collect();
-            }
-            intersection.insert(point);
-            if postdominators[&point] != intersection {
-                postdominators.insert(point, intersection);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
     Ok(ExpandedCfg {
         successors,
         predecessors,
-        postdominators,
     })
+}
+
+fn point_postdominates(cfg: &ExpandedCfg, candidate: SchedulePoint, point: SchedulePoint) -> bool {
+    if !cfg.successors.contains_key(&candidate) || !cfg.successors.contains_key(&point) {
+        return false;
+    }
+    let mut pending = vec![point];
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if current == candidate || !visited.insert(current) {
+            continue;
+        }
+        if current == SchedulePoint::Exit {
+            return false;
+        }
+        pending.extend(cfg.successors.get(&current).into_iter().flatten().copied());
+    }
+    true
 }
 
 fn remove_provisionals(unit: &mut Unit) -> Result<Vec<Seed>, OwnershipError> {
@@ -1200,11 +1175,7 @@ fn require_postdominates(
     candidate: SchedulePoint,
     point: SchedulePoint,
 ) -> Result<(), OwnershipError> {
-    if cfg
-        .postdominators
-        .get(&point)
-        .is_some_and(|postdominators| postdominators.contains(&candidate))
-    {
+    if point_postdominates(cfg, candidate, point) {
         Ok(())
     } else {
         Err(invariant(

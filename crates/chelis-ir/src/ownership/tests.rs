@@ -2629,6 +2629,37 @@ fn diamond_uses_the_post_dominating_join_instead_of_lexical_block_order() {
 }
 
 #[test]
+fn postdominance_queries_scale_over_long_straight_line_cfgs() {
+    const OP_COUNT: u32 = 4_096;
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            (0..OP_COUNT).map(|_| borrow_op(0)).collect(),
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::ExternalBorrow))]),
+    );
+    let unit = &program.units[0];
+    let entry = super::last_use::SchedulePoint::BlockEntry(BlockId(0));
+    let first = super::last_use::SchedulePoint::AfterOperation {
+        block: BlockId(0),
+        operation: OpId(0),
+    };
+    let last = super::last_use::SchedulePoint::AfterOperation {
+        block: BlockId(0),
+        operation: OpId(OP_COUNT - 1),
+    };
+
+    super::last_use::require_postdominates_for_test(unit, last, entry).unwrap();
+    assert!(matches!(
+        super::last_use::require_postdominates_for_test(unit, first, last),
+        Err(OwnershipError::LoweringInvariant { detail, .. })
+            if detail.contains("does not post-dominate")
+    ));
+}
+
+#[test]
 fn stale_provisionals_are_rejected() {
     let mut stale = roots(
         vec![block(0, vec![], vec![define(0)], Terminator::Exit)],
