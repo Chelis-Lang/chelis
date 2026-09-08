@@ -737,7 +737,19 @@ def _is_undecided(
         # than kept, because a comparison that cannot fire reads as coverage
         # and is worse than an absent one. Recovering the path the process
         # actually named would mean resolving runs of space-joined command
-        # tokens, which is more machinery than this branch is worth.
+        # tokens. That was first written off as more machinery than this
+        # branch is worth; a reviewer then measured it at about nine lines
+        # inside this branch, bounded to runs of six tokens, breaking nothing
+        # in the suite but the row that pins this gap. That exception is the
+        # important half: the pin row asserts the gap is still open, so an
+        # EFFECTIVE fix must fail it, and a green suite after an attempted fix
+        # is the signature of a repair that does not work. That is exactly how
+        # the dead clause above was caught. So cost is not the reason this is
+        # open. It is open because the defect needs whitespace in the checkout
+        # path AND a non-canonical spelling together, and because this branch
+        # had already taken two repairs that each introduced a defect, so its
+        # next change should be made deliberately rather than in passing. That
+        # is a live judgement call, not a settled one.
         #
         # The command line is the ONLY input to this program whose spelling it
         # does not control; every path it compares against is canonical by
