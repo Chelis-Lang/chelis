@@ -125,6 +125,23 @@ const ZERO_BROADCAST: &str = "module Repro.ExpandZero\n\
 def empty(x: tensor[2, 1, f32]) -> tensor[2, 0, f32] = expand(&x, 1, 0i64)\n\
 out = empty(to_tensor([[cast(1.0, f32)], [cast(2.0, f32)]]))\n";
 
+/// An operand whose extent is computed INSIDE the function, so section 4.7
+/// places the claim's guard locally rather than at entry.
+///
+/// `shrink` with a runtime end produces an op-declared extent: no input
+/// carries it, so the entry guard cannot see it and the claim has to be
+/// checked at the operation that makes it.
+const LOCAL_NON_UNIT_SOURCE: &str = "module Repro.ExpandLocalRefuted\n\
+sig f: tensor[n, f32] -> tensor[3, f32]\n\
+def f(x) = expand(shrink(&x, [[0i64, sub(shape(&x, 0), 1i64)]]), 0, 3i64)\n\
+out = f(to_tensor([cast(7.0, f32), cast(9.0, f32), cast(11.0, f32)]))\n";
+
+/// The same shape over an operand the shrink leaves at extent 1.
+const LOCAL_UNIT_SOURCE: &str = "module Repro.ExpandLocalSatisfied\n\
+sig f: tensor[n, f32] -> tensor[3, f32]\n\
+def f(x) = expand(shrink(&x, [[0i64, sub(shape(&x, 0), 2i64)]]), 0, 3i64)\n\
+out = f(to_tensor([cast(7.0, f32), cast(9.0, f32), cast(11.0, f32)]))\n";
+
 /// A literal operand extent that refutes the claim statically.
 const STATIC_NON_UNIT_SOURCE: &str = "module Repro.ExpandStaticNonUnit\n\
 def bad(x: tensor[2, 4, f32]) -> tensor[2, 3, f32] = expand(&x, 1, 3i64)\n";
@@ -1203,5 +1220,147 @@ fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval() {
         stderr.contains("axis 0 is 1") && stderr.contains("observed 2"),
         "the accompanying context names the axis and the value observed, which \
          §4.7 requires on separate lines from the trap: {stderr}"
+    );
+}
+
+/// A LOCALLY placed unit-extent claim is guarded on C, at its operation.
+///
+/// `spec/04-type-system.md` section 4.7 splits placement by operand class: a
+/// guard whose operands are all interface values runs at entry, and one that
+/// "compares a locally computed value (checked integer arithmetic, a
+/// user-function result, or an extent an operation computes) is evaluated
+/// after its producers and takes the source position of the operation that
+/// introduces the guarded extent". The `<op>` slot follows the same rule, so
+/// this one renders `expand` where the entry rows render `load`.
+///
+/// EVIDENTIARY STATUS: regression test, and it is the reason this row exists.
+/// The first cut of chelis#1277 S2b derived the Local case and then wired only
+/// the Entry consumers, so the compiled kernel for this program emitted ZERO
+/// `chelis_numeric_trap` and printed `[7.0, 7.0, 7.0]` at exit 0: element 0 of
+/// a two-element axis, broadcast in silence. That is the wrong answer the flip
+/// exists to remove, arriving on the lane that matters most.
+#[test]
+fn a_local_unit_extent_claim_traps_at_its_operation_on_c() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // The control first: the same shape with an operand the shrink leaves at
+    // extent 1 executes, so the guard fires on the disagreement rather than on
+    // the local placement.
+    let ok_path = fixture(&dir, "local_unit.ch", LOCAL_UNIT_SOURCE);
+    let ok_out = dir.path().join("local-unit-out");
+    let build = build_c(&ok_path, &ok_out);
+    assert!(
+        build.status.success(),
+        "a satisfied local claim must build: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(
+        common::link_generated(&ok_out, "local_unit.c", "local_unit").success(),
+        "the satisfied program must link"
+    );
+    let ran = std::process::Command::new(ok_out.join("local_unit"))
+        .output()
+        .expect("compiled satisfied program");
+    let ok_stdout = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success() && ok_stdout.contains("shape=[3]"),
+        "a satisfied local claim broadcasts: {ok_stdout}{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let path = fixture(&dir, "local_refuted.ch", LOCAL_NON_UNIT_SOURCE);
+    let out_dir = dir.path().join("local-refuted-out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "a refuted claim is a RUNTIME failure, so the build still succeeds: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted =
+        std::fs::read_to_string(out_dir.join("local_refuted.c")).expect("C source is written");
+    assert!(
+        emitted.contains(&format!("{}\");", domain_trap_line("expand"))),
+        "the emitted kernel carries the claim's guard, rendering [04-NUM-9] \
+         with `expand` as the introducing operation:\n{emitted}"
+    );
+    assert!(
+        common::link_generated(&out_dir, "local_refuted.c", "local_refuted").success(),
+        "the refuted program must still link"
+    );
+    let ran = std::process::Command::new(out_dir.join("local_refuted"))
+        .output()
+        .expect("compiled refuted program");
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        !ran.status.success(),
+        "an operand extent of 2 under a unit claim must not produce a value: \
+         {stdout}"
+    );
+    assert!(
+        !stdout.contains("data=[7.0, 7.0, 7.0]"),
+        "and must not broadcast element 0 of a two-element axis: {stdout}"
+    );
+    assert!(
+        stderr.contains(&domain_trap_line("expand")),
+        "the trap line names the operation that introduces the claim: {stderr}"
+    );
+    assert!(
+        stderr.contains("claimed = 1") && stderr.contains("axis 0 = 2"),
+        "with section 4.7's context on its own line: {stderr}"
+    );
+}
+
+/// The HIP lane carries the locally placed claim too, through the shared host
+/// lowering rather than through a HIP-specific guard.
+///
+/// This is the honest disposition for that lane, and it is not the one the
+/// plan assumed. The HIP emitter contains no local guard emission of its own:
+/// `local_dim_guard_sites` has no reader there. Nor does HIP DEVICE codegen
+/// ever see this shape, because `reject_unsupported_hip_ops` refuses a
+/// node-valued movement bound before codegen (chelis#616), and calling the HIP
+/// emitter directly on such a graph panics on that backstop. What the user
+/// gets from `build --target hip` is the C emitter's host lowering, which S2b's
+/// change reaches, so the claim is guarded on this lane by construction.
+///
+/// The row exists because "by construction" is exactly the kind of claim that
+/// stops being true silently. If the host sharing ever ends, this fails.
+///
+/// EVIDENTIARY STATUS: regression test. Before the Local arm had consumers the
+/// emitted HIP host source carried no comparison against 1 at all.
+#[test]
+fn a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "local_refuted_hip.ch", LOCAL_NON_UNIT_SOURCE);
+    let out_dir = dir.path().join("local-refuted-hip-out");
+
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            "--allow-style-violations",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("hip build");
+    assert!(
+        build.status.success(),
+        "the HIP build routes this program to the host lane and succeeds: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = std::fs::read_to_string(out_dir.join("local_refuted_hip_hip.cpp"))
+        .expect("HIP host source is written");
+    assert!(
+        emitted.contains(&format!("{}\");", domain_trap_line("expand"))),
+        "the emitted host source carries the claim's guard:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("extent `1`: claimed = %lld"),
+        "with section 4.7's context on its own line:\n{emitted}"
     );
 }

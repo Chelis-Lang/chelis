@@ -558,6 +558,24 @@ the defect class this slice removes.
   class - `load` at entry for an input operand's axis, the introducing `expand`
   otherwise. One more claim kind, one placement rule, one renderer.
 
+  **Both placements ship, and the consumers are named because deriving one
+  without them is how the claim goes silent.** The first cut of this derivation
+  computed `Local` and wired only the `Entry` consumers, so `trap_op`'s
+  `expand` arm had exactly one caller, an inventory test, and a compiled kernel
+  broadcast element 0 of a two-element axis at exit 0. The consumers that ship:
+
+  | placement | C | HIP | eval |
+  |---|---|---|---|
+  | `Entry` | the input shape preamble | its host prologue | before the first node evaluates |
+  | `Local` | `local_dim_guard_sites`, emitted at the operand's declaring site | the same host lowering, shared with C | at the `Expand` node's execution |
+
+  Two consequences worth stating rather than rediscovering. A site may now
+  DECLARE and GUARD: the operand's axis is often declared by its own producer,
+  and returning after the declaration made every local claim unreachable. And
+  HIP needs no lane-specific work here, because a node-valued movement bound
+  never reaches HIP device codegen at all ([#616] refuses it) and the program
+  is routed to the shared host lowering, which is where the guard already is.
+
 ### C3 Positional expand uses one normative protocol
 
 The implementation derives its action from `spec/04` §4.7.2 rather than

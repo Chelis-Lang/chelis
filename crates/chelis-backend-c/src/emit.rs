@@ -6776,11 +6776,22 @@ impl CEmitter {
     /// Load-declared in the prologue or declared by an earlier op — the
     /// checker unified them, so a disagreement is a real shape error).
     fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
+        // Declaring and guarding are not exclusive. The legacy walk owns
+        // declarations and the derivation owns guards, so an axis that
+        // declares its own extent may ALSO be the axis another operation
+        // makes a claim about: chelis#1277 S2b's unit-extent claim is exactly
+        // that shape, since it asserts something about the `expand`'s
+        // OPERAND, whose own axis a producer such as `shrink` has already
+        // declared. Returning after the declaration made every such guard
+        // unreachable, which is how a compiled kernel came to broadcast
+        // element 0 of a two-element axis in silence.
         if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
             let name = name.clone();
             self.declared_dim_names.insert(name.clone());
             self.line(&format!("int64_t {name} = {extent_expr};"));
-            return;
+            if !self.local_dim_guard_sites.contains_key(&(id, axis)) {
+                return;
+            }
         }
         // The guard site and the claim it compares against are the
         // derivation's, and the rendering is [04-NUM-9]'s: the complete

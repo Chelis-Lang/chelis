@@ -2281,6 +2281,21 @@ where
             .map(|claim| claim.node.0)
             .collect();
 
+    // The unit-extent claims section 4.7 places LOCAL, which the entry loop
+    // above cannot reach: it compares `resolved_inputs`, and a locally placed
+    // claim is about an extent no input carries, one an operation computes
+    // inside this function. Those are checked at the `expand` that makes them,
+    // "after its producers and before the first allocation or element access
+    // whose shape depends on the guarded extent". The derivation stays the
+    // authority on WHICH nodes owe one; the arm below only reads the extent
+    // actually observed.
+    let local_unit_extent_claims: chelis_unord::UnordSet<usize> =
+        crate::axis_sources::derive_unit_extent_claims(dag)
+            .into_iter()
+            .filter(|claim| claim.placement(dag) == crate::axis_sources::GuardPlacement::Local)
+            .map(|claim| claim.node.0)
+            .collect();
+
     for node in bound_dag.nodes() {
         if let Some(cancel) = &cancel
             && cancel.is_cancelled()

@@ -344,6 +344,34 @@ impl<'a> VerifiedDagView<'a> {
                 ));
             }
         }
+
+        // chelis#1277 S2b: the unit-extent claims section 4.7 places LOCAL,
+        // beside the class members above and through the same emission.
+        //
+        // The site is keyed on the OPERAND's axis, because that is the extent
+        // the guard reads: the claim asserts something about the operand, not
+        // about the `expand`'s own output axis, and keying it on the `expand`
+        // would hand the emitter the width being broadcast TO rather than the
+        // extent being claimed. The claimed value is the literal 1, so both
+        // the reported claim and the comparison operand are `1`.
+        //
+        // `op` comes from the claim rather than from the operand's own
+        // operation. Section 4.7's `<op>` names "the operation that introduces
+        // the guarded extent", which is the `expand` making the claim, not
+        // whichever operation happened to produce the operand.
+        for claim in crate::axis_sources::derive_unit_extent_claims(self.dag) {
+            if claim.placement(self.dag) != crate::axis_sources::GuardPlacement::Local {
+                continue;
+            }
+            sites.push((
+                (claim.operand.0, claim.axis),
+                LocalGuardClaim {
+                    claim: "1".to_string(),
+                    operand: "1".to_string(),
+                    op: claim.trap_op(self.dag),
+                },
+            ));
+        }
         sites
     }
 

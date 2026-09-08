@@ -337,3 +337,82 @@ fn a_unit_operand_extent_satisfies_the_claim_and_broadcasts() {
         "and repeats the single element across it"
     );
 }
+
+/// A LOCALLY placed unit-extent claim, on this evaluator.
+///
+/// The operand's extent is computed by a `Shrink` with a node-valued end, so
+/// no input carries it and the entry loop cannot see it. `spec/04-type-system.md`
+/// section 4.7 places such a guard "after its producers and takes the source
+/// position of the operation that introduces the guarded extent", which is the
+/// `expand`, and gives its `<op>` slot the same name.
+///
+/// EVIDENTIARY STATUS: regression test. The first cut of S2b derived the Local
+/// case and wired only the entry consumer, so this program evaluated to a
+/// broadcast of element 0 of a two-element axis.
+fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", vec![named("n")]);
+    // A movement bound source is extent-domain and therefore exactly `int64`
+    // ([05-DIM-1]); the f32 helper above is for tensor operands.
+    let end = dag.add_node(
+        RiscOp::Load { name: "end".into() },
+        vec![],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    let shrunk = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(RtDim::Lit(0), RtDim::Node(end_slot))],
+        },
+        vec![x, end],
+        ty(vec![named("_rt_shrink")], Prim::F32),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(3),
+        },
+        vec![shrunk],
+        ty(vec![DimInfo::Lit(3)], Prim::F32),
+        None,
+    );
+    dag.add_root(out);
+    (dag, out)
+}
+
+#[test]
+fn a_locally_placed_unit_claim_traps_at_the_expand_that_makes_it() {
+    let (dag, root) = local_unit_extent_claim_dag(1);
+    let err = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
+        // Shrink to two elements, which refutes the claim.
+        "end" => Some(TensorValue::scalar(2.0)),
+        _ => None,
+    })
+    .expect_err("a computed operand extent of 2 must not broadcast under a unit claim");
+    assert!(
+        err.contains(&domain_trap_line("expand")),
+        "a locally placed guard names the operation that introduces the claim, \
+         not `load`: {err}",
+    );
+    assert!(
+        err.contains("claimed = 1") && err.contains("axis 0 = 2"),
+        "with the axis and the value observed for it: {err}",
+    );
+}
+
+/// The control: the same graph shrunk to one element satisfies the claim.
+#[test]
+fn a_locally_placed_unit_claim_that_holds_broadcasts() {
+    let (dag, root) = local_unit_extent_claim_dag(1);
+    let values = eval_tensor_roots_with_strict(&dag, &[root], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![7.0, 9.0, 11.0])),
+        "end" => Some(TensorValue::scalar(1.0)),
+        _ => None,
+    })
+    .expect("a computed operand extent of 1 satisfies the claim");
+    let out = &values[&root];
+    assert_eq!(out.shape, vec![3]);
+    assert_eq!(out.to_f64_lossy_vec(), vec![7.0, 7.0, 7.0]);
+}

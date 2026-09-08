@@ -151,9 +151,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/eval.rs",
-        3,
+        4,
         0,
-        "DAG evaluator messages for `RiscOp::Expand`, the one IR op both spellings lower to",
+        "DAG evaluator messages for `RiscOp::Expand`, the one IR op both spellings lower to. The fourth is the locally placed unit-extent claim's [04-NUM-9] line, which names `expand` because section 4.7 gives a local guard the operation that introduces the claim rather than the `load` an entry guard names",
     ),
     (
         "crates/chelis-ir/src/grad.rs",
