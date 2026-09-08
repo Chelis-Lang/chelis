@@ -43,11 +43,11 @@ NOT be published as a frozen low-level guarantee while the implementation evolve
 - **WHEN** documenting `.chb`
 - **THEN** the project does not publish a frozen low-level layout guarantee while the format is still expected to evolve
 
-### Requirement: Exact WireDag schema version 7
+### Requirement: Exact WireDag schema version 8
 
-The compiler-API JSON WireDag surface SHALL carry explicit schema version 7,
-and version 7 SHALL be the only accepted version. Missing, versionless,
-versions 1 through 6, future, unknown-variant, and best-effort payloads SHALL
+The compiler-API JSON WireDag surface SHALL carry explicit schema version 8,
+and version 8 SHALL be the only accepted version. Missing, versionless,
+versions 1 through 7, future, unknown-variant, and best-effort payloads SHALL
 fail before IR construction. `Count.axes` SHALL already be the complete
 non-empty unique normalized original-axis vector in strictly descending order;
 encoder and decoder both reject a noncanonical vector. `Pad.fill` SHALL be a
@@ -59,7 +59,7 @@ output's exact float dtype and dimensions.
 
 #### Scenario: Unknown or older schema fails before IR construction
 
-- **WHEN** a consumer receives a versionless, v1-v6, future-version, or unknown-variant WireDag payload
+- **WHEN** a consumer receives a versionless, v1-v7, future-version, or unknown-variant WireDag payload
 - **THEN** decoding fails before any IR node is materialized
 
 #### Scenario: Noncanonical Count axes are not rewritten
@@ -76,6 +76,30 @@ output's exact float dtype and dimensions.
 
 - **WHEN** a `Relu` or `ReluAdjoint` node crosses the compiler-API boundary
 - **THEN** its dedicated identity, exact arity, float dtype, and dimensions are validated before IR construction rather than reconstructed as an extrema operation
+
+### Requirement: Exact numeric wire and role admission
+
+Execution payloads SHALL carry exact schema version 3. The value codec and
+source, reference, extent and report domains SHALL follow the controlling
+[serialization chapter §§3.2–3.5](../../../spec/10-serialization.md#32-exact-numeric-value-codec).
+General float payloads SHALL carry dtype-tagged fixed-width lowercase IEEE hex
+bits, preserving signed zero and every NaN payload; report JSON numbers SHALL
+use the chapter's exact fixed-dtype adapters over sealed numeric carriers.
+
+#### Scenario: Every float bit pattern is transportable
+
+- **WHEN** a numeric value crosses a general execution or DAG value boundary
+- **THEN** the codec preserves the exact dtype and stored bits, including infinity and signed zero
+
+#### Scenario: Wrong encoding is rejected
+
+- **WHEN** a general float payload uses a JSON number, null, wrong-width bits, or a mismatched dtype
+- **THEN** decoding rejects it without guessing, rounding, or supplying a default
+
+#### Scenario: Structural roles do not spread to numeric siblings
+
+- **WHEN** a report value or source numeric literal shares a container with a source coordinate
+- **THEN** each leaf retains its own numeric or source-syntax contract and normal admission
 
 ### Requirement: Decode-boundary invariant revalidation
 

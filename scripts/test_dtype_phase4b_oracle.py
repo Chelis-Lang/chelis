@@ -63,6 +63,43 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
+    def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
+        cases = (
+            ("spec/10-serialization.md", "Schema version 8 is explicitly\npresent", "wire v8 presence"),
+            ("spec/10-serialization.md", "`schema_version: 3`", "execution v3 exactness"),
+            ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
+            ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
+            ("spec/10-serialization.md", "A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
+            ("spec/10-serialization.md", "A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
+            ("spec/10-serialization.md", "Bounds alone never establish transport authority.", "wire report numeric authority"),
+            ("spec/04-type-system.md", "untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),
+            ("spec/11-ffi.md", "Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),
+            ("spec/11-ffi.md", "DLPack keywords are validated, never ignored.", "binding DLPack keyword admission"),
+            ("spec/design/dtype_semantics.md", "No partial WireDag v8 is published.", "wire atomic cutover"),
+        )
+        for relative, required, label in cases:
+            with self.subTest(label=label):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertTrue(required in original, f"missing decided contract: {label}")
+                path.write_text(original.replace(required, "REMOVED CONTRACT", 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(label)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_python_shape_registry_is_exact_and_not_the_c_shape_atom(self) -> None:
+        self.assertEqual(
+            oracle.EXPECTED_OP_MANIFESTS["05-OP-45"],
+            ("| full tensor shape | `chelis_python::NativeTensor::shape(self: &Self) -> Vec<i64>` |",),
+        )
+        self.replace(
+            Path("spec/registry/python_tensor_metadata.md"),
+            "-> Vec<i64>",
+            "-> Vec<usize>",
+        )
+        self.assert_contract_fails("05-OP-45")
+
     # The whole-file digest tests these replaced now live in
     # FrozenContractChangeTests, which runs the same mutations against the
     # merge-base acknowledgement gate.
@@ -2199,8 +2236,13 @@ class ContractValidationTests(unittest.TestCase):
             path = self.root / relative
             with self.subTest(atom=atom):
                 original = path.read_text(encoding="utf-8")
-                self.assertIn(rows[1], original)
-                path.write_text(original.replace(rows[1], rows[0], 1), encoding="utf-8")
+                self.assertIn(rows[0], original)
+                mutated = (
+                    original.replace(rows[1], rows[0], 1)
+                    if len(rows) > 1
+                    else original.replace(rows[0], rows[0] + "\n" + rows[0], 1)
+                )
+                path.write_text(mutated, encoding="utf-8")
                 try:
                     self.assert_contract_fails(f"{atom}.*exact manifest")
                 finally:
@@ -3312,7 +3354,7 @@ class ContractValidationTests(unittest.TestCase):
                 "wire Pad payload rejection",
             ),
             (
-                "No v5\nnumeric-fill migration or inferred fill dtype exists",
+                "No\nnumeric-fill migration or inferred fill dtype exists",
                 "A v5 numeric fill migrates by inferring f64",
                 "wire Pad no compatibility",
             ),
@@ -4444,14 +4486,14 @@ class FrozenContractChangeTests(unittest.TestCase):
 
     def test_unchanged_tree_passes(self) -> None:
         report = self.check()
-        self.assertIn("0 of 29 contract files changed", report[0])
+        self.assertIn("0 of 30 contract files changed", report[0])
 
     def test_every_contract_file_is_watched(self) -> None:
         # The converted whole-file-digest test. Contradictory prose prepended
         # to any contract file must fail, and the failure must name the file.
-        # The watched set is now all 29 CONTRACT_FILES, a superset of the 22
+        # The watched set is now all 30 CONTRACT_FILES, a superset of the 22
         # that carried a whole-file digest.
-        self.assertEqual(len(CONTRACT_FILES), 29)
+        self.assertEqual(len(CONTRACT_FILES), 30)
         for relative in oracle.CONTRACT_FILES:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -4544,7 +4586,7 @@ class FrozenContractChangeTests(unittest.TestCase):
     def test_an_acknowledged_change_passes(self) -> None:
         self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
         report = self.check(acknowledgements=("spec/11-ffi.md",))
-        self.assertIn("1 of 29 contract files changed", report[0])
+        self.assertIn("1 of 30 contract files changed", report[0])
         self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_a_body_line_acknowledges_the_change(self) -> None:
@@ -4649,7 +4691,7 @@ class FrozenContractChangeTests(unittest.TestCase):
         report = self.check(
             acknowledgements=("spec/10-serialization.md",)
         )
-        self.assertIn("1 of 29 contract files changed", report[0])
+        self.assertIn("1 of 30 contract files changed", report[0])
 
     def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
         # Round 1 F3. Reading a failed `git show` as "absent at the merge base"
