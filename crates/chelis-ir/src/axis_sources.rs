@@ -990,6 +990,27 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
     }
 }
 
+/// The `RtDim` carrier an operation computes this output axis's extent from,
+/// when the axis is one [`sets_axis`] admits as a witness.
+///
+/// This is the same C1.7 owner matrix `sets_axis` reads, returning the carrier
+/// rather than a bit, so a lane that has to EVALUATE the guarded quantity gets
+/// it from the derivation instead of re-deriving which operand holds it. The
+/// C emitter already has the carrier in hand at each site (it renders the
+/// extent expression there); the DAG evaluator does not, and asking the
+/// question twice is exactly the divergence C2.7 forbids.
+///
+/// A `Sym` or `Lit` carrier is deliberately absent: neither computes an
+/// extent, and `sets_axis` does not make either a witness on a `Reshape`.
+pub fn local_guard_extent_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
+    let carrier = match op {
+        RiscOp::Expand { axis: set, size } if axis == *set => size,
+        RiscOp::Reshape { new_shape } => new_shape.get(axis)?,
+        _ => return None,
+    };
+    matches!(carrier, RtDim::Node(_) | RtDim::InputAxis { .. }).then_some(carrier)
+}
+
 /// Whether this axis is a member of its claim's class.
 ///
 /// Three rules, each from a normative sentence:

@@ -1570,3 +1570,79 @@ fn a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c() {
         "the agreeing program produces its declared shape: {out}"
     );
 }
+
+/// reshape.named_claim.node_target.eval
+///
+/// The eval lane reaches this guard because B2h routes a host-lane def through
+/// the kernel the C lane emits for it, so once `reshape` is off the keep-list
+/// the same DAG, the same class and the same site serve both lanes.
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing on the tree with
+/// `reshape` already off the keep-list and no local guard in the DAG
+/// evaluator, where eval printed `out = tensor(shape=[2, 2], ...)` and exited
+/// 0 while the compiled binary trapped.
+#[test]
+fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "node_target_eval.ch", &node_target_source("n", 2));
+    assert!(
+        !ok,
+        "the claimed extent disagrees, so eval must fail: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("reshape")),
+        "eval renders [04-NUM-9]'s line for the same guard the C lane emits: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 4"),
+        "section 4.7's context line carries the claim and each observed value: {out}"
+    );
+    assert!(
+        !out.contains("reshape expects"),
+        "the extent guard is observed before the evaluator's own numel check: {out}"
+    );
+}
+
+/// The discriminating twin on eval, for the same reason as its C sibling.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "node_target_ok_eval.ch", &node_target_source("n", 1));
+    assert!(ok, "the claimed extent agrees, so eval must run: {out}");
+    assert!(
+        out.contains("shape=[4, 1]"),
+        "the agreeing program produces its declared shape: {out}"
+    );
+}
+
+/// The correct spelling of chelis#1375's program: the computed extent gets a
+/// binder of its own rather than restating the operand's. No claim is shared,
+/// so no class forms, no guard exists, and both lanes produce the real shape.
+///
+/// This is the row that says the repair rejects a WRONG claim rather than a
+/// computed target, which is the failure mode a guard placed on the carrier
+/// instead of on the class would have.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = node_target_source("m", 2);
+    let (ok, out) = eval_result(&dir, "fresh_binder_eval.ch", &source);
+    assert!(ok, "a fresh binder claims nothing to disagree with: {out}");
+    assert!(
+        out.contains("shape=[2, 2]"),
+        "eval produces the real shape: {out}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (c_ok, c_out) = c_run_result(&dir, "fresh_binder_c", &source);
+    assert!(c_ok, "the binary must run: {c_out}");
+    assert!(
+        c_out.contains("shape=[2, 2]"),
+        "the compiled binary produces the same real shape: {c_out}"
+    );
+}

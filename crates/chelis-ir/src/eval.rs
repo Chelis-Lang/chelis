@@ -2259,6 +2259,25 @@ where
     // dims so a declared-vs-computed disagreement errs loudly (the eval
     // mirror of the C backend's runtime equality-abort guard).
     let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
+    // chelis#1277 C1.3: the eval lane's LOCAL guards, from the same
+    // `local_dim_guard_sites` the C emitter reads (C2.7). Derived from `dag`
+    // and not from `bound_dag` for the same reason the entry guards are:
+    // binding rewrites a resolved `Named(n, None)` to `Named(n, Some(4))`, and
+    // the derivation reads a member's own dim to decide whether the checker
+    // already proved its extent, so on the bound graph every local member
+    // looks statically proved and every site disappears. Node ids survive
+    // `bind_symbolic_dims`, which rebuilds the graph to preserve them, so a
+    // site derived here addresses the node the loop below evaluates.
+    let mut local_guard_sites: UnordMap<
+        NodeId,
+        Vec<(usize, crate::axis_sources::LocalGuardClaim)>,
+    > = UnordMap::new();
+    for ((node, axis), claim) in crate::axis_sources::local_dim_guard_sites(dag) {
+        local_guard_sites
+            .entry(NodeId(node))
+            .or_default()
+            .push((axis, claim));
+    }
     let mut runtime_dims = prebound_dims;
 
     // chelis#914: cooperative cancellation. `eval_compiled` runs two lanes —
@@ -2293,6 +2312,48 @@ where
             && !mask[node.id.0]
         {
             continue;
+        }
+
+        // `spec/04-type-system.md` section 4.7: a guard comparing a locally
+        // computed value "takes the source position of the operation that
+        // introduces the guarded extent", so it runs BEFORE that operation,
+        // where the C lane emits it. Placing it after the value existed would
+        // let the operation's own failure - a `reshape` numel mismatch that
+        // the disagreeing extent caused - be reported instead of the claim
+        // that is actually wrong, which is the C lane's behaviour before the
+        // guard site existed.
+        if let Some(sites) = local_guard_sites.get(&node.id) {
+            for (axis, claim) in sites {
+                let Some(carrier) =
+                    crate::axis_sources::local_guard_extent_carrier(&node.op, *axis)
+                else {
+                    continue;
+                };
+                let observed = resolve_eval_bound(carrier, node, &values, 0)?;
+                // The class's canonical value. A binder no lane has bound is
+                // not a comparison this lane can make up: skip it rather than
+                // invent one, exactly as the C emitter emits no guard for a
+                // claim its prologue never declared.
+                let claimed = match &claim.canonical {
+                    crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
+                    crate::axis_sources::CanonicalExtent::Binder(name) => {
+                        match runtime_dims.get(name) {
+                            Some(value) => *value,
+                            None => continue,
+                        }
+                    }
+                };
+                if observed != claimed {
+                    // [04-NUM-9]'s complete line, no prefix and no suffix, with
+                    // section 4.7's context on its own line and in the C
+                    // lane's wording: the two lanes report one guard.
+                    return Err(format!(
+                        "extent `{}`: claimed = {claimed}, node {} axis {axis} = {observed}\n\
+                         numeric trap: domain in {} at int64",
+                        claim.claim, node.id.0, claim.op,
+                    ));
+                }
+            }
         }
 
         let out_prim = node.output_type.precision;
