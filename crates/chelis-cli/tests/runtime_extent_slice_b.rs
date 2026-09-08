@@ -1005,8 +1005,18 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
 //
 // Both are value-binding rows for the reason the `load_load` row above is
 // one: `out = f(...)` applies the exported kernel, so `f`'s entry guards run
-// at the call on eval and in the linked binary on C, and the two lanes render
-// the same line from the same derivation (C2.7).
+// at the call on eval and in the linked binary on C.
+//
+// The two lanes then render the same line, and the reason is worth stating
+// precisely because the short version of it is false. They do NOT call one
+// function. Eval reads `derive_runtime_dim_classes`, the C prologue reads
+// `derive_dim_witnesses`, and those are two sibling groupings in
+// `axis_sources.rs` that differ in their guard filter over one shared
+// primitive, `output_axis_sources`, which answers where an axis's extent comes
+// from. That shared primitive is what C2.7's one-derivation property is about.
+// Byte identity of the rendered line is therefore something these receipts
+// MEASURE, by asserting the same literal string on each lane, and not
+// something a single shared call already guarantees.
 //
 // The DIMENSION NAMES here are deliberately multi-letter. A single lowercase
 // letter in a dimension position desugars to `d-var`, a polymorphic dimension
@@ -1216,6 +1226,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_c() {
         &shared_member_node_source(SHARED_ROWS_DISAGREE),
     );
     assert!(!ok, "the binary must fail: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
         out.contains("extent `rows`: p axis 0 = 2, zz axis 0 = 1"),
         "byte-identical to the eval twin's line: {out}"
@@ -1228,6 +1239,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_c() {
         &shared_member_node_source(SHARED_COLS_DISAGREE),
     );
     assert!(!ok, "the binary must fail: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
         out.contains("extent `cols`: p axis 1 = 3, zz axis 1 = 2"),
         "byte-identical to the eval twin's line: {out}"
