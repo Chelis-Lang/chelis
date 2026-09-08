@@ -53,6 +53,13 @@ fn source_arguments_are_data_but_extension_values_are_annotations() {
 fn registered_inventory_contains_thirty_compiler_owned_keys() {
     let keys = chelis_deep::metadata::REGISTERED_METADATA_KEYS;
     assert_eq!(keys.len(), 30);
+    assert_eq!(TYPED_CASES.len(), keys.len());
+    for key in keys {
+        assert!(
+            TYPED_CASES.iter().any(|(covered, _)| covered == key),
+            "{key}"
+        );
+    }
     for key in ["effect", "literal_source", "destructure"] {
         assert!(keys.contains(&key), "{key}");
     }
@@ -477,6 +484,16 @@ fn previous_generic_ast_checkpoints_decode_without_loss() {
         32,
         "thirty registered shapes, prefix and source/extension data"
     );
+    assert_eq!(
+        json.len(),
+        expected.len(),
+        "all previous JSON programs decode"
+    );
+    assert_eq!(
+        binary.len(),
+        expected.len(),
+        "all previous binary programs decode"
+    );
     for (index, ((json, binary), expected)) in json.iter().zip(&binary).zip(&expected).enumerate() {
         assert_eq!(json, expected, "previous JSON producer: {}", sources[index]);
         assert_eq!(
@@ -533,4 +550,38 @@ fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
             );
         }
     }
+}
+
+#[test]
+fn unknown_effect_diagnostics_preserve_the_kind_at_text_and_serde_ingress() {
+    use chelis_deep::{Atom, Expr, Metadata, Span};
+    for kind in ["random", "resource"] {
+        parse_str(&format!(
+            "(handle-effect {{effect: {kind}}} (lit {{}} 1) (lit {{}} 2))"
+        ))
+        .unwrap();
+        let value = Expr::Atom(Atom::Name(kind.into()), Span::new(0, 0));
+        let wire = serde_json::json!({"entries": [["effect", value]]});
+        assert!(serde_json::from_value::<Metadata>(wire).is_ok());
+    }
+    let source = "(handle-effect {effect: teleport} (lit {} 1) (lit {} 2))";
+    let value = Expr::Atom(Atom::Name("teleport".into()), Span::new(0, 0));
+    let wire = serde_json::json!({"entries": [["effect", value]]});
+    for error in [
+        parse_str(source).unwrap_err().to_string(),
+        serde_json::from_value::<Metadata>(wire)
+            .unwrap_err()
+            .to_string(),
+    ] {
+        assert!(error.contains("metadata `effect`"), "{error}");
+        assert!(error.contains("unknown effect kind `teleport`"), "{error}");
+    }
+    let wrong_owner = parse_str("(var {effect: random} x)")
+        .unwrap_err()
+        .to_string();
+    assert!(wrong_owner.contains("handle-effect"), "{wrong_owner}");
+    assert!(
+        !wrong_owner.contains("unknown effect kind"),
+        "{wrong_owner}"
+    );
 }

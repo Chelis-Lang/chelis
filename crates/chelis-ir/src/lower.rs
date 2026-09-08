@@ -15960,10 +15960,6 @@ mod tests {
             "(app {type: (t-prim {} int64)} (var {} neg) \
                  (lit {type: (t-prim {} string)} 1))",
             "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
-                 (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, \
-                 literal_source: integer} 7) (t-prim {} int64))",
             "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
             "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
                  (t-prim {} string)) (t-prim {} int64))",
@@ -16018,12 +16014,36 @@ mod tests {
     }
 
     #[test]
-    fn issue_794_malformed_literal_and_cast_modes_use_typed_unsupported_channel() {
-        let seeds = [
-            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
-                 (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
-        ];
+    fn issue_794_seed_annotations_reject_before_lowering() {
+        for (seed, reason) in [
+            (
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) (t-prim {} int64))",
+                "integer on lit",
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, literal_source: integer} 7) (t-prim {} int64))",
+                "exactly one occurrence",
+            ),
+        ] {
+            for source in [
+                seed.to_string(),
+                format!("(handle-effect {{effect: random}} {seed} (lit {{}} 1))"),
+            ] {
+                let error = chelis_deep::parser::parse_str(&source)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("metadata `literal_source`"),
+                    "{source}: {error}"
+                );
+                assert!(error.contains(reason), "{source}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn issue_794_malformed_cast_modes_use_typed_unsupported_channel() {
+        let seeds = ["(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)"];
         for seed in seeds {
             let source = format!(
                 "(handle-effect {{effect: random}} \

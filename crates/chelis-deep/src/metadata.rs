@@ -389,11 +389,20 @@ fn value<'a>(meta: &Entries<'a>, key: &str) -> Option<View<'a>> {
     meta.iter().find_map(|(k, v)| (*k == key).then_some(*v))
 }
 fn error(key: &str, v: View<'_>, expected: &'static str) -> MetadataError {
+    let detail = if key == "effect" {
+        v.name()
+            .and_then(|name| {
+                chelis_vocab::EffectKind::decode(chelis_vocab::EffectKindInput::Symbol(name)).err()
+            })
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
     MetadataError {
         key: key.into(),
         span: v.span(),
         expected,
-        detail: None,
+        detail,
         forbidden_span_char: None,
     }
 }
