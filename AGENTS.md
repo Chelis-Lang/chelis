@@ -744,10 +744,6 @@ enforcement boundary.
 
 ### Changelog Fragments
 
-The fragment convention takes effect after release PR #1586 merges and the
-remaining `[Unreleased]` notes are migrated. The #1251 implementation stays draft
-until that cutover is complete.
-
 - A behavior-changing PR must add a fragment in `changelog.d/`, using
   `<pr-or-slug>.<added|changed|fixed>[.breaking].md`. Write the entry without its
   outer bullet; mark breaking changes through the filename suffix.
