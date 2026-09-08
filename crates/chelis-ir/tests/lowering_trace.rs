@@ -107,6 +107,46 @@ fn trace_captures_actual_ad_ports_roots_and_ordered_wrt() {
     assert!(grad.backward.is_root(grad.gradients[&grad.wrt[0]]));
     assert!(grad.backward.len() > grad.forward.len());
     assert!(trace.boundaries.is_empty());
+    let application = grad.application.as_ref().expect("completed application");
+    same_dag(&application.specialized, &grad.backward);
+    assert_eq!(application.remap.len(), grad.backward.len());
+    assert_eq!(application.wrt_actuals, vec![application.arguments["x"]]);
+    for node in application.specialized.nodes() {
+        let mapped = application
+            .after_splice
+            .get(application.remap[&node.id])
+            .unwrap();
+        match &node.op {
+            RiscOp::Load { name } if application.arguments.contains_key(name.as_str()) => {
+                assert_eq!(mapped.id, application.arguments[name.as_str()]);
+                assert!(application.before_splice.get(mapped.id).is_some());
+            }
+            _ => {
+                assert_eq!(mapped.op, node.op);
+                assert_eq!(mapped.output_type, node.output_type);
+                assert_eq!(
+                    mapped.inputs,
+                    node.inputs
+                        .iter()
+                        .map(|id| application.remap[id])
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    mapped.shape_deps,
+                    node.shape_deps
+                        .iter()
+                        .map(|id| application.remap[id])
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+    let expected = application.remap[&grad.gradients[&grad.wrt[0]]];
+    assert_eq!(
+        application.result,
+        chelis_ir::lowering_trace::Value::Node(expected)
+    );
+    assert!(application.after_packing.get(expected).is_some());
 }
 
 #[test]
@@ -155,6 +195,23 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> (tensor[3, f32], tensor[
         assert!(grad.backward.is_root(grad.gradients[id]));
     }
     assert_ne!(grad.gradients[&grad.wrt[0]], grad.gradients[&grad.wrt[1]]);
+    let application = grad.application.as_ref().unwrap();
+    assert_eq!(
+        application.result,
+        chelis_ir::lowering_trace::Value::Tuple(
+            grad.wrt
+                .iter()
+                .map(|id| chelis_ir::lowering_trace::Value::Node(
+                    application.remap[&grad.gradients[id]]
+                ))
+                .collect()
+        )
+    );
+    assert_eq!(
+        application.wrt_actuals,
+        vec![application.arguments["x"], application.arguments["y"]]
+    );
+    assert_ne!(application.wrt_actuals[0], application.wrt_actuals[1]);
 }
 
 #[test]
@@ -176,6 +233,13 @@ def second(x: tensor[3, f32]) -> tensor[3, f32] = grad(first)(x)
     assert_ne!(parent, nested.context);
     assert!(trace.gradients.iter().any(|grad| grad.context == parent));
     assert_eq!(trace.contexts[parent.0].parent, Some(ContextId(0)));
+    for grad in &trace.gradients {
+        assert!(
+            grad.application.is_some(),
+            "nested observations are completed independently"
+        );
+        assert!(trace.contexts[grad.context.0].parent.is_some());
+    }
 }
 
 #[test]
@@ -202,6 +266,13 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(constant)(x)
         vec![chelis_ir::dag::DimInfo::Lit(3)]
     );
     same_dag(&trace.normalization.after_drops, library.dag());
+    let application = grad.application.as_ref().unwrap();
+    let chelis_ir::lowering_trace::Value::Node(zero) = application.result else {
+        panic!("single disconnected cotangent remains a tensor result");
+    };
+    assert!(application.after_splice.get(zero).is_none());
+    assert!(application.after_packing.get(zero).is_some());
+    assert!(application.after_packing.len() > application.after_splice.len());
 }
 
 #[test]
@@ -216,6 +287,153 @@ def filled(x: tensor[n, f32]) -> tensor[n, f32] =
     assert_eq!(trace.boundaries.len(), 1);
     assert_eq!(trace.boundaries[0].kind, BoundaryKind::UnloweredDefinitions);
     same_dag(&trace.normalization.after_drops, library.dag());
+}
+
+#[test]
+fn application_preserves_formal_names_when_caller_names_differ() {
+    let source = r#"
+def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
+def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
+"#;
+    let program = checked(source);
+    let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
+    same_dag(
+        library.dag(),
+        try_lower_program_to_library(&program).unwrap().dag(),
+    );
+    let grad = &trace.gradients[0];
+    let application = grad.application.as_ref().unwrap();
+    let actual = application.arguments["x"];
+    assert!(matches!(&application.before_splice.get(actual).unwrap().op,
+        RiscOp::Load { name } if name.as_str() == "y"));
+    assert_eq!(application.wrt_actuals, vec![actual]);
+    let chelis_ir::lowering_trace::Value::Node(result) = application.result else {
+        panic!("one tensor result");
+    };
+    let dce = trace.normalization.dce_remap[&result];
+    let copied = trace.normalization.copy_remap[&dce];
+    assert_eq!(library.symbol_table()["derivative"], copied);
+    assert_ne!(
+        result, actual,
+        "returned cotangent is not its primal argument"
+    );
+}
+
+#[test]
+fn host_structured_results_are_not_reported_as_observed_applications() {
+    let source = r#"
+type Mixed = | Mixed { t: tensor[2, f32], n: int32 }
+def loss(p: Mixed) -> f32 = match p with {
+  | Mixed { t, n: _ } => tensor_to_scalar(sum(t, 0))
+}
+def derivative(x: tensor[2, f32]) -> tensor[2, f32] = {
+  g = grad(loss)(Mixed { t: x, n: 3 })
+  g.t
+}
+"#;
+    let program = checked(source);
+    let (library, trace) = try_lower_program_to_library_with_trace(&program).unwrap();
+    same_dag(
+        library.dag(),
+        try_lower_program_to_library(&program).unwrap().dag(),
+    );
+    assert!(trace.gradients.is_empty());
+    assert!(
+        trace
+            .boundaries
+            .iter()
+            .any(|b| b.kind == BoundaryKind::UnloweredDefinitions)
+    );
+    assert!(!library.lowered_names()["derivative"]);
+}
+
+#[test]
+fn specialization_records_both_named_and_actual_dimension_types() {
+    let source = r#"
+def loss(x: tensor[n, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
+def derivative(y: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(y)
+"#;
+    let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    assert_eq!(trace.gradients.len(), 1);
+    let application = trace.gradients[0].application.as_ref().unwrap();
+    assert_eq!(application.formal_types.len(), 1);
+    assert_eq!(application.actual_types.len(), 1);
+    assert_ne!(
+        application.formal_types[0].dims,
+        application.actual_types[0].dims
+    );
+    assert_eq!(
+        application.actual_types[0].dims,
+        vec![chelis_ir::dag::DimInfo::Lit(3)]
+    );
+    assert!(
+        application
+            .specialized
+            .nodes()
+            .iter()
+            .any(|node| node.output_type.dims == application.actual_types[0].dims)
+    );
+}
+
+#[test]
+fn selected_wrt_does_not_drop_the_other_argument_binding() {
+    let source = r#"
+def loss(x: tensor[3, f32], y: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, y), 0))
+def derivative(x: tensor[3, f32], y: tensor[3, f32]) -> tensor[3, f32] = grad(loss, wrt=x)(x, y)
+"#;
+    let (_, trace) = try_lower_program_to_library_with_trace(&checked(source)).unwrap();
+    let grad = &trace.gradients[0];
+    let application = grad.application.as_ref().unwrap();
+    assert_eq!(grad.wrt.len(), 1);
+    assert_eq!(application.wrt_actuals, vec![application.arguments["x"]]);
+    assert_ne!(application.arguments["x"], application.arguments["y"]);
+    assert_eq!(application.formal_types.len(), 2);
+    assert_eq!(application.actual_types.len(), 2);
+    assert!(
+        application
+            .specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(&node.op, RiscOp::Load { name } if name.as_str() == "y"))
+    );
+}
+
+#[test]
+fn completed_application_snapshots_do_not_alias_later_mutations() {
+    let (_, mut trace) = try_lower_program_to_library_with_trace(&checked(SQUARE)).unwrap();
+    let grad = &mut trace.gradients[0];
+    let backward = bincode::serialize(&grad.backward).unwrap();
+    let application = grad.application.as_mut().unwrap();
+    let specialized = bincode::serialize(&application.specialized).unwrap();
+    let spliced = bincode::serialize(&application.after_splice).unwrap();
+    let chelis_ir::lowering_trace::Value::Node(result) = application.result else {
+        panic!("single gradient result");
+    };
+    application
+        .after_packing
+        .node_mut(result)
+        .unwrap()
+        .shape_deps
+        .push(result);
+    application
+        .after_packing
+        .node_mut(result)
+        .unwrap()
+        .merged_spans
+        .push("later mutation".into());
+    assert_eq!(bincode::serialize(&grad.backward).unwrap(), backward);
+    assert_eq!(
+        bincode::serialize(&application.specialized).unwrap(),
+        specialized
+    );
+    assert_eq!(
+        bincode::serialize(&application.after_splice).unwrap(),
+        spliced
+    );
+    assert_ne!(
+        bincode::serialize(&application.after_packing).unwrap(),
+        spliced
+    );
 }
 
 #[test]

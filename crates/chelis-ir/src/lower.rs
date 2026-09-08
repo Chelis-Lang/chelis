@@ -4840,6 +4840,24 @@ pub(crate) struct LoweredSubexprWithControls {
 }
 
 impl LoweredValue {
+    #[cfg(feature = "lowering-trace")]
+    fn trace_value(&self) -> crate::lowering_trace::Value {
+        use crate::lowering_trace::Value;
+        match self {
+            Self::Node(id) => Value::Node(*id),
+            Self::Tuple(items) => Value::Tuple(items.iter().map(Self::trace_value).collect()),
+            Self::Adt {
+                ctor,
+                field_names,
+                fields,
+            } => Value::Adt {
+                ctor: ctor.clone(),
+                field_names: field_names.clone(),
+                fields: fields.iter().map(Self::trace_value).collect(),
+            },
+        }
+    }
+
     /// Whether `add_named_roots` would contribute zero roots for this
     /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
     ///
@@ -7317,9 +7335,10 @@ impl LowerCtx {
         });
 
         #[cfg(feature = "lowering-trace")]
-        if let Some(trace) = &subctx.trace {
-            trace.gradient(&subctx.dag, output, &wrt, &grad_result);
-        }
+        let trace_gradient = subctx
+            .trace
+            .as_ref()
+            .map(|trace| trace.gradient(&subctx.dag, output, &wrt, &grad_result));
 
         let arg_map = param_names
             .iter()
@@ -7337,7 +7356,11 @@ impl LowerCtx {
             &remap_formal_types,
             &remap_actual_types,
         );
+        #[cfg(feature = "lowering-trace")]
+        let before_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
+        #[cfg(feature = "lowering-trace")]
+        let after_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
         let mut control_roots = grad_result.dag.roots().iter().copied();
         for check in retained_checks {
             self.runtime_list_checks.push(match check {
@@ -7434,7 +7457,7 @@ impl LowerCtx {
                 }
             }
         }
-        match packed.as_slice() {
+        let result = match packed.as_slice() {
             [LoweredValue::Node(single)] => {
                 // Preserve the pre-#520 reuse hint on the classic
                 // single-tensor-gradient shape.
@@ -7447,17 +7470,33 @@ impl LowerCtx {
                     .collect();
                 if candidate_inputs.len() == plans.len() {
                     let single = *single;
-                    return LoweredValue::Node(self.attach_reuse_hint(
-                        single,
-                        app_span,
-                        &candidate_inputs,
-                    ));
+                    LoweredValue::Node(self.attach_reuse_hint(single, app_span, &candidate_inputs))
+                } else {
+                    LoweredValue::Node(*single)
                 }
-                LoweredValue::Node(*single)
             }
             [single] => single.clone(),
             _ => LoweredValue::Tuple(packed),
+        };
+        #[cfg(feature = "lowering-trace")]
+        if let Some(trace) = &subctx.trace {
+            trace.application(
+                trace_gradient.expect("gradient observation"),
+                crate::lowering_trace::Application {
+                    formal_types: remap_formal_types,
+                    actual_types: remap_actual_types,
+                    specialized: specialized_grad_dag,
+                    arguments: arg_map.into_sorted().into_iter().collect(),
+                    wrt_actuals,
+                    remap: crate::lowering_trace::ordered(&remap),
+                    before_splice: before_splice.expect("pre-splice observation"),
+                    after_splice: after_splice.expect("post-splice observation"),
+                    after_packing: self.dag.clone(),
+                    result: result.trace_value(),
+                },
+            );
         }
+        result
     }
 
     /// A zero-valued tensor of the given type: `Const 0.0`, cast to the
@@ -13774,6 +13813,44 @@ impl LowerCtx {
 mod tests {
     use super::*;
     use crate::verify;
+
+    #[cfg(feature = "lowering-trace")]
+    #[test]
+    fn trace_value_preserves_structured_slots_without_claiming_host_capture() {
+        use crate::lowering_trace::Value;
+        let original = LoweredValue::Tuple(vec![
+            LoweredValue::Adt {
+                ctor: "Mixed".into(),
+                field_names: Some(vec!["t".into(), "n".into()]),
+                fields: vec![LoweredValue::Node(NodeId(7)), LoweredValue::Tuple(vec![])],
+            },
+            LoweredValue::Adt {
+                ctor: "Positional".into(),
+                field_names: None,
+                fields: vec![LoweredValue::Node(NodeId(2))],
+            },
+        ]);
+        let observed = original.trace_value();
+        assert_eq!(
+            observed,
+            Value::Tuple(vec![
+                Value::Adt {
+                    ctor: "Mixed".into(),
+                    field_names: Some(vec!["t".into(), "n".into()]),
+                    fields: vec![Value::Node(NodeId(7)), Value::Tuple(vec![])],
+                },
+                Value::Adt {
+                    ctor: "Positional".into(),
+                    field_names: None,
+                    fields: vec![Value::Node(NodeId(2))],
+                }
+            ])
+        );
+        assert_ne!(
+            observed,
+            Value::Tuple(vec![Value::Node(NodeId(7)), Value::Node(NodeId(2))])
+        );
+    }
 
     /// chelis#1087: the param-slot UnknownForm arm is unreachable by role
     /// construction (a Binder slot stamps to atoms, Nodes, or BareLists,
