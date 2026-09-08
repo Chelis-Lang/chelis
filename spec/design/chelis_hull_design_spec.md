@@ -819,9 +819,11 @@ into every shard configuration and used for both nested compiler-check and
 compiler-evaluation calls; a missing target field fails closed rather than
 selecting a compiler from PATH. Record each selected executable's path, version
 output, and SHA-256 in the campaign result. Recheck both file hashes before
-accepting the aggregate so replacement of a selected executable is reported.
-These identify selected files, not a proof of their build provenance or of
-an interpreter behind a wrapper. The campaign retains its existing identity,
+accepting the aggregate to reject differences visible at those observations.
+These endpoint checks assume files remain immutable during the campaign; they
+cannot detect a temporary replacement restored before the final check or prove
+which bytes every invocation executed. They identify selected files, not their
+build provenance or an interpreter behind a wrapper. The campaign retains its existing identity,
 locking, accounting, conservative-whitelist, and acceptance rules.
 
 Test host/target routing independently of verdict agreement: matching outputs
