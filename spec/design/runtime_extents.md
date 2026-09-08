@@ -1023,6 +1023,39 @@ naming here rather than leaving to the corpus file:
   standalone with its declared extent symbolic, so both [#1375] rows are
   ordinary CLI rows.
 
+  The rebase over S2b then forced the mechanism's shape, and this is the part
+  worth keeping. S2b had added a second KIND of local claim, the unit-extent
+  claim an `expand` makes about its operand, keyed on that operand's axis, and
+  guarded it on eval from a check inside the evaluator's own `Expand` arm. Two
+  consumers, reading two different quantities: a class guard compares the
+  extent an operation is about to produce, read from the carrier it was given,
+  and a unit-extent guard compares the extent its operand already produced,
+  read from that operand's realized shape. Neither consumer could take over the
+  other's rows, and a consumer that infers which quantity to read from the
+  site's own operation can only get one of them right.
+
+  So the derivation states it. A local site now carries a read instruction with
+  two variants, "evaluate this carrier against this node" and "read this node's
+  realized extent", and the variants also fix WHEN each is readable: a carrier
+  before the node runs, where section 4.7 puts a class guard so a wrong claim
+  is reported instead of the operation's own downstream failure, and a realized
+  extent only after, which is still after the producer and before the consumer
+  allocates. One evaluator consumer reads the instruction. The C lane needed no
+  equivalent, because `emit_runtime_dim_site` takes the observed side as a
+  parameter and each caller supplies it; only eval ever had to ask.
+
+  Two consequences to carry forward. Two DIFFERENT claims can land on one key,
+  and that is two obligations rather than an unsupported construct: a `reshape`
+  with a computed target, claimed by a signature and then broadcast by a
+  same-rank `expand`, puts the class's binder and the unit claim's literal 1 on
+  the reshape's own axis, so both guards are emitted and only equal claims
+  coalesce. And a local unit-extent site is reached on the C lane only where an
+  emitter calls `emit_runtime_dim_site` for the operand node, which happens for
+  reshape, expand, pad, shrink and stride; an operand outside those five
+  carries a derived site no C caller reaches. That is main's shape rather than
+  B2r's, it is unchanged here, and the unified consumer inherits it on the C
+  side.
+
   `expand.foreign_claim.same_tensor_set_axis` is [#1376], not [#1375], and is
   NOT part of that handover: it is the same-tensor `shape()` size under a
   foreign named claim, its `.c` row moves with this slice's guards, and its
