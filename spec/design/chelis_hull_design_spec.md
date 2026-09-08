@@ -799,6 +799,37 @@ the in-fragment parser image.
 
 ## 6. Differential Testing Harness - `Hull.Check`
 
+### Host and candidate identity (2026-09-08)
+
+Hull's released host and the compiler under test are distinct roles. The
+campaign orchestrator accepts `--host-chelis-bin` and `--target-chelis-bin`.
+The existing `--chelis-bin` spelling remains an alias for the host selector;
+the two host spellings are mutually exclusive. If no target is supplied, the
+target is the host, preserving the ordinary release-pinned campaign.
+
+Both selectors are absolute executable paths. The host must report the exact
+`reef.toml` compiler version. An explicitly selected candidate need not match
+that version: it is an externally supplied artifact, never a compiler built
+or vendored by Hull. Do not change the shell pin or the machine-global default
+to select it. This host/target facility is Hull-specific test infrastructure,
+not a new requirement on other shells.
+
+The host launches the reference driver. The absolute target path is written
+into every shard configuration and used for both nested compiler-check and
+compiler-evaluation calls; a missing target field fails closed rather than
+selecting a compiler from PATH. Record each selected executable's path, version
+output, and SHA-256 in the campaign result. Recheck both file hashes before
+accepting the aggregate so replacement of a selected executable is reported.
+These identify selected files, not a proof of their build provenance or of
+an interpreter behind a wrapper. The campaign retains its existing identity,
+locking, accounting, conservative-whitelist, and acceptance rules.
+
+Test host/target routing independently of verdict agreement: matching outputs
+cannot show which executable ran. Cover same-binary compatibility, different
+host and target versions, wrong host pin, invalid target selection, explicit
+target propagation, and changed executable detection. Compiler validation,
+formal-model certification, and reference agreement remain separate claims.
+
 The core use case. Given a Deep source file, type-check it with both Hull's reference checker and the real compiler, and compare results.
 
 ```chelis
