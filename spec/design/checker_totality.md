@@ -1924,10 +1924,10 @@ Test dispositions, each stated for the `check` ingress and, in the new
   and a genuinely failed derivation, whose cascade must stay suppressed. One
   row locks a PRE-EXISTING false rejection, the well-typed `conv2d` behind a
   let-bound `expand` that the base refuses identically; fixing it needs the
-  validator to read unification's stamped type, which is not this pull
-  request. One row records that the post-inference validator runs on
-  `check_ir_program` only, so the other rows' silence about the second ingress
-  is stated rather than implied.
+  validator to read unification's stamped type rather than re-derive operand
+  types, which is [#1612]'s, not this pull request's. One row records that the
+  post-inference validator runs on `check_ir_program` only, so the other rows'
+  silence about the second ingress is stated rather than implied.
 - New: `the_expand_built_reproducer_is_loud_at_run_time` builds and runs the
   `expand`-built reproducer with a refuted unit-extent claim on the evaluator
   and C lanes, and asserts section 2.4.1's `Domain` trap, `numeric trap:
@@ -3494,3 +3494,4 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1519]: https://github.com/Chelis-Lang/chelis/pull/1519
 [#1523]: https://github.com/Chelis-Lang/chelis/pull/1523
 [#1532]: https://github.com/Chelis-Lang/chelis/pull/1532
+[#1612]: https://github.com/Chelis-Lang/chelis/issues/1612

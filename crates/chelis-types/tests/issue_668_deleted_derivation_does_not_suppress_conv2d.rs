@@ -192,7 +192,9 @@ fn a_symbolic_spatial_dimension_is_refused_through_a_let_bound_expand() {
 /// a type for `y`, which is either a new derivation arm -- the mechanism this
 /// pull request exists to delete -- or the redesign that has the validator read
 /// unification's stamped type instead of a private derivation. The second is
-/// the right answer and is larger than this pull request.
+/// the right answer, is larger than this pull request, and is owned by
+/// chelis#1612. If that issue closes, this row should go red and be updated to
+/// assert acceptance.
 #[test]
 fn a_well_typed_conv2d_through_a_let_bound_expand_is_still_refused() {
     let diagnostics = ir_diagnostics(
