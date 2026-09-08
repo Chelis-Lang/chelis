@@ -330,13 +330,12 @@ numeric data, whether or not you have read that document:
   structurally recognized exact tagged carrier/transport, or an exact numeric
   operation registration. The immutable foundation-era universe retains the old 39
   grandfather rows, three successor overrides, and 155 permanent plain rows as
-  deletion debt owned by chelis#1288. The active primary baseline has already
-  moved 18 exact structurally nonnumeric rows, the eight tagged-carrier
-  declarations, and 123 registered numeric operations (the [05-OP-35]
-  stdlib surface registrations among them) to final authority; it
-  therefore retains no pre-ratchet grandfather rows, no successors, and 63
-  permanent plain rows as active debt, and the obsolete prelude `Json` row
-  is deleted. The
+  deletion debt owned by chelis#1288. The active primary baseline has completed
+  that migration: all 237 rows have final authority as 66 exact structurally
+  nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
+  155 registered numeric operations (the [05-OP-35] stdlib registrations among
+  them). It retains no grandfather, successor-override, permanent-disposition,
+  integer-plumbing, or other transition rows. The
   84 typed-wire and 17 registered-PyO3 baseline rows remain sealed legacy cohorts,
   while Count's wire field is final-registered. Those lists confer no authorization
   for a new, renamed, reclassified, or otherwise changed row, and a change touching one
