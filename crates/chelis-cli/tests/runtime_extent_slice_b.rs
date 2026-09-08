@@ -25,6 +25,12 @@
 //! a guard against an in-body trap needs a caller, and a called function's
 //! entry sits exactly where its call sits in the caller's source order.
 //!
+//! chelis#1375's two rows belong here for a third reason, recorded at their
+//! own section below: the inlining that erases a class is `def main() =
+//! f(...)`'s, and a top-level BINDING `out = f(...)` does not inline, so the
+//! def is lowered standalone with its declared extent still symbolic and the
+//! guard is reachable from the CLI on both lanes.
+//!
 //! ## Why the guard-order controls are shaped the way they are
 //!
 //! A test that only asks "does a mismatching extent trap" cannot tell a guard
@@ -1348,6 +1354,70 @@ fn a_local_unit_extent_claim_traps_at_its_operation_on_c() {
     );
 }
 
+/// The same locally placed unit-extent claim on the EVAL lane.
+///
+/// S2b guarded this claim on eval from a check inside the DAG evaluator's
+/// `Expand` arm, and shipped no row for it: its two rows are the C lane and the
+/// HIP host lowering. B2r's unification deletes that arm, so the claim is now
+/// carried by the one consumer that reads every local site's own read
+/// instruction. A moved mechanism with no row is a mechanism that can be
+/// deleted silently, which is why this row exists.
+///
+/// It also pins a lane agreement the two implementations did not have. S2b's
+/// arm reported the `expand`'s node id and the C emitter reports the site's,
+/// which is the OPERAND's, so the same claim on the same program named `node 5`
+/// on eval and `node 4` on C. Reading the site rather than the operation makes
+/// both lanes name the site, so the whole two-line diagnostic is now identical
+/// text on both lanes.
+///
+/// EVIDENTIARY STATUS: regression test for the unification. Under the unified
+/// consumer replaced by a no-op this fails; before the unification it passed
+/// with a different node id, which is why the assertion is byte-exact rather
+/// than a `contains` on the trap line alone.
+#[test]
+fn a_local_unit_extent_claim_traps_at_its_operation_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // The control first, so the row proves a guard and not a broken lane: the
+    // same shape over an operand the shrink leaves at extent 1 executes.
+    let ok_path = fixture(&dir, "local_unit.ch", LOCAL_UNIT_SOURCE);
+    let accepted = eval(&ok_path);
+    let ok_stdout = String::from_utf8_lossy(&accepted.stdout).to_string();
+    assert!(
+        accepted.status.success(),
+        "a satisfied local claim executes on eval: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(
+        ok_stdout.contains("shape=[3]") && ok_stdout.contains("data=[7.0, 7.0, 7.0]"),
+        "the satisfied claim broadcasts exactly: {ok_stdout}"
+    );
+
+    let path = fixture(&dir, "local_refuted.ch", LOCAL_NON_UNIT_SOURCE);
+    let evaluated = eval(&path);
+    let stdout = String::from_utf8_lossy(&evaluated.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(
+        !evaluated.status.success(),
+        "an operand extent of 2 under a unit claim must not produce a value: {stdout}"
+    );
+    assert!(
+        !stdout.contains("data=[7.0, 7.0, 7.0]"),
+        "and must not broadcast element 0 of a two-element axis: {stdout}"
+    );
+    assert!(
+        stderr.contains(&domain_trap_line("expand")),
+        "the trap line names the operation that introduces the claim: {stderr}"
+    );
+    // Byte-exact, and on the operand's node id: this is the site's key, the
+    // same one the C emitter renders.
+    assert!(
+        stderr.contains("extent `1`: claimed = 1, node 4 axis 0 = 2"),
+        "section 4.7's context names the SITE, so the two lanes agree text for \
+         text: {stderr}"
+    );
+}
+
 /// The HIP lane carries the locally placed claim too, through the shared host
 /// lowering rather than through a HIP-specific guard.
 ///
@@ -1472,5 +1542,179 @@ fn two_expands_over_one_operand_axis_share_one_guard() {
     assert!(
         !ran.status.success() && stderr.contains(&domain_trap_line("expand")),
         "the one coalesced guard still refuses a non-unit operand: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1375: a node-valued reshape target under a named claim.
+//
+// `spec/04-type-system.md` section 4.7.3 makes an arithmetic reshape target a
+// FRESH extent, which a surrounding signature may give a name "only by
+// imposing an execution-time equality guard". Section 4.7.2 traps `Domain`
+// when a claimed named extent is not statically proven equal. So a signature
+// claiming the operand's own binder over a computed target owes a guard on
+// every lane, and chelis#1375 recorded both lanes executing without one.
+//
+// These are CLI rows rather than driven rows, unlike the guard rows this file
+// keeps out. The header's reason is exact and still holds: `def main() =
+// f(...)` inlines `f` into the root, so the target folds to a literal, the
+// class disappears, and both lanes print the wrong shape whatever the guards
+// do (measured: one kernel, `chelis_alloc(2, {2, 2})` and a `memcpy`). A
+// top-level BINDING does not inline. `out = f(...)` lowers `f` standalone
+// with its declared `n` symbolic, so the target keeps its `RtDim::Node`
+// carrier, the class forms with the `Load`'s axis, and the guard is reachable
+// from the CLI on both lanes.
+//
+// What "the same guard on both lanes" means exactly, because the rows assert
+// with `contains` and would not see the difference: the [04-NUM-9] line is
+// byte-identical, and section 4.7's context line is the same text on both
+// lanes, but on eval the CLI then frames the whole thing as an error, so what
+// a user reads there carries an `error: ` prefix and on C it does not. The
+// atom's own line takes no prefix on either lane, which is what [04-NUM-9]
+// fixes.
+// ---------------------------------------------------------------------------
+
+/// chelis#1375's reproducer, with `claim` naming the declared first result
+/// extent and `factor` the divisor of the computed target.
+///
+/// With `claim = "n"` and `factor = 2`, the signature claims the input's own
+/// extent for an axis whose runtime extent is half of it. With `claim = "n"`
+/// and `factor = 1` the same mechanism produces an extent that AGREES, which
+/// is what separates a guard from a lane that traps on every computed target.
+fn node_target_source(claim: &str, factor: u32) -> String {
+    let second = if factor == 2 { "2i64" } else { "1i64" };
+    let second_ty = if factor == 2 { "2" } else { "1" };
+    format!(
+        "def f(x: tensor[n, f32]) -> tensor[{claim}, {second_ty}, f32] = \
+         reshape(x, [floor_div(shape(x, 0), {factor}i64), {second}])\n\
+         out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
+    )
+}
+
+/// reshape.named_claim.node_target.c
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing on `f47ce5775` (the
+/// commit before `reshape` left the kernel keep-list), where the binary
+/// printed `out = tensor(shape=[2, 2], ...)` and exited 0.
+#[test]
+fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "node_target_c", &node_target_source("n", 2));
+    assert!(
+        !ok,
+        "the claimed extent disagrees, so the binary must fail: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("reshape")),
+        "the guard takes the position of the reshape that introduces the extent: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 4"),
+        "section 4.7's context line carries the claim and each observed value: {out}"
+    );
+    assert!(
+        !out.contains("numel mismatch"),
+        "the extent guard is observed before the chelis#616 numel abort: {out}"
+    );
+}
+
+/// The discriminating twin: the same mechanism with a target that AGREES with
+/// the claim executes. Without it, a lane that trapped on every node-valued
+/// target would pass the row above.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "node_target_ok_c", &node_target_source("n", 1));
+    assert!(
+        ok,
+        "the claimed extent agrees, so the binary must run: {out}"
+    );
+    assert!(
+        out.contains("shape=[4, 1]"),
+        "the agreeing program produces its declared shape: {out}"
+    );
+}
+
+/// reshape.named_claim.node_target.eval
+///
+/// The eval lane reaches this guard because B2h routes a host-lane def through
+/// the kernel the C lane emits for it, so once `reshape` is off the keep-list
+/// the same DAG, the same class and the same site serve both lanes.
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing on the tree with
+/// `reshape` already off the keep-list and no local guard in the DAG
+/// evaluator, where eval printed `out = tensor(shape=[2, 2], ...)` and exited
+/// 0 while the compiled binary trapped.
+#[test]
+fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "node_target_eval.ch", &node_target_source("n", 2));
+    assert!(
+        !ok,
+        "the claimed extent disagrees, so eval must fail: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("reshape")),
+        "eval renders [04-NUM-9]'s line for the same guard the C lane emits: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 4"),
+        "section 4.7's context line carries the claim and each observed value: {out}"
+    );
+    assert!(
+        !out.contains("reshape expects"),
+        "the extent guard is observed before the evaluator's own numel check: {out}"
+    );
+}
+
+/// The discriminating twin on eval, for the same reason as its C sibling.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "node_target_ok_eval.ch", &node_target_source("n", 1));
+    assert!(ok, "the claimed extent agrees, so eval must run: {out}");
+    assert!(
+        out.contains("shape=[4, 1]"),
+        "the agreeing program produces its declared shape: {out}"
+    );
+}
+
+/// The correct spelling of chelis#1375's program: the computed extent gets a
+/// binder of its own rather than restating the operand's. No claim is shared,
+/// so no class forms, no guard exists, and both lanes produce the real shape.
+///
+/// This is the row that says the repair rejects a WRONG claim rather than a
+/// computed target, which is the failure mode a guard placed on the carrier
+/// instead of on the class would have.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = node_target_source("m", 2);
+    let (ok, out) = eval_result(&dir, "fresh_binder_eval.ch", &source);
+    assert!(ok, "a fresh binder claims nothing to disagree with: {out}");
+    assert!(
+        out.contains("shape=[2, 2]"),
+        "eval produces the real shape: {out}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (c_ok, c_out) = c_run_result(&dir, "fresh_binder_c", &source);
+    assert!(c_ok, "the binary must run: {c_out}");
+    assert!(
+        c_out.contains("shape=[2, 2]"),
+        "the compiled binary produces the same real shape: {c_out}"
     );
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "fb70d034f50bf14a7456ce957aede5ca8f1198c8ef97a17e0db4d9a45d387b3c",
+  "corpus_sha256": "71041f16942d4f83a469587d69893557344ee68251dd4c857b1a31842aa6c74a",
   "rows": [
     {
       "baseline": "silent_unguarded",
@@ -299,13 +299,13 @@
     {
       "baseline": "silent_unguarded",
       "id": "reshape.named_claim.node_target.c",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c"
     },
     {
       "baseline": "silent_unguarded",
       "id": "reshape.named_claim.node_target.eval",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
     },
     {

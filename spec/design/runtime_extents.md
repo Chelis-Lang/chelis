@@ -947,15 +947,71 @@ move different lanes at different times and a single-valued row cannot record
 one lane at its exit state while another waits. Three consequences are worth
 naming here rather than leaving to the corpus file:
 
-- [#1375] is `reshape.named_claim.node_target` alone. Both its lanes stay at
-  baseline and belong to a later pull request, B2r, after B2h: `reshape` is on
-  the shared kernel keep-list (`chelis-ir/src/host.rs`'s
+- [#1375] is `reshape.named_claim.node_target` alone, and both its lanes moved
+  together in **B2r**, after B2h, as this paragraph planned. What B2r found is
+  worth recording, because the plan named one gap and there were three.
+  `reshape` was on the shared kernel keep-list (`chelis-ir/src/host.rs`'s
   `should_keep_tensor_expr_in_host_lane`), stale since Slice A gave reshape
-  targets their `RtDim` carrier, so a reshape-rooted def is emitted into the C
-  host program rather than lowered to a kernel and no class-derived guard
-  reaches it; B2h's routing is blocked on the same list for the eval lane. One
-  pull request therefore closes [#1375] on both lanes rather than two
-  half-moves.
+  targets their `RtDim` carrier, so a reshape-rooted def was emitted into the C
+  host program rather than lowered to a kernel and no class-derived guard could
+  reach it. Removing the entry was necessary and not sufficient. The derivation
+  was never the gap: a `Node` carrier is an `AxisSource::ScalarInput`,
+  `sets_axis` counts it, and the class formed with the `Load`'s axis. But
+  `local_dim_guard_sites` admitted only the folded `shape()` read as a site, so
+  the class had two members and nowhere to compare them; and the eval lane had
+  no local guard at all, reading `GuardPlacement::Entry` and nothing else, so
+  C2.7's one derivation had one consumer.
+
+  B2r therefore moved the site derivation beside `derive_runtime_dim_classes`,
+  admitted `ScalarInput` as a site, and made the DAG evaluator the second
+  consumer, checking each site before its node evaluates and rendering
+  [04-NUM-9] in the C lane's words. **That is the mechanism
+  `class.load_op_output.eval` waits on**; B2r did not move that row, whose
+  witness and receipt are its owner's.
+
+  Two facts a later slice should not rediscover. A local site is derived from
+  the UNBOUND graph: `bind_symbolic_dims` rewrites a resolved `Named(n, None)`
+  to `Named(n, Some(k))`, and the derivation reads a member's own dim to decide
+  whether the checker already proved its extent, so on the bound graph every
+  local member looks proved and every site disappears. And a claim over a
+  computed target is reachable from the CLI after all: `def main() = f(...)`
+  inlines `f` and folds the target to a literal, which is why this plan
+  expected driven rows, but a top-level binding `out = f(...)` lowers `f`
+  standalone with its declared extent symbolic, so both [#1375] rows are
+  ordinary CLI rows.
+
+  The rebase over S2b then forced the mechanism's shape, and this is the part
+  worth keeping. S2b had added a second KIND of local claim, the unit-extent
+  claim an `expand` makes about its operand, keyed on that operand's axis, and
+  guarded it on eval from a check inside the evaluator's own `Expand` arm. Two
+  consumers, reading two different quantities: a class guard compares the
+  extent an operation is about to produce, read from the carrier it was given,
+  and a unit-extent guard compares the extent its operand already produced,
+  read from that operand's realized shape. Neither consumer could take over the
+  other's rows, and a consumer that infers which quantity to read from the
+  site's own operation can only get one of them right.
+
+  So the derivation states it. A local site now carries a read instruction with
+  two variants, "evaluate this carrier against this node" and "read this node's
+  realized extent", and the variants also fix WHEN each is readable: a carrier
+  before the node runs, where section 4.7 puts a class guard so a wrong claim
+  is reported instead of the operation's own downstream failure, and a realized
+  extent only after, which is still after the producer and before the consumer
+  allocates. One evaluator consumer reads the instruction. The C lane needed no
+  equivalent, because `emit_runtime_dim_site` takes the observed side as a
+  parameter and each caller supplies it; only eval ever had to ask.
+
+  Two consequences to carry forward. Two DIFFERENT claims can land on one key,
+  and that is two obligations rather than an unsupported construct: a `reshape`
+  with a computed target, claimed by a signature and then broadcast by a
+  same-rank `expand`, puts the class's binder and the unit claim's literal 1 on
+  the reshape's own axis, so both guards are emitted and only equal claims
+  coalesce. And a local unit-extent site is reached on the C lane only where an
+  emitter calls `emit_runtime_dim_site` for the operand node, which happens for
+  reshape, expand, pad, shrink and stride; an operand outside those five
+  carries a derived site no C caller reaches. That is main's shape rather than
+  B2r's, it is unchanged here, and the unified consumer inherits it on the C
+  side.
 
   `expand.foreign_claim.same_tensor_set_axis` is [#1376], not [#1375], and is
   NOT part of that handover: it is the same-tensor `shape()` size under a

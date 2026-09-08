@@ -974,19 +974,40 @@ fn file_fed_pipeline_with_an_alias_binding_runs_to_completion() {
         "both names must still be observable roots:\n{stdout}"
     );
     assert_line_matches_eval(&source, "alias_pipeline", &stdout, "total");
-    // Seven tensor roots each receive an explicit artifact owner. The eight
-    // live tensor descriptors produced by the pipeline plus those seven
-    // retains are then released exactly once.
+    // Seven tensor roots each receive an explicit artifact owner. Those seven
+    // retains and the live tensor descriptors the pipeline produces are then
+    // released exactly once each.
     let tensor_roots = stdout
         .lines()
         .filter(|line| line.contains(" = tensor("))
         .count();
     assert_eq!(tensor_roots, 7, "fixture drifted:\n{stdout}");
+    // The WHOLE translation unit's ledger, which is the invariant chelis#1222
+    // is about and the one that must not move for any lowering reason. Counted
+    // over the emitted file rather than over `main`, because where a
+    // descriptor is released is a lowering decision and whether it is released
+    // is not.
+    assert_eq!(
+        (
+            emitted.matches("chelis_tensor_retain(").count(),
+            emitted.matches("chelis_tensor_release(").count(),
+        ),
+        (7, 16),
+        "the file-fed pipeline must balance every artifact owner and \
+         descriptor across the emitted unit",
+    );
+    // `main`'s own share of that ledger. `one990`'s binding is rooted at
+    // `reshape`, which chelis#1277 B2r took off the host-lane kernel keep-list,
+    // so the binding is now a kernel call and the two intermediate descriptors
+    // it used to build in `main` are built and released inside that kernel.
+    // The file-level count above is unchanged by that move, which is what says
+    // this is a relocation and not a leak; `emitted_main` excludes compiled
+    // function bodies deliberately, so this number tracks the lowering.
     assert_retain_release_counts(
         &emitted,
         "chelis_tensor_retain(",
         "chelis_tensor_release(",
-        (7, 15),
+        (7, 13),
         "the file-fed pipeline must balance every artifact owner and descriptor",
     );
 }

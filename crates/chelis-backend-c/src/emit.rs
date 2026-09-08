@@ -65,7 +65,7 @@ pub struct CEmitter {
     /// against, and the operation [04-NUM-9]'s `<op>` slot names.
     local_dim_guard_sites: chelis_unord::UnordMap<
         chelis_ir::ownership::LocalGuardSite,
-        chelis_ir::ownership::LocalGuardClaim,
+        Vec<chelis_ir::ownership::LocalGuardClaim>,
     >,
     /// Claim names this function actually declares as C variables. A local
     /// guard compares against the claim BY NAME, so a claim that resolved to
@@ -258,69 +258,36 @@ impl CEmitter {
         // Two claim KINDS reach this list: the equality classes and, since
         // chelis#1277 S2b, the unit-extent claims (C2.9). They are keyed the
         // same way, on the axis whose extent the guard reads, so two sites can
-        // land on one key. Collecting into a map would let the second REPLACE
-        // the first silently, and what would be lost is a guard.
+        // land on one key.
         //
-        // Whether that is a defect depends on whether the two AGREE, and the
-        // first cut of this check did not ask:
+        // Every distinct claim on a key is emitted, and equal ones coalesce:
         //
         // - EQUAL sites coalesce. One locally computed unit axis feeding two
         //   `expand` nodes produces the same claim, canonical and operation
         //   twice, and one emitted guard satisfies both, so a second is
-        //   redundant rather than lost. Refusing there refused a program that
-        //   checks clean and evaluates exactly, which is what round 2 found.
-        // - DISAGREEING sites are still refused. Two different claims or two
-        //   different canonicals on one key cannot both be emitted from one
-        //   comparison, so emitting either would drop a real obligation.
+        //   redundant rather than lost.
+        // - DISAGREEING sites are TWO OBLIGATIONS, and both are emitted. This
+        //   replaces an `Unsupported` refusal. The refusal was argued from a
+        //   pair that could not arise; it can. A `reshape` with a computed
+        //   target, claimed by a signature and then broadcast by a same-rank
+        //   `expand`, puts the class's `n` and the unit claim's `1` on the
+        //   reshape's own axis, and refusing there refuses a program that
+        //   checks clean. One comparison cannot discharge two claims, so the
+        //   answer is two comparisons, not a rejection and not a silent
+        //   replacement.
         //
-        // What separates the two producers is the `claim` field, not the
-        // canonical. The class producer's `operand` is
-        // `resolved.unwrap_or(name)`, so a `Name` class the checker resolved to
-        // 1 carries `"1"` as its canonical too; the canonicals can coincide.
-        // Its `claim` is a Surf identifier, a unit claim's `claim` is the
-        // literal `1`, and no Surf identifier is `1`. Since `LocalGuardClaim`
-        // derives `PartialEq` over all three fields, equality can only merge a
-        // pair agreeing in claim, canonical AND operation, which is exactly the
-        // set one comparison discharges.
-        //
-        // The check stays regardless: that is an argument about today's two
-        // producers, not an invariant the type system holds.
+        // `LocalGuardClaim` derives `PartialEq` over its fields, so "equal"
+        // means agreeing in claim, canonical, operation AND read instruction,
+        // which is exactly the set one comparison discharges.
         let mut local_dim_guard_sites: chelis_unord::UnordMap<
             chelis_ir::ownership::LocalGuardSite,
-            chelis_ir::ownership::LocalGuardClaim,
+            Vec<chelis_ir::ownership::LocalGuardClaim>,
         > = chelis_unord::UnordMap::new();
         for (site, claim) in dag.local_dim_guard_sites() {
-            if let Some(existing) = local_dim_guard_sites.get(&site) {
-                if *existing == claim {
-                    continue;
-                }
-                let (node, axis) = site;
-                return Err(Unsupported::new(
-                    UnsupportedKind::Construct(
-                        "two disagreeing local extent guards on one axis".to_string(),
-                    ),
-                    format!(
-                        "node {node} axis {axis} carries two local guard sites that do \
-                         not agree: claim `{}` against `{}` under `{}`, and claim `{}` \
-                         against `{}` under `{}`. One comparison cannot satisfy both, \
-                         so emitting either would drop the other",
-                        existing.claim,
-                        existing.operand,
-                        existing.op,
-                        claim.claim,
-                        claim.operand,
-                        claim.op,
-                    ),
-                    Stage::Codegen("c"),
-                    chelis_types::deliberate_rejection!(
-                        "[04-NUM-9]",
-                        "every runtime extent guard section 4.7 places is emitted; two \
-                         sites on one key that disagree are refused rather than losing \
-                         one of them"
-                    ),
-                ));
+            let claims = local_dim_guard_sites.entry(site).or_default();
+            if !claims.contains(&claim) {
+                claims.push(claim);
             }
-            local_dim_guard_sites.insert(site, claim);
         }
 
         let mut e = CEmitter {
@@ -6873,21 +6840,29 @@ impl CEmitter {
         // entry path emits for a `Literal` claim (chelis#1377). Keying it on
         // whether a C variable happened to be allocated narrowed a required
         // check to an implementation convenience.
-        let Some(site) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
+        let Some(sites) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        let (name, operand, op) = (site.claim, site.operand, site.op);
-        let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
-        self.line(&format!("if (({extent_expr}) != {operand}) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
-        ));
-        self.line(&format!(
-            "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        // One comparison per DISTINCT claim on this axis. Two claims here are
+        // two obligations, and the derivation already coalesced the equal ones.
+        for site in sites {
+            // The class's canonical value, rendered as a C expression: the
+            // variable this function's prologue declared for the claim's
+            // binder, or the size the checker resolved.
+            let operand = site.canonical.to_string();
+            let (name, op) = (site.claim, site.op);
+            let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
+            self.line(&format!("if (({extent_expr}) != {operand}) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
+            ));
+            self.line(&format!(
+                "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
+            ));
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     /// chelis#616 (defense in depth): a RUNTIME axis whose output dim
