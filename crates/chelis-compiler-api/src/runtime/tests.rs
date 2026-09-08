@@ -211,13 +211,76 @@ y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int6
     );
 }
 
+// ----- chelis#1558: [04-DTYPE-1] owns the unbounded cast target -----
+//
+// Every row below used to assert that the host interpreter accepted
+// `cast(<variable>, p)` under an unbounded binder and actualized `p` at each
+// call site's own concrete dtype. [04-DTYPE-1] says a primitive type position
+// SHALL name an active primitive and that the TYPE CHECKER rejects anything
+// else as a cast target, and [04-DTYPE-2] says an unbounded binder is not a
+// primitive. So those programs never reach the interpreter, and the rows
+// encoded an implementation convenience rather than a decided rule.
+//
+// Each row therefore became two: a negative control asserting the check-time
+// rejection, and a bounded-binder twin that keeps the actualization coverage,
+// because `[p_int: Int]` is a legitimate primitive position under [04-DTYPE-2]
+// and still specializes per call site. The twins are the reason the inversion
+// loses no behavioural coverage.
+
+/// Assert the [04-DTYPE-1] check-time rejection, naming the binder and its
+/// owning declaration. The interpreter is never invoked: a rejected program has
+/// no checked form to evaluate.
+fn expect_unbounded_cast_target_rejection(source: &str, binder: &str, owner: &str) {
+    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let errors = chelis_types::check_ir_program(&exprs)
+        .expect_err("an unbounded binder is not a primitive type position");
+    let subject = format!("cast target `{binder}` in `{owner}` does not name an active primitive");
+    assert!(
+        errors
+            .errors
+            .iter()
+            .any(|error| error.message.contains(&subject)
+                && error.message.contains("04-DTYPE-1")),
+        "expected the [04-DTYPE-1] rejection naming `{binder}` in `{owner}`; got {:?}",
+        errors
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// chelis#1558 negative control. **Regression test**: red before the checker
+/// enforced [04-DTYPE-1] for a variable source, when this program checked at
+/// 1.0 and the interpreter actualized `p_int` per call site.
+///
+/// The binder is declared by a `sig` with no bound, which is the form that most
+/// looks like a dtype parameter and is not one.
 #[test]
-fn generic_cast_target_uses_each_calls_concrete_precision() {
-    let checked = checked_surf(
+fn unbounded_sig_declared_cast_target_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 sig recast_int: p_int -> List[p_int] -> p_int
 def recast_int(value, witness) = cast(value, p_int)
-sig recast_float: p_float -> List[p_float] -> p_float
+i16_value = recast_int(cast(257, int16), [cast(0, int16)])
+"#,
+        "p_int",
+        "recast_int",
+    );
+}
+
+/// chelis#1558 positive twin of the row above. **Disposition lock** on the
+/// behaviour the old row protected: a cast target that IS a legitimate
+/// primitive position actualizes at each call site's own concrete dtype. Green
+/// before and after; only its binder gained the bound [04-DTYPE-2] requires.
+#[test]
+fn bounded_cast_target_uses_each_calls_concrete_precision() {
+    let checked = checked_surf(
+        r#"
+sig recast_int[p_int: Int]: p_int -> List[p_int] -> p_int
+def recast_int(value, witness) = cast(value, p_int)
+sig recast_float[p_float: Float]: p_float -> List[p_float] -> p_float
 def recast_float(value, witness) = cast(value, p_float)
 i16_value = recast_int(cast(257, int16), [cast(0, int16)])
 i64_value = recast_int(cast(4294967297, int64), [cast(0, int64)])
@@ -227,7 +290,7 @@ f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
     );
 
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
-        .expect("generic cast targets should actualize at each call");
+        .expect("bounded cast targets should actualize at each call");
     for (name, expected) in [
         ("i16_value", Prim::Int16),
         ("i64_value", Prim::Int64),
@@ -241,16 +304,21 @@ f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
     }
 }
 
+/// chelis#1558: this row's subject is the PRECISION MISMATCH, not the binder,
+/// so it keeps its subject on a bounded binder where the program is still
+/// admitted far enough to reach it. **Disposition lock**, green before and
+/// after. On an unbounded binder [04-DTYPE-1] now fires first and the mismatch
+/// is never reported, which is what the negative control below records.
 #[test]
-fn generic_cast_target_does_not_accept_conflicting_precisions() {
+fn bounded_cast_target_does_not_accept_conflicting_precisions() {
     let source = r#"
-def choose_and_cast[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+def choose_and_cast[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
 value = choose_and_cast(cast(1, int16), cast(2, int64))
 "#;
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
     let errors = chelis_types::check_ir_program(&exprs)
-        .expect_err("one generic precision cannot actualize to two concrete dtypes");
+        .expect_err("one bounded precision cannot actualize to two concrete dtypes");
     assert!(
         errors.errors.iter().any(|error| {
             let message = error.message.to_ascii_lowercase();
@@ -262,12 +330,46 @@ value = choose_and_cast(cast(1, int16), cast(2, int64))
     );
 }
 
+/// chelis#1558 negative control for the same program with the bound removed.
+/// **Regression test**: red before this change, when it checked far enough to
+/// report only the precision mismatch. It now fails earlier, on the target.
 #[test]
-fn generic_cast_target_uses_fresh_specialization_for_nested_calls() {
-    let checked = checked_surf(
+fn unbounded_cast_target_is_rejected_before_any_precision_mismatch() {
+    expect_unbounded_cast_target_rejection(
+        r#"
+def choose_and_cast[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+value = choose_and_cast(cast(1, int16), cast(2, int64))
+"#,
+        "p_int",
+        "choose_and_cast",
+    );
+}
+
+/// chelis#1558 negative control. **Regression test**: a callee binder nested
+/// inside a caller binder is still an unbounded binder in a primitive position.
+#[test]
+fn unbounded_cast_target_in_nested_calls_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def inner[p_int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
 def outer[p_int](witness: List[p_int]) -> int64 =
+  inner(cast(4294967297, int64), [cast(0, int64)])
+value = outer([cast(7, int16)])
+"#,
+        "p_int",
+        "inner",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: a callee's bounded binder
+/// specializes independently of its caller's, which is what the old row proved
+/// and a bound does not change.
+#[test]
+fn bounded_cast_target_uses_fresh_specialization_for_nested_calls() {
+    let checked = checked_surf(
+        r#"
+def inner[p_int: Int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
+def outer[p_int: Int](witness: List[p_int]) -> int64 =
   inner(cast(4294967297, int64), [cast(0, int64)])
 value = outer([cast(7, int16)])
 "#,
@@ -280,11 +382,29 @@ value = outer([cast(7, int16)])
     assert_eq!(payload.dtype(), Prim::Int64);
 }
 
+/// chelis#1558 negative control. **Regression test**: an empty container gives
+/// the binder no witness, and the rejection does not depend on one.
 #[test]
-fn generic_cast_target_uses_contextual_specialization_for_empty_container() {
-    let checked = checked_surf(
+fn unbounded_cast_target_with_an_empty_container_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def empty_witness[p_int](items: List[p_int], value: int64) -> p_int =
+  cast(value, p_int)
+def make_i16() -> int16 = empty_witness([], cast(257, int64))
+value = make_i16()
+"#,
+        "p_int",
+        "empty_witness",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: the checked call result
+/// still supplies the specialization when the container is empty.
+#[test]
+fn bounded_cast_target_uses_contextual_specialization_for_empty_container() {
+    let checked = checked_surf(
+        r#"
+def empty_witness[p_int: Int](items: List[p_int], value: int64) -> p_int =
   cast(value, p_int)
 def make_i16() -> int16 = empty_witness([], cast(257, int64))
 value = make_i16()
@@ -299,11 +419,28 @@ value = make_i16()
     assert_eq!(payload.dtype(), Prim::Int16);
 }
 
+/// chelis#1558 negative control. **Regression test**: an ADT argument carrying
+/// the concrete dtype does not make an unbounded binder a primitive position.
 #[test]
-fn generic_cast_target_uses_checked_adt_specialization() {
-    let checked = checked_surf(
+fn unbounded_cast_target_behind_an_adt_argument_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def option_witness[p_int](item: Option[p_int], value: int64) -> p_int =
+  cast(value, p_int)
+value = option_witness(Some(cast(0, int16)), cast(257, int64))
+"#,
+        "p_int",
+        "option_witness",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: a checked `Option` argument
+/// retains its concrete specialization through a bounded binder.
+#[test]
+fn bounded_cast_target_uses_checked_adt_specialization() {
+    let checked = checked_surf(
+        r#"
+def option_witness[p_int: Int](item: Option[p_int], value: int64) -> p_int =
   cast(value, p_int)
 value = option_witness(Some(cast(0, int16)), cast(257, int64))
 "#,
@@ -317,11 +454,28 @@ value = option_witness(Some(cast(0, int16)), cast(257, int64))
     assert_eq!(payload.dtype(), Prim::Int16);
 }
 
+/// chelis#1558 negative control. **Regression test**: passing the generic def
+/// as a `map` callback does not exempt its cast target.
 #[test]
-fn generic_cast_target_survives_map_callback_specialization() {
-    let checked = checked_surf(
+fn unbounded_cast_target_in_a_map_callback_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def recast[p_int](value: p_int) -> p_int = cast(value, p_int)
+values = map(recast, [cast(127, int8)])
+value = index(values, cast(0, int64))
+"#,
+        "p_int",
+        "recast",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: the checked `map` callback
+/// type still specializes the bounded closure.
+#[test]
+fn bounded_cast_target_survives_map_callback_specialization() {
+    let checked = checked_surf(
+        r#"
+def recast[p_int: Int](value: p_int) -> p_int = cast(value, p_int)
 values = map(recast, [cast(127, int8)])
 value = index(values, cast(0, int64))
 "#,
@@ -335,11 +489,27 @@ value = index(values, cast(0, int64))
     assert_eq!(payload.dtype(), Prim::Int8);
 }
 
+/// chelis#1558 negative control. **Regression test**: the `fold` accumulator
+/// edge is no different from the `map` element edge.
 #[test]
-fn generic_cast_target_survives_fold_callback_specialization() {
-    let checked = checked_surf(
+fn unbounded_cast_target_in_a_fold_callback_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def keep_left[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+value = fold(keep_left, cast(127, int8), [cast(1, int8)])
+"#,
+        "p_int",
+        "keep_left",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: the checked `fold` callback
+/// type still specializes the bounded closure.
+#[test]
+fn bounded_cast_target_survives_fold_callback_specialization() {
+    let checked = checked_surf(
+        r#"
+def keep_left[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
 value = fold(keep_left, cast(127, int8), [cast(1, int8)])
 "#,
     );
@@ -352,16 +522,41 @@ value = fold(keep_left, cast(127, int8), [cast(1, int8)])
     assert_eq!(payload.dtype(), Prim::Int8);
 }
 
+/// chelis#1558 negative control. **Regression test**, and the row whose cause
+/// was misread: the program's only literal cast to a binder is `cast(0, p_int)`
+/// inside `nonnegative[p_int: Int]`, a BOUNDED binder that PR #1545's literal
+/// rule always accepted. What this program trips is its three unbounded defs,
+/// each casting a variable. `keep_left_hof` is named because it is the first
+/// such declaration the checker reaches.
 #[test]
-fn generic_cast_target_survives_every_higher_order_callback_edge() {
-    let checked = checked_surf(
+fn unbounded_cast_target_across_higher_order_edges_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def nonnegative[p_int: Int](value: p_int) -> bool =
   gte(cast(value, p_int), cast(0, p_int))
 def keep_left_hof[p_int](left: p_int, right: p_int) -> p_int =
   cast(left, p_int)
-def singleton[p_int](value: p_int) -> List[p_int] = [cast(value, p_int)]
-def keep_state[p_int](state: p_int, index: int64) -> p_int = cast(state, p_int)
+scanned = scan(keep_left_hof, cast(7, int8), [cast(1, int8)])
+"#,
+        "p_int",
+        "keep_left_hof",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: every higher-order callback
+/// edge preserves its checked specialization when the binder carries a bound.
+/// This is the row that proves the inversion costs no behavioural coverage, so
+/// it keeps all five edges the old row exercised.
+#[test]
+fn bounded_cast_target_survives_every_higher_order_callback_edge() {
+    let checked = checked_surf(
+        r#"
+def nonnegative[p_int: Int](value: p_int) -> bool =
+  gte(cast(value, p_int), cast(0, p_int))
+def keep_left_hof[p_int: Int](left: p_int, right: p_int) -> p_int =
+  cast(left, p_int)
+def singleton[p_int: Int](value: p_int) -> List[p_int] = [cast(value, p_int)]
+def keep_state[p_int: Int](state: p_int, index: int64) -> p_int = cast(state, p_int)
 
 filtered = filter(nonnegative, [cast(-1, int8), cast(2, int8)])
 scanned = scan(keep_left_hof, cast(7, int8), [cast(1, int8)])
