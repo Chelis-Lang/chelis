@@ -25,6 +25,12 @@
 //! a guard against an in-body trap needs a caller, and a called function's
 //! entry sits exactly where its call sits in the caller's source order.
 //!
+//! chelis#1375's two rows belong here for a third reason, recorded at their
+//! own section below: the inlining that erases a class is `def main() =
+//! f(...)`'s, and a top-level BINDING `out = f(...)` does not inline, so the
+//! def is lowered standalone with its declared extent still symbolic and the
+//! guard is reachable from the CLI on both lanes.
+//!
 //! ## Why the guard-order controls are shaped the way they are
 //!
 //! A test that only asks "does a mismatching extent trap" cannot tell a guard
@@ -1472,5 +1478,95 @@ fn two_expands_over_one_operand_axis_share_one_guard() {
     assert!(
         !ran.status.success() && stderr.contains(&domain_trap_line("expand")),
         "the one coalesced guard still refuses a non-unit operand: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1375: a node-valued reshape target under a named claim.
+//
+// `spec/04-type-system.md` section 4.7.3 makes an arithmetic reshape target a
+// FRESH extent, which a surrounding signature may give a name "only by
+// imposing an execution-time equality guard". Section 4.7.2 traps `Domain`
+// when a claimed named extent is not statically proven equal. So a signature
+// claiming the operand's own binder over a computed target owes a guard on
+// every lane, and chelis#1375 recorded both lanes executing without one.
+//
+// These are CLI rows rather than driven rows, unlike the guard rows this file
+// keeps out. The header's reason is exact and still holds: `def main() =
+// f(...)` inlines `f` into the root, so the target folds to a literal, the
+// class disappears, and both lanes print the wrong shape whatever the guards
+// do (measured: one kernel, `chelis_alloc(2, {2, 2})` and a `memcpy`). A
+// top-level BINDING does not inline. `out = f(...)` lowers `f` standalone
+// with its declared `n` symbolic, so the target keeps its `RtDim::Node`
+// carrier, the class forms with the `Load`'s axis, and the guard is reachable
+// from the CLI on both lanes.
+// ---------------------------------------------------------------------------
+
+/// chelis#1375's reproducer, with `claim` naming the declared first result
+/// extent and `factor` the divisor of the computed target.
+///
+/// With `claim = "n"` and `factor = 2`, the signature claims the input's own
+/// extent for an axis whose runtime extent is half of it. With `claim = "n"`
+/// and `factor = 1` the same mechanism produces an extent that AGREES, which
+/// is what separates a guard from a lane that traps on every computed target.
+fn node_target_source(claim: &str, factor: u32) -> String {
+    let second = if factor == 2 { "2i64" } else { "1i64" };
+    let second_ty = if factor == 2 { "2" } else { "1" };
+    format!(
+        "def f(x: tensor[n, f32]) -> tensor[{claim}, {second_ty}, f32] = \
+         reshape(x, [floor_div(shape(x, 0), {factor}i64), {second}])\n\
+         out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
+    )
+}
+
+/// reshape.named_claim.node_target.c
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing on `f47ce5775` (the
+/// commit before `reshape` left the kernel keep-list), where the binary
+/// printed `out = tensor(shape=[2, 2], ...)` and exited 0.
+#[test]
+fn a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "node_target_c", &node_target_source("n", 2));
+    assert!(
+        !ok,
+        "the claimed extent disagrees, so the binary must fail: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("reshape")),
+        "the guard takes the position of the reshape that introduces the extent: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 4"),
+        "section 4.7's context line carries the claim and each observed value: {out}"
+    );
+    assert!(
+        !out.contains("numel mismatch"),
+        "the extent guard is observed before the chelis#616 numel abort: {out}"
+    );
+}
+
+/// The discriminating twin: the same mechanism with a target that AGREES with
+/// the claim executes. Without it, a lane that trapped on every node-valued
+/// target would pass the row above.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "node_target_ok_c", &node_target_source("n", 1));
+    assert!(
+        ok,
+        "the claimed extent agrees, so the binary must run: {out}"
+    );
+    assert!(
+        out.contains("shape=[4, 1]"),
+        "the agreeing program produces its declared shape: {out}"
     );
 }

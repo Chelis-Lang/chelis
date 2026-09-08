@@ -6724,7 +6724,6 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         name,
         Some(
             "copy"
-                | "reshape"
                 | "to_tensor"
                 | "scalar_to_tensor"
                 | "pad_sequences"
