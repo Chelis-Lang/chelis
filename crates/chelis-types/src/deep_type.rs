@@ -16,7 +16,7 @@ use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::DiagnosticSink;
 use crate::types::{
     Dim, DimVar, NominalArg, NominalParamKind, Prim, RankVar, TensorPrec, Type, TypeVar,
-    TypeVarRestriction, VarGen,
+    TypeVarRestriction, VarGen, unsigned_family_diagnostic,
 };
 
 /// A type that crossed the Deep syntax boundary without a silent fallback.
@@ -211,6 +211,11 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     owner_location: Option<TypeDiagnosticLocation>,
     resolution_location: Option<TypeDiagnosticLocation>,
     current_location: Option<TypeDiagnosticLocation>,
+    /// True while resolving the trailing precision child of a `t-tensor`.
+    /// That slot has its own reserved-name diagnostic in
+    /// `validate_tensor_precisions_in_program`, so the `t-prim` arm must not
+    /// emit a second one (chelis#1593).
+    resolving_tensor_precision: bool,
 }
 
 impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binders> {
@@ -235,6 +240,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             owner_location: None,
             resolution_location: None,
             current_location: None,
+            resolving_tensor_precision: false,
         };
         if let BinderMode::Explicit(names) = binder_mode {
             // Nominal parameters are type arguments even when their occurrence
@@ -477,12 +483,35 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         match form_tag {
             Some(DeepTag::TPrim) => {
                 let name = self.one_symbol(tag, children)?;
-                Prim::parse_name(name).map(Type::Prim).ok_or_else(|| {
-                    self.type_error(format!(
-                        "unknown primitive type `{name}` in {}",
-                        self.use_site.label()
-                    ))
-                })
+                if let Some(prim) = Prim::parse_name(name) {
+                    return Ok(Type::Prim(prim));
+                }
+                // chelis#1593: this is the one boundary every type position
+                // crosses, so a §1.1.2 unsigned spelling is named here once
+                // and reported the same way everywhere -- the defsig, the
+                // annotation, the `deftype` field, the `typealias` body, and
+                // a hand-written `.dp`. The generic message below names the
+                // wrong defect for a reserved spelling: it says the name is
+                // unknown, when the language reserved it and rejects it.
+                //
+                // The tensor precision slot is excluded because
+                // `validate_tensor_precisions_in_program` already reports it
+                // with the tensor-flavoured wording; reporting here as well
+                // would give one `tensor[..., u8]` two copies of the same
+                // complaint under two different surface words.
+                if !self.resolving_tensor_precision
+                    && let Some(diagnostic) =
+                        unsigned_family_diagnostic(name, /* tensor = */ false)
+                {
+                    let diagnostic = self
+                        .diagnostic_location()
+                        .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+                    return Err(report_witness(self.errors, diagnostic));
+                }
+                Err(self.type_error(format!(
+                    "unknown primitive type `{name}` in {}",
+                    self.use_site.label()
+                )))
             }
             Some(DeepTag::TVar) => {
                 let name = self.one_symbol(tag, children)?;
@@ -517,7 +546,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 for child in &children[..children.len() - 1] {
                     dims.push(self.resolve_dim(child)?);
                 }
-                let precision = match self.resolve_type(&children[children.len() - 1])? {
+                // The trailing child is the precision slot, whose reserved-name
+                // diagnostic belongs to `validate_tensor_precisions_in_program`
+                // rather than to the `t-prim` arm above (chelis#1593).
+                let resolved_precision = {
+                    let outer = std::mem::replace(&mut self.resolving_tensor_precision, true);
+                    let resolved = self.resolve_type(&children[children.len() - 1]);
+                    self.resolving_tensor_precision = outer;
+                    resolved?
+                };
+                let precision = match resolved_precision {
                     Type::Prim(prim) => TensorPrec::Concrete(prim),
                     Type::Var(var) => TensorPrec::Var(var),
                     other => {

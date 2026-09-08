@@ -2749,6 +2749,9 @@ fn desugar_type_with_scope_mode(
             //   call site (chelis#293). Without this, an uppercase
             //   quantifier name was misclassified as a rigid ADT and
             //   every call site failed with `type mismatch: P vs ..`.
+            // - A §1.1.2 unsigned spelling is a reserved name that names
+            //   no primitive, and stays `(t-prim {} <name>)` so the
+            //   checker's rejection fires (chelis#1593).
             // - Otherwise the lexical case-split applies: a PascalCase
             //   name is an ADT; a lowercase name is a free `t-var`
             //   whose binding the type checker resolves downstream.
@@ -2758,6 +2761,22 @@ fn desugar_type_with_scope_mode(
                 node(DeepTag::TPrim, vec![sym(canonical)])
             } else if tvar_set.contains(name.as_str()) {
                 node(DeepTag::TVar, vec![sym(name)])
+            } else if UNSIGNED_DTYPE_NAMES.contains(&name.as_str()) {
+                // chelis#1593. `is_candidate_tvar_name` already keeps these
+                // names out of the implicit quantifier set, which is only half
+                // of what `spec/04-type-system.md` §5.8.1 asks for: excluding a
+                // name from the set does nothing while the fall-through below
+                // quantifies it anyway. `def f(x: u8) -> u8 = x` therefore
+                // typed as `forall u8. u8 -> u8` and scored 1.0. The
+                // `tensor[...]` precision slot has always had the right
+                // fall-through; this gives the scalar arm the same one.
+                //
+                // Mapped to NOTHING, unlike chelis#1587's `i8`..`i64` above:
+                // those are input spellings for active primitives and
+                // normalise, these name no primitive at all and
+                // `Prim::parse_name` must keep failing on them. Same class,
+                // opposite repair.
+                node(DeepTag::TPrim, vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
                 node(DeepTag::TAdt, vec![sym(name)])
             } else {
