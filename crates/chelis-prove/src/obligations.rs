@@ -443,10 +443,7 @@ fn collect_record_fields_in(
     for expr in exprs {
         if tag(expr) == Some(DeepTag::Deftype) {
             // Skip opaque types: their fields are the sealed representation.
-            let opaque = matches!(
-                meta_value(expr, "opaque"),
-                Some(Expr::Atom(Atom::Bool(true), _))
-            );
+            let opaque = is_opaque(expr);
             if !opaque && let Some(name) = children(expr).first().and_then(symbol_text) {
                 // Collect EVERY variant's payload types, not just the first
                 // (CR-15): a non-first variant wrapping the opaque type
@@ -480,18 +477,16 @@ fn collect_record_fields_in(
     }
 }
 
-fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
+fn is_opaque(expr: &Expr) -> bool {
     let meta = match expr {
         Expr::Node(node, _) => node.meta(),
         Expr::List(list, _) => match list.elements.get(1) {
             Some(Expr::Map(map, _)) => map,
-            _ => return None,
+            _ => return false,
         },
-        _ => return None,
+        _ => return false,
     };
-    meta.entries
-        .iter()
-        .find_map(|(k, v)| (k == key).then_some(v))
+    meta.opaque().is_some()
 }
 
 /// Whether a parameter type hands the opaque type to caller-supplied code

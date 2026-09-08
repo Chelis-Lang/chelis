@@ -618,14 +618,10 @@ fn invariant_without_opaque_is_rejected_on_both_ingresses() {
     let error = parse_and_stamp_file(INVARIANT_WITHOUT_OPAQUE)
         .expect_err("invalid metadata cannot create a stamped Node");
     assert!(error.to_string().contains("opaque"));
-    let legacy = legacy_metadata::legacy_metadata_fixture(INVARIANT_WITHOUT_OPAQUE);
-    let typed = typed_errors(&legacy);
-    assert_eq!(typed, ir_errors(&legacy));
-    assert!(
-        typed
-            .iter()
-            .any(|m| m.contains("metadata `invariant`") && m.contains("opaque"))
-    );
+    let error = chelis_deep::parser::parse_str(INVARIANT_WITHOUT_OPAQUE)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invariant") && error.contains("opaque"));
 }
 
 /// PP7 row 4's over-rejection control, DISPOSITION LOCK (green before and
@@ -790,6 +786,3 @@ fn int64_suffixed_seed_literal_is_accepted_on_both_ingresses() {
         "with seed at an int64-suffixed literal",
     );
 }
-
-#[path = "../../../tests/support/legacy_metadata.rs"]
-mod legacy_metadata;

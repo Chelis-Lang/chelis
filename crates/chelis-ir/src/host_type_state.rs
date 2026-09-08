@@ -15,7 +15,7 @@
 use chelis_deep::DeepTag;
 use std::fmt;
 
-use chelis_deep::ast::{Atom, Expr, MetaMap};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_types::types::Prim;
 
 use crate::dag::{DimInfo, TensorType};
@@ -368,18 +368,13 @@ pub fn decode_host_type_metadata(expr: &Expr) -> Result<HostTypeTerm, HostTypeDe
         Expr::List(_, _) | Expr::Node(_, _) => {
             let (_, metadata, _) = stamped_parts(expr)?;
             let type_expr = metadata
-                .entries
-                .iter()
-                .find_map(|(key, value)| (key == "type").then_some(value))
+                .ty()
+                .map(|value| value.expression())
                 .ok_or(HostTypeDecodeError::MissingTypeMetadata)?;
             decode_host_type(type_expr)
         }
         Expr::MetaExpr(meta, _) => {
-            if let Some(type_expr) = meta
-                .entries
-                .iter()
-                .find_map(|(key, value)| (key == "type").then_some(value))
-            {
+            if let Some(type_expr) = meta.metadata.ty().map(|value| value.expression()) {
                 decode_host_type(type_expr)
             } else {
                 decode_host_type_metadata(&meta.expr)
@@ -525,7 +520,7 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
     }
 }
 
-fn stamped_parts(expr: &Expr) -> Result<(DeepTag, &MetaMap, &[Expr]), HostTypeDecodeError> {
+fn stamped_parts(expr: &Expr) -> Result<(DeepTag, &Metadata, &[Expr]), HostTypeDecodeError> {
     match expr {
         Expr::List(list, _) => match list.elements.get(1) {
             Some(Expr::Map(meta, _)) => Ok((

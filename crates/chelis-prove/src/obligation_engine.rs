@@ -12,11 +12,12 @@
 //! the cross-surface test locks).
 
 use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_types::types::{Prim, Type};
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
 
@@ -2088,13 +2089,10 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
             if list.tag() == Some(DeepTag::Deftype)
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
-                let kept: Vec<(String, Expr)> = map
-                    .entries
-                    .iter()
-                    .filter(|(k, _)| k != "invariant" && k != "invariant_amenability")
-                    .cloned()
-                    .collect();
-                elements[1] = Expr::Map(MetaMap { entries: kept }, *mspan);
+                let mut metadata = map.clone();
+                metadata.remove(K::Invariant);
+                metadata.remove(K::InvariantAmenability);
+                elements[1] = Expr::Map(metadata, *mspan);
             }
             Expr::List(List { elements }, *span)
         }
@@ -2196,8 +2194,11 @@ fn deep_sym(s: &str) -> Expr {
 }
 fn deep_node(tag: &str, children: Vec<Expr>) -> Expr {
     let mut elements = vec![
-        deep_sym(tag),
-        Expr::Map(MetaMap::default(), Span::new(0, 0)),
+        Expr::Atom(
+            Atom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
+            Span::new(0, 0),
+        ),
+        Expr::Map(Metadata::default(), Span::new(0, 0)),
     ];
     elements.extend(children);
     Expr::List(List { elements }, Span::new(0, 0))
@@ -2206,10 +2207,10 @@ fn deep_var(name: &str) -> Expr {
     deep_node("var", vec![deep_sym(name)])
 }
 fn deep_typed_lit(type_prim: &str, value: Expr) -> Expr {
-    let mut entries = MetaMap::default();
-    entries.entries.push((
-        "type".to_string(),
-        deep_node("t-prim", vec![deep_sym(type_prim)]),
+    let mut entries = Metadata::default();
+    entries.replace(M::Type(
+        TypeSyntax::try_new(deep_node("t-prim", vec![deep_sym(type_prim)]))
+            .expect("primitive type"),
     ));
     Expr::List(
         List {

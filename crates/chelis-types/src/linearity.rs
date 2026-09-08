@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
@@ -763,9 +763,9 @@ impl Checker {
         match expr {
             Expr::Atom(_, _) => {}
             Expr::Map(map, _) => {
-                for (_, value) in &map.entries {
+                map.visit_syntax(&mut |_, value| {
                     self.check_expr(value, scope);
-                }
+                });
             }
             Expr::MetaExpr(meta, _) => self.check_expr(&meta.expr, scope),
             Expr::List(list, _) => match get_tag(list) {
@@ -1693,20 +1693,14 @@ fn with_macro_provenance(expr: &Expr, message: String) -> String {
 
 fn macro_source(expr: &Expr) -> Option<String> {
     let (_, meta, _) = stamped_parts(expr)?;
-    let source = meta
-        .entries
-        .iter()
-        .find(|(key, _)| key == "source")
-        .map(|(_, value)| value)?;
-    let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(source));
-    Some(rendered.replace('\n', " ").trim().to_string())
+    Some(chelis_deep::printer::print_macro_source(meta.source()?))
 }
 
 fn get_tag_expr(expr: &Expr) -> Option<DeepTag> {
     stamped_parts(expr).map(|(tag, _, _)| tag)
 }
 
-fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
         Expr::List(list, _) => {
             let tag = get_tag(list)?;
@@ -2070,10 +2064,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
 
 fn type_metadata(expr: &Expr) -> Option<&Expr> {
     let (_, meta, _) = stamped_parts(expr)?;
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    meta.ty().map(|v| v.expression())
 }
 
 /// Render the source site of `expr` for linearity diagnostics.
@@ -2099,10 +2090,7 @@ fn diag_site(expr: &Expr) -> String {
 /// Extract the `span: "surf:a..b"` metadata entry, when present.
 fn span_metadata_id(expr: &Expr) -> Option<&str> {
     let (_, meta, _) = stamped_parts(expr)?;
-    meta.entries.iter().find_map(|(key, value)| match value {
-        Expr::Atom(Atom::Str(id), _) if key == "span" => Some(id.as_str()),
-        _ => None,
-    })
+    meta.span_id().map(|v| v.value())
 }
 
 fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
@@ -2111,8 +2099,8 @@ fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
         Expr::List(param_list, _) => Some((
             param_list.elements.first().and_then(symbol_name)?,
             get_meta(param_list)
-                .and_then(|meta| meta.entries.iter().find(|(k, _)| k == "type"))
-                .map(|(_, value)| value),
+                .and_then(|meta| meta.ty())
+                .map(|v| v.expression()),
         )),
         Expr::BareList(elements, _) => {
             let name = elements.first().and_then(symbol_name)?;
@@ -2120,10 +2108,7 @@ fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
                 let Expr::Map(meta, _) = meta else {
                     return None;
                 };
-                meta.entries
-                    .iter()
-                    .find(|(key, _)| key == "type")
-                    .map(|(_, value)| value)
+                meta.ty().map(|v| v.expression())
             });
             Some((name, ty))
         }
@@ -2141,19 +2126,13 @@ fn param_name_and_type(param: &Expr) -> Option<(&str, Option<&Expr>)> {
             let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
-            Some((
-                name.as_str(),
-                meta.entries
-                    .iter()
-                    .find(|(k, _)| k == "type")
-                    .map(|(_, value)| value),
-            ))
+            Some((name.as_str(), meta.metadata.ty().map(|v| v.expression())))
         }
         _ => None,
     }
 }
 
-fn get_meta(list: &List) -> Option<&MetaMap> {
+fn get_meta(list: &List) -> Option<&Metadata> {
     match list.elements.get(1) {
         Some(Expr::Map(meta, _)) => Some(meta),
         _ => None,
@@ -2214,9 +2193,7 @@ fn bind_introduces_destructure_tmp(bind_expr: &Expr) -> bool {
     let Some((DeepTag::Bind, meta, _)) = stamped_parts(bind_expr) else {
         return false;
     };
-    meta.entries.iter().any(|(key, value)| {
-        key == "destructure" && matches!(value, Expr::Atom(Atom::Bool(true), _))
-    })
+    meta.destructure().is_some()
 }
 
 fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &UnordSet<String>) -> bool {
@@ -2493,7 +2470,7 @@ mod tests {
 
     use super::*;
     use chelis_deep::Span;
-    use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+    use chelis_deep::ast::{Atom, Expr, List, Metadata};
 
     fn span() -> Span {
         Span::new(0, 0)
@@ -2504,15 +2481,16 @@ mod tests {
     }
 
     fn meta(entries: Vec<(&str, Expr)>) -> Expr {
-        Expr::Map(
-            MetaMap {
-                entries: entries
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect(),
-            },
-            span(),
-        )
+        let mut metadata = Metadata::default();
+        for (key, value) in entries {
+            assert_eq!(key, "type", "linearity fixtures only declare types");
+            metadata
+                .insert(chelis_deep::annotations::MetadataValue::Type(
+                    chelis_deep::annotations::TypeSyntax::try_new(value).unwrap(),
+                ))
+                .unwrap();
+        }
+        Expr::Map(metadata, span())
     }
 
     /// Build `(tag {meta} children...)`.

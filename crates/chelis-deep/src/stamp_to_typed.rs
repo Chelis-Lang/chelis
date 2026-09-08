@@ -3,7 +3,8 @@
 //! Walks top-down, consulting `child_stamp_role` at each child to decide
 //! whether a list decodes as a Node, BareList, or UnknownForm.
 
-use crate::ast::{Atom, Expr, MetaMap};
+use crate::Metadata;
+use crate::ast::{Atom, Expr};
 use crate::node::Node;
 use crate::raw::{RawAtom, RawExpr};
 use crate::role::{
@@ -331,7 +332,7 @@ fn stamp_in_role(
 /// A bare identifier here is the `spec/03-deep-syntax.md` [03-ROLE-2]
 /// ingress rejection: a name is not an expression, and the diagnostic
 /// names the `(var {} ...)` spelling that is one.
-fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
+pub(crate) fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(RawAtom::Symbol(name), span) => Err(StampError {
             kind: StampErrorKind::NameAtExprSlot { name },
@@ -456,7 +457,7 @@ fn stamp_type_in_role(raw: RawExpr, expected: TypeSyntaxRole) -> Result<Expr, St
 
 // ── Syntax/Binder/Selector → Node (if vocabulary head) or BareList ───
 
-fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
+pub(crate) fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => stamp_bare_list(elements, span),
@@ -727,53 +728,11 @@ fn convert_atom(raw: RawAtom) -> Atom {
     }
 }
 
-fn convert_meta_map(entries: Vec<(String, RawExpr)>) -> Result<MetaMap, StampError> {
-    let mut out = Vec::with_capacity(entries.len());
-    for (key, value) in entries {
-        use crate::metadata::{MetadataRole, role};
-        let value = match role(&key) {
-            MetadataRole::Expression => stamp_runtime_expr(value)?,
-            MetadataRole::Type => stamp_serialized_type(value)?,
-            MetadataRole::Preserved | MetadataRole::BinderMap => preserve_syntax(value),
-            MetadataRole::Syntax => stamp_bare(value)?,
-        };
-        out.push((key, value));
-    }
-    Ok(MetaMap { entries: out })
-}
-
-// Historical invocation arguments and binder maps are data, even when a
-// name spells a vocabulary tag or annotation key.
-fn preserve_syntax(raw: RawExpr) -> Expr {
-    match raw {
-        RawExpr::Atom(atom, span) => Expr::Atom(convert_atom(atom), span),
-        RawExpr::List(items, span) => {
-            Expr::BareList(items.into_iter().map(preserve_syntax).collect(), span)
-        }
-        RawExpr::Map(items, span) => Expr::Map(
-            MetaMap {
-                entries: items
-                    .into_iter()
-                    .map(|(k, v)| (k, preserve_syntax(v)))
-                    .collect(),
-            },
-            span,
-        ),
-        RawExpr::MetaExpr {
-            entries,
-            expr,
-            span,
-        } => Expr::MetaExpr(
-            crate::MetaExpr {
-                entries: entries
-                    .into_iter()
-                    .map(|(k, v)| (k, preserve_syntax(v)))
-                    .collect(),
-                expr: Box::new(preserve_syntax(*expr)),
-            },
-            span,
-        ),
-    }
+fn convert_meta_map(entries: Vec<(String, RawExpr)>) -> Result<Metadata, StampError> {
+    crate::annotations_codec::decode_entries(entries).map_err(|error| StampError {
+        span: error.span,
+        kind: StampErrorKind::NodeError(crate::node::NodeError::Metadata(error)),
+    })
 }
 
 fn stamp_map(entries: Vec<(String, RawExpr)>, span: Span) -> Result<Expr, StampError> {
@@ -789,7 +748,7 @@ fn stamp_meta_expr(
     let converted_expr = stamp_bare(expr)?;
     Ok(Expr::MetaExpr(
         crate::ast::MetaExpr {
-            entries: converted_entries.entries,
+            metadata: converted_entries,
             expr: Box::new(converted_expr),
         },
         span,

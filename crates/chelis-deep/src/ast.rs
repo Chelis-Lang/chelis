@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub use crate::annotations::Metadata;
 use crate::span::Span;
 use crate::tag::DeepTag;
 
@@ -18,7 +19,7 @@ pub enum Expr {
     /// Retained during migration; will be deleted when all consumers are migrated.
     List(List, Span),
     /// An inline metadata map `{key: value, ...}` or `{}`.
-    Map(MetaMap, Span),
+    Map(Metadata, Span),
     /// A metadata-annotated expression `^{k1 v1 ...} expr` (legacy, kept for compat).
     MetaExpr(MetaExpr, Span),
     /// A stamped vocabulary node produced by `stamp_to_typed`. The `Node`
@@ -39,7 +40,7 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnknownFormData {
     pub head: String,
-    pub meta: MetaMap,
+    pub meta: Metadata,
     pub children: Vec<Expr>,
     pub span: Span,
 }
@@ -50,7 +51,7 @@ impl Expr {
     /// chelis#731 Phase 3): programmatic Deep construction goes through
     /// here (or stamps `Atom::Tag` directly) so the in-memory tree never
     /// carries a vocabulary tag as a string.
-    pub fn node(tag: DeepTag, meta: MetaMap, children: Vec<Expr>, span: Span) -> Expr {
+    pub fn node(tag: DeepTag, meta: Metadata, children: Vec<Expr>, span: Span) -> Expr {
         Expr::Node(Box::new(crate::node::Node::new(tag, meta, children)), span)
     }
 
@@ -106,14 +107,7 @@ impl Expr {
             Expr::Node(node, _) => node.meta(),
             _ => return None,
         };
-        for (key, value) in &meta.entries {
-            if key == "span"
-                && let Expr::Atom(Atom::Str(s), _) = value
-            {
-                return Some(s.as_str());
-            }
-        }
-        None
+        meta.span_id().map(|v| v.value())
     }
 }
 
@@ -226,18 +220,11 @@ pub fn cast_mode_of(children: &[Expr]) -> Result<CastMode, String> {
     CastMode::from_deep_selector(symbol).ok_or_else(|| symbol.to_string())
 }
 
-/// Inline metadata map: `{key: value, ...}` or `{}`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct MetaMap {
-    /// Key-value pairs. Keys are bare identifiers.
-    pub entries: Vec<(String, Expr)>,
-}
-
 /// Legacy metadata: `^{k1 v1 ...} expr` (prefix form).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MetaExpr {
-    /// Key-value pairs. Keys are keyword strings (without `:`).
-    pub entries: Vec<(String, Expr)>,
+    /// Dedicated annotations with separately owned producer extensions.
+    pub metadata: Metadata,
     /// The expression this metadata is attached to.
     pub expr: Box<Expr>,
 }
@@ -255,7 +242,7 @@ pub struct MetaExpr {
 pub fn strip_metadata(expr: &Expr) -> Expr {
     match expr {
         Expr::Atom(..) => expr.clone(),
-        Expr::Map(_, span) => Expr::Map(MetaMap::default(), *span),
+        Expr::Map(_, span) => Expr::Map(Metadata::default(), *span),
         Expr::MetaExpr(meta, _) => strip_metadata(&meta.expr),
         Expr::List(list, span) => {
             let elements = list
@@ -264,7 +251,7 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                 .enumerate()
                 .map(|(index, element)| {
                     if index == 1 && matches!(element, Expr::Map(..)) {
-                        Expr::Map(MetaMap::default(), element.span())
+                        Expr::Map(Metadata::default(), element.span())
                     } else {
                         strip_metadata(element)
                     }
@@ -291,7 +278,7 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
                 })
                 .collect();
             Expr::Node(
-                Box::new(Node::new(node.tag(), MetaMap::default(), children)),
+                Box::new(Node::new(node.tag(), Metadata::default(), children)),
                 *span,
             )
         }
@@ -301,7 +288,7 @@ pub fn strip_metadata(expr: &Expr) -> Expr {
         }
         Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(UnknownFormData {
             head: data.head.clone(),
-            meta: MetaMap::default(),
+            meta: Metadata::default(),
             children: data.children.iter().map(strip_metadata).collect(),
             span: data.span,
         })),

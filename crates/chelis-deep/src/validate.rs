@@ -43,6 +43,15 @@ pub(crate) fn find_raw_vocabulary_tag_below_gate(exprs: &[Expr]) -> Option<Strin
     exprs.iter().find_map(|expr| walk(expr, false))
 }
 
+fn walk_metadata(meta: &crate::Metadata, descend_into_nodes: bool) -> Option<String> {
+    let mut result = None;
+    meta.visit_expressions(&mut |value, _| {
+        if result.is_none() {
+            result = walk(value, descend_into_nodes);
+        }
+    });
+    result
+}
 fn walk(expr: &Expr, descend_into_nodes: bool) -> Option<String> {
     match expr {
         Expr::List(list, _) => {
@@ -53,45 +62,28 @@ fn walk(expr: &Expr, descend_into_nodes: bool) -> Option<String> {
             }
             list.elements
                 .iter()
-                .find_map(|element| walk(element, descend_into_nodes))
+                .find_map(|v| walk(v, descend_into_nodes))
         }
-        Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .find_map(|(_, value)| walk(value, descend_into_nodes)),
-        Expr::MetaExpr(meta, _) => walk(&meta.expr, descend_into_nodes).or_else(|| {
-            meta.entries
-                .iter()
-                .find_map(|(_, value)| walk(value, descend_into_nodes))
-        }),
-        Expr::Atom(_, _) => None,
+        Expr::Map(meta, _) => walk_metadata(meta, descend_into_nodes),
+        Expr::MetaExpr(meta, _) => walk(&meta.expr, descend_into_nodes)
+            .or_else(|| walk_metadata(&meta.metadata, descend_into_nodes)),
+        Expr::Atom(..) => None,
         Expr::Node(node, _) => {
             if !descend_into_nodes {
                 return None;
             }
-            node.meta()
-                .entries
-                .iter()
-                .find_map(|(_, value)| walk(value, descend_into_nodes))
-                .or_else(|| {
-                    node.children_slice()
-                        .iter()
-                        .find_map(|child| walk(child, descend_into_nodes))
-                })
-        }
-        Expr::BareList(elements, _) => elements
-            .iter()
-            .find_map(|element| walk(element, descend_into_nodes)),
-        Expr::UnknownForm(data) => data
-            .meta
-            .entries
-            .iter()
-            .find_map(|(_, value)| walk(value, descend_into_nodes))
-            .or_else(|| {
-                data.children
+            walk_metadata(node.meta(), descend_into_nodes).or_else(|| {
+                node.children_slice()
                     .iter()
-                    .find_map(|child| walk(child, descend_into_nodes))
-            }),
+                    .find_map(|v| walk(v, descend_into_nodes))
+            })
+        }
+        Expr::BareList(items, _) => items.iter().find_map(|v| walk(v, descend_into_nodes)),
+        Expr::UnknownForm(data) => walk_metadata(&data.meta, descend_into_nodes).or_else(|| {
+            data.children
+                .iter()
+                .find_map(|v| walk(v, descend_into_nodes))
+        }),
     }
 }
 
@@ -295,26 +287,11 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
         }
         Expr::MetaExpr(meta, _) => {
             validate_expr(&meta.expr, warnings);
-            for (key, v) in &meta.entries {
-                if !matches!(
-                    crate::metadata::role(key),
-                    crate::metadata::MetadataRole::Preserved
-                        | crate::metadata::MetadataRole::BinderMap
-                ) {
-                    validate_expr(v, warnings);
-                }
-            }
+            meta.metadata
+                .visit_expressions(&mut |v, _| validate_expr(v, warnings));
         }
         Expr::Map(map, _) => {
-            for (key, v) in &map.entries {
-                if !matches!(
-                    crate::metadata::role(key),
-                    crate::metadata::MetadataRole::Preserved
-                        | crate::metadata::MetadataRole::BinderMap
-                ) {
-                    validate_expr(v, warnings);
-                }
-            }
+            map.visit_expressions(&mut |v, _| validate_expr(v, warnings));
         }
         Expr::Atom(_, _) => {} // Atoms are always valid
         // Stamped Node variants: structurally valid by construction (arity
@@ -328,15 +305,8 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                 validate_expr(child, warnings);
             }
             // Recurse into metadata values
-            for (key, v) in &node.meta().entries {
-                if !matches!(
-                    crate::metadata::role(key),
-                    crate::metadata::MetadataRole::Preserved
-                        | crate::metadata::MetadataRole::BinderMap
-                ) {
-                    validate_expr(v, warnings);
-                }
-            }
+            node.meta()
+                .visit_expressions(&mut |v, _| validate_expr(v, warnings));
         }
         Expr::BareList(elems, _) => {
             for child in elems {
@@ -353,15 +323,8 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                     DeepTag::COUNT
                 ),
             });
-            for (key, value) in &data.meta.entries {
-                if !matches!(
-                    crate::metadata::role(key),
-                    crate::metadata::MetadataRole::Preserved
-                        | crate::metadata::MetadataRole::BinderMap
-                ) {
-                    validate_expr(value, warnings);
-                }
-            }
+            data.meta
+                .visit_expressions(&mut |v, _| validate_expr(v, warnings));
             for child in &data.children {
                 validate_expr(child, warnings);
             }
@@ -767,7 +730,7 @@ fn validate_type_parameter_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Atom, List, MetaMap};
+    use crate::ast::{Atom, List, Metadata};
     use crate::span::Span;
 
     const ZERO: Span = Span { offset: 0, len: 0 };
@@ -777,7 +740,7 @@ mod tests {
     }
 
     fn empty_map() -> Expr {
-        Expr::Map(MetaMap::default(), ZERO)
+        Expr::Map(Metadata::default(), ZERO)
     }
 
     fn make_list(elements: Vec<Expr>) -> Expr {
@@ -823,36 +786,15 @@ mod tests {
             },
             ZERO,
         );
-        let rejected = crate::node::Node::try_new(
-            DeepTag::Tuple,
-            MetaMap {
-                entries: vec![("probe".to_string(), raw_in_meta.clone())],
-            },
-            Vec::new(),
-        );
+        let mut metadata = Metadata::default();
+        let error = metadata
+            .extensions_mut()
+            .insert("probe".into(), raw_in_meta)
+            .unwrap_err();
+        assert!(error.to_string().contains("var"));
         assert!(
-            matches!(
-                rejected,
-                Err(crate::node::NodeError::RawVocabularyTag { ref raw_tag, .. })
-                    if raw_tag == "var"
-            ),
-            "Node metadata remains part of the decode-once oracle: {rejected:?}"
-        );
-
-        // The ungated carriers have no constructor to reject them, so the
-        // oracle itself must still walk their metadata.
-        let unknown_with_raw_meta = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
-            head: "future-form".to_string(),
-            meta: MetaMap {
-                entries: vec![("probe".to_string(), raw_in_meta)],
-            },
-            children: Vec::new(),
-            span: ZERO,
-        }));
-        assert_eq!(
-            find_raw_vocabulary_tag(&[unknown_with_raw_meta]).as_deref(),
-            Some("var"),
-            "UnknownForm metadata remains part of the decode-once oracle"
+            metadata.is_empty(),
+            "no carrier can receive the rejected annotation"
         );
     }
 
@@ -903,14 +845,19 @@ mod tests {
 
         let nested = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
             head: "nested-unknown".to_string(),
-            meta: MetaMap::default(),
+            meta: Metadata::default(),
             children: Vec::new(),
             span: ZERO,
         }));
         let outer = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
             head: "outer-unknown".to_string(),
-            meta: MetaMap {
-                entries: vec![("payload".to_string(), nested)],
+            meta: {
+                let mut metadata = Metadata::default();
+                metadata
+                    .extensions_mut()
+                    .insert("payload".into(), nested)
+                    .unwrap();
+                metadata
             },
             children: Vec::new(),
             span: ZERO,
@@ -1051,10 +998,14 @@ mod tests {
                     empty_map(),
                     Expr::MetaExpr(
                         crate::ast::MetaExpr {
-                            entries: vec![(
-                                "type".to_string(),
-                                make_list(vec![sym("t-prim"), empty_map(), sym("int64")]),
-                            )],
+                            metadata: Metadata::from(crate::annotations::MetadataValue::Type(
+                                crate::annotations::TypeSyntax::try_new(make_list(vec![
+                                    sym("t-prim"),
+                                    empty_map(),
+                                    sym("int64"),
+                                ]))
+                                .unwrap(),
+                            )),
                             expr: Box::new(sym("let")),
                         },
                         ZERO,
@@ -1103,20 +1054,15 @@ mod tests {
 
     // ── Opaque-invariant metadata shape (RFC D-META) ─────────────────
 
-    mod legacy_metadata {
-        use crate as chelis_deep;
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/support/legacy_metadata.rs"
-        ));
-    }
     fn structural_messages(src: &str) -> Vec<String> {
-        let exprs = legacy_metadata::legacy_metadata_fixture(src);
-        validate(&exprs)
-            .into_iter()
-            .filter(|w| matches!(w.kind, WarningKind::Structural))
-            .map(|w| w.message)
-            .collect()
+        match crate::parser::parse_str(src) {
+            Ok(exprs) => validate(&exprs)
+                .into_iter()
+                .filter(|w| matches!(w.kind, WarningKind::Structural))
+                .map(|w| w.message)
+                .collect(),
+            Err(error) => vec![error.to_string()],
+        }
     }
 
     #[test]

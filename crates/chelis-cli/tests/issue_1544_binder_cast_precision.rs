@@ -336,21 +336,32 @@ fn single_type_stamp(source: &str) -> String {
 #[test]
 fn duplicate_type_stamps_reject_before_every_execution_lane() {
     for source in [DUPLICATED_TYPE_STAMP, DUPLICATED_TYPE_STAMP_TENSOR] {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join("duplicate.dp"), source).unwrap();
-        for args in [
-            vec!["check", "duplicate.dp"],
-            vec!["eval", "--file", "duplicate.dp"],
-            vec!["build", "duplicate.dp", "--target", "c", "--output", "out"],
+        for stamps in [
+            "type: (t-var {} p), type: (t-var {} p)",
+            "type: (t-var {} p), type: (t-prim {} f32)",
+            "type: (t-prim {} f32), type: (t-var {} p)",
+            "type: (t-prim {} f32), type: (t-prim {} f64)",
+            "type: (t-prim {} f64), type: (t-prim {} f32)",
         ] {
-            let output = run(dir.path(), &args);
-            assert!(!output.status.success(), "{args:?}: {}", text(&output));
-            let output = text(&output);
-            assert!(
-                output.contains("exactly one occurrence of this metadata key")
-                    && output.contains("type"),
-                "{args:?}: {output}"
-            );
+            let source = source.replace("type: (t-var {} p), type: (t-var {} p)", stamps);
+            let dir = tempdir().unwrap();
+            fs::write(dir.path().join("duplicate.dp"), &source).unwrap();
+            for args in [
+                vec!["check", "duplicate.dp"],
+                vec!["eval", "--file", "duplicate.dp"],
+                vec!["surf", "duplicate.dp"],
+                vec!["validate", "--deep", "duplicate.dp"],
+                vec!["build", "duplicate.dp", "--target", "c", "--output", "out"],
+            ] {
+                let output = run(dir.path(), &args);
+                assert!(!output.status.success(), "{args:?}: {}", text(&output));
+                let output = text(&output);
+                assert!(
+                    output.contains("exactly one occurrence of this metadata key")
+                        && output.contains("type"),
+                    "{args:?}: {output}"
+                );
+            }
         }
     }
 }

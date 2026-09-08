@@ -6,7 +6,7 @@
 //! `cast` and `par` nodes.  Resugaring must preserve those node classes and
 //! malformed Deep must fail rather than turn into a placeholder program.
 
-use chelis_deep::ast::{Atom as DeepAtom, MetaMap, UnknownFormData};
+use chelis_deep::ast::{Atom as DeepAtom, Metadata, UnknownFormData};
 use chelis_deep::parser::parse_str as parse_deep;
 use chelis_deep::printer::print_canonical;
 use chelis_deep::{DeepTag, Expr as DeepExpr, Span};
@@ -254,7 +254,7 @@ fn public_decompiler_propagates_malformed_foundation_nodes() {
     let span = Span::new(0, 0);
     let malformed = DeepExpr::UnknownForm(Box::new(UnknownFormData {
         head: "future-form".to_string(),
-        meta: MetaMap::default(),
+        meta: Metadata::default(),
         children: vec![DeepExpr::Atom(DeepAtom::Name("value".to_string()), span)],
         span,
     }));
@@ -293,7 +293,7 @@ fn constructed_non_finite_deep_float_fails_loudly() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let deep = DeepExpr::node(
             DeepTag::Lit,
-            MetaMap::default(),
+            Metadata::default(),
             vec![DeepExpr::Atom(DeepAtom::Float(value), span)],
             span,
         );

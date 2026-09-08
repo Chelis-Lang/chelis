@@ -230,9 +230,8 @@ fn resugaring_an_unbounded_sig_adds_no_binder_list() {
 
 #[test]
 fn a_malformed_deep_bound_fails_resugaring_closed() {
-    let deep = legacy_deep("(defsig {dtype_bounds: {p: signed}} f (t-var {} p))")
-        .expect("Deep parses; the family name is a resugaring concern");
-    resugar_program(&deep).expect_err("an unknown family must not resugar");
+    deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (t-var {} p))")
+        .expect_err("unknown dtype families are rejected at ingress");
 }
 
 fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
@@ -302,20 +301,18 @@ fn unrepresentable_binder_literal_provenance_fails_resugaring() {
         "surf_literal_style: 1, ",
         "",
     ] {
-        let deep = legacy_metadata_fixture(&format!(
+        let source = format!(
             "(defsig {{dtype_bounds: {{p: float}}}} scale (t-fn {{}} (t-var {{}} p) (t-var {{}} p))) (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) (cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))))"
-        ));
-        resugar_program(&deep).expect_err("unrepresentable binder provenance");
+        );
+        match deep_parse_strict(&source) {
+            Ok(deep) => {
+                resugar_program(&deep).expect_err("unrepresentable binder provenance");
+            }
+            Err(error) => assert!(error.to_string().contains("surf_literal_style")),
+        }
     }
 }
 
-#[path = "../../../tests/support/legacy_metadata.rs"]
-mod legacy_metadata;
-use legacy_metadata::legacy_metadata_fixture;
-
-fn legacy_deep(source: &str) -> Result<Vec<chelis_deep::Expr>, chelis_deep::parser::ParseError> {
-    Ok(legacy_metadata_fixture(source))
-}
 #[test]
 fn duplicate_authored_bounds_reject_before_deep_construction() {
     for source in [

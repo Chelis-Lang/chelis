@@ -47,7 +47,9 @@ Obligations:
 
 8. [03-META-1/2]: metadata shapes and roles reject at ingress, with positive
    controls for extensions, binder-map data, provenance, and canonical wrt.
-   Obligation 5 also runs the exact-key corpus and programmatic gate tests.
+   Obligation 5 also runs all 30 typed payloads, previous-producer JSON/binary
+   fixtures, API privacy and raw-reader controls, linear admission cost, and
+   the scalar/tensor duplicate-stamp execution corpus.
 
 Usage:
 
@@ -248,6 +250,8 @@ METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
     ("bare differentiation name", '(def {} g (grad {wrt: unwrapped} (var {} f)))', "wrt"),
     ("bare property expression", '(def {property_seed: unwrapped} f (lit {} 1))', "property_seed"),
     ("nested malformed span", '(def {custom: {inner: (lit {span: 1} 2)}} f (lit {} 1))', "span"),
+    ("duplicate extension", '(def {custom: 1, custom: 2} f (lit {} 1))', "custom"),
+    ("duplicate producer span extension", '(def {span_future: 1, span_future: 2} f (lit {} 1))', "span_future"),
     ("duplicate annotation", '(def {span: "a", span: "b"} f (lit {} 1))', "span"),
     ("wrong bound family", '(defsig {dtype_bounds: {p: signed}} f (t-var {} p))', "dtype_bounds"),
     ("incomplete dimension group", '(defdim {surf_dim_group_size: 2} n)', "surf_dim_group_size"),
@@ -281,6 +285,12 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "phase3_successor_validation",
     "--test",
     "metadata_contract",
+    "--test",
+    "typed_metadata",
+    "--test",
+    "typed_metadata_api",
+    "--test",
+    "issue_1544_binder_cast_precision",
     "--test",
     "metadata_ingress",
     "--test",
@@ -893,7 +903,9 @@ def check_stamp_pass_integration_tests() -> None:
     `crates/chelis-deep/tests/stamp_to_typed.rs`.
     """
     print("── Obligation 5: stamp pass integration tests green ──")
-    run_compiled_suite("stamp_to_typed + phase3_successor_validation", STAMP_NEXTEST_COMMAND)
+    run_compiled_suite("stamp and typed annotation contracts", STAMP_NEXTEST_COMMAND, timeout=900)
+    run_compiled_suite("typed annotation API privacy and positive controls", ("cargo", "test", "-p", "chelis-deep", "--doc", "annotations"))
+    run_compiled_suite("annotation admission scaling", ("cargo", "test", "-p", "chelis-deep", "--lib", "nested_typed_annotation_admission_scales_linearly"))
 
 
 def check_compiler_api_ingress() -> None:

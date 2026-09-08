@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::{try_lower_subexpr_program, type_expr_has_rank_var};
@@ -77,14 +77,14 @@ impl<'a> EvalContext<'a> {
     pub(super) fn static_type_expr_of(&self, expr: &Expr) -> Option<Expr> {
         match expr {
             Expr::MetaExpr(meta, _) => {
-                if let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") {
+                if let Some(ty) = meta.metadata.ty().map(|ty| ty.expression()) {
                     return Some(ty.clone());
                 }
                 self.static_type_expr_of(&meta.expr)
             }
             Expr::List(list, _) => {
                 if let Some(meta) = get_meta(list)
-                    && let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type")
+                    && let Some(ty) = meta.ty().map(|ty| ty.expression())
                 {
                     return Some(ty.clone());
                 }
@@ -159,12 +159,12 @@ impl<'a> EvalContext<'a> {
         let placeholder = "__chelis_named_axis_operand";
         let mut app_elements = vec![
             Expr::Atom(Atom::Tag(DeepTag::App), span),
-            Expr::Map(MetaMap::default(), span),
+            Expr::Map(Metadata::default(), span),
             Expr::List(
                 List {
                     elements: vec![
                         Expr::Atom(Atom::Tag(DeepTag::Var), span),
-                        Expr::Map(MetaMap::default(), span),
+                        Expr::Map(Metadata::default(), span),
                         Expr::Atom(Atom::Name(reduce_name.to_string()), span),
                     ],
                 },
@@ -209,12 +209,12 @@ impl<'a> EvalContext<'a> {
         let mut staged: UnordMap<String, IrTensorValue> = UnordMap::new();
         let mut app_elements: Vec<Expr> = Vec::with_capacity(3 + args.len());
         app_elements.push(Expr::Atom(Atom::Tag(DeepTag::App), span));
-        app_elements.push(Expr::Map(MetaMap::default(), span));
+        app_elements.push(Expr::Map(Metadata::default(), span));
         app_elements.push(Expr::List(
             List {
                 elements: vec![
                     Expr::Atom(Atom::Tag(DeepTag::Var), span),
-                    Expr::Map(MetaMap::default(), span),
+                    Expr::Map(Metadata::default(), span),
                     Expr::Atom(Atom::Name(resolved_name.to_string()), span),
                 ],
             },

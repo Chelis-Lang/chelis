@@ -19,7 +19,8 @@
 
 use chelis_deep::DeepTag;
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
 use chelis_types::types::Prim;
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
@@ -565,7 +566,13 @@ fn sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
-    let mut elements = vec![sym(tag), Expr::Map(MetaMap::default(), span0())];
+    let mut elements = vec![
+        Expr::Atom(
+            Atom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
+            span0(),
+        ),
+        Expr::Map(Metadata::default(), span0()),
+    ];
     elements.extend(kids);
     Expr::List(List { elements }, span0())
 }
@@ -573,10 +580,10 @@ fn var_node(name: &str) -> Expr {
     node("var", vec![sym(name)])
 }
 fn typed_lit(prim: &str, value: Expr) -> Expr {
-    let mut entries = MetaMap::default();
-    entries
-        .entries
-        .push(("type".to_string(), node("t-prim", vec![sym(prim)])));
+    let mut entries = Metadata::default();
+    entries.replace(M::Type(
+        TypeSyntax::try_new(node("t-prim", vec![sym(prim)])).expect("primitive type"),
+    ));
     Expr::List(
         List {
             elements: vec![sym("lit"), Expr::Map(entries, span0()), value],
@@ -659,13 +666,10 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
             if (list.tag() == Some(DeepTag::Deftype))
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
-                let kept: Vec<(String, Expr)> = map
-                    .entries
-                    .iter()
-                    .filter(|(k, _)| k != "invariant" && k != "invariant_amenability")
-                    .cloned()
-                    .collect();
-                elements[1] = Expr::Map(MetaMap { entries: kept }, *mspan);
+                let mut metadata = map.clone();
+                metadata.remove(K::Invariant);
+                metadata.remove(K::InvariantAmenability);
+                elements[1] = Expr::Map(metadata, *mspan);
             }
             Expr::List(List { elements }, *span)
         }

@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_deep::parser::parse_str;
 use chelis_ir::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
@@ -169,7 +169,7 @@ fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TPrim), span),
-                Expr::Map(MetaMap::default(), span),
+                Expr::Map(Metadata::default(), span),
             ],
         },
         span,
@@ -194,26 +194,14 @@ fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
     );
 
     assert!(parse_str("(lit {type: nope} 1)").is_err());
-    // The decoder's defensive check remains reachable through legacy input.
-    let invalid = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::Lit), span),
-                Expr::Map(
-                    MetaMap {
-                        entries: vec![("type".into(), Expr::Atom(Atom::Name("nope".into()), span))],
-                    },
-                    span,
-                ),
-                Expr::Atom(Atom::Int(1), span),
-            ],
-        },
-        span,
+    // Invalid type payloads cannot enter an AST annotation, including via serde.
+    assert!(
+        chelis_deep::annotations::TypeSyntax::try_new(Expr::Atom(Atom::Name("nope".into()), span),)
+            .is_err()
     );
-    assert!(matches!(
-        decode_host_type_metadata(&invalid),
-        Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
-    ));
+    let malformed =
+        serde_json::json!({"entries": [["type", Expr::Atom(Atom::Name("nope".into()), span)]]});
+    assert!(serde_json::from_value::<Metadata>(malformed).is_err());
 }
 
 fn production_legacy_unknown_lines(source: &str) -> Vec<(usize, &str)> {

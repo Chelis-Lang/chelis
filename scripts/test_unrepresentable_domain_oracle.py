@@ -914,6 +914,9 @@ class TestMetadataContract(unittest.TestCase):
     def test_metadata_obligation_is_continuous_and_executes_its_suite(self) -> None:
         self.assertIn(oracle.check_metadata_contract, oracle.OBLIGATIONS)
         self.assertIn("metadata_contract", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("typed_metadata", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("typed_metadata_api", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("issue_1544_binder_cast_precision", oracle.STAMP_NEXTEST_COMMAND)
         self.assertIn("metadata_ingress", oracle.STAMP_NEXTEST_COMMAND)
         self.assertIn("canonical_surf", oracle.STAMP_NEXTEST_COMMAND)
         self.assertIn("canonical_surf_roundtrip", oracle.STAMP_NEXTEST_COMMAND)

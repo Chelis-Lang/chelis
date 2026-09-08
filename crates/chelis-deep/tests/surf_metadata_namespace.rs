@@ -1,7 +1,7 @@
 use chelis_deep::node::Node;
 use chelis_deep::parser::{parse_raw_str, parse_str};
 use chelis_deep::validate::validate;
-use chelis_deep::{Atom, DeepTag, Expr, MetaMap, Span};
+use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span};
 
 fn name(value: &str) -> Expr {
     Expr::Atom(Atom::Name(value.to_string()), Span::new(0, 0))
@@ -9,19 +9,6 @@ fn name(value: &str) -> Expr {
 
 fn string(value: &str) -> Expr {
     Expr::Atom(Atom::Str(value.to_string()), Span::new(0, 0))
-}
-
-fn variable_with_metadata(entries: Vec<(String, Expr)>) -> Expr {
-    Expr::List(
-        chelis_deep::List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
-                Expr::Map(MetaMap { entries }, Span::new(0, 0)),
-                name("x"),
-            ],
-        },
-        Span::new(0, 0),
-    )
 }
 
 #[test]
@@ -42,35 +29,25 @@ fn programmatic_validation_accepts_known_surface_metadata_and_rejects_unknown_ke
     assert!(
         Node::try_new(
             DeepTag::Var,
-            MetaMap {
-                entries: vec![("surf_path".into(), string("M.Path"))]
-            },
+            Metadata::from(chelis_deep::annotations::MetadataValue::SurfPath(
+                chelis_deep::annotations::Spanned::new("M.Path".into(), Span::new(0, 0))
+            )),
             vec![name("x")]
         )
         .is_err()
     );
 
-    let unknown = variable_with_metadata(vec![("surf_future".to_string(), string("value"))]);
-    let warnings = validate(&[unknown]);
-    assert_eq!(
-        warnings
-            .iter()
-            .filter(|warning| warning.message.contains("closed Surf metadata namespace"))
-            .count(),
-        1,
-        "programmatic producers must hit the same closed namespace gate: {warnings:?}"
-    );
+    let mut metadata = Metadata::default();
+    let error = metadata
+        .extensions_mut()
+        .insert("surf_future".into(), string("value"))
+        .unwrap_err();
+    assert!(error.to_string().contains("surf_future"));
 }
 
 #[test]
 fn programmatic_validation_recurses_through_structural_containers() {
-    let unknown = variable_with_metadata(vec![("surf_nested".to_string(), string("value"))]);
-    let program = Expr::BareList(vec![unknown], Span::new(0, 0));
-
-    assert!(
-        validate(&[program])
-            .iter()
-            .any(|warning| warning.message.contains("surf_nested")),
-        "a structural container must not hide an unknown surface key"
-    );
+    let raw = serde_json::json!({"entries": [["outer", {"Map": [{"entries": [["surf_nested", string("value")]]}, Span::new(0, 0)]}]]});
+    let error = serde_json::from_value::<Metadata>(raw).unwrap_err();
+    assert!(error.to_string().contains("surf_nested"));
 }

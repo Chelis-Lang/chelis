@@ -1,6 +1,11 @@
 //! Spec-first corpus for [03-META-1/2], chelis#1478 and chelis#1330.
 use chelis_deep::parser::{parse_raw_str, parse_str};
-use chelis_deep::{Atom, DeepTag, Expr, MetaMap, Span, node::Node};
+use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span, node::Node};
+
+use chelis_deep::annotations::{
+    MetadataValue as M, PipeStageOrigin, PositiveInteger, RuntimeExpression, SpanId, Spanned,
+    TypeSyntax,
+};
 
 const ZERO: Span = Span { offset: 0, len: 0 };
 
@@ -84,6 +89,12 @@ const CASES: &[(&str, &str)] = &[
     ),
     ("lin", "(var {lin: borrow} x)"),
     ("doc", "(var {doc: \"documentation\"} x)"),
+    (
+        "effect",
+        "(handle-effect {effect: random} (lit {} 1) (lit {} 2))",
+    ),
+    ("literal_source", "(lit {literal_source: integer} 1)"),
+    ("destructure", "(bind {destructure: true} x (lit {} 1))"),
 ];
 
 fn metadata_value_span(expr: &chelis_deep::RawExpr, key: &str) -> Option<Span> {
@@ -185,19 +196,15 @@ fn data_and_provenance_are_not_metadata_or_expression_roles() {
 #[test]
 fn constructors_and_transactional_replacement_enforce_local_contracts() {
     let name = Expr::Atom(Atom::Name("x".into()), ZERO);
-    let bad = MetaMap {
-        entries: vec![("span".into(), Expr::Atom(Atom::Int(1), ZERO))],
-    };
+    assert!(SpanId::try_new("invalid\nspan".into(), ZERO).is_err());
+    let bad = Metadata::from(M::SurfPath(Spanned::new("Wrong.Owner".into(), ZERO)));
     assert!(Node::try_new(DeepTag::Var, bad.clone(), vec![name.clone()]).is_err());
-    let mut node = Node::try_new(DeepTag::Var, MetaMap::default(), vec![name]).unwrap();
+    let mut node = Node::try_new(DeepTag::Var, Metadata::default(), vec![name]).unwrap();
     let before = node.clone();
     assert!(node.try_replace_meta(bad).is_err());
     assert_eq!(node, before);
     let mut wire = serde_json::to_value(&node).unwrap();
-    wire["meta"] = serde_json::to_value(MetaMap {
-        entries: vec![("span".into(), Expr::Atom(Atom::Int(1), ZERO))],
-    })
-    .unwrap();
+    wire["meta"] = serde_json::json!({"entries": [["span", Expr::Atom(Atom::Int(1), ZERO)]]});
     assert!(serde_json::from_value::<Node>(wire).is_err());
 }
 
@@ -215,9 +222,6 @@ fn placements_and_singleton_keys_are_validated() {
         assert!(parse_str(source).is_err(), "{source}");
     }
 }
-
-#[path = "../../../tests/support/legacy_metadata.rs"]
-mod legacy_metadata;
 
 #[test]
 fn registry_and_corpus_cover_exactly_the_normative_inventory() {
@@ -251,16 +255,8 @@ fn legacy_programmatic_carriers_cannot_hide_malformed_metadata() {
         "(future {outer: (lit {span: 1} 2)} (var {} x))",
         "(var {span: \"ok\", span: 2} x)",
     ] {
-        let ast = legacy_metadata::legacy_metadata_fixture(source);
-        let error = chelis_deep::metadata::validate_metadata(&ast).unwrap_err();
-        assert_eq!(error.key, "span", "{source}");
-        assert!(
-            chelis_deep::validate::validate(&ast)
-                .iter()
-                .any(|w| w.message.contains("span"))
-        );
-        let child = Expr::BareList(ast, ZERO);
-        assert!(Node::try_new(DeepTag::Quote, MetaMap::default(), vec![child]).is_err());
+        let error = parse_str(source).unwrap_err().to_string();
+        assert!(error.contains("span"), "{source}: {error}");
     }
 }
 
@@ -268,14 +264,12 @@ fn legacy_programmatic_carriers_cannot_hide_malformed_metadata() {
 fn parent_placement_is_checked_without_rejecting_unattached_fragments() {
     let marked = Node::try_new(
         DeepTag::Fn,
-        MetaMap {
-            entries: vec![(
-                "surf_pipe_stage".into(),
-                Expr::Atom(Atom::Str("call-first".into()), ZERO),
-            )],
-        },
+        Metadata::from(M::SurfPipeStage(Spanned::new(
+            PipeStageOrigin::CallFirst,
+            ZERO,
+        ))),
         vec![
-            Expr::node(DeepTag::Params, MetaMap::default(), vec![], ZERO),
+            Expr::node(DeepTag::Params, Metadata::default(), vec![], ZERO),
             Expr::Atom(Atom::Int(1), ZERO),
         ],
     )
@@ -284,7 +278,7 @@ fn parent_placement_is_checked_without_rejecting_unattached_fragments() {
     assert!(chelis_deep::metadata::validate_metadata(std::slice::from_ref(&marked)).is_err());
     let mut pipe = Node::try_new(
         DeepTag::Pipe,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Int(1), ZERO), marked.clone()],
     )
     .unwrap();
@@ -340,25 +334,16 @@ fn structured_shapes_reject_wrong_members_and_closed_enum_values() {
 fn programmatic_type_metadata_obeys_recursive_type_roles() {
     let malformed_type = Expr::node(
         DeepTag::TPrim,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::node(
             DeepTag::Lit,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Int(1), ZERO)],
             ZERO,
         )],
         ZERO,
     );
-    assert!(
-        Node::try_new(
-            DeepTag::Var,
-            MetaMap {
-                entries: vec![("type".into(), malformed_type)]
-            },
-            vec![Expr::Atom(Atom::Name("x".into()), ZERO)]
-        )
-        .is_err()
-    );
+    assert!(TypeSyntax::try_new(malformed_type).is_err());
 }
 
 #[test]
@@ -394,24 +379,33 @@ fn declaration_roles_and_property_binder_spellings_follow_the_contract() {
 }
 
 #[test]
-fn each_registered_key_rejects_programmatic_replacement_atomically() {
+fn each_registered_key_rejects_invalid_serialized_replacement() {
     fn find<'a>(expr: &'a Expr, key: &str) -> Option<&'a Node> {
         let Expr::Node(node, _) = expr else {
             return None;
         };
-        if node.meta().entries.iter().any(|(k, _)| k == key) {
+        if node
+            .meta()
+            .values()
+            .any(|value| value.key().spelling() == key)
+        {
             return Some(node);
         }
         node.children_slice().iter().find_map(|v| find(v, key))
     }
     for (key, source) in CASES {
         let parsed = parse_str(source).unwrap();
-        let mut node = parsed.iter().find_map(|v| find(v, key)).expect(key).clone();
+        let node = parsed.iter().find_map(|v| find(v, key)).expect(key).clone();
         let before = node.clone();
-        let mut meta = node.meta().clone();
-        meta.entries.iter_mut().find(|(k, _)| k == key).unwrap().1 =
-            Expr::Atom(Atom::Name("unwrapped".into()), ZERO);
-        let error = node.try_replace_meta(meta).expect_err(key);
+        let mut wire = serde_json::to_value(node.meta()).unwrap();
+        let entry = wire["entries"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry[0] == *key)
+            .unwrap();
+        entry[1] = serde_json::to_value(Expr::Atom(Atom::Name("unwrapped".into()), ZERO)).unwrap();
+        let error = serde_json::from_value::<Metadata>(wire).expect_err(key);
         assert!(error.to_string().contains(key), "{error}");
         assert_eq!(
             node, before,
@@ -424,27 +418,27 @@ fn each_registered_key_rejects_programmatic_replacement_atomically() {
 fn module_construction_checks_the_siblings_it_already_contains() {
     let mut first = Node::try_new(
         DeepTag::Defdim,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Name("n".into()), ZERO)],
     )
     .unwrap();
     first
-        .try_replace_meta(MetaMap {
-            entries: vec![("surf_dim_group_size".into(), Expr::Atom(Atom::Int(2), ZERO))],
-        })
+        .try_replace_meta(Metadata::from(M::SurfDimGroupSize(
+            PositiveInteger::try_new(Expr::Atom(Atom::Int(2), ZERO)).unwrap(),
+        )))
         .unwrap();
     let mut children = vec![
         Expr::Atom(Atom::Name("m".into()), ZERO),
         Expr::Node(Box::new(first), ZERO),
     ];
-    assert!(Node::try_new(DeepTag::Module, MetaMap::default(), children.clone()).is_err());
+    assert!(Node::try_new(DeepTag::Module, Metadata::default(), children.clone()).is_err());
     children.push(Expr::node(
         DeepTag::Defdim,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Name("k".into()), ZERO)],
         ZERO,
     ));
-    Node::try_new(DeepTag::Module, MetaMap::default(), children).unwrap();
+    Node::try_new(DeepTag::Module, Metadata::default(), children).unwrap();
 }
 
 #[test]
@@ -459,12 +453,11 @@ fn resource_effect_metadata_requires_string_devices_at_every_ingress() {
             let valid = device == "\"gpu:0\"";
             assert_eq!(parse_raw_str(&source).is_ok(), valid, "raw: {source}");
             assert_eq!(parse_str(&source).is_ok(), valid, "stamped: {source}");
-            let legacy = legacy_metadata::legacy_metadata_fixture(&source);
-            assert_eq!(
-                chelis_deep::metadata::validate_metadata(&legacy).is_ok(),
-                valid,
-                "legacy: {source}"
-            );
+            if valid {
+                let parsed = parse_str(&source).unwrap();
+                let wire = serde_json::to_value(&parsed).unwrap();
+                assert_eq!(serde_json::from_value::<Vec<Expr>>(wire).unwrap(), parsed);
+            }
         }
     }
 }
@@ -477,7 +470,7 @@ fn expression_metadata_validates_nested_runtime_roles_on_legacy_carriers() {
             List {
                 elements: vec![
                     Expr::Atom(Atom::Tag(DeepTag::App), ZERO),
-                    Expr::Map(MetaMap::default(), ZERO),
+                    Expr::Map(Metadata::default(), ZERO),
                     child,
                 ],
             },
@@ -494,7 +487,7 @@ fn expression_metadata_validates_nested_runtime_roles_on_legacy_carriers() {
             let child = if valid {
                 Expr::node(
                     DeepTag::Var,
-                    MetaMap::default(),
+                    Metadata::default(),
                     vec![Expr::Atom(Atom::Name("missing".into()), ZERO)],
                     ZERO,
                 )
@@ -504,53 +497,21 @@ fn expression_metadata_validates_nested_runtime_roles_on_legacy_carriers() {
             // A typed runtime ancestor does not prove legacy descendants' roles.
             let mut payload = Expr::node(
                 DeepTag::Tuple,
-                MetaMap::default(),
+                Metadata::default(),
                 vec![legacy_app(child)],
                 ZERO,
             );
             if key == "property_preconditions" {
-                payload = Expr::node(DeepTag::Tuple, MetaMap::default(), vec![payload], ZERO);
+                payload = Expr::node(DeepTag::Tuple, Metadata::default(), vec![payload], ZERO);
             }
-            let meta = MetaMap {
-                entries: vec![(key.into(), payload)],
-            };
-            let children = vec![
-                Expr::Atom(Atom::Name("f".into()), ZERO),
-                Expr::Atom(Atom::Int(1), ZERO),
-            ];
-            assert_eq!(
-                Node::try_new(DeepTag::Def, meta.clone(), children.clone()).is_ok(),
-                valid,
-                "constructor {key}"
-            );
-            let mut elements = vec![
-                Expr::Atom(Atom::Tag(DeepTag::Def), ZERO),
-                Expr::Map(meta, ZERO),
-            ];
-            elements.extend(children);
-            let legacy = vec![Expr::List(List { elements }, ZERO)];
-            assert_eq!(
-                chelis_deep::metadata::validate_metadata(&legacy).is_ok(),
-                valid,
-                "legacy {key}"
-            );
+            let admitted = RuntimeExpression::try_new(payload);
+            assert_eq!(admitted.is_ok(), valid, "constructor {key}: {admitted:?}");
         }
     }
 }
 
 #[test]
 fn metadata_expressions_follow_runtime_roles_through_helpers() {
-    fn unbind_missing(expr: &mut Expr) {
-        if expr.tag() == Some(DeepTag::Var)
-            && matches!(expr, Expr::List(list, _) if matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(n), _)) if n == "missing"))
-        {
-            *expr = Expr::Atom(Atom::Name("missing".into()), ZERO);
-            return;
-        }
-        if let Expr::List(list, _) = expr {
-            list.elements.iter_mut().for_each(unbind_missing);
-        }
-    }
     for payload in [
         "(fn {} (params {} x) (app {} (var {} missing)))",
         "(let {} (bind {} x (app {} (var {} missing))) (var {} x))",
@@ -559,23 +520,10 @@ fn metadata_expressions_follow_runtime_roles_through_helpers() {
         "(pipe {} 1 (app {} (var {} missing)))",
         "(app {} (var {} missing))",
     ] {
-        let mut payload = legacy_metadata::legacy_metadata_fixture(payload).remove(0);
-        for valid in [true, false] {
-            if !valid {
-                unbind_missing(&mut payload);
-            }
-            let meta = MetaMap {
-                entries: vec![("property_seed".into(), payload.clone())],
-            };
-            let candidate = Node::try_new(
-                DeepTag::Def,
-                meta,
-                vec![
-                    Expr::Atom(Atom::Name("f".into()), ZERO),
-                    Expr::Atom(Atom::Int(1), ZERO),
-                ],
-            );
-            assert_eq!(candidate.is_ok(), valid, "{payload:?}: {candidate:?}");
-        }
+        let valid = parse_str(payload).unwrap().remove(0);
+        assert!(RuntimeExpression::try_new(valid).is_ok());
+        let invalid = payload.replace("(var {} missing)", "missing");
+        let source = format!("(def {{property_seed: {invalid}}} f 1)");
+        assert!(parse_str(&source).is_err(), "{source}");
     }
 }

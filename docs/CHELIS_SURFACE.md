@@ -620,12 +620,19 @@ is a tested-not-proven trusted base.
 | [`spec/design/shell_repo_contract.md`](../spec/design/shell_repo_contract.md) | what a downstream shell's `CHELIS_SURFACE.md` view must carry |
 
 Deep metadata follows `spec/03-deep-syntax.md` [03-META-1/2]. Malformed
-registered values, duplicate singleton annotations, and forbidden placements
+registered values, duplicate annotation keys (including extensions and `span_*`),
+and forbidden placements
 are rejected at ingress with the metadata key and source location. Producer
 extensions remain available outside the closed `surf_*` namespace. `grad`'s
 `wrt` metadata uses `(var {} name)` or a nonempty tuple of those references;
 bare names are rejected. `dtype_bounds` binder names and historical `source`
 arguments are data, so annotation-key spelling does not reclassify them.
+
+Rust AST carriers use `Metadata`: compiler annotations are dedicated
+`MetadataValue` variants, and `ExtensionMap` accepts only producer keys.
+Insertion rejects duplicates; replacement is explicit. Validated payloads
+expose immutable expression leaves and fallible role-aware rebuilding.
+Raw key/value pairs are confined to parsing and serialization boundaries.
 
 For Rust callers, `chelis_surf::resugar::normalize_deep_for_surface_roundtrip`
 returns `Result<Vec<Expr>, ResugarError>` and rejects malformed metadata before

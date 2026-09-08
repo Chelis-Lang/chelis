@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::tag::DeepTag;
 use crate::{
-    Atom, DeepPath, Expr, List, MetaMap, PathSegment, ResolveError, Span, function_body, printer,
+    Atom, DeepPath, Expr, List, Metadata, PathSegment, ResolveError, Span, function_body, printer,
     resolve_function,
 };
 
@@ -53,39 +53,30 @@ fn normalize_expr_for_mutation(expr: &Expr) -> Expr {
             *span,
         ),
         Expr::Map(map, span) => Expr::Map(
-            MetaMap {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
-                    .collect(),
-            },
+            map.map_expressions(&mut |v, _| normalize_expr_for_mutation(v))
+                .expect("normalization preserves payloads"),
             *span,
         ),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             crate::ast::MetaExpr {
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
-                    .collect(),
+                metadata: meta
+                    .metadata
+                    .map_expressions(&mut |v, _| normalize_expr_for_mutation(v))
+                    .expect("normalization preserves payloads"),
                 expr: Box::new(normalize_expr_for_mutation(&meta.expr)),
             },
             *span,
         ),
         Expr::UnknownForm(data) => {
-            let mut elements = vec![Expr::Atom(Atom::Name(data.head.clone()), data.span)];
-            elements.push(Expr::Map(
-                MetaMap {
-                    entries: data
-                        .meta
-                        .entries
-                        .iter()
-                        .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
-                        .collect(),
-                },
-                data.span,
-            ));
+            let mut elements = vec![
+                Expr::Atom(Atom::Name(data.head.clone()), data.span),
+                Expr::Map(
+                    data.meta
+                        .map_expressions(&mut |v, _| normalize_expr_for_mutation(v))
+                        .expect("normalization preserves payloads"),
+                    data.span,
+                ),
+            ];
             elements.extend(data.children.iter().map(normalize_expr_for_mutation));
             Expr::List(List { elements }, data.span)
         }
@@ -100,7 +91,7 @@ fn normalize_expr_for_mutation(expr: &Expr) -> Expr {
 #[derive(Clone, Copy)]
 struct NodeView<'a> {
     tag: DeepTag,
-    meta: Option<&'a MetaMap>,
+    meta: Option<&'a Metadata>,
     children: &'a [Expr],
 }
 
@@ -167,6 +158,8 @@ pub struct ChangeSignatureReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthoringError {
+    #[error("{0}")]
+    Metadata(#[from] crate::metadata::MetadataError),
     #[error("no module declaration found")]
     NoModule,
     #[error("expected exactly one module but found {count}")]
@@ -610,7 +603,8 @@ fn collect_metadata_symbol_references_view(
     let Some(meta) = def.meta else {
         return;
     };
-    for (key, value) in &meta.entries {
+    meta.visit_syntax(&mut |key, value| {
+        let key = key.spelling();
         collect_symbol_references(
             value,
             symbol,
@@ -620,7 +614,7 @@ fn collect_metadata_symbol_references_view(
             caller,
             out,
         );
-    }
+    });
 }
 
 fn collect_metadata_call_edges_view(
@@ -634,7 +628,8 @@ fn collect_metadata_call_edges_view(
     let Some(meta) = def.meta else {
         return;
     };
-    for (key, value) in &meta.entries {
+    meta.visit_syntax(&mut |key, value| {
+        let key = key.spelling();
         collect_call_edges(
             value,
             top_level_names,
@@ -644,7 +639,7 @@ fn collect_metadata_call_edges_view(
             module_name,
             out,
         );
-    }
+    });
 }
 
 fn rename_metadata_references(
@@ -657,10 +652,11 @@ fn rename_metadata_references(
     let Some(Expr::Map(meta, _)) = def.elements.get_mut(1) else {
         return 0;
     };
-    meta.entries
-        .iter_mut()
-        .map(|(_, value)| rename_unshadowed_vars(value, old_name, new_name, top_level_names, scope))
-        .sum()
+    let mut count = 0;
+    edit_metadata(meta, &mut |value| {
+        count += rename_unshadowed_vars(value, old_name, new_name, top_level_names, scope);
+    });
+    count
 }
 
 fn rewrite_metadata_direct_calls(
@@ -675,16 +671,18 @@ fn rewrite_metadata_direct_calls(
         return Ok(0);
     };
     let mut count = 0;
-    for (_, value) in &mut meta.entries {
+    *meta = meta.try_map_expressions::<AuthoringError>(&mut |value, _| {
+        let mut value = value.clone();
         count += rewrite_direct_calls(
-            value,
+            &mut value,
             target_name,
             old_params,
             argument_order,
             top_level_names,
             scope,
         )?;
-    }
+        Ok(value)
+    })?;
     Ok(count)
 }
 
@@ -698,10 +696,11 @@ fn count_stale_metadata_calls(
     let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
         return 0;
     };
-    meta.entries
-        .iter()
-        .map(|(_, value)| count_stale_calls(value, target, expected_arity, top_level_names, scope))
-        .sum()
+    let mut count = 0;
+    meta.visit_syntax(&mut |_, value| {
+        count += count_stale_calls(value, target, expected_arity, top_level_names, scope);
+    });
+    count
 }
 
 fn collect_call_edges(
@@ -922,15 +921,17 @@ where
 {
     match expr {
         Expr::Map(meta, _) => {
-            for (key, value) in &meta.entries {
+            meta.visit_syntax(&mut |key, value| {
+                let key = key.spelling();
                 f(value, scope, format!("{path}.{key}"));
-            }
+            });
             return;
         }
         Expr::MetaExpr(meta, _) => {
-            for (key, value) in &meta.entries {
+            meta.metadata.visit_syntax(&mut |key, value| {
+                let key = key.spelling();
                 f(value, scope, format!("{path}.{key}"));
-            }
+            });
             f(&meta.expr, scope, format!("{path}.expr"));
             return;
         }
@@ -942,9 +943,10 @@ where
             return;
         }
         Expr::UnknownForm(data) => {
-            for (key, value) in &data.meta.entries {
+            data.meta.visit_syntax(&mut |key, value| {
+                let key = key.spelling();
                 f(value, scope, format!("{path}.meta.{key}"));
-            }
+            });
             for (index, child) in data.children.iter().enumerate() {
                 f(child, scope, format!("{path}.{index}"));
             }
@@ -971,9 +973,10 @@ where
         return;
     };
     if let Some(meta) = node.meta {
-        for (key, value) in &meta.entries {
+        meta.visit_syntax(&mut |key, value| {
+            let key = key.spelling();
             f(value, scope, format!("{path}.meta.{key}"));
-        }
+        });
     }
     if node.tag == DeepTag::Fn {
         let added = node
@@ -993,9 +996,10 @@ where
             let mut inserted = Vec::new();
             if let Some(bind) = tagged_node_view(bind, DeepTag::Bind) {
                 if let Some(meta) = bind.meta {
-                    for (key, value) in &meta.entries {
+                    meta.visit_syntax(&mut |key, value| {
+                        let key = key.spelling();
                         f(value, scope, format!("{path}.0.meta.{key}"));
-                    }
+                    });
                 }
                 for pair_start in (0..bind.children.len()).step_by(2) {
                     if let Some(name_expr) = bind.children.get(pair_start) {
@@ -1050,15 +1054,11 @@ where
 {
     let list = match expr {
         Expr::Map(meta, _) => {
-            for (_, value) in &mut meta.entries {
-                f(value, scope);
-            }
+            edit_metadata(meta, &mut |value| f(value, scope));
             return;
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &mut meta.entries {
-                f(value, scope);
-            }
+            edit_metadata(&mut meta.metadata, &mut |value| f(value, scope));
             f(&mut meta.expr, scope);
             return;
         }
@@ -1087,9 +1087,7 @@ where
             return;
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &mut data.meta.entries {
-                f(value, scope);
-            }
+            edit_metadata(&mut data.meta, &mut |value| f(value, scope));
             for child in &mut data.children {
                 f(child, scope);
             }
@@ -1438,10 +1436,12 @@ fn property_quantifier_names_from_def_list(def: &List) -> Vec<String> {
     let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
         return Vec::new();
     };
-    meta.entries
-        .iter()
-        .find_map(|(key, value)| {
-            (key == "property_quantifiers").then(|| params_node_names(value))?
+    meta.property_quantifiers()
+        .map(|v| {
+            v.values()
+                .iter()
+                .map(|v| v.name().value().clone())
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -1584,10 +1584,12 @@ fn fn_params_from_def_view(def: NodeView<'_>) -> Vec<String> {
 
 fn property_quantifier_names_from_def_view(def: NodeView<'_>) -> Vec<String> {
     def.meta
-        .and_then(|meta| {
-            meta.entries.iter().find_map(|(key, value)| {
-                (key == "property_quantifiers").then(|| params_node_names(value))?
-            })
+        .and_then(Metadata::property_quantifiers)
+        .map(|v| {
+            v.values()
+                .iter()
+                .map(|v| v.name().value().clone())
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -1732,6 +1734,16 @@ fn render_path(path: &DeepPath) -> String {
         .join(".")
 }
 
+fn edit_metadata(meta: &mut Metadata, f: &mut impl FnMut(&mut Expr)) {
+    *meta = meta
+        .map_expressions(&mut |value, _| {
+            let mut value = value.clone();
+            f(&mut value);
+            value
+        })
+        .expect("authoring transformation preserves metadata shape");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1753,11 +1765,13 @@ mod tests {
                 Expr::Atom(Atom::Name("a".to_string()), sp()),
                 Expr::UnknownForm(Box::new(UnknownFormData {
                     head: "mystery".to_string(),
-                    meta: MetaMap {
-                        entries: vec![(
-                            "note".to_string(),
-                            Expr::Atom(Atom::Name("m".to_string()), sp()),
-                        )],
+                    meta: {
+                        let mut metadata = Metadata::default();
+                        metadata
+                            .extensions_mut()
+                            .insert("note".into(), Expr::Atom(Atom::Name("m".into()), sp()))
+                            .unwrap();
+                        metadata
                     },
                     children: vec![
                         Expr::Atom(Atom::Name("b".to_string()), sp()),

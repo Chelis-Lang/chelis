@@ -3,7 +3,10 @@
 //! Converts `&[Expr]` into the canonical string representation used for `.dp`
 //! files and `chelis deep`.
 
-use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use crate::annotations_codec::{
+    WireExpr, WireList as List, WireMetaExpr as MetaExpr, WireMetadata as MetaMap, WireNode,
+};
+use crate::ast::{Atom, Expr};
 use crate::span::Span;
 use crate::tag::DeepTag;
 
@@ -31,12 +34,20 @@ pub fn print_canonical_flat(exprs: &[Expr]) -> String {
 
 /// Print a single expression in canonical pretty form (no trailing newline).
 pub fn print_expr(expr: &Expr) -> String {
-    Printer::pretty().fmt_expr(expr, 0)
+    Printer::pretty().fmt_expr(&WireExpr::from_ast(expr), 0)
 }
 
 /// Print a single expression in canonical flat form (no trailing newline).
 pub fn print_expr_flat(expr: &Expr) -> String {
-    Printer::flat().fmt_expr(expr, 0)
+    Printer::flat().fmt_expr(&WireExpr::from_ast(expr), 0)
+}
+
+/// Render preserved invocation data for diagnostics without interpreting it.
+pub fn print_macro_source(source: &crate::annotations::MacroSource) -> String {
+    Printer::flat().fmt_expr(
+        &WireExpr::from_value(&crate::annotations::MetadataValue::Source(source.clone())),
+        0,
+    )
 }
 
 fn print_program(exprs: &[Expr], mode: PrintMode) -> String {
@@ -44,7 +55,10 @@ fn print_program(exprs: &[Expr], mode: PrintMode) -> String {
         return String::new();
     }
     let printer = Printer::new(mode);
-    let parts: Vec<String> = exprs.iter().map(|expr| printer.fmt_expr(expr, 0)).collect();
+    let parts: Vec<String> = exprs
+        .iter()
+        .map(|expr| printer.fmt_expr(&WireExpr::from_ast(expr), 0))
+        .collect();
     let mut out = parts.join("\n\n");
     out.push('\n');
     out
@@ -73,47 +87,47 @@ impl Printer {
         Self::new(PrintMode::Flat)
     }
 
-    fn fmt_expr(&self, expr: &Expr, indent: usize) -> String {
+    fn fmt_expr(&self, expr: &WireExpr, indent: usize) -> String {
         match expr {
-            Expr::Atom(atom, _) => Self::fmt_atom(atom),
-            Expr::Map(map, _) => self.fmt_map(map, indent),
-            Expr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
-            Expr::List(list, _) => self.fmt_list(list, indent),
-            Expr::Node(node, _) => {
+            WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
+            WireExpr::Map(map, _) => self.fmt_map(map, indent),
+            WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
+            WireExpr::List(list, _) => self.fmt_list(list, indent),
+            WireExpr::Node(node, _) => {
                 // Render a stamped Node back as its canonical list form.
                 let list = node_to_list(node.as_ref());
                 self.fmt_list(&list, indent)
             }
-            Expr::BareList(elems, _) => {
+            WireExpr::BareList(elems, _) => {
                 let list = List {
                     elements: elems.clone(),
                 };
                 self.fmt_list(&list, indent)
             }
-            Expr::UnknownForm(data) => {
+            WireExpr::UnknownForm(data) => {
                 let list = unknown_form_to_list(&data.head, &data.meta, &data.children);
                 self.fmt_list(&list, indent)
             }
         }
     }
 
-    fn fmt_expr_flat(&self, expr: &Expr) -> String {
+    fn fmt_expr_flat(&self, expr: &WireExpr) -> String {
         match expr {
-            Expr::Atom(atom, _) => Self::fmt_atom(atom),
-            Expr::Map(map, _) => Self::fmt_map_flat(map),
-            Expr::MetaExpr(meta, _) => self.fmt_meta_expr_flat(meta),
-            Expr::List(list, _) => self.fmt_list_flat(list),
-            Expr::Node(node, _) => {
+            WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
+            WireExpr::Map(map, _) => Self::fmt_map_flat(map),
+            WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr_flat(meta),
+            WireExpr::List(list, _) => self.fmt_list_flat(list),
+            WireExpr::Node(node, _) => {
                 let list = node_to_list(node.as_ref());
                 self.fmt_list_flat(&list)
             }
-            Expr::BareList(elems, _) => {
+            WireExpr::BareList(elems, _) => {
                 let list = List {
                     elements: elems.clone(),
                 };
                 self.fmt_list_flat(&list)
             }
-            Expr::UnknownForm(data) => {
+            WireExpr::UnknownForm(data) => {
                 let list = unknown_form_to_list(&data.head, &data.meta, &data.children);
                 self.fmt_list_flat(&list)
             }
@@ -310,7 +324,7 @@ impl Printer {
         format!("{meta_part} {}", self.fmt_expr_flat(&meta.expr))
     }
 
-    fn fmt_meta_entries(&self, entries: &[(String, Expr)]) -> String {
+    fn fmt_meta_entries(&self, entries: &[(String, WireExpr)]) -> String {
         let mut sorted: Vec<_> = entries.iter().collect();
         sorted.sort_by_key(|(key, _)| key.as_str());
         let parts: Vec<String> = sorted
@@ -344,11 +358,11 @@ impl Printer {
     }
 }
 
-fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[WireExpr])> {
     match list.elements.as_slice() {
         [
-            Expr::Atom(Atom::Tag(tag), _),
-            Expr::Map(meta, _),
+            WireExpr::Atom(Atom::Tag(tag), _),
+            WireExpr::Map(meta, _),
             children @ ..,
         ] => Some((*tag, meta, children)),
         _ => None,
@@ -356,36 +370,22 @@ fn canonical_node_parts(list: &List) -> Option<(DeepTag, &MetaMap, &[Expr])> {
 }
 
 /// Reconstruct a canonical `List` from a stamped `Node` for printing.
-fn node_to_list(node: &crate::node::Node) -> List {
-    use crate::node::ChildRef;
+fn node_to_list(node: &WireNode) -> List {
     let span = Span::new(0, 0);
-    let mut elements = Vec::with_capacity(node.child_count() + 2);
-    elements.push(Expr::Atom(Atom::Tag(node.tag()), span));
-    elements.push(Expr::Map(node.meta().clone(), span));
-    for child_ref in node.children_iter() {
-        match child_ref {
-            ChildRef::Expr(e)
-            | ChildRef::Syntax(e)
-            | ChildRef::Type(e)
-            | ChildRef::EffectHandler(e)
-            | ChildRef::Bypass(e) => elements.push(e.clone()),
-            ChildRef::Binder(s) => {
-                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
-            }
-            ChildRef::Selector(s) => {
-                elements.push(Expr::Atom(Atom::Name(s.to_string()), span));
-            }
-        }
-    }
+    let mut elements = vec![
+        WireExpr::Atom(Atom::Tag(node.tag), span),
+        WireExpr::Map(node.meta.clone(), span),
+    ];
+    elements.extend(node.children.iter().cloned());
     List { elements }
 }
 
 /// Reconstruct a `List` from an `UnknownForm` for printing.
-fn unknown_form_to_list(head: &str, meta: &MetaMap, children: &[Expr]) -> List {
+fn unknown_form_to_list(head: &str, meta: &MetaMap, children: &[WireExpr]) -> List {
     let span = Span::new(0, 0);
     let mut elements = Vec::with_capacity(children.len() + 2);
-    elements.push(Expr::Atom(Atom::Name(head.to_string()), span));
-    elements.push(Expr::Map(meta.clone(), span));
+    elements.push(WireExpr::Atom(Atom::Name(head.to_string()), span));
+    elements.push(WireExpr::Map(meta.clone(), span));
     elements.extend(children.iter().cloned());
     List { elements }
 }
@@ -393,7 +393,7 @@ fn unknown_form_to_list(head: &str, meta: &MetaMap, children: &[Expr]) -> List {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+    use crate::ast::{Atom, Expr, List, MetaExpr, Metadata};
     use crate::span::Span;
 
     fn sp() -> Span {
@@ -408,16 +408,23 @@ mod tests {
         atom_expr(Atom::Name(name.to_string()))
     }
 
+    fn metadata(values: Vec<(&str, Expr)>) -> Metadata {
+        let mut metadata = Metadata::default();
+        for (key, value) in values {
+            if key == "type" {
+                metadata
+                    .insert(crate::annotations::MetadataValue::Type(
+                        crate::annotations::TypeSyntax::try_new(value).unwrap(),
+                    ))
+                    .unwrap();
+            } else {
+                metadata.extensions_mut().insert(key.into(), value).unwrap();
+            }
+        }
+        metadata
+    }
     fn map_expr(entries: Vec<(&str, Expr)>) -> Expr {
-        Expr::Map(
-            MetaMap {
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| (key.to_string(), value))
-                    .collect(),
-            },
-            sp(),
-        )
+        Expr::Map(metadata(entries), sp())
     }
 
     fn node(tag: &str, meta: Vec<(&str, Expr)>, children: Vec<Expr>) -> Expr {
@@ -437,10 +444,7 @@ mod tests {
     fn meta_expr(entries: Vec<(&str, Expr)>, expr: Expr) -> Expr {
         Expr::MetaExpr(
             MetaExpr {
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| (key.to_string(), value))
-                    .collect(),
+                metadata: metadata(entries),
                 expr: Box::new(expr),
             },
             sp(),
@@ -616,12 +620,12 @@ mod tests {
     fn meta_expr_sorts_keys() {
         let expr = meta_expr(
             vec![
-                ("z-key", atom_expr(Atom::Int(1))),
-                ("a-key", atom_expr(Atom::Int(2))),
+                ("z_key", atom_expr(Atom::Int(1))),
+                ("a_key", atom_expr(Atom::Int(2))),
             ],
             atom_expr(Atom::Name("body".into())),
         );
-        assert_eq!(print_expr(&expr), "^{:a-key 2 :z-key 1} body");
+        assert_eq!(print_expr(&expr), "^{:a_key 2 :z_key 1} body");
     }
 
     #[test]

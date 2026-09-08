@@ -17,7 +17,7 @@
 //! (`expansion.rs::parsed_deep_internal_macro_expands_from_raw_form_boundary`)
 //! must stay green UNMODIFIED beside these.
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap, UnknownFormData};
+use chelis_deep::ast::{Atom, Expr, List, Metadata, UnknownFormData};
 use chelis_deep::{DeepTag, Span};
 use chelis_macros::{ExpansionOptions, expand_program};
 
@@ -111,7 +111,7 @@ fn atom_name(name: &str) -> Expr {
 }
 
 fn empty_map() -> Expr {
-    Expr::Map(MetaMap::default(), sp())
+    Expr::Map(Metadata::default(), sp())
 }
 
 fn tag_list(tag: DeepTag, children: Vec<Expr>) -> Expr {
@@ -135,7 +135,7 @@ fn hygienize_renames_binders_inside_unknown_form() {
             tag_list(DeepTag::Bind, vec![atom_name("tmp"), var_ref("v")]),
             Expr::UnknownForm(Box::new(UnknownFormData {
                 head: "mystery".to_string(),
-                meta: MetaMap::default(),
+                meta: Metadata::default(),
                 children: vec![var_ref("tmp")],
                 span: sp(),
             })),
@@ -263,16 +263,18 @@ fn hygienize_renames_reach_references_inside_nested_meta_map() {
             tag_list(DeepTag::Bind, vec![atom_name("tmp"), var_ref("v")]),
             Expr::UnknownForm(Box::new(UnknownFormData {
                 head: "mystery".to_string(),
-                meta: MetaMap {
-                    entries: vec![(
-                        "outer".to_string(),
-                        Expr::Map(
-                            MetaMap {
-                                entries: vec![("inner".to_string(), var_ref("tmp"))],
-                            },
-                            sp(),
-                        ),
-                    )],
+                meta: {
+                    let mut inner = Metadata::default();
+                    inner
+                        .extensions_mut()
+                        .insert("inner".into(), var_ref("tmp"))
+                        .unwrap();
+                    let mut outer = Metadata::default();
+                    outer
+                        .extensions_mut()
+                        .insert("outer".into(), Expr::Map(inner, sp()))
+                        .unwrap();
+                    outer
                 },
                 children: vec![var_ref("tmp")],
                 span: sp(),

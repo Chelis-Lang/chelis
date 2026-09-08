@@ -25,7 +25,7 @@ use chelis_surf::parser::parse_str;
 
 fn deep_of(source: &str) -> String {
     let decls = parse_str(source).expect("parse");
-    format!("{:?}", desugar_program(&decls))
+    chelis_deep::printer::print_canonical(&desugar_program(&decls))
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn the_alias_maps_in_every_type_position() {
          def main() -> i64 = ann(1i32)\n",
     );
     assert!(deep.contains("int64") && deep.contains("int32"), "{deep}");
-    for short in ["\"i64\"", "\"i32\""] {
+    for short in ["i64", "i32"] {
         assert!(
             !deep.contains(short),
             "no short spelling may reach Deep: {short} in {deep}"
@@ -77,7 +77,7 @@ fn a_genuine_lowercase_name_still_quantifies() {
     // name in a sig is still an implicitly quantified type variable.
     let deep = deep_of("module P.M\nexport (f)\nsig f: a -> a\ndef f(x) = x\n");
     assert!(
-        deep.contains("TVar"),
+        deep.contains("(t-var"),
         "`a` must stay a type variable: {deep}"
     );
 }

@@ -1,6 +1,6 @@
 //! Structural classification of scalar literal sources and binder adoption.
 
-use crate::{Atom, DeepTag, DtypeFamily, Expr, MetaMap};
+use crate::{Atom, DeepTag, DtypeFamily, Expr, Metadata};
 
 /// Whether a numeric atom is valid at every applicable member of a family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,13 +17,13 @@ pub enum LiteralFamilyFit {
 #[derive(Debug, Clone, Copy)]
 pub struct LiteralSource<'a> {
     literal: &'a Expr,
-    metadata: &'a MetaMap,
+    metadata: &'a Metadata,
     numeric_atom: Option<&'a Atom>,
 }
 
 impl<'a> LiteralSource<'a> {
     /// Metadata carried by the exact `lit` node.
-    pub fn metadata(self) -> &'a MetaMap {
+    pub fn metadata(self) -> &'a Metadata {
         self.metadata
     }
 
@@ -39,15 +39,9 @@ impl<'a> LiteralSource<'a> {
 
     /// Whether exactly one producer marker identifies an unsuffixed literal.
     pub fn has_exact_unsuffixed_style(self) -> bool {
-        let mut styles = self
-            .metadata
-            .entries
-            .iter()
-            .filter_map(|(key, value)| (key == "surf_literal_style").then_some(value));
-        matches!(
-            styles.next(),
-            Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"
-        ) && styles.next().is_none()
+        self.metadata
+            .surf_literal_style()
+            .is_some_and(|v| *v.value() == crate::annotations::LiteralStyle::Unsuffixed)
     }
 
     /// Classify kind and family-wide value validity independently of provenance.
@@ -127,11 +121,9 @@ pub fn visit_binder_literal_uses<'a>(
                 ));
             } else {
                 if tag == DeepTag::Lit
-                    && let Some(binder) = meta.entries.iter().find_map(|(key, ty)| {
-                        (key == "type")
-                            .then(|| exact_type_variable_name(ty))
-                            .flatten()
-                    })
+                    && let Some(binder) = meta
+                        .ty()
+                        .and_then(|ty| exact_type_variable_name(ty.expression()))
                 {
                     visitor(BinderLiteralUse::Literal {
                         binder,
@@ -141,16 +133,17 @@ pub fn visit_binder_literal_uses<'a>(
                 }
                 stack.extend(children.iter().rev().map(|child| (child, None)));
             }
-            stack.extend(meta.entries.iter().rev().map(|(_, value)| (value, None)));
+            meta.visit_expressions(&mut |value, _| stack.push((value, None)));
             continue;
         }
         match expr {
             Expr::MetaExpr(meta, _) => {
-                stack.extend(meta.entries.iter().rev().map(|(_, value)| (value, None)));
+                meta.metadata
+                    .visit_expressions(&mut |value, _| stack.push((value, None)));
                 stack.push((&meta.expr, adopting_binder));
             }
             Expr::Map(meta, _) => {
-                stack.extend(meta.entries.iter().rev().map(|(_, value)| (value, None)));
+                meta.visit_expressions(&mut |value, _| stack.push((value, None)));
             }
             Expr::List(list, _) => {
                 stack.extend(list.elements.iter().rev().map(|child| (child, None)));
@@ -160,20 +153,15 @@ pub fn visit_binder_literal_uses<'a>(
             }
             Expr::UnknownForm(data) => {
                 stack.extend(data.children.iter().rev().map(|child| (child, None)));
-                stack.extend(
-                    data.meta
-                        .entries
-                        .iter()
-                        .rev()
-                        .map(|(_, value)| (value, None)),
-                );
+                data.meta
+                    .visit_expressions(&mut |value, _| stack.push((value, None)));
             }
             Expr::Node(..) | Expr::Atom(..) => {}
         }
     }
 }
 
-fn direct_literal(expr: &Expr) -> Option<(&Expr, &MetaMap, Option<&Atom>)> {
+fn direct_literal(expr: &Expr) -> Option<(&Expr, &Metadata, Option<&Atom>)> {
     let (DeepTag::Lit, metadata, children) = node_parts(expr)? else {
         return None;
     };
@@ -198,7 +186,7 @@ pub fn exact_type_variable_name(expr: &Expr) -> Option<&str> {
     (name != "_").then_some(name)
 }
 
-fn node_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+fn node_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
         Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
         Expr::List(list, _) => {

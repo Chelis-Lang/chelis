@@ -4,7 +4,10 @@
 //! binder maps and historical macro arguments are not annotation maps. Node
 //! construction checks local invariants inductively; public tree boundaries
 //! additionally check parent and sibling placement.
-use crate::{Atom, DeepTag, Expr, MetaMap, RawAtom, RawExpr, Span};
+use crate::annotations::{
+    EffectMember, InvariantPredicate, MetadataValue as V, PropertyBinder, VariableRef, WrtTargets,
+};
+use crate::{Atom, DeepTag, Expr, Metadata, RawAtom, RawExpr, Span};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataError {
@@ -116,6 +119,9 @@ rules! {
     "surf_binding_type" => S::Choices(&["inferred", "explicit"]), P::BindingValue, "\"inferred\" or \"explicit\" on a bind value";
     "lin" => S::Names(&["once", "borrow", "unrestricted"]), P::Any, "once, borrow, or unrestricted";
     "doc" => S::String, P::Any, "a string";
+    "effect" => S::Names(&["random", "resource"]), P::Tag(T::HandleEffect), "random or resource on handle-effect";
+    "literal_source" => S::Names(&["integer"]), P::Tag(T::Lit), "integer on lit";
+    "destructure" => S::True, P::Tag(T::Bind), "true on bind";
 }
 
 enum KeyClass {
@@ -160,6 +166,15 @@ pub fn role(key: &str) -> MetadataRole {
 enum View<'a> {
     Raw(&'a RawExpr),
     Ast(&'a Expr),
+    Value(&'a V),
+    Name(&'a str, Span),
+    String(&'a str, Span),
+    True(Span),
+    Annotations(&'a Metadata, Span),
+    Variable(&'a VariableRef),
+    Binder(&'a PropertyBinder),
+    Effect(&'a EffectMember),
+    InvariantParams(&'a InvariantPredicate),
 }
 type Entries<'a> = Vec<(&'a str, View<'a>)>;
 struct Parts<'a> {
@@ -168,28 +183,68 @@ struct Parts<'a> {
     children: Vec<View<'a>>,
 }
 impl<'a> View<'a> {
+    fn scalar(self) -> Self {
+        match self {
+            Self::Value(v) => match v {
+                V::Type(v) => Self::Ast(v.expression()),
+                V::PropertyTolerance(v) | V::PropertySeed(v) | V::PropertySamples(v) => {
+                    Self::Ast(v.expression())
+                }
+                V::SurfDimGroupSize(v) => Self::Ast(v.expression()),
+                V::Span(v) => Self::String(v.value(), v.span()),
+                V::Doc(v) | V::ChelisRole(v) | V::PropertySourceId(v) | V::SurfPath(v) => {
+                    Self::String(v.value(), v.span())
+                }
+                V::PropertySourceKind(v) => Self::String(v.value().spelling(), v.span()),
+                V::InvariantAmenability(v) => Self::String(v.value().spelling(), v.span()),
+                V::SurfPipeStage(v) => Self::String(v.value().spelling(), v.span()),
+                V::SurfLiteralStyle(v) => Self::String(v.value().spelling(), v.span()),
+                V::SurfBindingType(v) => Self::String(v.value().spelling(), v.span()),
+                V::Lin(v) => Self::Name(v.value().spelling(), v.span()),
+                V::Effect(v) => Self::Name(v.value().symbol(), v.span()),
+                V::LiteralSource(v) => Self::Name(v.value().spelling(), v.span()),
+                V::Opaque(v) | V::Destructure(v) => Self::True(v.span()),
+                V::Wrt(WrtTargets::Variable(v)) => Self::Variable(v),
+                _ => self,
+            },
+            Self::Effect(EffectMember::Name(v)) => Self::Name(v.value(), v.span()),
+            _ => self,
+        }
+    }
     fn span(self) -> Span {
         match self {
             Self::Raw(v) => v.span(),
             Self::Ast(v) => v.span(),
+            Self::Value(v) => v.span(),
+            Self::Name(_, span)
+            | Self::String(_, span)
+            | Self::True(span)
+            | Self::Annotations(_, span) => span,
+            Self::Variable(v) => v.span(),
+            Self::Binder(v) => v.span(),
+            Self::Effect(EffectMember::Name(v)) => v.span(),
+            Self::Effect(EffectMember::Resource(v)) => v.span(),
+            Self::InvariantParams(v) => v.params.span,
         }
     }
     fn name(self) -> Option<&'a str> {
-        match self {
+        match self.scalar() {
             Self::Raw(RawExpr::Atom(RawAtom::Symbol(v), _))
             | Self::Ast(Expr::Atom(Atom::Name(v), _)) => Some(v),
+            Self::Name(v, _) => Some(v),
             _ => None,
         }
     }
     fn string(self) -> Option<&'a str> {
-        match self {
+        match self.scalar() {
             Self::Raw(RawExpr::Atom(RawAtom::Str(v), _))
             | Self::Ast(Expr::Atom(Atom::Str(v), _)) => Some(v),
+            Self::String(v, _) => Some(v),
             _ => None,
         }
     }
     fn integer(self) -> Option<i64> {
-        match self {
+        match self.scalar() {
             Self::Raw(RawExpr::Atom(RawAtom::Int(v), _))
             | Self::Ast(Expr::Atom(Atom::Int(v), _)) => Some(*v),
             _ => None,
@@ -197,35 +252,104 @@ impl<'a> View<'a> {
     }
     fn is_true(self) -> bool {
         matches!(
-            self,
+            self.scalar(),
             Self::Raw(RawExpr::Atom(RawAtom::Bool(true), _))
                 | Self::Ast(Expr::Atom(Atom::Bool(true), _))
+                | Self::True(_)
         )
     }
     fn list(self) -> Option<Vec<Self>> {
-        match self {
+        match self.scalar() {
             Self::Raw(RawExpr::List(v, _)) => Some(v.iter().map(Self::Raw).collect()),
             Self::Ast(Expr::List(v, _)) => Some(v.elements.iter().map(Self::Ast).collect()),
             Self::Ast(Expr::BareList(v, _)) => Some(v.iter().map(Self::Ast).collect()),
+            Self::Value(V::Source(v)) => Some(
+                std::iter::once(Self::Name(v.name.value(), v.name.span()))
+                    .chain(v.arguments.iter().map(Self::Raw))
+                    .collect(),
+            ),
+            Self::Value(V::Loc(v)) => Some(vec![
+                Self::Name("loc", v.head_span),
+                Self::String(v.file.value(), v.file.span()),
+                Self::Ast(v.line.expression()),
+                Self::Ast(v.column.expression()),
+            ]),
+            Self::Binder(v) => Some(vec![
+                Self::Name(v.name.value(), v.name.span()),
+                Self::Annotations(v.metadata(), v.span()),
+            ]),
             _ => None,
         }
     }
     fn map(self) -> Option<Entries<'a>> {
-        match self {
+        match self.scalar() {
             Self::Raw(RawExpr::Map(v, _)) => {
                 Some(v.iter().map(|(k, v)| (k.as_str(), Self::Raw(v))).collect())
             }
-            Self::Ast(Expr::Map(v, _)) => Some(
-                v.entries
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), Self::Ast(v)))
+            Self::Ast(Expr::Map(v, _)) | Self::Annotations(v, _) => Some(entries(v)),
+            Self::Value(V::DtypeBounds(v)) => Some(
+                v.bounds()
+                    .map(|(k, v)| (k, Self::Name(v.value().deep_name(), v.span())))
                     .collect(),
             ),
             _ => None,
         }
     }
     fn parts(self) -> Option<Parts<'a>> {
-        match self {
+        match self.scalar() {
+            Self::Variable(v) => Some(Parts {
+                tag: Some(T::Var),
+                meta: entries(v.metadata()),
+                children: vec![Self::Name(v.name.value(), v.name.span())],
+            }),
+            Self::Value(V::Wrt(WrtTargets::Tuple(v))) => Some(Parts {
+                tag: Some(T::Tuple),
+                meta: entries(v.metadata()),
+                children: v.variables().map(Self::Variable).collect(),
+            }),
+            Self::Value(V::Eff(v) | V::Effects(v)) => Some(Parts {
+                tag: Some(T::Effects),
+                meta: entries(v.metadata()),
+                children: v.values().iter().map(Self::Effect).collect(),
+            }),
+            Self::Effect(EffectMember::Resource(v)) => Some(Parts {
+                tag: Some(T::Resource),
+                meta: entries(v.metadata()),
+                children: vec![Self::String(v.name.value(), v.name.span())],
+            }),
+            Self::Value(V::PropertyQuantifiers(v)) => Some(Parts {
+                tag: Some(T::Params),
+                meta: entries(v.metadata()),
+                children: v.values().iter().map(Self::Binder).collect(),
+            }),
+            Self::Value(V::PropertyPreconditions(v)) => Some(Parts {
+                tag: Some(T::Tuple),
+                meta: entries(v.metadata()),
+                children: v
+                    .values()
+                    .iter()
+                    .map(|v| Self::Ast(v.expression()))
+                    .collect(),
+            }),
+            Self::Value(V::PropertyContracts(v)) => Some(Parts {
+                tag: Some(T::Tuple),
+                meta: entries(v.metadata()),
+                children: v
+                    .values()
+                    .iter()
+                    .map(|v| Self::String(v.value(), v.span()))
+                    .collect(),
+            }),
+            Self::Value(V::Invariant(v)) => Some(Parts {
+                tag: Some(T::Fn),
+                meta: entries(v.metadata()),
+                children: vec![Self::InvariantParams(v), Self::Ast(v.body.expression())],
+            }),
+            Self::InvariantParams(v) => Some(Parts {
+                tag: Some(T::Params),
+                meta: entries(v.parameter_metadata()),
+                children: vec![Self::Binder(&v.binder)],
+            }),
             Self::Ast(Expr::Node(node, _)) => Some(Parts {
                 tag: Some(node.tag()),
                 meta: entries(node.meta()),
@@ -255,10 +379,10 @@ impl<'a> View<'a> {
         self.parts().filter(|v| v.tag == Some(tag))
     }
 }
-fn entries(meta: &MetaMap) -> Entries<'_> {
-    meta.entries
-        .iter()
-        .map(|(k, v)| (k.as_str(), View::Ast(v)))
+fn entries(meta: &Metadata) -> Entries<'_> {
+    meta.values()
+        .map(|v| (v.key().spelling(), View::Value(v)))
+        .chain(meta.extensions().iter().map(|(k, v)| (k, View::Ast(v))))
         .collect()
 }
 fn value<'a>(meta: &Entries<'a>, key: &str) -> Option<View<'a>> {
@@ -278,6 +402,14 @@ fn variable(v: View<'_>) -> bool {
         .is_some_and(|n| n.children.len() == 1 && n.children[0].name().is_some())
 }
 fn expression(root: View<'_>) -> bool {
+    if matches!(
+        root,
+        View::Value(
+            V::PropertyTolerance(_) | V::PropertySeed(_) | V::PropertySamples(_) | V::Wrt(_)
+        )
+    ) {
+        return true;
+    }
     use crate::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
     // A Node proves its own immediate runtime slots. Its legacy descendants
     // remain untrusted, so metadata expression admission cannot stop there.
@@ -540,13 +672,7 @@ fn binder_signature(v: View<'_>) -> Option<(&str, Option<View<'_>>)> {
                 .map(|(k, v)| (k.as_str(), View::Raw(v)))
                 .collect(),
         ),
-        View::Ast(Expr::MetaExpr(m, _)) => (
-            View::Ast(&m.expr).name()?,
-            m.entries
-                .iter()
-                .map(|(k, v)| (k.as_str(), View::Ast(v)))
-                .collect(),
-        ),
+        View::Ast(Expr::MetaExpr(m, _)) => (View::Ast(&m.expr).name()?, entries(&m.metadata)),
         _ => {
             let items = v.list()?;
             if items.len() != 2 {
@@ -583,6 +709,10 @@ fn same_entries(a: &Entries<'_>, b: &Entries<'_>) -> bool {
 }
 
 fn shape_valid(shape: Shape, v: View<'_>) -> bool {
+    // The variant and immutable payload prove local shape at construction.
+    if matches!(v, View::Value(_)) {
+        return true;
+    }
     match shape {
         S::String | S::Span => v.string().is_some(),
         S::Choices(choices) => v.string().is_some_and(|v| choices.contains(&v)),
@@ -658,6 +788,13 @@ fn check_entries(
     context: Option<Context>,
 ) -> Result<(), MetadataError> {
     for (index, (key, v)) in meta.iter().enumerate() {
+        if meta[..index].iter().any(|(prior, _)| prior == key) {
+            return Err(error(
+                key,
+                *v,
+                "exactly one occurrence of this metadata key",
+            ));
+        }
         let rule = match classify(key) {
             KeyClass::Extension => continue,
             KeyClass::Forbidden => {
@@ -669,13 +806,6 @@ fn check_entries(
             }
             KeyClass::Registered(rule) => rule,
         };
-        if meta[..index].iter().any(|(prior, _)| prior == key) {
-            return Err(error(
-                key,
-                *v,
-                "exactly one occurrence of this metadata key",
-            ));
-        }
         let placement = match rule.placement {
             P::Any => true,
             P::Declaration => {
@@ -808,15 +938,20 @@ fn push_metadata<'a>(meta: Entries<'a>, stack: &mut Vec<(View<'a>, Context)>) {
         }
     }
 }
+#[cfg(test)]
+thread_local! { static ADMISSION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn walk(
     mut stack: Vec<(View<'_>, Context)>,
     descend_nodes: bool,
     groups: bool,
 ) -> Result<(), MetadataError> {
     while let Some((v, context)) = stack.pop() {
+        #[cfg(test)]
+        ADMISSION_VISITS.with(|visits| visits.set(visits.get() + 1));
         if let Some(p) = v.parts() {
             check_entries(&p.meta, p.tag, &p.children, Some(context))?;
-            if !descend_nodes && matches!(v, View::Ast(Expr::Node(..))) {
+            if !descend_nodes && matches!(v.scalar(), View::Ast(Expr::Node(..))) {
                 continue;
             }
             if groups && p.tag == Some(T::Module) {
@@ -840,13 +975,7 @@ fn walk(
                         .collect(),
                     View::Raw(expr),
                 ),
-                View::Ast(Expr::MetaExpr(m, _)) => (
-                    m.entries
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), View::Ast(v)))
-                        .collect(),
-                    View::Ast(&m.expr),
-                ),
+                View::Ast(Expr::MetaExpr(m, _)) => (entries(&m.metadata), View::Ast(&m.expr)),
                 _ => continue,
             };
             check_entries(&meta, None, &[], Some(context))?;
@@ -887,7 +1016,7 @@ pub fn validate_metadata(exprs: &[Expr]) -> Result<(), MetadataError> {
 /// Check a candidate Node without claiming a parent placement for its root.
 pub(crate) fn validate_node(
     tag: DeepTag,
-    meta: &MetaMap,
+    meta: &Metadata,
     children: &[Expr],
 ) -> Result<(), MetadataError> {
     let meta = entries(meta);
@@ -902,4 +1031,149 @@ pub(crate) fn validate_node(
     }
     push_metadata(meta, &mut stack);
     walk(stack, false, true)
+}
+
+/// Inductive decode-once admission: typed Node subtrees already passed this gate.
+pub(crate) fn validate_payload_tags(key: &str, expr: &Expr) -> Result<(), MetadataError> {
+    if let Some(tag) =
+        crate::validate::find_raw_vocabulary_tag_below_gate(std::slice::from_ref(expr))
+    {
+        let mut error = crate::annotations::invalid(
+            key,
+            expr.span(),
+            "decoded vocabulary tags in annotation expressions",
+        );
+        error.detail = Some(format!(
+            "raw closed-vocabulary tag `{tag}` must pass stamping"
+        ));
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Admit one payload inductively. A Node already validated its descendant
+/// annotation placement; legacy carriers still require a walk. The payload's
+/// root has a new detached context, so it is always checked.
+pub(crate) fn validate_payload_metadata(expr: &Expr) -> Result<(), MetadataError> {
+    let root = View::Ast(expr);
+    check_groups(&[root])?;
+    walk(vec![(root, Context::default())], false, true)
+}
+
+/// Runtime leaves share one shape, while diagnostics name their owning key.
+pub(crate) fn validate_runtime_payload(key: &str, expr: &Expr) -> Result<(), MetadataError> {
+    validate_payload_tags(key, expr)?;
+    if !expression(View::Ast(expr)) {
+        return Err(error(key, View::Ast(expr), "a runtime expression"));
+    }
+    validate_payload_metadata(expr)
+}
+
+/// Admission for genuine expression payload wrappers.
+pub(crate) fn validate_payload(key: &str, expr: &Expr) -> Result<(), MetadataError> {
+    validate_payload_tags(key, expr)?;
+    let KeyClass::Registered(rule) = classify(key) else {
+        unreachable!("registered payload constructor")
+    };
+    if !shape_valid(rule.shape, View::Ast(expr)) {
+        return Err(error(key, View::Ast(expr), rule.expected));
+    }
+    validate_payload_metadata(expr)
+}
+
+pub(crate) fn validate_typed_container(
+    tag: DeepTag,
+    meta: &crate::annotations::Metadata,
+) -> Result<(), MetadataError> {
+    typed_container_placement(Some(tag), meta)
+}
+pub(crate) fn validate_typed_detached(
+    meta: &crate::annotations::Metadata,
+) -> Result<(), MetadataError> {
+    typed_container_placement(None, meta)
+}
+fn typed_container_placement(
+    tag: Option<DeepTag>,
+    meta: &crate::annotations::Metadata,
+) -> Result<(), MetadataError> {
+    for value in meta.values() {
+        let KeyClass::Registered(rule) = classify(value.key().spelling()) else {
+            unreachable!("typed key is registered")
+        };
+        let allowed = match rule.placement {
+            P::Any => true,
+            P::Tag(owner) => tag == Some(owner),
+            P::Declaration => tag.is_some_and(crate::role::is_declaration_tag),
+            P::Path => matches!(tag, Some(T::Module | T::Import | T::ImportAll)),
+            P::BindingValue => tag.is_some_and(runtime_tag),
+            P::PipeStage => tag == Some(T::Fn),
+        };
+        if !allowed {
+            return Err(crate::annotations::invalid(
+                rule.key,
+                value.span(),
+                rule.expected,
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_raw_payload(key: &str, expr: &RawExpr) -> Result<(), MetadataError> {
+    let KeyClass::Registered(rule) = classify(key) else {
+        unreachable!("registered payload decoder")
+    };
+    if !shape_valid(rule.shape, View::Raw(expr)) {
+        return Err(error(key, View::Raw(expr), rule.expected));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod annotation_admission_cost {
+    use super::*;
+    use crate::annotations::{MetadataValue, TypeSyntax};
+
+    #[test]
+    fn nested_typed_annotation_admission_scales_linearly() {
+        fn work(depth: usize, extension: bool) -> usize {
+            let span = Span::new(0, 0);
+            ADMISSION_VISITS.with(|v| v.set(0));
+            let mut current = Expr::node(
+                T::TPrim,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name("f32".into()), span)],
+                span,
+            );
+            for _ in 0..depth {
+                let mut metadata = Metadata::default();
+                if extension {
+                    metadata
+                        .extensions_mut()
+                        .insert("custom".into(), current)
+                        .unwrap();
+                } else {
+                    metadata
+                        .insert(MetadataValue::Type(TypeSyntax::try_new(current).unwrap()))
+                        .unwrap();
+                }
+                current = Expr::node(
+                    T::TPrim,
+                    metadata,
+                    vec![Expr::Atom(Atom::Name("f32".into()), span)],
+                    span,
+                );
+            }
+            ADMISSION_VISITS.with(|v| v.get())
+        }
+        for extension in [false, true] {
+            let small = work(64, extension);
+            let large = work(128, extension);
+            assert!(small > 0);
+            assert!(
+                large <= small * 2 + 16,
+                "nested admission rescans validated payloads: {small} -> {large}, extension={extension}"
+            );
+        }
+    }
 }

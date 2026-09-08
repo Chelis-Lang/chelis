@@ -23,7 +23,7 @@
 //! See docs/investigations/wi1_infer_recursion_depth.md and the
 //! `STACK_RED_ZONE_BYTES` doc-comment in crates/chelis-types/src/infer.rs.
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_deep::span::Span;
 use chelis_types::{
     TypeEnv, build_compiled_library_context, build_compiled_library_context_with_base,
@@ -34,7 +34,7 @@ fn sym(s: &str) -> Expr {
 }
 
 fn empty_meta() -> Expr {
-    Expr::Map(MetaMap::default(), Span::new(0, 0))
+    Expr::Map(Metadata::default(), Span::new(0, 0))
 }
 
 /// `(var name)`.

@@ -297,20 +297,9 @@ fn count_node(expr: &chelis_deep::Expr) -> usize {
     match expr {
         chelis_deep::Expr::Atom(_, _) => 1,
         chelis_deep::Expr::List(list, _) => 1 + list.elements.iter().map(count_node).sum::<usize>(),
-        chelis_deep::Expr::Map(map, _) => {
-            1 + map
-                .entries
-                .iter()
-                .map(|(_, v)| count_node(v))
-                .sum::<usize>()
-        }
+        chelis_deep::Expr::Map(map, _) => 1 + count_metadata(map),
         chelis_deep::Expr::MetaExpr(meta, _) => {
-            1 + count_node(&meta.expr)
-                + meta
-                    .entries
-                    .iter()
-                    .map(|(_, v)| count_node(v))
-                    .sum::<usize>()
+            1 + count_node(&meta.expr) + count_metadata(&meta.metadata)
         }
         // Bridge: reconstruct List so all children (including meta) are counted (#908)
         chelis_deep::Expr::Node(node, span) => {
@@ -322,6 +311,32 @@ fn count_node(expr: &chelis_deep::Expr) -> usize {
             1 + data.children.iter().map(count_node).sum::<usize>()
         }
     }
+}
+
+fn count_metadata(meta: &chelis_deep::Metadata) -> usize {
+    fn raw_count(expr: &chelis_deep::RawExpr) -> usize {
+        use chelis_deep::RawExpr;
+        match expr {
+            RawExpr::Atom(..) => 1,
+            RawExpr::List(values, _) => 1 + values.iter().map(raw_count).sum::<usize>(),
+            RawExpr::Map(values, _) => 1 + values.iter().map(|(_, v)| raw_count(v)).sum::<usize>(),
+            RawExpr::MetaExpr { entries, expr, .. } => {
+                1 + raw_count(expr) + entries.iter().map(|(_, v)| raw_count(v)).sum::<usize>()
+            }
+        }
+    }
+    let mut count = meta.values().count() + meta.extensions().iter().count();
+    meta.visit_syntax(&mut |_, value| count += count_node(value) - 1);
+    if let Some(source) = meta.source() {
+        count += 1 + source.arguments().iter().map(raw_count).sum::<usize>();
+    }
+    if let Some(bounds) = meta.dtype_bounds() {
+        count += bounds.bounds().count();
+    }
+    if meta.loc().is_some() {
+        count += 4;
+    }
+    count
 }
 
 #[cfg(test)]

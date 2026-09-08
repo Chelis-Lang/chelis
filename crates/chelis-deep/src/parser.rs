@@ -462,15 +462,24 @@ pub fn stamp_tags(exprs: &mut [Expr]) {
                 }
             }
             Expr::Map(map, _) => {
-                for (_, value) in map.entries.iter_mut() {
-                    stamp(value);
-                }
+                *map = map
+                    .map_expressions(&mut |value, _| {
+                        let mut value = value.clone();
+                        stamp(&mut value);
+                        value
+                    })
+                    .expect("stamping preserves metadata shape");
             }
             Expr::MetaExpr(meta, _) => {
                 stamp(&mut meta.expr);
-                for (_, value) in meta.entries.iter_mut() {
-                    stamp(value);
-                }
+                meta.metadata = meta
+                    .metadata
+                    .map_expressions(&mut |value, _| {
+                        let mut value = value.clone();
+                        stamp(&mut value);
+                        value
+                    })
+                    .expect("stamping preserves metadata shape");
             }
             Expr::Atom(_, _) => {}
             Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
@@ -711,11 +720,8 @@ mod tests {
                     node.children_slice()[0],
                     Expr::Atom(Atom::Int(7), _)
                 ));
-                assert!(node.meta().entries.iter().any(|(key, _)| key == "type"));
-                assert!(node.meta().entries.iter().any(|(key, value)| {
-                    key == "literal_source"
-                        && matches!(value, Expr::Atom(Atom::Name(name), _) if name == "integer")
-                }));
+                assert!(node.meta().ty().is_some());
+                assert!(node.meta().literal_source().is_some());
             }
             other => panic!("expected lit Node, got {other:?}"),
         }
@@ -830,7 +836,7 @@ mod tests {
         match &exprs[0] {
             Expr::Node(node, _) => {
                 assert_eq!(node.tag(), crate::tag::DeepTag::Def);
-                assert!(node.meta().entries.is_empty());
+                assert!(node.meta().is_empty());
                 // Def has 2 children: the name binder and the (fn ...) node
                 assert_eq!(node.child_count(), 2);
                 match &node.children_slice()[0] {
@@ -856,9 +862,8 @@ mod tests {
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::MetaExpr(meta, _) => {
-                assert_eq!(meta.entries.len(), 1);
-                assert_eq!(meta.entries[0].0, "type");
-                match &meta.entries[0].1 {
+                assert_eq!(meta.metadata.values().count(), 1);
+                match meta.metadata.ty().unwrap().expression() {
                     Expr::Node(node, _) => assert_eq!(node.tag(), crate::DeepTag::TPrim),
                     other => panic!("expected type node, got {:?}", other),
                 }
@@ -877,9 +882,12 @@ mod tests {
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::MetaExpr(meta, _) => {
-                assert_eq!(meta.entries.len(), 2);
-                assert_eq!(meta.entries[0].0, "type");
-                assert_eq!(meta.entries[1].0, "pure");
+                assert!(meta.metadata.ty().is_some());
+                assert_eq!(meta.metadata.extensions().iter().count(), 1);
+                assert!(matches!(
+                    meta.metadata.extensions().get("pure"),
+                    Some(Expr::Atom(Atom::Bool(true), _))
+                ));
                 match meta.expr.as_ref() {
                     Expr::BareList(elems, _) => match &elems[0] {
                         Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),

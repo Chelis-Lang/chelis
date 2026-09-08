@@ -914,8 +914,8 @@ impl<'a> EvalContext<'a> {
             .map(|arg| self.static_type_expr_of(arg))
             .collect::<Vec<_>>();
         let result_type_expr = get_meta(list)
-            .and_then(|meta| meta.entries.iter().find(|(key, _)| key == "type"))
-            .map(|(_, ty)| ty.clone());
+            .and_then(|meta| meta.ty())
+            .map(|ty| ty.expression().clone());
         let args = kids[1..]
             .iter()
             .map(|arg| self.eval_expr(arg))

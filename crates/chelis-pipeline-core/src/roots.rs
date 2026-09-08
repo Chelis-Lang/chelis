@@ -126,11 +126,7 @@ fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
         DeepExpr::Node(node, _) => node.meta(),
         _ => return None,
     };
-    metadata
-        .entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    metadata.ty().map(|ty| ty.expression())
 }
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {

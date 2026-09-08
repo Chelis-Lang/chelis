@@ -2134,7 +2134,7 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
             span: Span,
         },
         FinishMap {
-            map: &'a deep::MetaMap,
+            map: &'a deep::Metadata,
             span: Span,
         },
         FinishMetaExpr {
@@ -2143,7 +2143,7 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
         },
         FinishNode {
             tag: DeepTag,
-            meta: &'a deep::MetaMap,
+            meta: &'a deep::Metadata,
             child_count: usize,
             span: Span,
         },
@@ -2158,6 +2158,26 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
         values.split_off(start)
     }
 
+    fn metadata_leaves(meta: &deep::Metadata) -> Vec<&deep::Expr> {
+        let mut leaves = Vec::new();
+        meta.visit_expressions(&mut |value, _| leaves.push(value));
+        leaves
+    }
+    fn rebuild_metadata(meta: &deep::Metadata, normalized: Vec<deep::Expr>) -> deep::Metadata {
+        let mut normalized = normalized.into_iter();
+        let result = meta
+            .try_map_leaves::<chelis_deep::metadata::MetadataError>(&mut |_, _| {
+                Ok(normalized
+                    .next()
+                    .expect("one worklist value per metadata leaf"))
+            })
+            .expect("carrier normalization preserves payload admission");
+        assert!(
+            normalized.next().is_none(),
+            "all metadata worklist values consumed"
+        );
+        result
+    }
     let mut actions = vec![Action::Visit(expr)];
     let mut values = Vec::new();
 
@@ -2176,21 +2196,16 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
                 }
                 deep::Expr::Map(map, span) => {
                     actions.push(Action::FinishMap { map, span: *span });
-                    actions.extend(
-                        map.entries
-                            .iter()
-                            .rev()
-                            .map(|(_, value)| Action::Visit(value)),
-                    );
+                    actions.extend(metadata_leaves(map).into_iter().rev().map(Action::Visit));
                 }
                 deep::Expr::MetaExpr(meta, span) => {
                     actions.push(Action::FinishMetaExpr { meta, span: *span });
                     actions.push(Action::Visit(&meta.expr));
                     actions.extend(
-                        meta.entries
-                            .iter()
+                        metadata_leaves(&meta.metadata)
+                            .into_iter()
                             .rev()
-                            .map(|(_, value)| Action::Visit(value)),
+                            .map(Action::Visit),
                     );
                 }
                 deep::Expr::Node(node, span) => {
@@ -2202,11 +2217,10 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
                     });
                     actions.extend(node.children_slice().iter().rev().map(Action::Visit));
                     actions.extend(
-                        node.meta()
-                            .entries
-                            .iter()
+                        metadata_leaves(node.meta())
+                            .into_iter()
                             .rev()
-                            .map(|(_, value)| Action::Visit(value)),
+                            .map(Action::Visit),
                     );
                 }
                 deep::Expr::BareList(elements, span) => {
@@ -2220,11 +2234,10 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
                     actions.push(Action::FinishUnknownForm(data));
                     actions.extend(data.children.iter().rev().map(Action::Visit));
                     actions.extend(
-                        data.meta
-                            .entries
-                            .iter()
+                        metadata_leaves(&data.meta)
+                            .into_iter()
                             .rev()
-                            .map(|(_, value)| Action::Visit(value)),
+                            .map(Action::Visit),
                     );
                 }
             },
@@ -2236,29 +2249,16 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
                 values.push(deep::Expr::List(deep::List { elements }, span));
             }
             Action::FinishMap { map, span } => {
-                let normalized_values = split_tail(&mut values, map.entries.len());
-                let entries = map
-                    .entries
-                    .iter()
-                    .zip(normalized_values)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
-                values.push(deep::Expr::Map(deep::MetaMap { entries }, span));
+                let normalized = split_tail(&mut values, metadata_leaves(map).len());
+                values.push(deep::Expr::Map(rebuild_metadata(map, normalized), span));
             }
             Action::FinishMetaExpr { meta, span } => {
-                let mut normalized = split_tail(&mut values, meta.entries.len() + 1);
-                let normalized_expr = normalized
-                    .pop()
-                    .expect("MetaExpr normalization visits its expression");
-                let entries = meta
-                    .entries
-                    .iter()
-                    .zip(normalized)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
+                let mut normalized =
+                    split_tail(&mut values, metadata_leaves(&meta.metadata).len() + 1);
+                let normalized_expr = normalized.pop().expect("MetaExpr visits its expression");
                 values.push(deep::Expr::MetaExpr(
                     deep::MetaExpr {
-                        entries,
+                        metadata: rebuild_metadata(&meta.metadata, normalized),
                         expr: Box::new(normalized_expr),
                     },
                     span,
@@ -2270,34 +2270,23 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
                 child_count,
                 span,
             } => {
-                let mut normalized = split_tail(&mut values, meta.entries.len() + child_count);
-                let children = normalized.split_off(meta.entries.len());
-                let entries = meta
-                    .entries
-                    .iter()
-                    .zip(normalized)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
-                let mut elements = Vec::with_capacity(child_count + 2);
-                elements.push(deep::Expr::Atom(deep::Atom::Tag(tag), span));
-                elements.push(deep::Expr::Map(deep::MetaMap { entries }, span));
+                let metadata_count = metadata_leaves(meta).len();
+                let mut normalized = split_tail(&mut values, metadata_count + child_count);
+                let children = normalized.split_off(metadata_count);
+                let mut elements = vec![
+                    deep::Expr::Atom(deep::Atom::Tag(tag), span),
+                    deep::Expr::Map(rebuild_metadata(meta, normalized), span),
+                ];
                 elements.extend(children);
                 values.push(deep::Expr::List(deep::List { elements }, span));
             }
             Action::FinishUnknownForm(data) => {
-                let mut normalized =
-                    split_tail(&mut values, data.meta.entries.len() + data.children.len());
-                let children = normalized.split_off(data.meta.entries.len());
-                let entries = data
-                    .meta
-                    .entries
-                    .iter()
-                    .zip(normalized)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
+                let metadata_count = metadata_leaves(&data.meta).len();
+                let mut normalized = split_tail(&mut values, metadata_count + data.children.len());
+                let children = normalized.split_off(metadata_count);
                 values.push(deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
                     head: data.head.clone(),
-                    meta: deep::MetaMap { entries },
+                    meta: rebuild_metadata(&data.meta, normalized),
                     children,
                     span: data.span,
                 })));

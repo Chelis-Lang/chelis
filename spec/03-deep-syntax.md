@@ -38,6 +38,9 @@ portable across Surf and Reef boundaries.
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
 | `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig`'s binders; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
+| `effect` | `random` / `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
+| `literal_source` | `integer` | Integer-written literal provenance on `lit`; see §6.4 and [04-LIT-1] |
+| `destructure` | `true` | Destructured component binding on `bind`; see spec/04 §8.2 and [04-LIN-1/2] |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
 | `wrt` | variable or nonempty tuple of variables | On `grad`: `(var {} name)` or `(tuple {} (var {} name) ...)`, preserving target order; see §2.7 |
 | `span` | string | External-source span identifier (see §1.1.1) |
@@ -75,9 +78,9 @@ the namespace for arbitrary provenance.
 | `doc` | string | Documentation |
 | `span_*` | reserved | Span-metadata extension namespace (see §1.1.1) |
 
-> **[03-META-1]** Every defined or individually reserved key in this section
-> SHALL occur at most once in a metadata map and SHALL carry the declared
-> value shape. A malformed value, duplicate key, or forbidden placement SHALL
+> **[03-META-1]** Every key SHALL occur at most once in an annotation map,
+> including producer-specific and `span_*` extension keys. Every defined or
+> individually reserved key SHALL carry its declared value shape. A malformed value, duplicate key, or forbidden placement SHALL
 > be rejected at program-text ingress, before a semantic consumer observes
 > the program. The diagnostic SHALL identify the key, the violated contract,
 > and the offending value's source location. Programmatic node construction,
@@ -123,8 +126,10 @@ those payloads remain subject to validation. A `dtype_bounds` payload is
 instead a data map governed by §2.2: its keys are binder names, even when
 they spell `type`, `span`, or a `surf_*` name. They are not metadata keys.
 Likewise, the contents of a preserved `source` record are syntax data.
-These distinctions depend on the enclosing role, not heuristics about
-key spelling. Missing optional metadata is valid; malformed present metadata
+The annotation-key uniqueness rule does not reinterpret data maps inside
+preserved `source` arguments as annotations. `dtype_bounds` independently
+requires unique binder names under §2.2. These distinctions depend on the
+enclosing role, not heuristics about key spelling. Missing optional metadata is valid; malformed present metadata
 SHALL NOT be dropped, defaulted, or coerced to absence.
 
 **Metadata propagation through transformations.** Semantic metadata and the

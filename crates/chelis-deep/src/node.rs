@@ -10,7 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ast::{Atom, Expr, List, MetaMap};
+use crate::Metadata;
+use crate::ast::{Atom, Expr, List};
 use crate::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
 use crate::span::Span;
 use crate::tag::DeepTag;
@@ -125,14 +126,19 @@ pub enum ChildRef<'a> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Node {
     tag: DeepTag,
-    meta: MetaMap,
+    meta: Metadata,
     children: Vec<Expr>,
 }
 
 impl Node {
+    /// Consume a node for atomic rebuilding of coupled metadata and children.
+    pub fn into_parts(self) -> (DeepTag, Metadata, Vec<Expr>) {
+        (self.tag, self.meta, self.children)
+    }
+
     /// Boundary constructor — returns `Err` when the user wrote
     /// something wrong (Name at RuntimeExpr slot, wrong arity).
-    pub fn try_new(tag: DeepTag, meta: MetaMap, children: Vec<Expr>) -> Result<Self, NodeError> {
+    pub fn try_new(tag: DeepTag, meta: Metadata, children: Vec<Expr>) -> Result<Self, NodeError> {
         Self::validate(tag, &meta, &children)?;
         Ok(Node {
             tag,
@@ -144,7 +150,7 @@ impl Node {
     /// Internal constructor — panics on violation. Use only when a
     /// violation would indicate a compiler bug (rewriting
     /// already-validated trees).
-    pub fn new(tag: DeepTag, meta: MetaMap, children: Vec<Expr>) -> Self {
+    pub fn new(tag: DeepTag, meta: Metadata, children: Vec<Expr>) -> Self {
         if let Err(e) = Self::validate(tag, &meta, &children) {
             panic!("Node::new invariant violation (compiler bug): {e}");
         }
@@ -155,7 +161,7 @@ impl Node {
         }
     }
 
-    fn validate(tag: DeepTag, meta: &MetaMap, children: &[Expr]) -> Result<(), NodeError> {
+    fn validate(tag: DeepTag, meta: &Metadata, children: &[Expr]) -> Result<(), NodeError> {
         // Arity check.
         let spec = arity_contract(tag);
         let n = children.len();
@@ -208,13 +214,16 @@ impl Node {
         // per ancestor, which made bottom-up stamping quadratic in nesting
         // depth. Every non-Node carrier is still walked to any depth. See
         // `find_raw_vocabulary_tag_below_gate` for the induction.
-        let raw_tag = meta
-            .entries
-            .iter()
-            .find_map(|(_, value)| {
-                crate::validate::find_raw_vocabulary_tag_below_gate(std::slice::from_ref(value))
-            })
-            .or_else(|| crate::validate::find_raw_vocabulary_tag_below_gate(children));
+        let mut raw_tag = None;
+        meta.visit_expressions(&mut |value, _| {
+            if raw_tag.is_none() {
+                raw_tag = crate::validate::find_raw_vocabulary_tag_below_gate(
+                    std::slice::from_ref(value),
+                );
+            }
+        });
+        let raw_tag =
+            raw_tag.or_else(|| crate::validate::find_raw_vocabulary_tag_below_gate(children));
         if let Some(raw_tag) = raw_tag {
             return Err(NodeError::RawVocabularyTag {
                 container: tag,
@@ -234,7 +243,7 @@ impl Node {
     }
 
     /// The node's metadata map.
-    pub fn meta(&self) -> &MetaMap {
+    pub fn meta(&self) -> &Metadata {
         &self.meta
     }
 
@@ -244,7 +253,7 @@ impl Node {
     /// original metadata untouched. Public callers never receive a mutable
     /// reference that could reopen the raw-vocabulary domain after
     /// construction (chelis#731 Phase 3).
-    pub fn try_replace_meta(&mut self, meta: MetaMap) -> Result<(), NodeError> {
+    pub fn try_replace_meta(&mut self, meta: Metadata) -> Result<(), NodeError> {
         Self::validate(self.tag, &meta, &self.children)?;
         self.meta = meta;
         Ok(())
@@ -423,7 +432,7 @@ impl<'de> Deserialize<'de> for Node {
         #[derive(Deserialize)]
         struct NodeShadow {
             tag: DeepTag,
-            meta: MetaMap,
+            meta: Metadata,
             children: Vec<Expr>,
         }
 
@@ -452,28 +461,32 @@ mod tests {
     #[test]
     fn try_new_rejects_name_at_runtime_expr_slot() {
         // App children are all RuntimeExpr. A bare Name there is invalid.
-        let result = Node::try_new(DeepTag::App, MetaMap::default(), vec![name("x")]);
+        let result = Node::try_new(DeepTag::App, Metadata::default(), vec![name("x")]);
         assert!(matches!(result, Err(NodeError::NameAtExprSlot { .. })));
     }
 
     #[test]
     fn try_new_permits_name_at_binder_slot() {
         // Var child 0 is Syntax (name is content). Def child 0 is Binder.
-        let result = Node::try_new(DeepTag::Var, MetaMap::default(), vec![name("x")]);
+        let result = Node::try_new(DeepTag::Var, Metadata::default(), vec![name("x")]);
         assert!(result.is_ok());
     }
 
     #[test]
     fn try_new_permits_name_at_type_slot() {
         // TVar child 0 is Type. A Name there is a type variable.
-        let result = Node::try_new(DeepTag::TVar, MetaMap::default(), vec![name("a")]);
+        let result = Node::try_new(DeepTag::TVar, Metadata::default(), vec![name("a")]);
         assert!(result.is_ok());
     }
 
     #[test]
     fn try_new_rejects_wrong_arity() {
         // Var requires exactly 1 child.
-        let result = Node::try_new(DeepTag::Var, MetaMap::default(), vec![name("x"), name("y")]);
+        let result = Node::try_new(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![name("x"), name("y")],
+        );
         assert!(matches!(result, Err(NodeError::ArityViolation { .. })));
     }
 
@@ -481,7 +494,7 @@ mod tests {
     fn try_new_accepts_correct_arity() {
         let result = Node::try_new(
             DeepTag::If,
-            MetaMap::default(),
+            Metadata::default(),
             vec![int(1), int(2), int(3)],
         );
         assert!(result.is_ok());
@@ -490,14 +503,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "compiler bug")]
     fn new_panics_on_violation() {
-        Node::new(DeepTag::App, MetaMap::default(), vec![name("x")]);
+        Node::new(DeepTag::App, Metadata::default(), vec![name("x")]);
     }
 
     #[test]
     fn expr_child_returns_runtime_expr_children() {
         let node = Node::new(
             DeepTag::App,
-            MetaMap::default(),
+            Metadata::default(),
             vec![int(1), int(2), int(3)],
         );
         assert_eq!(node.expr_children().count(), 3);
@@ -505,14 +518,14 @@ mod tests {
 
     #[test]
     fn binder_name_works() {
-        let node = Node::new(DeepTag::Def, MetaMap::default(), vec![name("f"), int(42)]);
+        let node = Node::new(DeepTag::Def, Metadata::default(), vec![name("f"), int(42)]);
         assert_eq!(node.binder_name(0), "f");
     }
 
     #[test]
     #[should_panic(expected = "not RuntimeExpr")]
     fn expr_child_panics_on_role_mismatch() {
-        let node = Node::new(DeepTag::Def, MetaMap::default(), vec![name("f"), int(42)]);
+        let node = Node::new(DeepTag::Def, Metadata::default(), vec![name("f"), int(42)]);
         // Index 0 of Def is Binder, not RuntimeExpr.
         let _ = node.expr_child(0);
     }
@@ -533,7 +546,7 @@ mod tests {
             List {
                 elements: vec![
                     Expr::Atom(Atom::Name("lit".to_string()), sp()),
-                    Expr::Map(MetaMap::default(), sp()),
+                    Expr::Map(Metadata::default(), sp()),
                     int(0),
                 ],
             },
@@ -544,7 +557,7 @@ mod tests {
         let smuggled = Expr::Node(
             Box::new(Node {
                 tag: DeepTag::Var,
-                meta: MetaMap::default(),
+                meta: Metadata::default(),
                 children: vec![raw.clone()],
             }),
             sp(),
@@ -556,21 +569,21 @@ mod tests {
             "the permanent boundary oracle must still descend into Node subtrees"
         );
         assert!(
-            Node::try_new(DeepTag::App, MetaMap::default(), vec![smuggled]).is_ok(),
+            Node::try_new(DeepTag::App, Metadata::default(), vec![smuggled]).is_ok(),
             "construction must trust an already-validated Node child instead of \
              re-walking it once per ancestor"
         );
 
         // The same raw form under an unvalidated carrier is still rejected.
         assert!(matches!(
-            Node::try_new(DeepTag::App, MetaMap::default(), vec![raw]),
+            Node::try_new(DeepTag::App, Metadata::default(), vec![raw]),
             Err(NodeError::RawVocabularyTag { .. })
         ));
     }
 
     #[test]
     fn children_iter_yields_correct_roles() {
-        let node = Node::new(DeepTag::Def, MetaMap::default(), vec![name("f"), int(42)]);
+        let node = Node::new(DeepTag::Def, Metadata::default(), vec![name("f"), int(42)]);
         let refs: Vec<_> = node.children_iter().collect();
         assert!(matches!(refs[0], ChildRef::Binder("f")));
         assert!(matches!(refs[1], ChildRef::Expr(_)));

@@ -1,11 +1,10 @@
-//! [03-META-1]: ungated legacy input cannot bypass checker admission.
-#[path = "../../../tests/support/legacy_metadata.rs"]
-mod legacy_metadata;
-
+//! [03-META-1]: typed payload admission and checker placement defenses.
+use chelis_deep::annotations::{DtypeBounds, MetadataValue as M, RuntimeExpression};
+use chelis_deep::{Atom, DeepTag, Expr, List, Metadata, Span};
+const SPAN: Span = Span { offset: 0, len: 0 };
 fn verdicts(source: &str) -> Vec<Vec<chelis_types::errors::CheckError>> {
-    verdicts_for(&legacy_metadata::legacy_metadata_fixture(source))
+    verdicts_for(&chelis_deep::parser::parse_str(source).unwrap())
 }
-
 fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::CheckError>> {
     use chelis_types::*;
     let library = chelis_deep::parser::parse_str("(def {} library_value (lit {} 1))").unwrap();
@@ -43,17 +42,32 @@ fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::Ch
 #[test]
 fn checked_effect_replacement_also_checks_metadata_before_publication() {
     let original =
-        chelis_deep::parser::parse_str("(def {} f (fn {} (params {}) (lit {} 1)))").unwrap();
+        chelis_deep::parser::parse_str("(def {doc: \"keep\"} f (fn {} (params {}) (lit {} 1)))")
+            .unwrap();
     let checked = chelis_types::check_ir_program(&original).unwrap();
     checked
         .try_with_effect_annotations(checked.exprs().to_vec())
         .unwrap();
-    let bad = legacy_metadata::legacy_metadata_fixture(
-        "(def {} f (fn {effects: 1} (params {}) (lit {} 1)))",
-    );
-    let result = checked.try_with_effect_annotations(bad).unwrap_err();
-    assert_eq!(result.errors.len(), 1);
-    assert!(result.errors[0].message.contains("metadata `effects`"));
+    let mut changed = checked.exprs().to_vec();
+    match &mut changed[0] {
+        Expr::List(list, _) => {
+            let Expr::Map(meta, _) = &mut list.elements[1] else {
+                panic!("metadata slot")
+            };
+            meta.remove(chelis_deep::annotations::MetadataKey::Doc);
+        }
+        Expr::Node(node, _) => {
+            let mut meta = node.meta().clone();
+            meta.remove(chelis_deep::annotations::MetadataKey::Doc);
+            node.try_replace_meta(meta).unwrap();
+        }
+        _ => panic!("declaration"),
+    }
+    checked
+        .try_with_effect_annotations(changed)
+        .expect_err("derived-effect rewrite cannot discard source annotations");
+    let malformed = serde_json::json!({"entries": [["effects", Expr::Atom(Atom::Int(1), SPAN)]]});
+    assert!(serde_json::from_value::<Metadata>(malformed).is_err());
 }
 
 #[test]
@@ -62,20 +76,37 @@ fn metadata_admission_precedes_inference_on_every_checker_session() {
         ("(def {span: 1} f (lit {} 1))", "span"),
         ("(def {} f (lit {type: unknown_type_syntax} 1))", "type"),
         ("(def {} f (grad {wrt: x} (var {} missing)))", "wrt"),
-        (
-            "(def {dtype_bounds: {p: float}} f (lit {} 1))",
-            "dtype_bounds",
-        ),
     ] {
-        for errors in verdicts(source) {
-            assert_eq!(errors.len(), 1, "{source}: {errors:?}");
-            assert!(matches!(
-                errors[0].kind,
-                chelis_types::errors::CheckErrorKind::MalformedForm
-            ));
-            assert!(errors[0].message.contains(key), "{:?}", errors[0]);
-            assert!(errors[0].span_offset.is_some());
-        }
+        let error = chelis_deep::parser::parse_str(source).unwrap_err();
+        assert!(error.to_string().contains(key), "{error}");
+    }
+    // Legacy Lists can still assemble a locally misplaced, well-shaped payload.
+    // Every checker ingress must reject it before resolving the unbound body.
+    let metadata = Metadata::from(M::DtypeBounds(DtypeBounds::try_new([], SPAN).unwrap()));
+    let expr = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Def), SPAN),
+                Expr::Map(metadata, SPAN),
+                Expr::Atom(Atom::Name("f".into()), SPAN),
+                Expr::node(
+                    DeepTag::Var,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("missing".into()), SPAN)],
+                    SPAN,
+                ),
+            ],
+        },
+        SPAN,
+    );
+    for errors in verdicts_for(&[expr]) {
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(matches!(
+            errors[0].kind,
+            chelis_types::errors::CheckErrorKind::MalformedForm
+        ));
+        assert!(errors[0].message.contains("dtype_bounds"));
+        assert!(errors[0].span_offset.is_some());
     }
 }
 
@@ -88,46 +119,38 @@ fn valid_metadata_remains_admissible_on_every_checker_session() {
 
 #[test]
 fn nested_legacy_expression_roles_are_checked_before_publication() {
-    use chelis_deep::{Atom, DeepTag, Expr, List, MetaMap, Span};
-    let span = Span { offset: 0, len: 0 };
     let list = |tag, children: Vec<Expr>| {
         let mut elements = vec![
-            Expr::Atom(Atom::Tag(tag), span),
-            Expr::Map(MetaMap::default(), span),
+            Expr::Atom(Atom::Tag(tag), SPAN),
+            Expr::Map(Metadata::default(), SPAN),
         ];
         elements.extend(children);
-        Expr::List(List { elements }, span)
+        Expr::List(List { elements }, SPAN)
     };
     for valid in [true, false] {
-        let name = Expr::Atom(Atom::Name("missing".into()), span);
+        let name = Expr::Atom(Atom::Name("missing".into()), SPAN);
         let callee = if valid {
             list(DeepTag::Var, vec![name])
         } else {
             name
         };
-        let meta = MetaMap {
-            entries: vec![("property_seed".into(), list(DeepTag::App, vec![callee]))],
-        };
-        let exprs = vec![Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Def), span),
-                    Expr::Map(meta, span),
-                    Expr::Atom(Atom::Name("f".into()), span),
-                    list(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span)]),
-                ],
-            },
-            span,
-        )];
-        for errors in verdicts_for(&exprs) {
-            if valid {
+        let payload = RuntimeExpression::try_new(list(DeepTag::App, vec![callee]));
+        assert_eq!(payload.is_ok(), valid);
+        if let Ok(payload) = payload {
+            let metadata = Metadata::from(M::PropertySeed(payload));
+            let expr = Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Def), SPAN),
+                        Expr::Map(metadata, SPAN),
+                        Expr::Atom(Atom::Name("f".into()), SPAN),
+                        list(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), SPAN)]),
+                    ],
+                },
+                SPAN,
+            );
+            for errors in verdicts_for(&[expr]) {
                 assert!(errors.is_empty(), "{errors:?}");
-            } else {
-                assert_eq!(errors.len(), 1, "{errors:?}");
-                assert!(
-                    errors[0].message.contains("metadata `property_seed`"),
-                    "{errors:?}"
-                );
             }
         }
     }

@@ -35,7 +35,7 @@ fn carries_type_stamp(expr: &Expr) -> bool {
     let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
         return false;
     };
-    meta.entries.iter().any(|(key, _)| key == "type")
+    meta.ty().is_some()
 }
 
 fn collect_tag_stamp_state(expr: &Expr, wanted: &str, out: &mut Vec<bool>) {
@@ -50,20 +50,16 @@ fn collect_tag_stamp_state(expr: &Expr, wanted: &str, out: &mut Vec<bool>) {
             }
         }
         Expr::Map(meta, _) => {
-            for (_, value) in &meta.entries {
-                collect_tag_stamp_state(value, wanted, out);
-            }
+            meta.visit_expressions(&mut |value, _| collect_tag_stamp_state(value, wanted, out));
         }
         Expr::MetaExpr(meta, _) => {
             collect_tag_stamp_state(&meta.expr, wanted, out);
-            for (_, value) in &meta.entries {
-                collect_tag_stamp_state(value, wanted, out);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| collect_tag_stamp_state(value, wanted, out));
         }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                collect_tag_stamp_state(value, wanted, out);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| collect_tag_stamp_state(value, wanted, out));
             for child in node.children_iter() {
                 match child {
                     chelis_deep::node::ChildRef::Expr(expr)
@@ -84,9 +80,8 @@ fn collect_tag_stamp_state(expr: &Expr, wanted: &str, out: &mut Vec<bool>) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                collect_tag_stamp_state(value, wanted, out);
-            }
+            data.meta
+                .visit_expressions(&mut |value, _| collect_tag_stamp_state(value, wanted, out));
             for child in &data.children {
                 collect_tag_stamp_state(child, wanted, out);
             }

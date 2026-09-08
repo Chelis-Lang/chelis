@@ -189,49 +189,37 @@ fn roundtrip_normalization_retains_non_default_surface_origin_metadata() {
 
 #[test]
 fn mismatched_surface_path_fails_closed() {
-    let deep = legacy_deep("(import-all {surf_path: \"Other\"} foo)")
-        .expect("known surface metadata parses for contract validation");
-
-    let error = resugar_program(&deep)
-        .expect_err("surface path metadata must agree with the lowered Deep path");
+    let error = parse_deep("(import-all {surf_path: \"Other\"} foo)")
+        .expect_err("invalid annotation rejected at ingress");
 
     assert!(error.to_string().contains("path child"), "{error}");
 }
 
 #[test]
 fn normalization_retains_malformed_surface_path_marker() {
-    let deep = legacy_deep("(import-all {surf_path: \"FOO\"} FOO)")
-        .expect("known surface metadata parses for normalization");
-
-    let error = normalize_deep_for_surface_roundtrip(&deep)
-        .expect_err("invalid metadata must fail before normalization");
+    let error = parse_deep("(import-all {surf_path: \"FOO\"} FOO)")
+        .expect_err("invalid annotation rejected at ingress");
     assert!(error.to_string().contains("surf_path"));
 }
 
 #[test]
 fn dimension_group_marker_on_non_first_member_fails_closed() {
-    let deep = legacy_deep(concat!(
+    let error = parse_deep(concat!(
         "(defdim {surf_dim_group_size: 2} rows)\n",
         "(defdim {surf_dim_group_size: 1} cols)\n",
     ))
-    .expect("known surface metadata parses for sequence validation");
-
-    let error = resugar_program(&deep)
-        .expect_err("only the first member of a dimension group may carry the marker");
+    .expect_err("invalid annotation rejected at ingress");
 
     assert!(error.to_string().contains("first member"), "{error}");
 }
 
 #[test]
 fn normalization_retains_misplaced_default_dimension_marker() {
-    let deep = legacy_deep(concat!(
+    let error = parse_deep(concat!(
         "(defdim {surf_dim_group_size: 2} rows)\n",
         "(defdim {surf_dim_group_size: 1} cols)\n",
     ))
-    .expect("known surface metadata parses for normalization");
-
-    let error = normalize_deep_for_surface_roundtrip(&deep)
-        .expect_err("invalid metadata must fail before normalization");
+    .expect_err("invalid annotation rejected at ingress");
     assert!(error.to_string().contains("surf_dim_group_size"));
 }
 
@@ -1052,15 +1040,13 @@ fn property_resugaring_rejects_provenance_that_surf_cannot_represent() {
 
 #[test]
 fn property_resugaring_rejects_quantifiers_that_disagree_with_fn_parameters() {
-    let deep = legacy_deep(concat!(
+    let error = parse_deep(concat!(
         "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
         "property_quantifiers: (params {} (y {type: (t-prim {} f32)})), ",
         "property_preconditions: (tuple {})} ",
         "p (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
     ))
-    .expect("mismatched property Deep parses structurally");
-    let error = resugar_program(&deep)
-        .expect_err("property quantifiers must match the callable binder list exactly");
+    .expect_err("invalid annotation rejected at ingress");
     assert!(
         error.to_string().contains("property_quantifiers") && error.to_string().contains("match"),
         "unexpected quantifier mismatch error: {error}"
@@ -1069,14 +1055,12 @@ fn property_resugaring_rejects_quantifiers_that_disagree_with_fn_parameters() {
 
 #[test]
 fn property_resugaring_rejects_missing_required_precondition_metadata() {
-    let deep = legacy_deep(concat!(
+    let error = parse_deep(concat!(
         "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
         "property_quantifiers: (params {} (x {type: (t-prim {} f32)}))} ",
         "p (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
     ))
-    .expect("property without precondition metadata parses structurally");
-    let error = resugar_program(&deep)
-        .expect_err("required property metadata must not silently default to an empty tuple");
+    .expect_err("invalid annotation rejected at ingress");
     assert!(
         error.to_string().contains("property_preconditions"),
         "unexpected missing-precondition error: {error}"
@@ -1442,68 +1426,46 @@ fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
 
 #[test]
 fn deep_surf_metadata_namespace_and_marker_values_are_closed() {
-    let unknown = parse_deep("(var {surf_future: true} x)")
-        .expect_err("unknown surf metadata key must be rejected at parse time");
-    assert!(
-        unknown
-            .to_string()
-            .contains("closed Surf metadata namespace")
-    );
-
-    let mut malformed = legacy_deep(
-        "(pipe {} (var {} x) (fn {surf_pipe_stage: \"later\"} (params {} v) (var {} v)))",
-    )
-    .expect("known key parses for value validation");
-    let error = resugar_expression(&malformed.remove(0))
-        .expect_err("unknown call-stage marker value must fail closed");
-    assert!(error.to_string().contains("call-first"));
-
-    let mut malformed =
-        legacy_deep("(lit {type: (t-prim {} f32), surf_literal_style: \"future\"} 1.0)")
-            .expect("known literal-style key parses for value validation");
-    let error = resugar_expression(&malformed.remove(0))
-        .expect_err("unknown literal-style marker value must fail closed");
-    assert!(error.to_string().contains("unsuffixed"));
-
-    let malformed = legacy_deep(concat!(
-        "(let {} (bind {} x ",
-        "(lit {type: (t-prim {} int32), surf_binding_type: \"future\"} 1)) ",
-        "(var {} x))",
-    ))
-    .expect("known binding-style key parses for value validation");
-    let error = resugar_expression(&malformed[0])
-        .expect_err("unknown binding-style marker value must fail closed");
-    assert!(error.to_string().contains("inferred"));
-
-    for deep_source in [
-        "(var {surf_literal_style: \"future\"} x)",
-        "(var {surf_binding_type: \"future\"} x)",
-        "(var {surf_binding_type: \"inferred\"} x)",
-        "(var {surf_pipe_stage: \"call-first\"} x)",
-        "(var {surf_path: \"Demo\"} x)",
-        "(var {surf_dim_group_size: 1} x)",
+    for (source, key) in [
+        ("(var {surf_future: true} x)", "surf_future"),
+        (
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"later\"} (params {} v) (var {} v)))",
+            "surf_pipe_stage",
+        ),
+        (
+            "(lit {type: (t-prim {} f32), surf_literal_style: \"future\"} 1.0)",
+            "surf_literal_style",
+        ),
+        (
+            "(let {} (bind {} x (lit {surf_binding_type: \"future\"} 1)) (var {} x))",
+            "surf_binding_type",
+        ),
+        (
+            "(var {surf_literal_style: \"future\"} x)",
+            "surf_literal_style",
+        ),
+        (
+            "(var {surf_binding_type: \"future\"} x)",
+            "surf_binding_type",
+        ),
+        (
+            "(var {surf_binding_type: \"inferred\"} x)",
+            "surf_binding_type",
+        ),
+        (
+            "(var {surf_pipe_stage: \"call-first\"} x)",
+            "surf_pipe_stage",
+        ),
+        ("(var {surf_path: \"Demo\"} x)", "surf_path"),
+        ("(var {surf_dim_group_size: 1} x)", "surf_dim_group_size"),
+        (
+            "^{:surf_literal_style \"explicit\"} (var {} x)",
+            "surf_literal_style",
+        ),
     ] {
-        let mut malformed = legacy_deep(deep_source).expect("known metadata key parses");
-        let rendered = print_canonical(&malformed);
-        let Err(error) = resugar_expression(&malformed.remove(0)) else {
-            panic!(
-                "known Surf metadata unexpectedly resugared outside its declared placement: {deep_source}: {rendered}"
-            );
-        };
-        assert!(
-            error.to_string().contains("metadata"),
-            "{deep_source}: {error}"
-        );
+        let error = parse_deep(source).unwrap_err();
+        assert!(error.to_string().contains(key), "{source}: {error}");
     }
-
-    let mut legacy_wrapper = legacy_deep("^{:surf_literal_style \"explicit\"} (var {} x)")
-        .expect("legacy metadata expression parses");
-    let error = resugar_expression(&legacy_wrapper.remove(0))
-        .expect_err("surface metadata on a legacy metadata wrapper must fail closed");
-    assert!(error.to_string().contains("literal"));
-
-    let malformed = legacy_deep("(var {surf_binding_type: \"future\"} x)").unwrap();
-    assert!(normalize_deep_for_surface_roundtrip(&malformed).is_err());
 }
 
 #[test]
@@ -1662,7 +1624,7 @@ fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
         );
     }
 
-    let legal_markers = legacy_deep(concat!(
+    let legal_markers = parse_deep(concat!(
         "(bind {} x ",
         "(lit {surf_literal_style: \"explicit\", surf_binding_type: \"inferred\"} 1))\n",
     ))
@@ -1748,14 +1710,6 @@ fn synthesized_destructuring_temporaries_do_not_capture_authored_names() {
     );
 }
 
-#[path = "../../../tests/support/legacy_metadata.rs"]
-mod legacy_metadata;
-use legacy_metadata::legacy_metadata_fixture;
-
-fn legacy_deep(source: &str) -> Result<Vec<chelis_deep::Expr>, chelis_deep::parser::ParseError> {
-    Ok(legacy_metadata_fixture(source))
-}
-
 #[test]
 fn roundtrip_normalization_preserves_metadata_named_dtype_binders() {
     for name in [
@@ -1781,8 +1735,7 @@ fn roundtrip_normalization_preserves_metadata_named_dtype_binders() {
             printed, other,
             "distinct bound families collapsed for {name}"
         );
-        let bad = legacy_deep(&source.replace(": float", ": 42")).unwrap();
-        assert!(normalize_deep_for_surface_roundtrip(&bad).is_err());
+        assert!(parse_deep(&source.replace(": float", ": 42")).is_err());
     }
 }
 
@@ -1811,8 +1764,7 @@ fn normalization_preserves_structural_metadata_containers() {
             "{printed}"
         );
         chelis_deep::metadata::validate_metadata(&normalized).unwrap();
-        let bad = legacy_deep(&format!("(def {{{key}: (lit {{}} 1)}} f (lit {{}} 1))")).unwrap();
-        assert!(normalize_deep_for_surface_roundtrip(&bad).is_err());
+        assert!(parse_deep(&format!("(def {{{key}: (lit {{}} 1)}} f (lit {{}} 1))")).is_err());
     }
 }
 
@@ -1854,5 +1806,5 @@ fn normalization_retains_property_parameter_types_with_a_signature() {
         "property_quantifiers: (params {} (x {type: (t-prim {} bool)}))",
         1,
     );
-    assert!(normalize_deep_for_surface_roundtrip(&legacy_deep(&bad).unwrap()).is_err());
+    assert!(parse_deep(&bad).is_err());
 }

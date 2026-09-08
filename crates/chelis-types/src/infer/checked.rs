@@ -10,12 +10,8 @@ use crate::context::LibraryProofId;
 pub(super) struct DeclaredSigMetadata {
     pub(super) param_types: Vec<deep::Expr>,
     pub(super) binders: UnordSet<String>,
-    /// Exact dtype-family capabilities authored on this signature. Keep the
-    /// decode result rather than defaulting malformed metadata to no bounds:
-    /// declaration collection owns the diagnostic, while structural users
-    /// may proceed only through `Ok`.
-    pub(super) dtype_bounds:
-        Result<UnordMap<String, chelis_deep::DtypeFamily>, chelis_deep::DtypeBoundsError>,
+    /// Exact dtype-family capabilities admitted by the typed annotation boundary.
+    pub(super) dtype_bounds: UnordMap<String, chelis_deep::DtypeFamily>,
 }
 
 /// Explicit annotation-time declaration context. The declared signature map
@@ -676,11 +672,9 @@ impl InferenceProduct {
                 (deep::Expr::Node(left, _), deep::Expr::Node(right, _)) => {
                     pending.extend(left.children_slice().iter().zip(right.children_slice()));
                     pending.extend(
-                        left.meta()
-                            .entries
-                            .iter()
-                            .zip(&right.meta().entries)
-                            .map(|((_, left), (_, right))| (left, right)),
+                        metadata_expression_leaves(left.meta())
+                            .into_iter()
+                            .zip(metadata_expression_leaves(right.meta())),
                     );
                 }
                 (deep::Expr::List(left, _), deep::Expr::List(right, _)) => {
@@ -691,29 +685,25 @@ impl InferenceProduct {
                 }
                 (deep::Expr::Map(left, _), deep::Expr::Map(right, _)) => {
                     pending.extend(
-                        left.entries
-                            .iter()
-                            .zip(&right.entries)
-                            .map(|((_, left), (_, right))| (left, right)),
+                        metadata_expression_leaves(left)
+                            .into_iter()
+                            .zip(metadata_expression_leaves(right)),
                     );
                 }
                 (deep::Expr::MetaExpr(left, _), deep::Expr::MetaExpr(right, _)) => {
                     pending.push((&left.expr, &right.expr));
                     pending.extend(
-                        left.entries
-                            .iter()
-                            .zip(&right.entries)
-                            .map(|((_, left), (_, right))| (left, right)),
+                        metadata_expression_leaves(&left.metadata)
+                            .into_iter()
+                            .zip(metadata_expression_leaves(&right.metadata)),
                     );
                 }
                 (deep::Expr::UnknownForm(left), deep::Expr::UnknownForm(right)) => {
                     pending.extend(left.children.iter().zip(&right.children));
                     pending.extend(
-                        left.meta
-                            .entries
-                            .iter()
-                            .zip(&right.meta.entries)
-                            .map(|((_, left), (_, right))| (left, right)),
+                        metadata_expression_leaves(&left.meta)
+                            .into_iter()
+                            .zip(metadata_expression_leaves(&right.meta)),
                     );
                 }
                 _ => {}
@@ -1144,28 +1134,18 @@ pub(super) fn extend_declared_sig_binders_from_def_params(
     };
     for param in params {
         let type_expr = match param {
-            deep::Expr::MetaExpr(meta, _) => meta
-                .entries
-                .iter()
-                .find(|(key, _)| key == "type")
-                .map(|(_, value)| value),
+            deep::Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|v| v.expression()),
             deep::Expr::List(param_list, _) => param_list.elements.get(1).and_then(|meta| {
                 let deep::Expr::Map(meta, _) = meta else {
                     return None;
                 };
-                meta.entries
-                    .iter()
-                    .find(|(key, _)| key == "type")
-                    .map(|(_, value)| value)
+                meta.ty().map(|v| v.expression())
             }),
             deep::Expr::BareList(elements, _) => elements.get(1).and_then(|meta| {
                 let deep::Expr::Map(meta, _) = meta else {
                     return None;
                 };
-                meta.entries
-                    .iter()
-                    .find(|(key, _)| key == "type")
-                    .map(|(_, value)| value)
+                meta.ty().map(|v| v.expression())
             }),
             _ => None,
         };
@@ -1219,8 +1199,7 @@ pub(super) fn collect_defsig_param_types(
                 .or_insert_with(|| DeclaredSigMetadata {
                     param_types: param_type_exprs,
                     binders: deep_type_binder_names(&kids[1]),
-                    dtype_bounds: chelis_deep::decode_dtype_bounds(meta)
-                        .map(|bounds| bounds.into_iter().collect()),
+                    dtype_bounds: chelis_deep::decode_dtype_bounds(meta).into_iter().collect(),
                 });
         }
         _ => {}
@@ -1592,7 +1571,7 @@ pub(super) fn effects_only_rewrite_matches(
             .iter()
             .zip(candidate)
             .all(|(before, after)| effects_only_expr_matches(before, after))
-        && candidate.iter().all(effect_metadata_is_singular)
+        && chelis_deep::metadata::validate_metadata(candidate).is_ok()
 }
 
 pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr) -> bool {
@@ -1603,14 +1582,18 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
         }
         (deep::Expr::Map(before_map, before_span), deep::Expr::Map(after_map, after_span)) => {
             before_span == after_span
-                && metadata_entries_match(&before_map.entries, &after_map.entries, false)
+                && metadata_matches_except_effects(before_map, after_map, false)
         }
         (
             deep::Expr::MetaExpr(before_meta, before_span),
             deep::Expr::MetaExpr(after_meta, after_span),
         ) => {
             before_span == after_span
-                && metadata_entries_match(&before_meta.entries, &after_meta.entries, false)
+                && metadata_matches_except_effects(
+                    &before_meta.metadata,
+                    &after_meta.metadata,
+                    false,
+                )
                 && effects_only_expr_matches(&before_meta.expr, &after_meta.expr)
         }
         (deep::Expr::List(before_list, before_span), deep::Expr::List(after_list, after_span)) => {
@@ -1629,11 +1612,7 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
                             ) = (before_element, after_element)
                         {
                             return before_map_span == after_map_span
-                                && metadata_entries_match(
-                                    &before_map.entries,
-                                    &after_map.entries,
-                                    true,
-                                );
+                                && metadata_matches_except_effects(before_map, after_map, true);
                         }
                         effects_only_expr_matches(before_element, after_element)
                     })
@@ -1641,11 +1620,7 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
         (deep::Expr::Node(before_node, before_span), deep::Expr::Node(after_node, after_span)) => {
             before_span == after_span
                 && before_node.tag() == after_node.tag()
-                && metadata_entries_match(
-                    &before_node.meta().entries,
-                    &after_node.meta().entries,
-                    true,
-                )
+                && metadata_matches_except_effects(before_node.meta(), after_node.meta(), true)
                 && before_node.children_slice().len() == after_node.children_slice().len()
                 && before_node
                     .children_slice()
@@ -1671,7 +1646,7 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
         (deep::Expr::UnknownForm(before_data), deep::Expr::UnknownForm(after_data)) => {
             before_data.head == after_data.head
                 && before_data.span == after_data.span
-                && metadata_entries_match(&before_data.meta.entries, &after_data.meta.entries, true)
+                && metadata_matches_except_effects(&before_data.meta, &after_data.meta, true)
                 && before_data.children.len() == after_data.children.len()
                 && before_data.children.iter().zip(&after_data.children).all(
                     |(before_child, after_child)| {
@@ -1683,90 +1658,111 @@ pub(super) fn effects_only_expr_matches(before: &deep::Expr, after: &deep::Expr)
     }
 }
 
-pub(super) fn metadata_entries_match(
-    before: &[(String, deep::Expr)],
-    after: &[(String, deep::Expr)],
+/// Compare the admitted representation after removing only derived effect sets.
+/// Scalar choices, structural containers, dtype bounds, and preserved source
+/// remain ordinary typed equality checks; only live expression subtrees recurse.
+fn metadata_matches_except_effects(
+    before: &deep::Metadata,
+    after: &deep::Metadata,
     ignore_effects: bool,
 ) -> bool {
-    let mut before_entries = before
-        .iter()
-        .filter(|(key, _)| !ignore_effects || key != "effects");
-    let mut after_entries = after
-        .iter()
-        .filter(|(key, _)| !ignore_effects || key != "effects");
-    loop {
-        match (before_entries.next(), after_entries.next()) {
-            (Some((before_key, before_value)), Some((after_key, after_value))) => {
-                if before_key != after_key || !effects_only_expr_matches(before_value, after_value)
-                {
-                    return false;
-                }
-            }
-            (None, None) => return true,
-            _ => return false,
-        }
+    match (
+        metadata_without_derived_effects(before, ignore_effects),
+        metadata_without_derived_effects(after, ignore_effects),
+    ) {
+        (Ok(before), Ok(after)) => before == after,
+        _ => false,
     }
 }
 
-pub(super) fn effect_metadata_is_singular(expr: &deep::Expr) -> bool {
-    stack_guard!("effect_metadata_is_singular", expr, false);
-    match expr {
-        deep::Expr::Atom(_, _) => true,
-        deep::Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .all(|(_, value)| effect_metadata_is_singular(value)),
-        deep::Expr::MetaExpr(meta, _) => {
-            effect_metadata_is_singular(&meta.expr)
-                && meta
-                    .entries
-                    .iter()
-                    .all(|(_, value)| effect_metadata_is_singular(value))
-        }
-        deep::Expr::List(list, _) => {
-            let singular_here = match list.elements.get(1) {
-                Some(deep::Expr::Map(map, _)) => {
-                    map.entries
-                        .iter()
-                        .filter(|(key, _)| key == "effects")
-                        .count()
-                        <= 1
-                }
-                _ => true,
-            };
-            singular_here && list.elements.iter().all(effect_metadata_is_singular)
-        }
-        deep::Expr::Node(node, _) => {
-            node.meta()
-                .entries
-                .iter()
-                .filter(|(key, _)| key == "effects")
-                .count()
-                <= 1
-                && node
-                    .meta()
-                    .entries
-                    .iter()
-                    .all(|(_, value)| effect_metadata_is_singular(value))
-                && node
-                    .children_slice()
-                    .iter()
-                    .all(effect_metadata_is_singular)
-        }
-        deep::Expr::BareList(elems, _) => elems.iter().all(effect_metadata_is_singular),
-        deep::Expr::UnknownForm(data) => {
-            data.meta
-                .entries
-                .iter()
-                .filter(|(key, _)| key == "effects")
-                .count()
-                <= 1
-                && data
-                    .meta
-                    .entries
-                    .iter()
-                    .all(|(_, value)| effect_metadata_is_singular(value))
-                && data.children.iter().all(effect_metadata_is_singular)
-        }
+struct EffectComparisonError;
+impl From<chelis_deep::metadata::MetadataError> for EffectComparisonError {
+    fn from(_: chelis_deep::metadata::MetadataError) -> Self {
+        Self
     }
+}
+fn metadata_without_derived_effects(
+    meta: &deep::Metadata,
+    remove_here: bool,
+) -> Result<deep::Metadata, EffectComparisonError> {
+    let mut result =
+        meta.try_map_expressions(&mut |expr, _| expression_without_derived_effects(expr))?;
+    if remove_here {
+        result.remove(chelis_deep::annotations::MetadataKey::Effects);
+    }
+    Ok(result)
+}
+fn expression_without_derived_effects(
+    expr: &deep::Expr,
+) -> Result<deep::Expr, EffectComparisonError> {
+    stack_guard!(
+        "expression_without_derived_effects",
+        expr,
+        Err(EffectComparisonError)
+    );
+    Ok(match expr {
+        deep::Expr::Atom(..) => expr.clone(),
+        deep::Expr::Map(meta, span) => {
+            deep::Expr::Map(metadata_without_derived_effects(meta, false)?, *span)
+        }
+        deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
+            deep::MetaExpr {
+                metadata: metadata_without_derived_effects(&meta.metadata, false)?,
+                expr: Box::new(expression_without_derived_effects(&meta.expr)?),
+            },
+            *span,
+        ),
+        deep::Expr::Node(node, span) => deep::Expr::Node(
+            Box::new(
+                chelis_deep::node::Node::try_new(
+                    node.tag(),
+                    metadata_without_derived_effects(node.meta(), true)?,
+                    node.children_slice()
+                        .iter()
+                        .map(expression_without_derived_effects)
+                        .collect::<Result<_, _>>()?,
+                )
+                .map_err(|_| EffectComparisonError)?,
+            ),
+            *span,
+        ),
+        deep::Expr::List(list, span) => {
+            let mut elements = Vec::with_capacity(list.elements.len());
+            for (index, value) in list.elements.iter().enumerate() {
+                if index == 1
+                    && let deep::Expr::Map(meta, span) = value
+                {
+                    elements.push(deep::Expr::Map(
+                        metadata_without_derived_effects(meta, true)?,
+                        *span,
+                    ));
+                } else {
+                    elements.push(expression_without_derived_effects(value)?);
+                }
+            }
+            deep::Expr::List(deep::List { elements }, *span)
+        }
+        deep::Expr::BareList(values, span) => deep::Expr::BareList(
+            values
+                .iter()
+                .map(expression_without_derived_effects)
+                .collect::<Result<_, _>>()?,
+            *span,
+        ),
+        deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
+            head: data.head.clone(),
+            meta: metadata_without_derived_effects(&data.meta, true)?,
+            children: data
+                .children
+                .iter()
+                .map(expression_without_derived_effects)
+                .collect::<Result<_, _>>()?,
+            span: data.span,
+        })),
+    })
+}
+fn metadata_expression_leaves(meta: &deep::Metadata) -> Vec<&deep::Expr> {
+    let mut leaves = Vec::new();
+    meta.visit_expressions(&mut |value, _| leaves.push(value));
+    leaves
 }

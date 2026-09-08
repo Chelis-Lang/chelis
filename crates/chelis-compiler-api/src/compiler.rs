@@ -587,6 +587,9 @@ fn authoring_error_to_compiler_error(
         AuthoringError::NoModule | AuthoringError::MultipleModules { .. } => {
             stage_error(default_stage, error.to_string(), GeneralKind::DeepDeclError)
         }
+        AuthoringError::Metadata(error) => {
+            stage_error(default_stage, error.to_string(), GeneralKind::DeepDeclError)
+        }
         AuthoringError::InvalidDecl(message) => {
             stage_error(default_stage, message, GeneralKind::DeepDeclError)
         }
@@ -3503,10 +3506,8 @@ fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
         DeepExpr::Node(node, _) => node.meta(),
         _ => return false,
     };
-    meta.entries.iter().any(|(key, value)| {
-        key == "chelis_role"
-            && matches!(value, DeepExpr::Atom(chelis_deep::Atom::Str(role), _) if role == expected)
-    })
+    meta.chelis_role()
+        .is_some_and(|role| role.value() == expected)
 }
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
@@ -5765,110 +5766,48 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
 }
 
 fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
-    match expr {
-        DeepExpr::Atom(atom, s) => WireDeepExpr {
-            kind: WireDeepExprKind::Atom {
+    fn encode(expr: chelis_deep::raw::RawExpr) -> WireDeepExpr {
+        use chelis_deep::raw::{RawAtom, RawExpr};
+        let source_span = Some(span(expr.span()));
+        let kind = match expr {
+            RawExpr::Atom(atom, _) => WireDeepExprKind::Atom {
                 atom: match atom {
-                    chelis_deep::Atom::Name(value) => WireDeepAtom::Symbol {
-                        value: value.clone(),
-                    },
-                    // Serialization boundary (decode-once, chelis#731 Phase
-                    // 3): a decoded tag crosses the wire as its canonical
-                    // string spelling, keeping the wire schema unchanged.
-                    chelis_deep::Atom::Tag(tag) => WireDeepAtom::Symbol {
-                        value: tag.as_str().to_string(),
-                    },
-                    chelis_deep::Atom::Int(value) => WireDeepAtom::Int { value: *value },
-                    chelis_deep::Atom::Float(value) => WireDeepAtom::Float { value: *value },
-                    chelis_deep::Atom::Str(value) => WireDeepAtom::Str {
-                        value: value.clone(),
-                    },
-                    chelis_deep::Atom::Bool(value) => WireDeepAtom::Bool { value: *value },
+                    RawAtom::Symbol(value) => WireDeepAtom::Symbol { value },
+                    RawAtom::Int(value) => WireDeepAtom::Int { value },
+                    RawAtom::Float(value) => WireDeepAtom::Float { value },
+                    RawAtom::Str(value) => WireDeepAtom::Str { value },
+                    RawAtom::Bool(value) => WireDeepAtom::Bool { value },
                 },
             },
-            span: Some(span(*s)),
-        },
-        DeepExpr::List(list, s) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: list.elements.iter().map(wire_deep_expr).collect(),
+            RawExpr::List(elements, _) => WireDeepExprKind::List {
+                elements: elements.into_iter().map(encode).collect(),
             },
-            span: Some(span(*s)),
-        },
-        DeepExpr::Map(map, s) => WireDeepExpr {
-            kind: WireDeepExprKind::Map {
-                entries: map
-                    .entries
-                    .iter()
+            RawExpr::Map(entries, _) => WireDeepExprKind::Map {
+                entries: entries
+                    .into_iter()
                     .map(|(key, value)| WireMetaEntry {
-                        key: key.clone(),
-                        value: wire_deep_expr(value),
+                        key,
+                        value: encode(value),
                     })
                     .collect(),
             },
-            span: Some(span(*s)),
-        },
-        DeepExpr::MetaExpr(meta, s) => WireDeepExpr {
-            kind: WireDeepExprKind::MetaExpr {
-                entries: meta
-                    .entries
-                    .iter()
+            RawExpr::MetaExpr { entries, expr, .. } => WireDeepExprKind::MetaExpr {
+                entries: entries
+                    .into_iter()
                     .map(|(key, value)| WireMetaEntry {
-                        key: key.clone(),
-                        value: wire_deep_expr(value),
+                        key,
+                        value: encode(value),
                     })
                     .collect(),
-                expr: Box::new(wire_deep_expr(&meta.expr)),
+                expr: Box::new(encode(*expr)),
             },
-            span: Some(span(*s)),
-        },
-        // Bridge: reconstruct List so wire format includes tag and meta (#908)
-        DeepExpr::Node(node, s) => {
-            let bridged = DeepExpr::List(node.to_list(*s), *s);
-            wire_deep_expr(&bridged)
-        }
-        DeepExpr::BareList(elems, s) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: elems.iter().map(wire_deep_expr).collect(),
-            },
-            span: Some(span(*s)),
-        },
-        DeepExpr::UnknownForm(data) => {
-            // Unknown forms retain the same canonical list-shaped wire
-            // representation as known nodes: head, metadata, then children.
-            // Dropping either of the first two elements erases the identity
-            // and diagnostic context that UnknownForm exists to preserve
-            // (chelis#1088; salvaged from PR #1036).
-            let wire_span = Some(span(data.span));
-            let mut elements = Vec::with_capacity(data.children.len() + 2);
-            elements.push(WireDeepExpr {
-                kind: WireDeepExprKind::Atom {
-                    atom: WireDeepAtom::Symbol {
-                        value: data.head.clone(),
-                    },
-                },
-                span: wire_span,
-            });
-            elements.push(WireDeepExpr {
-                kind: WireDeepExprKind::Map {
-                    entries: data
-                        .meta
-                        .entries
-                        .iter()
-                        .map(|(key, value)| WireMetaEntry {
-                            key: key.clone(),
-                            value: wire_deep_expr(value),
-                        })
-                        .collect(),
-                },
-                span: wire_span,
-            });
-            elements.extend(data.children.iter().map(wire_deep_expr));
-            WireDeepExpr {
-                kind: WireDeepExprKind::List { elements },
-                span: wire_span,
-            }
+        };
+        WireDeepExpr {
+            kind,
+            span: source_span,
         }
     }
+    encode(expr.to_raw())
 }
 
 fn wire_dag(dag: &Dag) -> WireDag {

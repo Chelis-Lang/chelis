@@ -68,7 +68,7 @@ pub(super) fn annotate_expr_with_scope(
                     annotation_context,
                     errors,
                 )),
-                entries: meta.entries.clone(),
+                metadata: meta.metadata.clone(),
             },
             *span,
         ),
@@ -345,9 +345,14 @@ pub(super) fn annotate_params_node(
                                 elements: vec![
                                     deep::Expr::Atom(deep::Atom::Name(name.clone()), *atom_span),
                                     deep::Expr::Map(
-                                        deep::MetaMap {
-                                            entries: vec![("type".to_string(), type_expr.clone())],
-                                        },
+                                        deep::Metadata::from(
+                                            chelis_deep::annotations::MetadataValue::Type(
+                                                chelis_deep::annotations::TypeSyntax::try_new(
+                                                    type_expr.clone(),
+                                                )
+                                                .expect("declared parameter type syntax"),
+                                            ),
+                                        ),
                                         *atom_span,
                                     ),
                                 ],
@@ -435,9 +440,7 @@ pub(super) fn annotated_meta_map_with_override(
         Some(deep::Expr::Map(_, span)) => *span,
         _ => span_of_expr(expr),
     };
-    let mut entries = get_meta(list)
-        .map(|meta| meta.entries.clone())
-        .unwrap_or_default();
+    let mut metadata = get_meta(list).cloned().unwrap_or_default();
 
     let ty_for_meta = if let Some(tag) = get_tag(list) {
         match (tag, precomputed_ty) {
@@ -455,21 +458,21 @@ pub(super) fn annotated_meta_map_with_override(
     };
 
     if let Some(ty) = ty_for_meta {
-        write_type_metadata_monotone(&mut entries, ty, type_to_legacy_deep_expr);
+        write_type_metadata_monotone(&mut metadata, ty, type_to_legacy_deep_expr);
     }
 
-    deep::Expr::Map(deep::MetaMap { entries }, meta_span)
+    deep::Expr::Map(metadata, meta_span)
 }
 
 pub(super) fn annotated_node_meta_with_override(
     tag: DeepTag,
-    meta: &deep::MetaMap,
+    meta: &deep::Metadata,
     expr: &deep::Expr,
     precomputed_ty: Option<Type>,
     product: &InferenceProduct,
     errors: &mut DiagnosticSink<'_>,
-) -> deep::MetaMap {
-    let mut entries = meta.entries.clone();
+) -> deep::Metadata {
+    let mut metadata = meta.clone();
     let ty_for_meta = match (tag, precomputed_ty) {
         (DeepTag::Fn, Some(ty)) => Some(ty),
         (DeepTag::PatVar | DeepTag::PatAs, _) => {
@@ -482,39 +485,30 @@ pub(super) fn annotated_node_meta_with_override(
     };
 
     if let Some(ty) = ty_for_meta {
-        write_type_metadata_monotone(&mut entries, ty, type_to_deep_expr);
+        write_type_metadata_monotone(&mut metadata, ty, type_to_deep_expr);
     }
 
-    deep::MetaMap { entries }
+    metadata
 }
 
 /// Write checker-owned metadata only when doing so preserves or increases
 /// information (#783). An unresolved, error, or partially resolved candidate
 /// never replaces existing metadata; a safe resolved candidate may refresh it.
 fn write_type_metadata_monotone(
-    entries: &mut Vec<(String, deep::Expr)>,
+    metadata: &mut deep::Metadata,
     ty: Type,
     encode: fn(&Type) -> deep::Expr,
 ) {
-    let existing = entries.iter().position(|(key, _)| key == "type");
-    let safe = type_is_safe_annotation_stamp(&ty);
-    match existing {
-        // An unresolved/error/partial candidate is strictly less informative
-        // than authored concrete metadata. Preserve the existing expression
-        // byte-for-byte instead of recreating #783's silent degradation.
-        Some(_) if !safe => {}
-        Some(index) => {
-            // A resolved owner may refine a generated wildcard or refresh
-            // stale derived metadata. Both remain ordinary checker writeback.
-            entries[index].1 = encode(&ty);
-        }
-        None if !matches!(ty, Type::Error(_)) => {
-            // Generalized functions and symbolic results legitimately carry
-            // variables when there was no more-informative annotation to
-            // protect. That is not a degradation.
-            entries.push(("type".to_string(), encode(&ty)));
-        }
-        None => {}
+    let write = if metadata.ty().is_some() {
+        type_is_safe_annotation_stamp(&ty)
+    } else {
+        !matches!(ty, Type::Error(_))
+    };
+    if write {
+        metadata.replace(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(encode(&ty))
+                .expect("checker emits valid type syntax"),
+        ));
     }
 }
 
@@ -627,10 +621,15 @@ mod monotone_writeback_tests {
             TensorPrec::Concrete(Prim::F32),
         );
         let original = type_to_deep_expr(&concrete);
-        let mut entries = vec![("type".to_string(), original.clone())];
+        let mut metadata = deep::Metadata::default();
+        metadata
+            .insert(chelis_deep::annotations::MetadataValue::Type(
+                chelis_deep::annotations::TypeSyntax::try_new(original.clone()).unwrap(),
+            ))
+            .unwrap();
 
         write_type_metadata_monotone(
-            &mut entries,
+            &mut metadata,
             Type::Tensor(
                 vec![Dim::Var(DimVar(9001)), Dim::Lit(4)],
                 TensorPrec::Concrete(Prim::F32),
@@ -639,8 +638,8 @@ mod monotone_writeback_tests {
         );
 
         assert_eq!(
-            entries,
-            vec![("type".to_string(), original)],
+            metadata.ty().map(|ty| ty.expression()),
+            Some(&original),
             "an unresolved dimension is less informative than an existing concrete shape"
         );
     }
@@ -651,12 +650,12 @@ mod monotone_writeback_tests {
             vec![Dim::Var(DimVar(9002)), Dim::Lit(4)],
             TensorPrec::Concrete(Prim::F32),
         );
-        let mut entries = Vec::new();
+        let mut metadata = deep::Metadata::default();
 
-        write_type_metadata_monotone(&mut entries, candidate, type_to_deep_expr);
+        write_type_metadata_monotone(&mut metadata, candidate, type_to_deep_expr);
 
         assert_eq!(
-            entries.len(),
+            metadata.values().count(),
             1,
             "symbolic inferred metadata still has an owner"
         );

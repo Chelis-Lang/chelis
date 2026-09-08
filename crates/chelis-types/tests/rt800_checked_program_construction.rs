@@ -13,6 +13,23 @@ fn checked_program() -> CheckedProgram {
     check_linearity(&typed).expect("fixture passes linearity")
 }
 
+fn mutate_annotation_leaves(
+    metadata: &mut chelis_deep::Metadata,
+    mut f: impl FnMut(&mut Expr) -> bool,
+) -> bool {
+    let mut changed = false;
+    *metadata = metadata
+        .map_expressions(&mut |value, _| {
+            let mut value = value.clone();
+            if !changed {
+                changed = f(&mut value);
+            }
+            value
+        })
+        .expect("mutation preserves the payload shape");
+    changed
+}
+
 fn find_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
     match expr {
         Expr::List(list, _) => {
@@ -30,14 +47,9 @@ fn find_list_mut<'a>(expr: &'a mut Expr, tag: &str) -> Option<&'a mut List> {
             }
             None
         }
-        Expr::Map(map, _) => {
-            for (_, value) in &mut map.entries {
-                if let Some(found) = find_list_mut(value, tag) {
-                    return Some(found);
-                }
-            }
-            None
-        }
+        // These mutation targets are ordinary function/body nodes. Typed
+        // metadata exposes no mutable Expr reference that could invalidate it.
+        Expr::Map(_, _) => None,
         Expr::MetaExpr(meta, _) => find_list_mut(&mut meta.expr, tag),
         Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
             panic!("rt800 list mutation helper requires the legacy checked-AST representation")
@@ -56,16 +68,12 @@ fn replace_symbol(expr: &mut Expr, from: &str, to: &str) -> bool {
             .elements
             .iter_mut()
             .any(|element| replace_symbol(element, from, to)),
-        Expr::Map(map, _) => map
-            .entries
-            .iter_mut()
-            .any(|(_, value)| replace_symbol(value, from, to)),
+        Expr::Map(map, _) => mutate_annotation_leaves(map, |value| replace_symbol(value, from, to)),
         Expr::MetaExpr(meta, _) => {
             replace_symbol(&mut meta.expr, from, to)
-                || meta
-                    .entries
-                    .iter_mut()
-                    .any(|(_, value)| replace_symbol(value, from, to))
+                || mutate_annotation_leaves(&mut meta.metadata, |value| {
+                    replace_symbol(value, from, to)
+                })
         }
         Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
             panic!("rt800 symbol mutation helper requires the legacy checked-AST representation")
@@ -74,29 +82,26 @@ fn replace_symbol(expr: &mut Expr, from: &str, to: &str) -> bool {
     }
 }
 
-fn remove_first_metadata_key(expr: &mut Expr, key: &str) -> bool {
+fn remove_first_metadata_key(expr: &mut Expr, key: chelis_deep::annotations::MetadataKey) -> bool {
     match expr {
         Expr::List(list, _) => {
             if let Some(Expr::Map(meta, _)) = list.elements.get_mut(1)
-                && let Some(index) = meta.entries.iter().position(|(name, _)| name == key)
+                && meta.remove(key).is_some()
             {
-                meta.entries.remove(index);
                 return true;
             }
             list.elements
                 .iter_mut()
                 .any(|element| remove_first_metadata_key(element, key))
         }
-        Expr::Map(map, _) => map
-            .entries
-            .iter_mut()
-            .any(|(_, value)| remove_first_metadata_key(value, key)),
+        Expr::Map(map, _) => {
+            mutate_annotation_leaves(map, |value| remove_first_metadata_key(value, key))
+        }
         Expr::MetaExpr(meta, _) => {
             remove_first_metadata_key(&mut meta.expr, key)
-                || meta
-                    .entries
-                    .iter_mut()
-                    .any(|(_, value)| remove_first_metadata_key(value, key))
+                || mutate_annotation_leaves(&mut meta.metadata, |value| {
+                    remove_first_metadata_key(value, key)
+                })
         }
         Expr::Node(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
             panic!("rt800 metadata mutation helper requires the legacy checked-AST representation")
@@ -117,10 +122,16 @@ fn add_effects_metadata(exprs: &mut [Expr]) {
     else {
         panic!("function metadata must be a map");
     };
-    let effect_row = chelis_deep::parser::parse_str("(effects {} io)")
-        .expect("effect row parses")
-        .remove(0);
-    meta.entries.push(("effects".to_string(), effect_row));
+    meta.insert(chelis_deep::annotations::MetadataValue::Effects(
+        chelis_deep::annotations::EffectSet::new(
+            chelis_deep::Metadata::default(),
+            vec![chelis_deep::annotations::EffectMember::Name(
+                chelis_deep::annotations::Spanned::new("io".into(), Span::new(0, 0)),
+            )],
+            Span::new(0, 0),
+        ),
+    ))
+    .unwrap();
 }
 
 fn mutate_body(exprs: &mut [Expr]) {
@@ -141,10 +152,14 @@ fn mutate_eff_metadata(exprs: &mut [Expr]) {
     let Expr::Map(meta, _) = &mut function.elements[1] else {
         panic!("function metadata must be a map");
     };
-    meta.entries.push((
-        "eff".to_string(),
-        Expr::Atom(Atom::Name("forged".to_string()), Span::new(0, 0)),
-    ));
+    meta.insert(chelis_deep::annotations::MetadataValue::Eff(
+        chelis_deep::annotations::EffectSet::new(
+            chelis_deep::Metadata::default(),
+            vec![],
+            Span::new(0, 0),
+        ),
+    ))
+    .unwrap();
 }
 
 fn mutate_span(exprs: &mut [Expr]) {
@@ -155,41 +170,20 @@ fn mutate_span(exprs: &mut [Expr]) {
 }
 
 fn remove_type_stamp(exprs: &mut [Expr]) {
-    assert!(remove_first_metadata_key(&mut exprs[0], "type"));
+    assert!(remove_first_metadata_key(
+        &mut exprs[0],
+        chelis_deep::annotations::MetadataKey::Type
+    ));
 }
 
-fn root_metadata_mut(exprs: &mut [Expr]) -> &mut Vec<(String, Expr)> {
+fn root_metadata_mut(exprs: &mut [Expr]) -> &mut chelis_deep::Metadata {
     let Expr::List(root, _) = &mut exprs[0] else {
         panic!("expected list root");
     };
     let Expr::Map(meta, _) = &mut root.elements[1] else {
         panic!("expected canonical root metadata");
     };
-    &mut meta.entries
-}
-
-fn reorder_non_effect_metadata(exprs: &mut [Expr]) {
-    let entries = root_metadata_mut(exprs);
-    assert!(
-        entries.len() >= 2,
-        "fixture must retain span and type metadata"
-    );
-    entries.swap(0, 1);
-}
-
-fn duplicate_non_effect_metadata(exprs: &mut [Expr]) {
-    let entries = root_metadata_mut(exprs);
-    let duplicate = entries
-        .iter()
-        .find(|(key, _)| key != "effects")
-        .expect("fixture has non-effects metadata")
-        .clone();
-    entries.push(duplicate);
-}
-
-fn duplicate_effects_metadata(exprs: &mut [Expr]) {
-    add_effects_metadata(exprs);
-    add_effects_metadata(exprs);
+    meta
 }
 
 #[test]
@@ -247,44 +241,33 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
 }
 
 #[test]
-fn effects_only_boundary_rejects_order_duplicates_and_multiple_effect_rows() {
-    type MutationCase = (&'static str, fn(&mut [Expr]), &'static str);
-
+fn typed_metadata_canonicalizes_order_and_rejects_duplicate_effect_rows() {
     let checked = checked_program();
-    let cases: [MutationCase; 3] = [
-        (
-            "reordered non-effects metadata",
-            reorder_non_effect_metadata,
-            "effects-only",
-        ),
-        (
-            "duplicated non-effects metadata",
-            duplicate_non_effect_metadata,
-            "metadata `span`",
-        ),
-        (
-            "duplicate effects rows",
-            duplicate_effects_metadata,
-            "metadata `effects`",
-        ),
-    ];
+    let mut reordered = checked.annotated_exprs().to_vec();
+    let root = root_metadata_mut(&mut reordered);
+    let mut values = root.values().cloned().collect::<Vec<_>>();
+    values.reverse();
+    let reversed = chelis_deep::Metadata::try_from_values(values).unwrap();
+    assert_eq!(*root, reversed);
+    *root = reversed;
+    checked.try_with_effect_annotations(reordered).unwrap();
 
-    for (label, mutate, diagnostic) in cases {
-        let mut forged = checked.annotated_exprs().to_vec();
-        mutate(&mut forged);
-        let result = checked
-            .try_with_effect_annotations(forged)
-            .expect_err("the narrow effects-only boundary must reject the mutation");
-        assert_eq!(
-            result.errors.len(),
-            1,
-            "{label} must report exactly once: {:?}",
-            result.errors
-        );
-        assert!(
-            result.errors[0].message.contains(diagnostic),
-            "{label} must name its metadata or ownership boundary: {:?}",
-            result.errors
-        );
-    }
+    let mut candidate = checked.annotated_exprs().to_vec();
+    let root = root_metadata_mut(&mut candidate);
+    let before = root.clone();
+    let duplicate = root.values().next().unwrap().clone();
+    assert!(root.insert(duplicate).is_err());
+    assert_eq!(*root, before);
+    add_effects_metadata(&mut candidate);
+    let function = find_list_mut(&mut candidate[0], "fn").unwrap();
+    let Expr::Map(metadata, _) = &mut function.elements[1] else {
+        panic!("metadata slot")
+    };
+    let duplicate = metadata.effects().unwrap().clone();
+    assert!(
+        metadata
+            .insert(chelis_deep::annotations::MetadataValue::Effects(duplicate))
+            .is_err()
+    );
+    checked.try_with_effect_annotations(candidate).unwrap();
 }

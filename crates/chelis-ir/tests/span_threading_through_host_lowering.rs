@@ -104,25 +104,19 @@ fn collect_input_spans(exprs: &[Expr]) -> BTreeSet<String> {
         match expr {
             Expr::List(list, _) => list.elements.iter().for_each(|child| walk(child, acc)),
             Expr::Node(node, _) => {
-                node.meta()
-                    .entries
-                    .iter()
-                    .for_each(|(_, value)| walk(value, acc));
+                node.meta().visit_syntax(&mut |_, value| walk(value, acc));
                 node.children_slice()
                     .iter()
                     .for_each(|child| walk(child, acc));
             }
-            Expr::Map(map, _) => map.entries.iter().for_each(|(_, value)| walk(value, acc)),
+            Expr::Map(map, _) => map.visit_syntax(&mut |_, value| walk(value, acc)),
             Expr::MetaExpr(meta, _) => {
-                meta.entries.iter().for_each(|(_, value)| walk(value, acc));
+                meta.metadata.visit_syntax(&mut |_, value| walk(value, acc));
                 walk(&meta.expr, acc);
             }
             Expr::BareList(elements, _) => elements.iter().for_each(|child| walk(child, acc)),
             Expr::UnknownForm(data) => {
-                data.meta
-                    .entries
-                    .iter()
-                    .for_each(|(_, value)| walk(value, acc));
+                data.meta.visit_syntax(&mut |_, value| walk(value, acc));
                 data.children.iter().for_each(|child| walk(child, acc));
             }
             Expr::Atom(_, _) => {}

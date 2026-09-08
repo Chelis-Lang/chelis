@@ -227,14 +227,22 @@ pub fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
     out
 }
 
+fn collect_annotation_references<'a>(metadata: &'a chelis_deep::Metadata, out: &mut Vec<&'a str>) {
+    if let Some(targets) = metadata.wrt() {
+        out.extend(targets.variables().map(|var| var.name().value().as_str()));
+    }
+    metadata.visit_expressions(&mut |value, _| collect_deep_referenced_vars(value, out));
+}
+
 fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) {
     match expr {
         DeepExpr::Atom(_, _) => {}
-        DeepExpr::MetaExpr(meta, _) => collect_deep_referenced_vars(&meta.expr, out),
+        DeepExpr::MetaExpr(meta, _) => {
+            collect_annotation_references(&meta.metadata, out);
+            collect_deep_referenced_vars(&meta.expr, out);
+        }
         DeepExpr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_deep_referenced_vars(value, out);
-            }
+            collect_annotation_references(map, out);
         }
         DeepExpr::List(list, _) => {
             if let (Some(DeepTag::Var), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) =
@@ -248,6 +256,7 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
         }
         // Direct Node handling (bridge not possible due to lifetime constraints) (#908)
         DeepExpr::Node(node, _) => {
+            collect_annotation_references(node.meta(), out);
             use chelis_deep::node::ChildRef;
             if node.tag() == DeepTag::Var {
                 for child_ref in node.children_iter() {
@@ -276,6 +285,7 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
             }
         }
         DeepExpr::UnknownForm(data) => {
+            collect_annotation_references(&data.meta, out);
             for child in &data.children {
                 collect_deep_referenced_vars(child, out);
             }

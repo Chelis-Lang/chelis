@@ -54,7 +54,7 @@ fn post_sprint_def_ast_structure() {
     match &exprs[0] {
         Expr::Node(node, _) => {
             assert_eq!(node.tag(), DeepTag::Def);
-            assert!(node.meta().entries.is_empty());
+            assert!(node.meta().is_empty());
             // children[0] = name "square"
             match &node.children_slice()[0] {
                 Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "square"),
@@ -127,7 +127,7 @@ fn parse_empty_map() {
     let exprs = parse_str("{}").unwrap();
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
-        Expr::Map(m, _) => assert!(m.entries.is_empty()),
+        Expr::Map(m, _) => assert!(m.is_empty()),
         other => panic!("expected empty Map, got {:?}", other),
     }
 }
@@ -138,8 +138,8 @@ fn parse_map_with_entries() {
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Map(m, _) => {
-            assert_eq!(m.entries.len(), 1);
-            assert_eq!(m.entries[0].0, "type");
+            assert_eq!(m.values().count(), 1);
+            assert!(m.ty().is_some());
         }
         other => panic!("expected Map with entries, got {:?}", other),
     }
@@ -221,8 +221,8 @@ fn spec_metadata_on_list_items() {
                     assert_eq!(params.len(), 1);
                     match &params[0] {
                         Expr::MetaExpr(meta, _) => {
-                            assert_eq!(meta.entries.len(), 1);
-                            assert_eq!(meta.entries[0].0, "type");
+                            assert_eq!(meta.metadata.values().count(), 1);
+                            assert!(meta.metadata.ty().is_some());
                         }
                         other => panic!("expected MetaExpr, got {:?}", other),
                     }
