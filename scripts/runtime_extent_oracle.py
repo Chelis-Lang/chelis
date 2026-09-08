@@ -922,6 +922,8 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
                 "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
+                "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
+                "a_local_unit_extent_claim_traps_at_its_operation_on_c",
                 "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
                 "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
                 "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",

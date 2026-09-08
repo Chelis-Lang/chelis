@@ -255,10 +255,53 @@ impl CEmitter {
         // class. Reading the declaration through the axis SOURCE rather than
         // through the stamped name is C4.4's remaining half and is what closes
         // chelis#665; it is not this change.
-        let local_dim_guard_sites: chelis_unord::UnordMap<
+        // Two claim KINDS reach this list: the equality classes and, since
+        // chelis#1277 S2b, the unit-extent claims (C2.9). They are keyed the
+        // same way, on the axis whose extent the guard reads, and collecting
+        // into a map would let a duplicate key REPLACE silently. A dropped
+        // guard is the wrong answer, not a missing optimization, so the
+        // collision is a hard failure naming both sites rather than a
+        // `debug_assert` that ships as nothing.
+        //
+        // It should be impossible. A class member and a unit claim on the same
+        // (node, axis) would need that axis to be simultaneously an output
+        // axis some operation SETS under a stamped claim and the operand axis
+        // an `expand` claims is 1, with the unit claim placed Local, which
+        // requires its source not to resolve to a `Load`. Nobody has
+        // constructed it, and this check is here because "nobody constructed
+        // it" is not the same as "it cannot happen", and the failure mode if
+        // it does is silent.
+        let mut local_dim_guard_sites: chelis_unord::UnordMap<
             chelis_ir::ownership::LocalGuardSite,
             chelis_ir::ownership::LocalGuardClaim,
-        > = dag.local_dim_guard_sites().into_iter().collect();
+        > = chelis_unord::UnordMap::new();
+        for (site, claim) in dag.local_dim_guard_sites() {
+            if let Some(existing) = local_dim_guard_sites.get(&site) {
+                let (node, axis) = site;
+                return Err(Unsupported::new(
+                    UnsupportedKind::Construct("two local extent guards on one axis".to_string()),
+                    format!(
+                        "node {node} axis {axis} carries two local guard sites: claim \
+                         `{}` against `{}` under `{}`, and claim `{}` against `{}` under \
+                         `{}`. Emitting one would drop the other",
+                        existing.claim,
+                        existing.operand,
+                        existing.op,
+                        claim.claim,
+                        claim.operand,
+                        claim.op,
+                    ),
+                    Stage::Codegen("c"),
+                    chelis_types::deliberate_rejection!(
+                        "[04-NUM-9]",
+                        "every runtime extent guard section 4.7 places is emitted; a \
+                         site that would silently replace another is refused rather \
+                         than losing one of them"
+                    ),
+                ));
+            }
+            local_dim_guard_sites.insert(site, claim);
+        }
 
         let mut e = CEmitter {
             lines: Vec::new(),

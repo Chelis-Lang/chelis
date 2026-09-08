@@ -1182,9 +1182,20 @@ fn a_zero_positional_replacement_declares_an_empty_axis_on_c() {
 ///
 /// The trap renders as `spec/04-type-system.md` [04-NUM-9] requires, at
 /// `int64` because the guarded result is an extent under [05-DIM-1] and not a
-/// tensor element. The [05-UNS-1] envelope around it is the host lane's
-/// existing root-realization wrapper (chelis#912) and is not this row's
-/// subject.
+/// tensor element.
+///
+/// `<op>` is `load`, not `expand`, and which lane answers moved under B2h
+/// (#1531). Before it, `chelis eval` reached only the host interpreter for a
+/// program of this shape, so the trap came from `tensor_expand_host`'s own
+/// check and named `expand`. B2h applies a host-lane def through the kernel C
+/// emits for it, so the DAG evaluator's ENTRY guard now answers first, and
+/// section 4.7 fixes its slot: "for a guard whose operands are all interface
+/// values, the `load` primitive of the later witness in signature order". The
+/// operand here is an input tensor's axis, so `load` is the correct rendering
+/// and the previous one was correct for the lane that used to answer.
+///
+/// The host interpreter's check remains and is unchanged; it is simply no
+/// longer the first guard this program meets.
 #[test]
 fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1212,12 +1223,13 @@ fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval() {
         String::from_utf8_lossy(&evaluated.stdout)
     );
     assert!(
-        stderr.contains(&domain_trap_line("expand")),
+        stderr.contains(&domain_trap_line("load")),
         "the trap line is the [04-NUM-9] rendering verbatim, at the extent's \
-         own dtype: {stderr}"
+         own dtype, with the slot section 4.7 gives an all-interface guard: \
+         {stderr}"
     );
     assert!(
-        stderr.contains("axis 0 is 1") && stderr.contains("observed 2"),
+        stderr.contains("claimed = 1") && stderr.contains("axis 0 = 2"),
         "the accompanying context names the axis and the value observed, which \
          §4.7 requires on separate lines from the trap: {stderr}"
     );
