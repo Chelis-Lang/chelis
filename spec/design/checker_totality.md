@@ -2726,7 +2726,7 @@ make that command green.
 
 #### What PP7 does not establish
 
-- **Axis B is not closed; [#1537] owns it.** `validate_ir_program` runs on the
+- **Axis B is not closed; [#1537] owns it, and PP9 decides it.** `validate_ir_program` runs on the
   serialized-IR entry only, and the two entries drive different inference
   functions (`infer_ir_program_with_state` against
   `infer_program_with_product_in_session`). Unifying them is a driver merge,
@@ -2735,7 +2735,9 @@ make that command green.
   entry's pass set is the correct one, which is a question no probe here
   answers. PP6 closes [#1134] on the forward-reference and schedule questions
   and names neither `validate_ir_program` nor the pass set, so the asymmetry
-  outlived its former tracker and now has its own.
+  outlived its former tracker and now has its own. PP9 below is that decision:
+  it dispositions each pass separately and records the choice as decision row
+  20.
 - **No universal reader claim.** The oracle proves the listed rows and
   whatever the lint's corpus plants. It does not prove that no reader remains
   carrier-incomplete; E5e's inventory is the honest statement of what is
@@ -3154,7 +3156,7 @@ language question no carrier probe answers. [04-TOT-5] already makes the
 asymmetry a violation. What it does not decide is which set survives, and that
 is the decision this item puts to the user.
 
-Everything below was measured on `3b701e54b` by driving a 27-row corpus
+Everything below was measured on `3b701e54b` by driving a 32-row corpus
 through every entry and by applying, running, and reverting three candidate
 repairs. The transcripts are the probe reports named in the PR.
 
@@ -3173,7 +3175,7 @@ driver's fresh builtin env is not a difference.
 
 #### What execution shows
 
-Fourteen of the 27 rows give different verdicts from `check_ir_program` and
+Eighteen of the 32 rows give different verdicts from `check_ir_program` and
 `check_typed_program`. Every one runs in the same direction: the IR-driven
 entry rejects or reports more. No fail-closed row appeared; [#1124]'s mirror
 image is closed and its row agrees.
@@ -3183,6 +3185,7 @@ image is closed and its row agrees.
 | trivial non-termination, five spellings | `def a(x: int32) -> int32 = a(x)` and its mutual, `sig`-carrying, module-wrapped, stamped-`.dp` and round-tripped forms | REJECT `CycleDetected` | **ACCEPT** |
 | conv2d zero stride | `conv2d(&x, &k, cast(0, int32), 0)` | REJECT "requires a positive stride, got 0" | **ACCEPT** |
 | conv2d negative padding | `conv2d(&x, &k, 1, cast(-1, int32))` | REJECT "requires non-negative padding, got -1" | **ACCEPT** |
+| conv2d non-literal stride or padding, each in both carriers | `conv2d(&x, &k, s, 0)` with `s: int32` a parameter | REJECT "requires a literal integer stride" (respectively "padding") | **ACCEPT** |
 | vmap batch-varying extent | a `shrink` bound read from batched elements | REJECT `batch_varying_extent` | **ACCEPT** |
 | `mean` over a symbolic axis | `mean(x, 0)` on `tensor[n, f32]` | REJECT, 2 diagnostics | REJECT, 1 |
 | `layer_norm` symbolic final axis | | REJECT, 2 | REJECT, 1 |
@@ -3210,23 +3213,31 @@ through it.
 
 **Union alone** — add `validate_ir_program` and the `chelis_deep::validate`
 loop to the typed driver, and let the former own the initialization report.
-Closes 12 of the 14 check-level rows and all of the inference-level ones. It
+Closes 14 of the 18 check-level rows and all of the inference-level ones. It
 does not close the stamped-`.dp` rows, and it is worse than that: run every
 Surf row back through `chelis deep` (`print_canonical` then
-`parse_and_stamp_file`) and five of seven round trips still disagree. The
-conv2d row disagrees in a new way it did not before — the typed entry now
+`parse_and_stamp_file`) and seven of nine round trips still disagree. The
+conv2d rows disagree in a new way they did not before — the typed entry now
 rejects, but with "requires concrete tensor argument metadata" where the IR
-entry says "requires a positive stride, got 0". The pass runs, misreads the
-tensor metadata off the stamped carrier, and bails at the concreteness gate
-before reaching the stride check. Adding the passes without repairing their
+entry says "requires a positive stride, got 0" (and, on the two literal-operand
+round trips, where it says "requires a literal integer stride" or "padding").
+The pass runs, misreads the tensor metadata off the stamped carrier, and bails
+at the concreteness gate before reaching either the range check or the literal
+check. The two literal-operand rows in the Surf carrier do close under this
+candidate, and that is the point against it: they close by unioning a rejection
+that carries no spec sentence and that [05-RWIN-1] forbids as a rejection
+shape. Adding the passes without repairing their
 readers manufactures a wrong-diagnostic divergence in place of a missing one.
 This is PP7's own warning: a mechanism chosen for the wrong axis closes
 neither.
 
-**Union plus normalization at the typed entry** — closes 26 of 27 rows, and
-the twenty-seventh is the `chelis_deep::validate` duplicate. Deleting that pass
-too closes all 27, across all four entries. It is the only measured mechanism
-that closes the axis whole. It is also **not available**: on the full
+**Union plus normalization at the typed entry** — closes 26 of the 27 rows
+the corpus held when this candidate was run, and the twenty-seventh is the
+`chelis_deep::validate` duplicate. Deleting that pass too closed all 27, across
+all four entries. The four conv2d literal-operand rows were added afterwards
+and were measured at the base and under the union only, so no claim is made
+that this candidate closes them. It is the only measured mechanism that closes
+the carrier residual. It is also **not available**: on the full
 `-p chelis-types` suite it fails ten tests, and seven of those are
 `issue_1023_stamped_checker_boundary` and
 `issue_1085_barelist_expression_disposition`, which pin that the typed entry
@@ -3253,7 +3264,8 @@ informative rather than costly, and none is a reason to keep the asymmetry:
 | module-reopen and forged-linker-name guards, `collect_all_declarations`, opacity, `validate_binder_literal_adoption_in_program`, the PP6 schedule, the deferred borrow and opaque ledgers, `validate_tensor_precisions_in_program`, `validate_type_invariants_in_program_with_sink`, `validate_polymorphic_op_constraints` | all four | shared already; no action |
 | `report_initialization_errors` | IR, typed (wrapper), `infer_ir` | **[04-INF-4]/[04-INF-7]/[04-INF-8].** Move into the shared driver so the fourth entry gets it |
 | `validate_vmap_extent_dependencies` | IR, `infer_ir` | **spec/06 §3.7: "Such a program is a type error, `batch_varying_extent` (§8.6)".** The spec makes it a *type* error, so it runs at every checker entry. Add, and repair its stamped-carrier read |
-| conv2d stride > 0 and padding >= 0 | IR, `infer_ir` | **author the atom.** spec/05 §4.5 gives conv2d a signature and an im2col lowering and no constraint, and no `[05-OP-N]`. The code cites "spec/05 §471-483", which is the windowed-primitive text for a different primitive. Draft below; keep the rule, give it authority |
+| conv2d stride > 0 and padding >= 0 | IR, `infer_ir` | **author the atom, with [05-RWIN-1]'s split.** spec/05 §4.5 gives conv2d a signature and an im2col lowering and no constraint, and no `[05-OP-N]`. The code's comment cites "spec/05-risc-primitives.md §471-483", which is the `sum` accumulator-parameter text and governs nothing here. The nearest governing category is [05-RWIN-1] (spec/05:526-533), which applies the static-versus-runtime split to the constraint itself. Draft below; keep the rule, give it authority, and give it that split |
+| conv2d "requires a literal integer stride / padding" (`extract_typed_scalar_literal`) | IR, `infer_ir` | **delete as a checker rejection; the lowering restriction relocates to [#730].** [05-RWIN-1] decides this by category: for the analogous windowed primitives the stride list "may be runtime values", and the violation "never becomes an empty-list default, truncated rank, **static-parameter signature**, or backend assertion". A demand that the operand be a compile-time literal is exactly a static-parameter signature. A non-literal stride is therefore legal, and the range rule reaches it through the runtime half of the split. That the Phase 0 im2col lowering cannot emit a runtime-strided conv2d today is a capability restriction, and it moves with the concreteness gate below rather than separately |
 | conv2d "concrete tensor argument metadata", `mean` concrete reduced axis, `layer_norm` concrete normalized axis | IR, `infer_ir` | **relocate to [#730].** No spec sentence; the rationale is that the IR lowering needs the extent statically. That is a backend capability, and the typed lane's own tests accept the symbolic forms. `loud_unsupported.md`'s class owns it; `chelis check` does not |
 | `detect_trivial_non_terminating_fns` | IR, `infer_ir` | **relocate to [#730].** No spec sentence. [04-INF-2]/[04-INF-3] admit recursion at the type level; nothing makes a base-case-less function a type error. Its own comment says the Phase 0 DAG lowering cannot represent recursion and would silently elide it to an identity, which is precisely the loud-unsupported class |
 | `validate_identity_builtin_rank_requirements` | IR, `infer_ir` | **delete; already decided.** Decision row 15, PP5 D6 (d). PP9 must land after PP5 D8 PR A or exclude this leg |
@@ -3281,13 +3293,24 @@ The conv2d constraint has no home atom. It needs one, allocated against the
 highest `[05-OP-N]` on current `main` at authoring time:
 
 > *Proposed, for spec/05 §4.5:* **[05-OP-N]** `conv2d(input, kernel, stride,
-> padding)` requires `stride >= 1` and `padding >= 0`. The output spatial
+> padding)` SHALL receive `stride >= 1` and `padding >= 0`. The output spatial
 > extent is `floor((in + 2 * padding - k) / stride) + 1`; a stride of zero or
 > less leaves it undefined and a negative padding shrinks the effective input
-> below zero, so both are type errors at every checker entry. Where the extent
-> is statically proved non-positive the call is a type error; where it becomes
-> non-positive only at execution it traps `Domain`, as the windowed primitives
-> do.
+> below zero. `stride` and `padding` MAY be runtime values. A statically
+> proved violation of either bound, or a statically proved non-positive output
+> extent, is a type error at every checker entry; otherwise the same violation
+> traps `Domain` before any tensor read or output allocation. It never becomes
+> a static-parameter signature, a silently clamped extent, or a backend
+> assertion.
+
+That is [05-RWIN-1]'s shape, deliberately. The reviewer's hypothesis was that
+the literal-operand requirement is not a checker rule at all, and the spec text
+supports it twice over: [05-RWIN-1] says the analogous lists "may be runtime
+values", and it names "static-parameter signature" among the forms the
+rejection may never take. It is also the shape decision row 15 already took for
+`expand` — a literal violation is a check-time type error, a symbolic operand is
+a runtime `Domain` trap — so PP9 adopts an existing decision rather than
+inventing a second model for the same question.
 
 Nothing about `mean`, `layer_norm`, symbolic conv2d metadata, or termination is
 proposed as normative text. Those rejections move to [#730] because they
@@ -3314,10 +3337,10 @@ repair that does not hold.
 
 | rows | evidentiary status |
 |---|---|
-| the five non-termination spellings, the two conv2d rows, the vmap row, and each of their `.dp` round trips | **regression**: red before, measured ACCEPT at the typed entry on `3b701e54b` |
+| the five non-termination spellings, the two conv2d range rows, the two conv2d literal-operand rows, the vmap row, and each of their `.dp` round trips | **regression**: red before, measured ACCEPT at the typed entry on `3b701e54b` |
 | `mean`, `layer_norm`, elementwise rank, unknown tag, and their round trips | **regression**: red before, measured as a missing second diagnostic |
 | `a = b; b = a` through `infer_program` and `chelis_types::check_program` | **regression**: red before, measured score 1.000 with an empty error vector |
-| the two well-typed controls, the Deep arity row, the reduction-axis row, the [#1124] mismatch, the [#1134] ascribed self-reference | **disposition lock**: green in both states; they hold the agreeing behaviour in place so a repair cannot buy parity by rejecting more |
+| the two well-typed controls, the Deep arity row, the reduction-axis row, the [#1124] mismatch, the [#1134] ascribed self-reference, and a literal-stride conv2d that both entries accept | **disposition lock**: green in both states; they hold the agreeing behaviour in place so a repair cannot buy parity by rejecting more. The literal-stride control is what stops the literal-operand deletion from being bought by accepting every conv2d |
 
 Acceptance is that command green with no row skipped.
 
@@ -3341,7 +3364,7 @@ family. It closes [#1537] and takes PP7's axis-B residue off that item's books.
 
 #### What PP9 does not establish
 
-- **No universal pass claim.** The oracle proves the 27 rows in two carriers
+- **No universal pass claim.** The oracle proves the 32 rows in two carriers
   each. It does not prove that the two pass sets are otherwise identical; the
   inventory table is a reading of the two drivers, and a pass added to one of
   them tomorrow is caught only if a row exercises it.
@@ -3359,9 +3382,21 @@ family. It closes [#1537] and takes PP7's axis-B residue off that item's books.
 - **`infer_ir_program`'s missing expand-default materialization is unmeasured.**
   The call is fallible and one entry of the four skips it. No reproducer.
 - **The relocation targets are named, not designed.** Moving termination,
-  symbolic conv2d metadata, and the two axis-concreteness rules to [#730] says
-  where they belong. What their loud-unsupported diagnostics say, and at which
-  stage, is that item's to design.
+  symbolic conv2d metadata, the two axis-concreteness rules, and the
+  literal-operand demand to [#730] says where they belong. What their
+  loud-unsupported diagnostics say, and at which stage, is that item's to
+  design.
+- **Five program classes get looser before they get louder.** Under the
+  recommendation, a base-case-less def, a conv2d with symbolic tensor metadata,
+  a `mean` or `layer_norm` over a symbolic axis, and a conv2d with a runtime
+  stride or padding are all accepted by every checker entry from the moment
+  PP9's change lands until [#730] lands their loud form. That is the price of
+  parity-by-subtraction and it is deliberate, but it is a real regression in
+  loudness for the window between the two, and the change that lands it says so
+  in its own body. The two conv2d relocations in particular must move together:
+  the metadata-concreteness gate returns early ahead of the literal-operand
+  check today, so relocating concreteness alone would make the literal demand
+  fire on strictly more programs.
 
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
@@ -3627,13 +3662,17 @@ is closed.
 - **With [#1024]**: [#1258] is the resugaring half of [#1247]. PR [#1406]
   closes both with one structural dimension-literal representation; it does
   not absorb unrelated canonical-Surf or total-resugaring instances.
-- **With [#730] again, for PP9**: the pass-set sweep RELOCATES four checker
+- **With [#730] again, for PP9**: the pass-set sweep RELOCATES five checker
   rejections that describe what a backend can lower rather than what the language
-  admits - trivially non-terminating defs, symbolic conv2d tensor metadata, and the
-  `mean` / `layer_norm` axis-concreteness rules. [#730] receives them; PP9 does not
-  design their diagnostics. Until it does, those four programs are accepted by every
-  checker entry, which is a deliberate loosening and is stated in the PR that makes
-  it.
+  admits - trivially non-terminating defs, symbolic conv2d tensor metadata, the
+  `mean` / `layer_norm` axis-concreteness rules, and conv2d's literal-operand
+  demand, which [05-RWIN-1] forbids as a checker rejection shape. [#730] receives
+  them; PP9 does not design their diagnostics. Until it does, those five program
+  classes are accepted by every checker entry, which is a deliberate loosening and
+  is stated in the change that makes it. The two conv2d relocations move together:
+  the metadata-concreteness gate returns early ahead of the literal-operand check,
+  so relocating it alone would make the literal demand fire on strictly more
+  programs than it does today.
 - **With [#721]**: none (eval ingestion, no checker code); listed so nobody
   searches for it here.
 
@@ -3653,10 +3692,10 @@ is closed.
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
 | PP6 | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), and [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses) are delivered with the shared-graph, schedule, paired-ingress, and CLI oracles |
-| PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
+| PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537] and decided in PP9, and the unswept guarded-arm inventory are named residue, not claims |
 | [#1134] forward-reference parity | both checker ingresses reject eager forward values, accept backward values from value initializers and function bodies where allowed, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference and every [04-INF-7] eager value cycle identically; the schedule's order invariants are asserted directly |
 | PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and `infer_expr` reaches it from either Deep carrier. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
-| PP9 | [#1537]'s pass-set axis: the four checker entries apply one pass set, every pass in it carries a spec sentence or has moved to the stage whose capability it describes, and 27 rows in two carriers each receive identical ordered diagnostics from all four. The two prebind mechanisms are reconciled by choice rather than by evidence, and no claim is made that the sets are identical outside the corpus |
+| PP9 | [#1537]'s pass-set axis: the four checker entries apply one pass set, every pass in it carries a spec sentence or has moved to the stage whose capability it describes, and 32 rows in two carriers each receive identical ordered diagnostics from all four. The two prebind mechanisms are reconciled by choice rather than by evidence, and no claim is made that the sets are identical outside the corpus |
 | [#1339] top-level initialization frontier | an eager value whose acyclic closure reaches a later non-function value rejects as `UnboundVariable` under [04-INF-8]; cycles retain [04-INF-7]'s `CycleDetected`, while backward and independent controls preserve source-ordered manifest output; `issue_1339_top_level_initialization` covers both checker ingresses plus `check`, `prove`, `eval`, and C `build` as the authoritative oracle |
 
 ## Decisions and remaining questions
@@ -3682,7 +3721,7 @@ is closed.
 | 17 | whether the source-coverage obligation is a new atom or a tightening of an existing one, and whether [#887] closes | DECIDED 2026-09-03: a new atom that EXTENDS [04-TOT-3] rather than replacing it. [04-TOT-3] already governs the live instances and the shipped `access`/`record` rejections cite it, so R1 through R3 are unimplemented [04-TOT-3] cases and an implementer fixing them cites [04-TOT-3]. [04-TOT-4] carries that obligation from the form to each of the form's slots and adds the two sentences no earlier atom states: an omitted optional child and a present unreadable one are distinct inputs with only the omission permitted to default, and coverage quantifies over the submitted program rather than the checked result. The second is the one [04-TOT-2] structurally cannot express, and R1 proves it by satisfying [04-TOT-2] completely while being wrong. [#887] is RE-SCOPED, not closed: its Tier 2 shipped via [#998]/[#1019]/[#1041], and its Tier 1 consumption-boundary residue is this item's Slice 2 | [04-TOT-4] + PP8 |
 | 18 | whether a parsed-vs-checked coverage census belongs at `finalize_checked_program` | OPEN, recorded 2026-09-03, no deliverable attached. It closes none of PP8's five named instances, which Slices 1 and 2 close between them, and its three candidate justifications do not survive a necessity trace: the roles it would guard have no demonstrated defect, `child_stamp_role` already makes an unclassified tag a compile error, and the cancellation route it would subsume is closed at the surface [#874] named. It is also the only proposal here touching the public fitness surface. Revisit if a coverage-keyed instance appears that the selector-read seam does not reach | PP8 + [#874] |
 | 19 | whether an eager value may initialize through a function or nested lambda that reaches a later non-function value | DECIDED 2026-09-04: no. Every non-function value in the initiating value's [04-INF-7] eager-reference set is compared with the initiating value's source position; an acyclic later member is `UnboundVariable`, while a return to the origin is `CycleDetected`. Dependency-ordering whole initializers was rejected because top-level effects and traps make it observably different from eval's demand forcing; the implementation follows PP6 B/C and reuses their single graph | [04-INF-8] + [#1339] frontier section |
-| 20 | which of the two checker pass sets is correct, and whether one shared driver replaces the two inference functions | OPEN, recorded 2026-09-08. [04-TOT-5] already forbids the asymmetry; what is undecided is which side moves, and the answer is per-pass rather than per-set. Measured on `3b701e54b`: 14 of 27 rows diverge, all fail-open toward `check_typed_program`, and a fifth entry-level defect ([#1457] placed `report_initialization_errors` in a wrapper) makes `chelis_types::check_program` return score 1.000 with an empty error vector for `a = b; b = a`. **The three options, one sentence each.** (a) RECOMMENDED, union plus dispositions: both entries run `validate_ir_program`'s surviving legs, the initialization report moves into the shared driver, `chelis_deep::validate` is deleted as a duplicate, the conv2d stride/padding rule gets the `[05-OP-N]` atom it never had, and four backend-capability rejections (termination, symbolic conv2d metadata, `mean` and `layer_norm` axis concreteness) relocate to [#730], which loosens those four programs at every checker entry until [#730] lands their loud form. (b) Union alone: cheaper, closes 12 of 14 rows, leaves the stamped `.dp` carrier open and makes conv2d report a different wrong diagnostic at the typed entry instead of none. (c) Union plus normalization at the typed entry: closes all 27 rows and is the only mechanism measured to do so, but fails seven tests that pin §C4.2's stamped-carrier contract (`issue_1023_stamped_checker_boundary`, `issue_1085_barelist_expression_disposition`) and deepens the [#1029] carrier dependency, so it is recorded as measured and rejected. A shared driver is a consequence of (a), not a fourth option: after the dispositions the two functions differ only in their prebind mechanism, and which prebind survives is the one question no probe here answers | [04-TOT-5] + PP9 |
+| 20 | which of the two checker pass sets is correct, and whether one shared driver replaces the two inference functions | OPEN, recorded 2026-09-08. [04-TOT-5] already forbids the asymmetry; what is undecided is which side moves, and the answer is per-pass rather than per-set. Measured on `3b701e54b`: 18 of 32 rows diverge, all fail-open toward `check_typed_program`, and a fifth entry-level defect ([#1457] placed `report_initialization_errors` in a wrapper) makes `chelis_types::check_program` return score 1.000 with an empty error vector for `a = b; b = a`. **The three options, one sentence each.** (a) RECOMMENDED, union plus dispositions: both entries run `validate_ir_program`'s surviving legs, the initialization report moves into the shared driver, `chelis_deep::validate` is deleted as a duplicate, the conv2d stride/padding rule gets the `[05-OP-N]` atom it never had in [05-RWIN-1]'s shape (a statically proved violation is a type error, otherwise a runtime `Domain` trap, and the operands may be runtime values), and five backend-capability rejections (termination, symbolic conv2d metadata, `mean` and `layer_norm` axis concreteness, and conv2d's literal-operand demand, which [05-RWIN-1] forbids as a rejection shape) relocate to [#730], which loosens those five program classes at every checker entry until [#730] lands their loud form. (b) Union alone: cheaper, closes 14 of the 18 diverging rows, leaves the stamped `.dp` carrier open, makes conv2d report a different wrong diagnostic at the typed entry instead of none, and closes the two conv2d literal-operand rows it does close by unioning a rejection shape [05-RWIN-1] forbids. (c) Union plus normalization at the typed entry: closes all 27 rows of the corpus as it stood when that candidate was run, and is the only mechanism measured to close the carrier residual, but fails seven tests that pin §C4.2's stamped-carrier contract (`issue_1023_stamped_checker_boundary`, `issue_1085_barelist_expression_disposition`) and deepens the [#1029] carrier dependency, so it is recorded as measured and rejected. A shared driver is a consequence of (a), not a fourth option: after the dispositions the two functions differ only in their prebind mechanism, and which prebind survives is the one question no probe here answers | [04-TOT-5] + PP9 |
 | 21 | whether a borrow's target type is decided at the borrow arm or after def-level resolution, and whether the #256 deferred classification survives [04-INF-6] ([#1589]) | DECIDED by `spec/04` §8.2, which already states it: the inner "must be — or must ultimately resolve to — a tensor or a tensor-carrying value", and classification is deferred when it is not yet known. No language decision is open. The reading that a borrow is decided where it is written is REFUTED by execution: disabling `validate_deferred_borrow_vars` makes `def use_it[a](seed: a) -> bool = { v = seed  consume_any(&v) }` score 1.00 with no errors, reopening the #256 round-2 unsoundness, and turns all three of the suite's deferred-path tests red, so the validator is live code and its two acceptance tests were merely relabelled by [#1542]. The issue's original premise that an inferred parameter "rejects at the borrow arm" is also wrong: measured, the borrow arm defers, the validator resolves it `sound=true`, and the 0.80 `InvalidBorrow` comes from linearity's `check_borrow_arg`, which failed closed because `expr_type` returns `None` for a `(var ..)` node whose parameter annotation is a synthesized hole. The repair reads the resolved `&T` the annotate pass already stamps on the `borrow` node. Rows C/E/F/G of the [#1589] header matrix become accepted regression rows; rows I/J/K stay rejected as locks on the validator's reject branch; §8.2's `relu` example is corrected, because unresolved dimension variables never reach the deferral | `spec/04` §8.2 + PP6 residue |
 
 ## Contract summary
