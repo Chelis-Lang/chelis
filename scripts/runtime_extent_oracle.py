@@ -925,6 +925,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
                 "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
                 "a_local_unit_extent_claim_traps_at_its_operation_on_c",
+                "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
                 "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
                 "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
                 "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
