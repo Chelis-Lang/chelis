@@ -161,7 +161,7 @@ explicitly first. Windowed extents must be statically known on the build path.
 | `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | `sum(g, axis)` |
 | `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | `shrink(g, inverse_padding)` |
 | `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | `pad(g, inverse_bounds)` |
-| `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | expand/scatter |
+| `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | [05-MOV-1]'s zero-filled inverse sampling map at the original shape |
 
 `expand` sets an existing size-1 axis to `size` and leaves the rank alone; `insert`
 adds an axis and raises the rank by one. Neither copies data (stride-0 on the
