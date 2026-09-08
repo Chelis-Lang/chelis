@@ -283,6 +283,12 @@ fn build_app(
 /// matching close. Panics when the function is absent, so a renamed or
 /// dropped definition fails loudly instead of vacuously passing.
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    // The public symbol is now the [04-LIN-7] borrowing adapter. Constructor
+    // layout and projection are emitted in the consuming implementation body.
+    let (prefix, params) = signature
+        .split_once('(')
+        .expect("test signature contains parameter list");
+    let signature = format!("{prefix}__chelis_owned_body({params}");
     let start = source
         .find(&format!("{signature} {{"))
         .unwrap_or_else(|| panic!("emitted C has no `{signature}` definition:\n{source}"));
@@ -501,7 +507,8 @@ fn positional_construction_keeps_the_authored_packages_field_dtype() {
         "the payload dtype must follow the authored declaration, not the collider's"
     );
     assert!(
-        body.contains("chelis_value_from_f32_boxed") && !body.contains("chelis_value_from_f64"),
+        body.contains("chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F32")
+            && !body.contains("CHELIS_DTYPE_F64"),
         "the authored declaration stores f32; emitted body was:\n{body}"
     );
 }

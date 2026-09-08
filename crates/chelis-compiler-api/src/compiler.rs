@@ -1,10 +1,14 @@
 use chelis_deep::DeepTag;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{
+    Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim,
+    TensorType,
+};
 use chelis_ir::eval;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
@@ -12,7 +16,7 @@ use chelis_surf::ast::{
 };
 use chelis_types::{
     CheckedProgram,
-    errors::{CheckError, CheckErrorKind},
+    errors::CheckError,
     manifest::{ManifestedProgram, RootEntry, RootManifest},
     types::{Lane, Target},
 };
@@ -29,15 +33,16 @@ use crate::schema::{
     CompileRequest, CompileResult, CompileTarget, DecompileRequest, DecompileResult,
     DeepCallGraphRequest, DeepCallGraphResult, DeepFunctionOutline, DeepOutlineRequest,
     DeepOutlineResult, DeepReference, DeepReferencesRequest, DeepReferencesResult, DesugarRequest,
-    DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents,
-    GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest,
-    ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult,
-    RootManifestEntryResult, RootManifestResult, SourceKind, Span, ValidateMode, ValidateRequest,
-    ValidateResult, WireBinOp, WireDag, WireDagNode, WireDagSchemaError, WireDeepAtom,
-    WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo, WireFusedInput, WireFusedStep,
-    WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
-    WireMetaEntry, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
-    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim, WireSurfDecl, WireSurfExpr,
+    DesugarResult, Diagnostic, DiagnosticSpan, EvalRequest, EvalResult, EvaluatedRoot,
+    FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest,
+    LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
+    ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
+    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
+    WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
+    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
+    WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
     WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
@@ -506,9 +511,10 @@ fn require_valid_deep(stage: &str, exprs: &[DeepExpr]) -> Result<()> {
             stage,
             warning.message,
             GeneralKind::DeepParseError,
-            Some(Span {
+            // chelis#1395: `validate` reports a coordinate and no end, so
+            // the location travels as a point rather than an invented range.
+            Some(DiagnosticSpan::Point {
                 offset: warning.offset,
-                len: 0,
             }),
         )),
     }
@@ -926,9 +932,9 @@ enum EntryStrictness {
 /// characters -> `_`, and prefixes a digit-leading or empty name with
 /// `chelis_`, but guards NEITHER a libc collision (`free`, `malloc`, …)
 /// NOR the runtime's own `chelis_*` namespace (`chelis_runtime.h`
-/// declares `chelis_free`, `chelis_tuple_get`, …): a single-def program
+/// declares `chelis_tensor_release`, `chelis_tuple_get`, …): a single-def program
 /// whose def is named `free`, compiled via the free-form path, still
-/// emits `void free(...)`, and an `entry_name` of `chelis_free` emits
+/// emits `void free(...)`, and an `entry_name` of `chelis_tensor_release` emits
 /// verbatim. Both gaps are documented in `spec/11-ffi.md` §5a. The
 /// entry-scoped metadata lane — which claims multi-def tensor programs
 /// and single-def programs whose body needs host lowering (e.g. `concat`)
@@ -964,7 +970,7 @@ fn execution_c_symbol(entry_name: Option<&str>) -> String {
 /// `entry_name` is now a def *selector* the user must supply, so the selected
 /// name can be anything — `main` (collides with the reserved program entry),
 /// `free`/`malloc` (collide with libc), or a name in the runtime's own
-/// `chelis_*` namespace (`chelis_runtime.h` declares `chelis_free`,
+/// `chelis_*` namespace (`chelis_runtime.h` declares `chelis_tensor_release`,
 /// `chelis_tuple_get`, …). To be collision-free against ALL of those, the
 /// entry-scoped artifact ALWAYS emits the fixed symbol `chelis_main`. This is
 /// safe because each artifact is scoped to exactly one entry def, so there is
@@ -998,8 +1004,8 @@ fn project_host_program_to_entry(
 
     fn collect_callback(
         callback: &ConcreteHostCallback,
-        bound: &HashSet<String>,
-        out: &mut HashSet<String>,
+        bound: &UnordSet<String>,
+        out: &mut UnordSet<String>,
     ) {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
@@ -1015,7 +1021,7 @@ fn project_host_program_to_entry(
         }
     }
 
-    fn collect_expr(expr: &ConcreteHostExpr, bound: &HashSet<String>, out: &mut HashSet<String>) {
+    fn collect_expr(expr: &ConcreteHostExpr, bound: &UnordSet<String>, out: &mut UnordSet<String>) {
         match &expr.kind {
             ConcreteHostExprKind::Call { function, args, .. } => {
                 if !bound.contains(function) {
@@ -1129,7 +1135,7 @@ fn project_host_program_to_entry(
         }
     }
 
-    let function_names: HashSet<&str> = program
+    let function_names: UnordSet<&str> = program
         .functions
         .iter()
         .map(|function| function.name.as_str())
@@ -1138,7 +1144,7 @@ fn project_host_program_to_entry(
         return None;
     }
 
-    let mut reachable = HashSet::from([entry.to_string()]);
+    let mut reachable = UnordSet::from([entry.to_string()]);
     let mut pending = vec![entry.to_string()];
     while let Some(name) = pending.pop() {
         let function = program
@@ -1151,9 +1157,9 @@ fn project_host_program_to_entry(
             .iter()
             .map(|param| param.name.clone())
             .collect();
-        let mut referenced = HashSet::new();
+        let mut referenced = UnordSet::new();
         collect_expr(&function.body, &bound, &mut referenced);
-        for referenced_name in referenced {
+        for referenced_name in referenced.into_sorted() {
             if function_names.contains(referenced_name.as_str())
                 && reachable.insert(referenced_name.clone())
             {
@@ -1479,7 +1485,7 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    let declared_params: HashSet<&str> = host_program
+    let declared_params: UnordSet<&str> = host_program
         .functions
         .iter()
         .find(|function| function.name == entry)
@@ -1729,13 +1735,13 @@ fn execution_artifact_from_compiled(
 ) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
-    let host_compiled =
-        chelis_ir::host::try_lower_manifested_program(&compiled.program).map_err(|diagnostic| {
+    let mut host_compiled = chelis_ir::host::try_lower_manifested_program(&compiled.program)
+        .map_err(|diagnostic| {
             stage_error_with_span(
                 "lower",
                 diagnostic.to_string(),
                 GeneralKind::LowerError,
-                deep_span_to_schema(diagnostic.span),
+                deep_span_to_diagnostic(diagnostic.span),
             )
         })?;
     let func_name = execution_c_symbol(entry_name);
@@ -1859,15 +1865,22 @@ fn execution_artifact_from_compiled(
                 reject_unsized_named_dims(&entry_dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                let result = chelis_backend_c::codegen_with_options(
-                    &fused,
-                    entry_symbol,
-                    chelis_backend_c::CodegenOptions {
-                        use_blas: true,
-                        ..chelis_backend_c::CodegenOptions::default()
-                    },
+                let options = chelis_backend_c::CodegenOptions {
+                    use_blas: true,
+                    ..chelis_backend_c::CodegenOptions::default()
+                };
+                let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?,
                 )
-                .map_err(unsupported_stage_error)?;
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result =
+                    chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
+                        .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     entry_symbol,
                     None,
@@ -1941,7 +1954,24 @@ fn execution_artifact_from_compiled(
                     host_program,
                     BuildTarget::C,
                 )?;
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                let scalar_only_globals = host_program
+                    .globals
+                    .iter()
+                    .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
+                let selected = projected_host_program
+                    .unwrap_or_else(|| host_compiled.host.take().expect("host branch selected"));
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                    .map_err(unsupported_stage_error)?;
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                        .map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?,
+                )
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 // Preserve a more specific host-emitter rejection (for
                 // example the function-value ABI) when one exists. The
@@ -1952,10 +1982,7 @@ fn execution_artifact_from_compiled(
                 // host-lane artifact with an explicit decline reason.
                 if strictness == EntryStrictness::Strict
                     && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
-                    && host_program
-                        .globals
-                        .iter()
-                        .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)))
+                    && scalar_only_globals
                 {
                     return Err(strict_entry_decline_error(EntryLaneDecline::HasGlobals));
                 }
@@ -1977,15 +2004,21 @@ fn execution_artifact_from_compiled(
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
             let fused = chelis_ir::fuse::fuse(&specialized);
-            let result = chelis_backend_c::codegen_with_options(
-                &fused,
-                &func_name,
-                chelis_backend_c::CodegenOptions {
-                    use_blas: true,
-                    ..chelis_backend_c::CodegenOptions::default()
-                },
+            let options = chelis_backend_c::CodegenOptions {
+                use_blas: true,
+                ..chelis_backend_c::CodegenOptions::default()
+            };
+            let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
+            let verified = chelis_ir::ownership::verify_ownership(
+                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?,
             )
-            .map_err(unsupported_stage_error)?;
+            .map_err(|error| {
+                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+            })?;
+            let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
+                .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
                 &func_name,
                 None,
@@ -2050,7 +2083,19 @@ fn execution_artifact_from_compiled(
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
                 reject_unsupported_hip_ops_in_host_program(host_program)?;
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                let selected = host_compiled.host.take().expect("host branch selected");
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                    .map_err(unsupported_stage_error)?;
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                        .map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?,
+                )
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     &func_name,
@@ -2075,7 +2120,16 @@ fn execution_artifact_from_compiled(
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
             reject_unsupported_hip_ops(&specialized)?;
             let fused = chelis_ir::fuse::fuse(&specialized);
-            let result = chelis_backend_hip::codegen_hip(&fused, &func_name)
+            let selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
+            let verified = chelis_ir::ownership::verify_ownership(
+                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?,
+            )
+            .map_err(|error| {
+                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+            })?;
+            let result = chelis_backend_hip::codegen_hip(verified, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
                 &func_name,
@@ -2261,8 +2315,21 @@ fn compile_new_source_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
+    compile_rewritten_decls_in_context(context, &rewritten, target)
+}
+
+/// Compile declarations whose module identity and imports have already been
+/// resolved by Reef. Keeping this boundary separate prevents an isolated
+/// multi-entry batch from being flattened back into the synthetic eval module
+/// and rewritten a second time.
+fn compile_rewritten_decls_in_context(
+    context: &crate::context::CompiledContext,
+    rewritten: &[Decl],
+    target: Target,
+) -> Result<CompiledSource> {
+    let _linked = chelis_types::install_linked_program_guard();
     bail_if_cancelled("desugar")?;
-    let prepared = crate::pipeline::prepare_surf_decls(&rewritten, None).map_err(|error| {
+    let prepared = crate::pipeline::prepare_surf_decls(rewritten, None).map_err(|error| {
         pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
     })?;
     bail_if_cancelled("check")?;
@@ -2461,6 +2528,19 @@ pub fn prepare_eval_in_context(
     })
 }
 
+/// Prepare an independently Reef-rewritten entry batch against a cached
+/// context. The batch is consumed as linked declarations; it never re-enters
+/// `rewrite_entry_decls_with_reef_graph` as one flat eval scope.
+pub fn prepare_rewritten_entry_batch_in_context(
+    context: &crate::context::CompiledContext,
+    batch: &chelis_reef::RewrittenEntryBatch,
+) -> Result<PreparedEvalInContext> {
+    let compiled = compile_rewritten_decls_in_context(context, batch.declarations(), Target::Eval)?;
+    Ok(PreparedEvalInContext {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
 fn eval_compiled(
     compiled: &CompiledSource,
     bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -2477,12 +2557,8 @@ fn eval_compiled(
         selected_root_names,
     );
     let manifest = effective_program.manifest();
-    let selected = selected_root_names.map(|roots| {
-        roots
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<String>>()
-    });
+    let selected =
+        selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
     let observed_entries = manifest
         .entries
         .iter()
@@ -2501,7 +2577,7 @@ fn eval_compiled(
     let required_inputs = observed_entries
         .iter()
         .flat_map(|entry| entry.required_inputs.iter().cloned())
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
 
     let bindings = bindings
         .into_iter()
@@ -2516,7 +2592,7 @@ fn eval_compiled(
             })?;
             Ok((name, tensor))
         })
-        .collect::<Result<HashMap<_, _>>>()?;
+        .collect::<Result<UnordMap<_, _>>>()?;
 
     let tensor_entries = observed_entries
         .iter()
@@ -2536,7 +2612,7 @@ fn eval_compiled(
         })
         .collect::<Result<Vec<_>>>()?;
     let tensor_values = if roots.is_empty() {
-        HashMap::new()
+        UnordMap::new()
     } else {
         eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
@@ -2544,7 +2620,7 @@ fn eval_compiled(
         .map_err(eval_stage_error)?
     };
 
-    let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
+    let mut tensor_values_by_name = UnordMap::<String, RuntimeTensorValue>::new();
     for entry in &tensor_entries {
         let name = crate::pipeline::IrName::new(entry.name.as_str());
         let node_id = compiled.named_roots.get(&name).ok_or_else(|| {
@@ -2600,7 +2676,7 @@ fn eval_compiled(
         .entries
         .iter()
         .map(|entry| (entry.def_name.clone(), entry.lane == Lane::Tensor))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
@@ -2636,7 +2712,7 @@ fn eval_compiled(
                 .get(entry.def_name.as_str())
                 .cloned()
                 .and_then(|value| {
-                    let synthetic_bindings = HashMap::from([(entry.def_name.clone(), value)]);
+                    let synthetic_bindings = UnordMap::from([(entry.def_name.clone(), value)]);
                     lookup_runtime_value_for_manifest_root(
                         entry,
                         &synthetic_bindings,
@@ -2836,7 +2912,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
                 "parse",
                 error.to_string(),
                 GeneralKind::SurfParseError,
-                parse_error_span_surf(&source, &error),
+                Some(parse_error_span_surf(&source, &error)),
             )
         }
         PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
@@ -2866,7 +2942,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             "lower",
             diagnostic.to_string(),
             GeneralKind::LowerError,
-            deep_span_to_schema(diagnostic.span),
+            deep_span_to_diagnostic(diagnostic.span),
         ),
         PipelineRejection::RootCount {
             context,
@@ -2949,7 +3025,7 @@ fn manifested_program_for_eval<'a>(
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
 ) -> ManifestedProgram {
-    let available = binding_names.collect::<HashSet<_>>();
+    let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
         .map(|names| {
             names
@@ -3023,7 +3099,7 @@ fn manifested_program_for_eval<'a>(
             .params
             .iter()
             .map(|param| param.name.clone())
-            .collect::<HashSet<_>>();
+            .collect::<BTreeSet<_>>();
         let live_parameter_names =
             chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names);
         if live_parameter_names.iter().any(|name| {
@@ -3135,7 +3211,7 @@ fn selected_callable_result_expr<'a>(
         .find_map(|expr| find(expr, selected))
 }
 
-fn checked_def_order(program: &CheckedProgram) -> HashMap<&str, usize> {
+fn checked_def_order(program: &CheckedProgram) -> UnordMap<&str, usize> {
     fn collect<'a>(expr: &'a DeepExpr, names: &mut Vec<&'a str>) {
         let Some((tag, children)) = deep_tagged_children(expr) else {
             return;
@@ -3216,7 +3292,7 @@ fn route_tensor_inputs_from_dag(
 
 fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
     let mut stack = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     let mut required = BTreeSet::new();
     while let Some(node_id) = stack.pop() {
         if !seen.insert(node_id) {
@@ -3246,12 +3322,12 @@ struct LibraryRuntime {
     /// expects the merged library + new-code Deep type-env so a
     /// library-name reference inside a `grad` body resolves the same
     /// way it does in the monolithic compile.
-    type_env: HashMap<String, DeepExpr>,
+    type_env: BTreeMap<String, DeepExpr>,
     /// Library-side lowered-vs-host classification. Threaded through
     /// so `evaluate_host_program_with_library`'s "is this a tensor
     /// root vs a host-init" decision is byte-identical to what the
     /// monolithic pipeline would have computed.
-    lowered_names: HashMap<String, bool>,
+    lowered_names: BTreeMap<String, bool>,
 }
 
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
@@ -3349,7 +3425,7 @@ fn parse_surf(source: &str) -> Result<Vec<Decl>> {
             "parse",
             err.to_string(),
             GeneralKind::SurfParseError,
-            parse_error_span_surf(source, &err),
+            Some(parse_error_span_surf(source, &err)),
         )
     })
 }
@@ -3374,8 +3450,12 @@ fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
 /// error would report.
 fn deep_ingress_error(stage: &str, error: &chelis_deep::StampOrParseError) -> CompilerError {
     let span = match error {
-        chelis_deep::StampOrParseError::Parse(parse_error) => parse_error_span_deep(parse_error),
-        chelis_deep::StampOrParseError::Stamp(stamp_error) => Some(Span {
+        chelis_deep::StampOrParseError::Parse(parse_error) => {
+            Some(parse_error_span_deep(parse_error))
+        }
+        // The stamp half carries a measured extent, so it reports a range
+        // where the parse half above can only report a point (chelis#1395).
+        chelis_deep::StampOrParseError::Stamp(stamp_error) => Some(DiagnosticSpan::Range {
             offset: stamp_error.span.offset,
             len: stamp_error.span.len,
         }),
@@ -3389,7 +3469,7 @@ fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
             "decompile",
             format!("decompiler emitted Surf that the parser rejected: {err}"),
             GeneralKind::SurfParseError,
-            parse_error_span_surf(source, &err),
+            Some(parse_error_span_surf(source, &err)),
         )
     })?;
     Ok(chelis_surf::format::format_program(&decls))
@@ -3576,7 +3656,7 @@ fn compile_result_hip_host(
 }
 
 fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTensorSpec>> {
-    let mut load_types = HashMap::<String, TensorType>::new();
+    let mut load_types = UnordMap::<String, TensorType>::new();
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
             load_types
@@ -3624,7 +3704,7 @@ fn execution_output_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionT
 }
 
 fn execution_output_nodes(dag: &Dag) -> Vec<NodeId> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     let mut nodes = Vec::new();
 
     for node in dag.nodes() {
@@ -4201,6 +4281,51 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     guard_count_for_device(dag, "metal")?;
     for node in dag.nodes() {
+        let direct_arithmetic = match &node.op {
+            RiscOp::Sub => Some("sub"),
+            RiscOp::MaxElem => Some("max_elem"),
+            RiscOp::MinElem => Some("min_elem"),
+            RiscOp::ExtremaAdjoint { .. } => Some("extrema adjoint"),
+            RiscOp::FusedElem { ops }
+                if ops.iter().any(|step| {
+                    matches!(
+                        step.op,
+                        FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                    )
+                }) =>
+            {
+                Some("fused direct arithmetic")
+            }
+            _ => None,
+        };
+        if let Some(op) = direct_arithmetic {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target metal` does not yet support exact `{op}` at lowered node {}; use `--target c` or `--target hip` for the implemented cells",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "the Metal direct-subtraction/extrema kernel and exact trap/bit-selection cells are not implemented"
+                ),
+            ));
+        }
+
+        if matches!(&node.op, RiscOp::Expand { size, .. } if size.node_input().is_some()) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "runtime (node-valued) `expand` extent at lowered node {}",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    1383,
+                    "the Metal device scalar path for runtime expand extents is not implemented; use `--target c`"
+                ),
+            ));
+        }
+
         let node_valued = match &node.op {
             RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
             RiscOp::Pad { padding, .. } => padding.iter().any(pair_has_node_bound),
@@ -4265,7 +4390,10 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
 #[cfg(test)]
 mod metal_runtime_dim_reject_tests {
     use super::reject_unsupported_metal_ops;
-    use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+    use chelis_ir::dag::{
+        Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
+        RiscOp, RtAxis, RtDim, TensorType,
+    };
     use chelis_types::types::Prim;
 
     fn ty(dims: &[usize], precision: Prim) -> TensorType {
@@ -4286,7 +4414,7 @@ mod metal_runtime_dim_reject_tests {
         let m = dag.add_node(
             RiscOp::Load { name: "m".into() },
             vec![],
-            ty(&[], Prim::Int32),
+            ty(&[], Prim::Int64),
             None,
         );
         (dag, x, m)
@@ -4357,6 +4485,65 @@ mod metal_runtime_dim_reject_tests {
     }
 
     #[test]
+    fn metal_seam_accepts_input_axis_expand_extent() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            ty(&[], Prim::F32),
+            None,
+        );
+        let witness = dag.add_node(
+            RiscOp::Load {
+                name: "witness".into(),
+            },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![value, witness],
+            ty(&[4], Prim::F32),
+            None,
+        );
+
+        reject_unsupported_metal_ops(&dag)
+            .expect("InputAxis is a metadata read admitted by the Metal capability seam");
+    }
+
+    #[test]
+    fn metal_seam_rejects_node_valued_expand_with_issue_1383_receipt() {
+        let (mut dag, x, size) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            vec![x, size],
+            ty(&[4, 4], Prim::F32),
+            None,
+        );
+
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal must reject a device scalar expand extent");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1383:"), "{message}");
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
+
+    #[test]
     fn metal_seam_rejects_count_with_issue_1291_receipt() {
         let mut dag = Dag::new();
         let input = dag.add_node(
@@ -4385,11 +4572,141 @@ mod metal_runtime_dim_reject_tests {
             chelis_vocab::DiagnosticKind::UnsupportedFeature
         );
     }
+
+    fn direct_arithmetic_dag(op: RiscOp) -> Dag {
+        let mut dag = Dag::new();
+        let lhs = dag.add_node(
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let gradient = dag.add_node(
+            RiscOp::Load {
+                name: "gradient".into(),
+            },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let inputs = match op {
+            RiscOp::Relu => vec![lhs],
+            RiscOp::ReluAdjoint => vec![lhs, gradient],
+            RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
+            _ => vec![lhs, rhs],
+        };
+        dag.add_node(op, inputs, ty(&[4], Prim::F32), None);
+        dag
+    }
+
+    #[test]
+    fn metal_seam_rejects_every_direct_arithmetic_identity_with_issue_1306() {
+        let ops = [
+            RiscOp::Sub,
+            RiscOp::MaxElem,
+            RiscOp::MinElem,
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Max,
+                operand: ExtremaOperand::Left,
+            },
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Min,
+                operand: ExtremaOperand::Right,
+            },
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Sub,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::MinElem,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+        ];
+
+        for op in ops {
+            let dag = direct_arithmetic_dag(op);
+            let error = reject_unsupported_metal_ops(&dag)
+                .expect_err("Metal must reject every unimplemented direct arithmetic identity");
+            let message = &error.errors[0].message;
+            assert!(message.contains("unimplemented chelis#1306:"), "{message}");
+        }
+    }
+
+    #[test]
+    fn metal_seam_accepts_dedicated_relu() {
+        for op in [RiscOp::Relu, RiscOp::ReluAdjoint] {
+            reject_unsupported_metal_ops(&direct_arithmetic_dag(op))
+                .expect("Metal ReLU must reach the typed kernel");
+        }
+    }
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     guard_count_for_device(dag, "hip")?;
     for node in dag.nodes() {
+        let fused_direct_ops = match &node.op {
+            RiscOp::FusedElem { ops } => Some(ops),
+            _ => None,
+        };
+        let has_direct_sub = matches!(node.op, RiscOp::Sub)
+            || fused_direct_ops
+                .is_some_and(|ops| ops.iter().any(|step| matches!(step.op, FusedStepOp::Sub)));
+        let has_direct_arithmetic = matches!(
+            node.op,
+            RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem | RiscOp::ExtremaAdjoint { .. }
+        ) || fused_direct_ops.is_some_and(|ops| {
+            ops.iter().any(|step| {
+                matches!(
+                    step.op,
+                    FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                )
+            })
+        });
+
+        if has_direct_sub && node.output_type.precision.is_integer() {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target hip` cannot execute checked `{}` subtraction at lowered node {} without a device numeric-trap channel; use `--target c`",
+                    node.output_type.precision.name(),
+                    node.id.0
+                ),
+                "hip",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "checked signed-integer subtraction needs an exact HIP overflow-trap channel; the C target implements this cell"
+                ),
+            ));
+        }
+        if has_direct_arithmetic
+            && matches!(
+                node.output_type.precision,
+                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
+            )
+        {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target hip` does not yet support exact `{}` direct arithmetic at lowered node {}",
+                    node.output_type.precision.name(),
+                    node.id.0
+                ),
+                "hip",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented"
+                ),
+            ));
+        }
+
         match &node.op {
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
@@ -4479,6 +4796,19 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     chelis_types::deliberate_rejection!(
                         "[05-SHAPE-1]",
                         "runtime shape-value reads are intentionally excluded from the HIP device lane; use the C target"
+                    ),
+                ));
+            }
+            RiscOp::Expand { size, .. } if size.node_input().is_some() => {
+                return Err(unsupported_gate_error(
+                    format!(
+                        "runtime (node-valued) `expand` extent at lowered node {}",
+                        node.id.0
+                    ),
+                    "hip",
+                    chelis_types::unimplemented_rejection!(
+                        1298,
+                        "the HIP device scalar path for runtime movement bounds is not implemented; use `--target c`"
                     ),
                 ));
             }
@@ -4685,9 +5015,10 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
 
     // The shared gate follows the backend's exact dtype surface. f64 and
     // the integer family have typed kernel templates. bf16/f16 are narrower:
-    // storage and hipBLAS matmul are implemented, while an ordinary compute
-    // node would still reach the elementwise suffix rejection.
-    let narrow_float_admissible: HashSet<NodeId> = dag
+    // storage and hipBLAS matmul are implemented, and [05-OP-43]'s dedicated
+    // ReLU identities have exact raw-bit kernels. Other compute nodes would
+    // still reach an unsupported narrow-float path.
+    let narrow_float_admissible: UnordSet<NodeId> = dag
         .nodes()
         .iter()
         .filter(|node| {
@@ -4697,7 +5028,11 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             )
         })
         .filter_map(|node| match &node.op {
-            RiscOp::Load { .. } | RiscOp::Store { .. } | RiscOp::BlasMatmul { .. } => Some(node.id),
+            RiscOp::Load { .. }
+            | RiscOp::Store { .. }
+            | RiscOp::BlasMatmul { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint => Some(node.id),
             _ => None,
         })
         .collect();
@@ -4717,12 +5052,12 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     {
                         chelis_types::unimplemented_rejection!(
                             729,
-                            "`f16` is implemented only for HIP tensor load/store and `BlasMatmul` operands; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                            "`f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
                         )
                     } else {
                         chelis_types::unimplemented_rejection!(
                             729,
-                            "`bf16` is implemented only for HIP tensor load/store and `BlasMatmul` operands; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                            "`bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
                         )
                     };
                     return Err(unsupported_gate_error(
@@ -4742,8 +5077,9 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     format!(
                         "`chelis build --target hip` DAG path does not support tensor precision \
                          `{}` (node {}). Supported: f32/f64/bool plus the integer family \
-                         (int8/int16/int32/int64), with bf16/f16 admitted on matmul and \
-                         load/store nodes. See spec/04-type-system.md §5.7.1.",
+                         (int8/int16/int32/int64), with bf16/f16 admitted on matmul, \
+                         load/store, and dedicated ReLU nodes. See \
+                         spec/04-type-system.md §5.7.1.",
                         other.name(),
                         node.id.0,
                     ),
@@ -4817,16 +5153,62 @@ pub(crate) fn schema_stage_check(
     })
 }
 
-fn deep_span_to_schema(span: Option<chelis_deep::Span>) -> Option<Span> {
-    span.map(|span| Span {
+/// A Deep node span as a DIAGNOSTIC location (chelis#1395).
+///
+/// Always a `Range`: `chelis_deep::Span` carries both an offset and a length,
+/// so this producer never has to report a bare coordinate. The AST wire types
+/// keep their own converter, `span`, because their spans are structurally
+/// ranges and stay on `Span`.
+fn deep_span_to_diagnostic(span: Option<chelis_deep::Span>) -> Option<DiagnosticSpan> {
+    span.map(|span| DiagnosticSpan::Range {
         offset: span.offset,
         len: span.len,
     })
 }
 
-fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) -> Option<Span> {
+/// The byte offset a Surf lexer error carries.
+///
+/// Exhaustive by construction rather than a catch-all: a new `LexError`
+/// variant stops this compiling until its coordinate is chosen, which is what
+/// the previous `return None` arm silently avoided (chelis#1395). Every
+/// variant carries one, so the return type is `usize`, not `Option`.
+fn surf_lex_error_offset(err: &chelis_surf::lexer::LexError) -> usize {
+    use chelis_surf::lexer::LexError as Lex;
+    match err {
+        Lex::UnterminatedString { offset }
+        | Lex::InvalidEscape { offset, .. }
+        | Lex::UnescapedControl { offset, .. }
+        | Lex::InvalidNumber { offset, .. }
+        | Lex::UnexpectedChar { offset, .. }
+        | Lex::ReservedForFuture { offset, .. }
+        | Lex::UnterminatedBlockComment { offset }
+        | Lex::DeferredSuffix { offset, .. }
+        | Lex::UnsignedSuffix { offset, .. }
+        | Lex::IntegerSuffixOnFloat { offset, .. }
+        | Lex::HexFloatSuffix { offset, .. }
+        | Lex::UnknownSuffix { offset, .. } => *offset,
+    }
+}
+
+/// The byte offset a Deep lexer error carries. See `surf_lex_error_offset`.
+fn deep_lex_error_offset(err: &chelis_deep::lexer::LexError) -> usize {
+    use chelis_deep::lexer::LexError as Lex;
+    match err {
+        Lex::UnterminatedString { offset }
+        | Lex::InvalidEscape { offset, .. }
+        | Lex::InvalidNumber { offset, .. }
+        | Lex::UnexpectedChar { offset, .. }
+        | Lex::DeferredSuffix { offset, .. }
+        | Lex::UnsignedSuffix { offset, .. }
+        | Lex::IntegerSuffixOnFloat { offset, .. }
+        | Lex::HexFloatSuffix { offset, .. }
+        | Lex::UnknownSuffix { offset, .. } => *offset,
+    }
+}
+
+fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) -> DiagnosticSpan {
     let offset = match err {
-        chelis_surf::parser::ParseError::Lex(_) => return None,
+        chelis_surf::parser::ParseError::Lex(lex) => surf_lex_error_offset(lex),
         chelis_surf::parser::ParseError::UnexpectedEof => source.len(),
         chelis_surf::parser::ParseError::Expected { offset, .. }
         | chelis_surf::parser::ParseError::ReservedWordBinding { offset, .. }
@@ -4839,52 +5221,29 @@ fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) ->
             offset, ..
         } => *offset,
     };
-    Some(Span { offset, len: 0 })
+    DiagnosticSpan::Point { offset }
 }
 
-fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> {
+fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpan {
     let offset = match err {
-        chelis_deep::parser::ParseError::Lex(_) => return None,
+        chelis_deep::parser::ParseError::Lex(lex) => deep_lex_error_offset(lex),
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
         | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
     };
-    Some(Span { offset, len: 0 })
+    DiagnosticSpan::Point { offset }
 }
 
+/// Project a check diagnostic onto the wire carrier.
+///
+/// chelis#886 consolidated this with the CLI report's producer: there were
+/// two independent 24-arm projections of the same type onto the same
+/// carrier, which is the drift the issue exists to remove. The one
+/// implementation lives beside `Diagnostic`; this keeps the name its callers
+/// already use.
 pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
-    let kind = match error.kind {
-        CheckErrorKind::TypeMismatch => GeneralKind::TypeMismatch,
-        CheckErrorKind::PrecisionMismatch => GeneralKind::PrecisionMismatch,
-        CheckErrorKind::DimensionMismatch => GeneralKind::DimensionMismatch,
-        CheckErrorKind::ArityMismatch => GeneralKind::ArityMismatch,
-        CheckErrorKind::UnboundVariable => GeneralKind::UnboundVariable,
-        CheckErrorKind::UnknownConstructor => GeneralKind::UnknownConstructor,
-        CheckErrorKind::NotAFunction => GeneralKind::NotAFunction,
-        CheckErrorKind::NonExhaustiveMatch => GeneralKind::NonExhaustiveMatch,
-        CheckErrorKind::OccursCheck => GeneralKind::OccursCheck,
-        CheckErrorKind::CastNonTensor => GeneralKind::CastNonTensor,
-        CheckErrorKind::TupleIndexOutOfBounds => GeneralKind::TupleIndexOutOfBounds,
-        CheckErrorKind::UseAfterConsume => GeneralKind::UseAfterConsume,
-        CheckErrorKind::UnconsumedLinear => GeneralKind::UnconsumedLinear,
-        CheckErrorKind::InvalidBorrow => GeneralKind::InvalidBorrow,
-        CheckErrorKind::CycleDetected => GeneralKind::CycleDetected,
-        CheckErrorKind::UnsupportedTensorPrecision => GeneralKind::UnsupportedTensorPrecision,
-        CheckErrorKind::DuplicateDefinition => GeneralKind::DuplicateDefinition,
-        CheckErrorKind::DuplicateModule => GeneralKind::DuplicateModule,
-        CheckErrorKind::OpaqueTypeViolation => GeneralKind::OpaqueTypeViolation,
-        CheckErrorKind::ReservedLinkerName => GeneralKind::ReservedLinkerName,
-        CheckErrorKind::BuiltinShadowing => GeneralKind::BuiltinShadowing,
-        CheckErrorKind::UnknownForm => GeneralKind::UnknownForm,
-        CheckErrorKind::MalformedForm => GeneralKind::MalformedForm,
-        CheckErrorKind::Other => GeneralKind::CheckOther,
-    };
-    let mut diagnostic = Diagnostic::general(kind, error.message.clone(), error.severity);
-    diagnostic.expected = error.expected.clone();
-    diagnostic.got = error.got.clone();
-    diagnostic.suggestions = error.suggestions.clone();
-    diagnostic
+    Diagnostic::from_check_error(error)
 }
 
 fn span(span: chelis_deep::Span) -> Span {
@@ -4968,7 +5327,7 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         },
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             body,
@@ -4976,7 +5335,13 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             ..
         } => WireSurfDecl::FunDef {
             name: name.clone(),
-            dim_params: dim_params.clone(),
+            type_binders: type_binders
+                .iter()
+                .map(|binder| crate::schema::WireTypeBinder {
+                    name: binder.name.clone(),
+                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                })
+                .collect(),
             params: params.iter().map(wire_param).collect(),
             ret_ty: ret_ty.as_ref().map(wire_type_expr),
             body: wire_expr(body),
@@ -5363,6 +5728,10 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
             name: name.clone(),
             span: span(*s),
         },
+        TypeExpr::DimensionLiteral(value, s) => WireSurfTypeExpr::DimensionLiteral {
+            digits: value.to_string(),
+            span: span(*s),
+        },
         TypeExpr::Tensor(dims, precision, s) => WireSurfTypeExpr::Tensor {
             dims: dims.iter().map(wire_type_expr).collect(),
             precision: precision.clone(),
@@ -5558,18 +5927,39 @@ fn wire_bound(b: &RtDim) -> WireRtDim {
         RtDim::ToEnd => WireRtDim::ToEnd,
         RtDim::Node(i) => WireRtDim::Node { input: *i },
         RtDim::Sym(name) => WireRtDim::Sym { name: name.clone() },
+        RtDim::InputAxis {
+            tensor,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRtDim::InputAxis {
+            tensor: *tensor,
+            axis: WireRtAxis::Lit { value: *axis },
+        },
     }
 }
 
 fn wire_op(op: &RiscOp) -> WireRiscOp {
     match op {
         RiscOp::Add => WireRiscOp::Add,
+        RiscOp::Sub => WireRiscOp::Sub,
         RiscOp::Mul => WireRiscOp::Mul,
         RiscOp::Div => WireRiscOp::Div,
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
         RiscOp::CmpLt => WireRiscOp::CmpLt,
         RiscOp::MaxElem => WireRiscOp::MaxElem,
+        RiscOp::MinElem => WireRiscOp::MinElem,
+        RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {
+            extrema: match kind {
+                ExtremaKind::Max => WireExtremaKind::Max,
+                ExtremaKind::Min => WireExtremaKind::Min,
+            },
+            operand: match operand {
+                ExtremaOperand::Left => WireExtremaOperand::Left,
+                ExtremaOperand::Right => WireExtremaOperand::Right,
+            },
+        },
+        RiscOp::Relu => WireRiscOp::Relu,
+        RiscOp::ReluAdjoint => WireRiscOp::ReluAdjoint,
         RiscOp::Neg => WireRiscOp::Neg,
         RiscOp::Recip => WireRiscOp::Recip,
         RiscOp::Exp => WireRiscOp::Exp,
@@ -5636,7 +6026,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Permute { axes } => WireRiscOp::Permute { axes: axes.clone() },
         RiscOp::Expand { axis, size } => WireRiscOp::Expand {
             axis: *axis,
-            size: size.to_string(),
+            size: wire_bound(size),
         },
         RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
@@ -5679,11 +6069,13 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 .map(|step| WireFusedStep {
                     op: match step.op {
                         FusedStepOp::Add => WireFusedStepOp::Add,
+                        FusedStepOp::Sub => WireFusedStepOp::Sub,
                         FusedStepOp::Mul => WireFusedStepOp::Mul,
                         FusedStepOp::Div => WireFusedStepOp::Div,
                         FusedStepOp::FloorDiv => WireFusedStepOp::FloorDiv,
                         FusedStepOp::TruncDiv => WireFusedStepOp::TruncDiv,
                         FusedStepOp::MaxElem => WireFusedStepOp::MaxElem,
+                        FusedStepOp::MinElem => WireFusedStepOp::MinElem,
                         FusedStepOp::CmpLt => WireFusedStepOp::CmpLt,
                         FusedStepOp::Neg => WireFusedStepOp::Neg,
                         FusedStepOp::Recip => WireFusedStepOp::Recip,
@@ -5742,6 +6134,61 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    /// chelis#1395 [04-FIT-16]: a lexer error carries a byte offset, so the
+    /// carrier transports it.
+    ///
+    /// Both languages previously matched `ParseError::Lex(_) => return None`,
+    /// discarding a coordinate the producer held -- the exact loss the tagged
+    /// carrier exists to stop, left in place at the one producer that cannot
+    /// reach the parser to be given a span.
+    #[test]
+    fn a_surf_lex_error_retains_its_point() {
+        let source = "x=\"unterminated";
+        let error = chelis_surf::parser::parse_str(source)
+            .expect_err("an unterminated string is a lex error");
+        assert!(
+            matches!(error, chelis_surf::parser::ParseError::Lex(_)),
+            "fixture must reach the lexer arm, got: {error:?}"
+        );
+        let span = parse_error_span_surf(source, &error);
+        assert_eq!(
+            span.extent(),
+            None,
+            "a lexer coordinate is a point, not a measured range"
+        );
+        assert_eq!(
+            span,
+            DiagnosticSpan::Point {
+                offset: source.find('"').expect("the fixture has a quote"),
+            },
+            "the point must be the offset the lexer reported"
+        );
+    }
+
+    /// The Deep half of the same omission. Kept as a separate test because the
+    /// two languages have separate `LexError` enums and separate projections;
+    /// one passing proved nothing about the other.
+    #[test]
+    fn a_deep_lex_error_retains_its_point() {
+        let source = "(x \"unterminated";
+        // `parse_raw_str` is the lex-then-parse entry; the stamped entries
+        // wrap the same `ParseError` in `StampOrParseError`.
+        let error = chelis_deep::parser::parse_raw_str(source)
+            .expect_err("an unterminated string is a lex error");
+        assert!(
+            matches!(error, chelis_deep::parser::ParseError::Lex(_)),
+            "fixture must reach the lexer arm, got: {error:?}"
+        );
+        let span = parse_error_span_deep(&error);
+        assert_eq!(span.extent(), None);
+        assert_eq!(
+            span,
+            DiagnosticSpan::Point {
+                offset: source.find('"').expect("the fixture has a quote"),
+            }
+        );
+    }
 
     #[test]
     fn decompile_maps_resugaring_rejection_to_the_validation_kind() {
@@ -5910,6 +6357,160 @@ mod tests {
         }
     }
 
+    fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_types::types::Prim) -> Dag {
+        let mut dag = Dag::new();
+        let lhs = dag.add_node(
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let gradient = dag.add_node(
+            RiscOp::Load {
+                name: "gradient".into(),
+            },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let inputs = match op {
+            RiscOp::Relu => vec![lhs],
+            RiscOp::ReluAdjoint => vec![lhs, gradient],
+            RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
+            _ => vec![lhs, rhs],
+        };
+        let result = dag.add_node(op, inputs, tensor_type(vec![4], precision), None);
+        dag.add_root(result);
+        dag
+    }
+
+    #[test]
+    fn hip_seam_accepts_supported_direct_arithmetic_cells() {
+        for precision in [
+            chelis_types::types::Prim::F32,
+            chelis_types::types::Prim::F64,
+        ] {
+            for op in [
+                RiscOp::Sub,
+                RiscOp::MaxElem,
+                RiscOp::MinElem,
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Max,
+                    operand: ExtremaOperand::Left,
+                },
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Min,
+                    operand: ExtremaOperand::Right,
+                },
+                RiscOp::Relu,
+                RiscOp::ReluAdjoint,
+            ] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP f32/f64 direct arithmetic must reach implemented codegen");
+            }
+        }
+
+        for precision in [
+            chelis_types::types::Prim::F32,
+            chelis_types::types::Prim::F64,
+            chelis_types::types::Prim::F16,
+            chelis_types::types::Prim::Bf16,
+        ] {
+            for op in [RiscOp::Relu, RiscOp::ReluAdjoint] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP ReLU must reach the typed kernel at every float width");
+            }
+        }
+
+        for precision in [
+            chelis_types::types::Prim::Int8,
+            chelis_types::types::Prim::Int16,
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::Int64,
+        ] {
+            for op in [RiscOp::MaxElem, RiscOp::MinElem] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP signed-integer extrema must reach implemented codegen");
+            }
+        }
+    }
+
+    #[test]
+    fn hip_seam_rejects_unimplemented_direct_arithmetic_cells_with_issue_1306() {
+        for precision in [
+            chelis_types::types::Prim::Int8,
+            chelis_types::types::Prim::Int16,
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::Int64,
+        ] {
+            let error =
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
+                    .expect_err("HIP integer subtraction needs a device trap channel");
+            assert!(
+                error.errors[0]
+                    .message
+                    .contains("unimplemented chelis#1306:"),
+                "{}",
+                error.errors[0].message
+            );
+        }
+
+        for precision in [
+            chelis_types::types::Prim::F16,
+            chelis_types::types::Prim::Bf16,
+        ] {
+            for op in [
+                RiscOp::Sub,
+                RiscOp::MaxElem,
+                RiscOp::MinElem,
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Max,
+                    operand: ExtremaOperand::Left,
+                },
+            ] {
+                let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect_err("HIP narrow-float direct arithmetic is not implemented");
+                assert!(
+                    error.errors[0]
+                        .message
+                        .contains("unimplemented chelis#1306:"),
+                    "{}",
+                    error.errors[0].message
+                );
+            }
+        }
+
+        let fused_sub = RiscOp::FusedElem {
+            ops: vec![chelis_ir::dag::FusedStep {
+                op: FusedStepOp::Sub,
+                input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+            }],
+        };
+        for precision in [
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::F16,
+        ] {
+            let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
+                fused_sub.clone(),
+                precision,
+            ))
+            .expect_err("fused subtraction inherits the direct target disposition");
+            assert!(
+                error.errors[0]
+                    .message
+                    .contains("unimplemented chelis#1306:"),
+                "{}",
+                error.errors[0].message
+            );
+        }
+    }
+
     #[test]
     fn hip_sparse_gather_is_supported_with_integer_indices() {
         let mut dag = Dag::new();
@@ -5964,6 +6565,81 @@ mod tests {
             message.contains("count") && message.contains("--target c"),
             "{message}"
         );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
+
+    #[test]
+    fn hip_seam_accepts_input_axis_expand_extent() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::F32),
+            None,
+        );
+        let witness = dag.add_node(
+            RiscOp::Load {
+                name: "witness".into(),
+            },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: chelis_ir::dag::RtAxis::Lit(0),
+                },
+            },
+            vec![value, witness],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+
+        reject_unsupported_hip_ops(&dag)
+            .expect("InputAxis is a metadata read implemented by HIP expand codegen");
+    }
+
+    #[test]
+    fn hip_seam_rejects_node_valued_expand_with_issue_1298_receipt() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::F32),
+            None,
+        );
+        let size = dag.add_node(
+            RiscOp::Load {
+                name: "size".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::Int64),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            vec![value, size],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+
+        let error = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject a device scalar expand extent");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1298:"), "{message}");
         assert_eq!(
             error.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature

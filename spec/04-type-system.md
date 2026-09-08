@@ -335,6 +335,9 @@ Last child is the precision type (must be a numeric `t-prim`). All preceding chi
 ;; List (tensor[batch, f32])
 (t-adt {} List (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 
+;; Column with a concrete extent argument
+(t-adt {} Column (d-lit {} 3))
+
 ;; No type arguments
 (t-adt {} Activation)
 ```
@@ -409,6 +412,34 @@ reannotation, and linearity annotation.
 > one concrete tensor extent, rank, precision, or stored ADT argument cannot
 > constrain a later use in the same consuming module.
 
+### 2.3.2 Nominal parameter kinds and applications
+
+> **[04-ADT-3]** Every parameter of a `deftype` or `typealias` SHALL have one
+> checker-owned kind, `Type` or `Dimension`, fixed for the whole check unit
+> before any declaration body is resolved. A parameter has `Dimension` kind
+> exactly when it has at least one use in a dimension slot and no use in a
+> type slot. A tensor axis is a dimension slot; other type-expression
+> positions are type slots. A nominal argument position inherits the target
+> header's corresponding kind. This inheritance is the least fixed point over
+> all source headers, including forward, recursive, mutually recursive, and
+> alias-mediated references. An unused parameter defaults to `Type`. A
+> parameter used in both kinds is a type error; an implementation SHALL NOT
+> choose one occurrence, create independent variables, or reinterpret either
+> occurrence as an inference wildcard.
+
+> **[04-ADT-4]** A nominal application SHALL have the target header's exact
+> arity and SHALL match every parameter kind positionally. A `Type` parameter
+> accepts only a type argument. A `Dimension` parameter accepts one dimension
+> (`d-name`, `d-var`, or `d-lit`) and does not accept a type or rank spread.
+> Consequently, a Surf integer argument such as `Column[3]` denotes the exact
+> literal dimension `(d-lit {} 3)`, while `Option[3]` is a type error. The
+> dimension argument participates in ordinary dimension substitution and
+> unification through constructors, aliases, signatures, records, matches,
+> evaluation, and lowering. Unequal literal extents are a
+> `DimensionMismatch`; an implementation SHALL NOT erase, freshen, or
+> wildcard the argument before checking. Type aliases substitute type and
+> dimension parameters transparently and preserve the same rule.
+
 ### 2.4 Exhaustive Pattern Matching
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
@@ -418,6 +449,33 @@ A top-level irrefutable arm covers the match: a bare variable pattern
 (`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm level
 only; a variable pattern NESTED inside a constructor or record pattern
 does not cover the other variants.
+
+Coverage is a separate question from whether a pattern is admissible at the
+scrutinee type at all.
+
+> **[04-PAT-1]** A literal pattern is a typing constraint on the scrutinee, at
+> every depth a pattern may occur. Its value atom SHALL agree with the
+> scrutinee's primitive type under [04-LIT-1]'s closed pairing: an integer atom
+> matches only an integer primitive, a float atom only a float primitive, a
+> boolean atom only `bool`, and a string atom only `string`. [04-LIT-1]'s one
+> cross-family form, an Int atom marked `literal_source: integer` under a float
+> primitive, requires `lit` metadata that a `pat-lit` cannot carry and therefore
+> does not arise in pattern position. A literal pattern SHALL NOT be admitted
+> against a non-primitive scrutinee: a tensor, nominal, tuple, record, or
+> function scrutinee admits no literal pattern. A numeric literal pattern whose
+> value lies outside the range of the scrutinee's primitive type SHALL be
+> rejected, under the same range rule §5.3 and §5.6 apply to a literal bound at
+> that type; a float primitive has no such range, because finalization at a
+> float width is total under [04-NUM-1]. Each violation SHALL be a
+> `TypeMismatch` located at the offending pattern, at every checker ingress and
+> before any evaluation or lowering lane runs; an implementation SHALL NOT admit
+> the arm as merely unreachable, drop it, or defer the diagnostic to a lane. A
+> literal pattern selects no width: a Deep `pat-lit` carries only its raw value,
+> with no precision slot and no admissible suffix
+> (`spec/03-deep-syntax.md` §6.4, `spec/02-surf-syntax.md` §P10a), so an
+> unsuffixed integer pattern is admissible against every integer primitive and
+> an unsuffixed float pattern against every float primitive, and §5.3's literal
+> default does not apply in pattern position.
 
 ### 2.5 Opaque Types
 
@@ -691,8 +749,9 @@ Standard Algorithm W with extensions for tensor types. The flow:
 
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for
-one builtin. In particular, a `matmul`, reduction, `expand`, `layer_norm`,
-`conv2d`, or `scatter_elements` reached through a bare lambda parameter is
+one builtin. In particular, a `matmul`, reduction, `expand`, `insert`,
+`layer_norm`, `conv2d`, or `scatter_elements` reached through a bare lambda
+parameter is
 checked again after the parameter binds. The check used on replay is the
 operation's ordinary typing rule, so immediate and deferred applications
 cannot acquire different semantics.
@@ -729,6 +788,113 @@ recursive binding group, whether the recursion is direct or mutual.
 > is lane-uniform: because the rejection happens at check time, the eval, C,
 > HIP, and Metal paths reject an offending program identically, before any
 > lane-specific stage runs.
+
+#### 3.1.2 Top-level value scope
+
+> **[04-INF-4]** A top-level non-function `def` SHALL become visible only after
+> its declaration in its exact declaration namespace. A reference to that
+> value from an earlier declaration is a type error reported as
+> `UnboundVariable`, whichever checker entry receives the program; body-type
+> metadata SHALL NOT make that later value visible. A reference to an
+> earlier value SHALL resolve, whether it occurs in a value's initializer or
+> in a function body. An explicitly typed self-reference, spelled either
+> `x: T = x` or `x = (x : T)`, declares an external input rather than reading
+> an eager value; its type is available only while checking its own
+> declaration, and the binding becomes visible to later declarations
+> afterward. The untyped spelling `x = x` is an ordinary eager self-reference
+> and is not an external input declaration. Local `let` bindings are
+> sequential per `spec/03-deep-syntax.md` §6.2. Function recursion and
+> inference groups remain governed by [04-INF-2] and [04-INF-3], and an eager
+> value cycle remains a type error reported as `CycleDetected`.
+
+#### 3.1.3 Signature holes and authored binders
+
+A signature's type expression can carry two kinds of variable. A wildcard,
+`(t-var {} _)` or its dimension and rank spellings, is an inference hole
+(`spec/03-deep-syntax.md` §2.5); the desugarer synthesizes one for every
+omitted parameter or result annotation of a `def` that carries at least one
+annotation (`spec/02-surf-syntax.md` §5.2). A named type variable is a
+binder: it is listed in the declaration's binder list, or §5.8.1 quantifies
+it implicitly. The two are different objects and the checker treats them
+differently.
+
+> **[04-INF-5]** A wildcard slot in a declaration's signature, whether
+> written or synthesized for an omitted annotation, is an inference hole and
+> not a type binder. It SHALL NOT be quantified, and it confers no type on
+> the declaration: the declaration's type at that slot is the type its body
+> determines, generalized together with the body under §3.1. Every reference
+> to the declaration SHALL be typed at that body-determined signature,
+> whichever checker entry receives the program and wherever the reference
+> sits relative to the declaration, so no reference can observe the hole
+> before the body has filled it. A reference whose use disagrees with the
+> body-determined slot is a type error at the reference; a body is never
+> narrowed to satisfy a reference. Inside a group of declarations inferred
+> as one unit, whether a recursive binding group of §3.1.1 or a component
+> that the reference graph closes through a top-level value, an in-group
+> reference is typed at the member's provisional monomorphic type, as
+> [04-INF-2] provides for a recursive call.
+
+> **[04-INF-6]** An authored type variable of a declaration's signature,
+> whether listed in its binder list or introduced by §5.8.1's implicit
+> quantification, is a universally quantified binder and is rigid within the
+> declaration's body: the body SHALL type-check for every admissible
+> instantiation of the binder. A body constraint that identifies an authored
+> binder with a concrete type, with another authored binder of the same
+> signature, or with a type containing either is a type error reported at
+> the declaration, and the declaration's scheme is its declared signature,
+> never a narrowing of it. A wildcard slot that the body resolves to an
+> authored binder takes that binder's type. A dtype-family bound
+> ([04-DTYPE-2]) restricts the admissible instantiations without making the
+> binder concrete. The dimension parameter rule of §4.4 is this rule for
+> dimension binders.
+
+An unsuffixed literal binds at its default primitive type
+(`spec/02-surf-syntax.md` §P10), so `lt(x, 0.0)` with `x: p` identifies the
+binder `p` with `f32` and is rejected under [04-INF-6]; the polymorphic
+spelling is the `cast(0.0, p)` override that §P10 names.
+
+#### 3.1.4 Eager initialization references
+
+> **[04-INF-7]** The eager reference set of a top-level eager value is the
+> least set that contains every free reference in the value's initializer,
+> including a reference inside a lambda body nested anywhere in the
+> initializer, and, for every top-level `def` whose name is in the set,
+> every free reference in that `def` (a function's body or a value's
+> initializer), likewise including references inside nested lambda bodies.
+> For this rule and for [04-INF-4], a top-level `def` whose initializer is
+> a lambda expression is a function declaration, not an eager value. A
+> reference is free when
+> it names a top-level declaration rather than a parameter, `let` binding,
+> or pattern binder in scope at the reference. The eager value cycle that
+> [04-INF-4] reports as `CycleDetected` exists exactly when the value's own
+> name occurs in its eager reference set, as a read or as an application,
+> other than as the value's own explicitly typed self-reference. The set is
+> a syntactic over-approximation: a lambda or a function value that reaches
+> an initializer is treated as applied during that initialization whether
+> or not the receiving callee applies it. The rule depends only on the
+> program's declarations, never on the checker entry that receives the
+> program or on the order in which declaration bodies are inferred.
+
+A program rejected only by the over-approximation, one whose initializer
+stores a function value that reads the initialized binding and that no
+initializer ever applies, is written so the function receives that value as
+an argument instead of reading the top-level binding.
+
+> **[04-INF-8]** For a top-level eager value `V`, every non-function
+> top-level value in `V`'s eager reference set ([04-INF-7]) SHALL be available
+> before `V`'s declaration. If `V` itself does not occur in the set, a member
+> declared later than `V` is a type error reported as `UnboundVariable`, naming
+> both `V` and the later value, whichever checker entry receives the program
+> and before evaluation or lowering begins. The comparison is against `V`'s
+> source position, not the position of a function or nested lambda that
+> contains the textual reference. If `V` itself occurs in the set,
+> [04-INF-7]'s `CycleDetected` verdict takes precedence. Function declarations
+> and recursive function groups remain
+> governed by [04-INF-2] and [04-INF-3]; a forward function reference is legal
+> when every non-function value in its eager closure is already available to
+> the initiating eager value. Values imported from an already-checked library
+> are available before the current unit and do not participate in this
+> source-position comparison.
 
 ### 3.2 Inference Rules
 
@@ -789,6 +955,11 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
     Γ ⊢ (match {} e arm₁ ... armₙ) : τᵣ
 ```
 
+`bindings(p, τₛ)` is defined only when `p` is admissible at the scrutinee type
+`τₛ`. An inadmissible pattern is a type error at its own arm, not an arm that
+contributes no bindings. A `pat-lit` binds nothing and contributes exactly one
+constraint on `τₛ`, which [04-PAT-1] states.
+
 **Pipe:**
 ```
     Γ ⊢ e₁ : τ₁
@@ -842,14 +1013,14 @@ Tensor operations require strict dimension matching. Two dimension lists are com
 
 ### 4.2 No Broadcasting
 
-Chelis does NOT support implicit broadcasting. All rank and dimension manipulation must be explicit via `expand`, `reshape`, `permute`.
+Chelis does NOT support implicit broadcasting. All rank and dimension manipulation must be explicit via `insert`, `expand`, `reshape`, `permute`.
 
 ```scheme
 ;; WRONG: dimensions don't match
 ;; tensor[batch, hidden, f32] + tensor[hidden, f32]  →  TYPE ERROR
 
-;; CORRECT: explicit expand
-;; tensor[batch, hidden, f32] + expand(tensor[hidden, f32], [batch, hidden])
+;; CORRECT: explicit insert
+;; tensor[batch, hidden, f32] + insert(tensor[hidden, f32], 0, batch)
 ```
 
 Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named dimensions + no broadcasting means the type checker catches transposition bugs, broadcasting bugs, and shape mismatches at compile time.
@@ -876,7 +1047,8 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 | `einsum(equation, left, right, accumulator=a)` | two `tensor[..., p]` operands | `tensor[D_output, sum_result(p,a)]` | Explicit output labels define `D_output`; [05-OP-33] owns label/extent legality |
 | `reshape(x, shape)` | `tensor[D_old, p]` | `tensor[D_new, p]` | Product of dims must match. New dims are `d-lit` or `d-name` (user-specified) |
 | `permute(x, axes)` | `tensor[d₁,...,dₙ, p]` | `tensor[d_{axes[0]},...,d_{axes[n-1]}, p]` | Reorder dimensions |
-| `expand(x, shape)` | `tensor[D_small, p]` | `tensor[D_large, p]` | Add dimensions. Each new dim is explicit. |
+| `expand(x, axis, size)` | `tensor[D, p]` | `tensor[D', p]` | Set the size-1 dimension at `axis` to `size`; rank unchanged |
+| `insert(x, axis, size)` | `tensor[D, p]` | `tensor[D_plus, p]` | Add one dimension of extent `size` at `axis`; rank increases by one |
 | `pad(x, ...)` | `tensor[D, p]` | `tensor[D', p]` | Padded dimensions get new sizes (d-lit) |
 | `cast(x, new_p)` | `tensor[D, p]` | `tensor[D, new_p]` | Dimensions preserved, precision changes |
 
@@ -1199,25 +1371,25 @@ most-general unifier:
   position (e.g. a reduction's `tensor[..pre, ..post]` result), which is only
   ever matched against an identical row or expanded after its spreads are bound.
 
-**Named-axis expand (`R+1`).** The inverse arithmetic direction: `expand`
-inserts a *named* axis in a rank-polymorphic way when its axis argument is a
+**Named-axis insert (`R+1`).** The inverse arithmetic direction: `insert`
+adds a *named* axis in a rank-polymorphic way when its axis argument is a
 dimension name rather than an integer. Two call forms are admitted:
 
 ```chelis
 ;; insert a trailing named axis (the new axis goes after every existing axis):
-;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)
+;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = insert(x, one, 1)
 ;; insert immediately BEFORE an existing named anchor (4-arg form):
 ;; def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
-;;   = expand(x, c, 5, seq)
+;;   = insert(x, c, 5, seq)
 ```
 
-- `expand(x, new, size)` — `new` is a bare dimension name: insert a new
+- `insert(x, new, size)` — `new` is a bare dimension name: add a new
   **trailing** axis named `new` with extent `size`. The symbolic output is the
   operand's row form with `new` appended.
-- `expand(x, new, size, anchor)` — additionally name an **anchor**, an existing
+- `insert(x, new, size, anchor)` — additionally name an **anchor**, an existing
   named axis of the operand; the new axis is inserted immediately *before* the
   anchor. Leading-end insertion is expressible exactly when the row begins with
-  a named anchor (`tensor[first, ..rest]` + `expand(x, c, k, first)`); a row
+  a named anchor (`tensor[first, ..rest]` + `insert(x, c, k, first)`); a row
   that begins with a spread has no leading anchor and admits trailing or
   anchored insertion only.
 
@@ -1247,7 +1419,7 @@ The inserted axis is a *named* dim: declared result types refer to it by name
 (`tensor[..rest, one, f32]`). A bare identifier in the axis slot is read as a
 dimension name only when it is **not bound in the value environment**: a bound
 `int32` variable is a runtime value and keeps the static-axis rule:
-`expand(x, ax, 4i64)` with `ax: int32` is an error, never a trailing insert
+`insert(x, ax, 4i64)` with `ax: int32` is an error, never a trailing insert
 of an axis named `ax`. The `size` argument is any expression of exactly type
 `int64`. A static negative value is a type error; a runtime negative value
 traps `Domain`. The inserted named dimension carries the executed extent. A
@@ -1261,7 +1433,7 @@ anchored → the anchor's index), mirroring named-axis reduction.
 sequences — never unordered "rows"); the reduced axis is a retained name; and a
 rank-poly def body is restricted by the §4.2 Body-Discipline check to
 *name-trackable* operations only — shape-identity (elementwise) ops,
-named-axis reductions, and named-axis expand. A *positional* shape-rewriter
+named-axis reductions, and named-axis insert. A *positional* shape-rewriter
 (`permute`, `reshape`, `matmul`, positional `gather`) is rejected inside a
 `..r` body: its output shape is not name-trackable at symbolic rank, so it
 could hide an untracked transposition. For the name-tracked ops the procedural
@@ -1337,12 +1509,14 @@ built-ins are:
   `int64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` is any
   expression of exactly type `int32`. The result is a runtime scalar, not a
   symbolic dim reference.
-- `expand(x, axis, size)`: insert or set a dimension at position `axis`
-  with width `size`, where `size` is any expression of exactly type `int64`.
-  When `axis` is a dimension *name* instead of an integer, the call is the
-  named-axis expand form (§4.5.3): it inserts a new named axis at the trailing
-  end, or — with a fourth `anchor` argument — immediately before an existing
-  named axis.
+- `expand(x, axis, size)`: set the size-1 dimension at position `axis` to
+  width `size`, where `size` is any expression of exactly type `int64`. The
+  rank is unchanged.
+- `insert(x, axis, size)`: add a new dimension of width `size` at position
+  `axis`, where `size` is any expression of exactly type `int64`. When `axis`
+  is a dimension *name* instead of an integer, the call is the named-axis
+  insert form (§4.5.3): it adds a new named axis at the trailing end, or —
+  with a fourth `anchor` argument — immediately before an existing named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
   `shape_list`, a `List<int64>`; every element may be computed at runtime.
 - `reduce_window_*`: consume runtime `List[int64]` window and stride values
@@ -1353,8 +1527,49 @@ Static knowledge improves diagnostics and symbolic dimension propagation; it
 does not define a smaller executable language. A violation proven from
 literals is a type error. A constraint that depends on runtime values is
 checked before allocation or element access and traps `Domain` or `Overflow`
-under the owning operation's atom. Every execution mode observes the same
-values and traps.
+under the owning operation. Every execution mode observes the same values and
+traps.
+
+A runtime extent guard is the check that a declared, named, or otherwise
+claimed extent agrees with the value actually observed, or that a runtime
+extent is non-negative. Each guard is evaluated exactly once, after every
+value it compares is available and before the first allocation or element
+access whose shape depends on the guarded extent. A guard whose operands are
+all interface values (an input tensor's axis, a scalar parameter, or a
+literal) is evaluated at function entry, in declared signature order, before
+any other operation of the function runs. An entry that declares no signature
+orders those guards by its ABI input-slot order instead: the order in which
+the caller supplies that entry's inputs. Whatever rule assigns the slots, the
+guard order follows the assigned slots, and never a separate traversal by
+binding name, hash iteration, or node identity. A guard that compares a locally
+computed value (checked integer arithmetic, a user-function result, or an
+extent an operation computes) is evaluated after its producers and takes the
+source position of the operation that introduces the guarded extent: an
+independent effect or trap that precedes that operation in source order is
+observed first, and one that follows it is observed only if the guard passes.
+A `cast` takes the placement of the value it casts. Guards ready at the same
+source position are evaluated in declaration order. These constraints are the
+complete observable contract; a guard and an operation related by neither data
+dependence nor source order may be evaluated in either order.
+Every execution mode places guards by this rule.
+
+A runtime extent guard is a typed operation-precondition guard under
+[04-NUM-9] and is therefore itself the trap-producing primitive. A failing
+equality guard and a failing non-negativity guard both raise a `Domain` trap.
+Its `<op>` slot is the canonical name of the operation that introduces the
+guarded extent: for a guard whose operands are all interface values, the
+`load` primitive of the later witness in signature order
+(spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
+movement operation. Its `<prim>` slot is `int64`, because the result this
+guard finalizes is an extent ([05-DIM-1]) and not a tensor element. The
+complete user-facing line is therefore
+`numeric trap: domain in <op> at int64`, and [04-NUM-9] permits it no prefix
+and no suffix. Every lane SHALL also convey, on separate lines accompanying
+that trap, the names of the disagreeing sources, the axis, and the value
+observed for each; that requirement binds the information conveyed and not
+the bytes rendered, and the context is not part of the trap line. The failure
+is a value inside its lane under [04-NUM-10] and becomes a process failure
+only at that lane's boundary.
 
 For the movement primitives, symbolic-dim pass-through is
 **identity-only**: a `stride` axis with literal
@@ -1389,27 +1604,24 @@ type is not exactly `int32` is a type error; no width is inferred or coerced.
 The zero-cotangent and target-independent execution rules are [05-OP-7] and
 [05-SHAPE-1].
 
-#### 4.7.2 `expand` with a runtime size
+#### 4.7.2 `expand` and `insert` with a runtime size
 
-`expand(x, axis, size)` accepts any `int64` `size`. A literal produces a
-literal result extent; an in-scope symbolic dimension may preserve its name;
-and every other expression produces a fresh runtime extent. A static negative
-size is a type error. A runtime negative size traps `Domain` before allocation
-or access.
+`expand(x, axis, size)` and `insert(x, axis, size)` each accept any `int64`
+`size`. A literal produces a literal result extent; an in-scope symbolic
+dimension may preserve its name; and every other expression produces a fresh
+runtime extent. A static negative size is a type error. A runtime negative
+size traps `Domain` before allocation or access.
 
-For a positional three-argument call, a declared result tensor or the first
-shape-bearing consumer fixes which of the two shapes applies: a same-rank
-result replaces the extent at `axis`, while a result of rank `rank(x) + 1`
-inserts the new extent at `axis`. The result remains one monomorphic value
-while that choice is deferred; separate uses cannot choose different shapes
-for the same binding. If a shape-neutral consumer such as `cast` requires the
-tensor type before any shape-bearing context fixes it, an axis within the
-input rank selects the established same-rank replacement form. `axis ==
-rank(x)` has no replacement form and therefore selects trailing insertion.
-The same default is materialized when no consumer in the complete program
-fixes the shape. A reusable library context carries the unresolved choice to
-its downstream program rather than deciding it early. An axis greater than
-`rank(x)` is a type error.
+Each operation has exactly one result shape. `expand` sets the extent at
+`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`
+at `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer
+selects between shapes, and no context supplies a default. `expand` requires
+`axis` within `rank(x)` and an operand extent at `axis` of 1, which
+`spec/05-risc-primitives.md` §2.4.1 states as a claim: a literal operand
+extent other than 1 is a type error, and a symbolic or runtime one is checked
+by a §4.7 runtime extent guard. `insert` admits `axis` in `0..=rank(x)`, so
+`axis == rank(x)` appends a trailing axis. An axis outside its operation's
+range is a type error.
 
 When a declared or inferred result dimension claims a literal or named extent
 that is not statically proven equal to `size`, execution checks equality and
@@ -1443,6 +1655,18 @@ results, casts, and arbitrary checked integer arithmetic over literal,
 symbolic, or `shape`-derived values. Eval, C, HIP, and Metal execute the same
 graph and checks. A backend may optimize a proven constant but may not require
 one, infer provenance to narrow the language, or substitute a guessed extent.
+
+> **[04-SHAPE-1]** Any equality or ordering over tensor element counts or
+> storage capacities that an implementation uses to select, alias, or reuse a
+> buffer SHALL be sound over the exact mathematical values of the complete
+> typed extent expressions. An implementation MAY conservatively decline to
+> prove two capacities equal, but it SHALL NOT wrap, saturate, truncate, or
+> substitute an overflow sentinel that can make unequal mathematical counts
+> equal. Projection from the exact count into `int64`, `usize`, or a target
+> allocation-size domain SHALL be checked and SHALL fail before planning,
+> allocation, or element access when the value is outside that domain. This
+> rule applies to compiler analyses as well as runtime allocation paths; a
+> reuse decision is not exempt because no bytes have yet been touched.
 
 #### 4.7.5 Precision rule for `reshape`'s shape list
 
@@ -1861,7 +2085,11 @@ contextually:
 > precision slot of a `tensor[...]` type that match the sig's quantifier
 > list become `(t-var {} <name>)`, not `(t-prim {} <name>)`. Names
 > matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
-> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
+> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. The four short
+> integer names stay as `t-prim` BY MAPPING to their §1.1 primitives
+> (`i8` to `int8`, and likewise for `i16`, `i32` and `i64`), so
+> canonical Deep carries one spelling per primitive; they are accepted
+> Surf input spellings, not Deep ones. Outside a sig
 > (e.g., in a value-position type annotation), no quantifier exists,
 > so the existing rule applies.
 
@@ -1871,7 +2099,11 @@ the sig's type expression is treated as a `forall`-quantified type
 variable. The §1.1.2 unsigned aliases (`u8`, `u16`, `u32`, `u64`,
 `uint8`, `uint16`, `uint32`, `uint64`) are explicitly excluded so they
 reach the type-checker's §1.1.2 rejection path with a precise
-diagnostic, not silently absorbed as quantifiers.
+diagnostic, not silently absorbed as quantifiers. A dtype spelling that
+[04-DTYPE-1] rejects names no type variable in any type position: an
+explicit quantifier list does not rebind it, and it reaches that
+rejection wherever it appears, on the Deep carrier as well as the Surf
+one.
 
 The internal type representation carries this through `TensorPrec`:
 
@@ -1899,6 +2131,56 @@ boundary. The restrictions in §5.4 and §5.7.2 apply both to direct primitive
 calls and to a polymorphic call's instantiation. An inadmissible
 instantiation is a `PrecisionMismatch` at the call site with a citation to
 the governing section.
+
+### 5.9 Dtype-Family Bounds
+
+A declaration's type-binder list may constrain a binder to one **dtype
+family**: a named subset of the active primitive set of §1.1. There are three
+families.
+
+| family | members |
+|---|---|
+| `Float` | every active float dtype of §1.1 |
+| `Int` | every active signed integer dtype of §1.1 |
+| `Numeric` | the union of `Float` and `Int` |
+
+Membership follows §1.1's active set rather than an enumeration repeated here,
+so a dtype §1.1 admits into a family is admitted by every bound naming that
+family. The reserved spellings of §1.1.1 belong to no family. `bool` and
+`string` belong to no family.
+
+> **[04-DTYPE-2]** A type binder that declares a dtype-family bound SHALL
+> occupy type positions only and SHALL be instantiated only at an active
+> primitive of §1.1 belonging to that family. The bound is part of the
+> declaration's scheme rather than a property of one call: instantiation
+> installs it on each fresh variable, unification propagates it through every
+> variable the bounded variable is identified with, and generalization
+> re-quantifies it, so the bound survives aliases, wrappers, higher-order
+> values, imports, and recursive calls. Unifying two bounded variables SHALL
+> yield the intersection of their families. An instantiation outside the bound
+> SHALL be a `PrecisionMismatch` naming the required family and the offending
+> type; an empty intersection SHALL be a `PrecisionMismatch` naming both
+> families. A binder that declares no bound
+> remains an unconstrained type variable admitting every type, not only a
+> dtype. A bound naming anything but a family of this section, a bounded
+> binder used in a dimension slot or as a rank spread, and a bounded binder
+> that does not occur in the type it is declared for are each declaration
+> errors.
+
+A declaration's bounds live in exactly one binder list. When a standalone
+signature declares a name, that signature's binder list carries the bounds for
+that declaration, and a bound written in the same declaration's `def` binder
+list is a declaration error. A `def` with no standalone signature carries its
+bounds in its own binder list.
+
+A public stdlib signature whose `[05-OP-35]` registry domain is exactly one of
+these families declares that family as a bound. That registry writes its domains
+as the signature-table metavariables `p_float`, `p_int`, and `p_numeric`, and
+each denotes the family of the same name; a signature whose domain is some other
+set, such as every active tensor element dtype, declares no bound.
+
+The surface spelling of a binder list is `spec/02-surf-syntax.md` §P4b and of
+a bound is its §P4c; the Deep encoding is `spec/03-deep-syntax.md` §1.1.
 
 ---
 
@@ -1954,31 +2236,160 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 
 ### 6.4 Fitness Report Format
 
+`chelis check` emits one JSON document per checked input. It is a
+machine-facing contract rather than an illustration: reward surfaces,
+conformance corpora, and downstream tooling consume it, so a change to its
+shape is a change to a published interface.
+
+> **[04-FIT-11]** The report SHALL be produced by serializing one typed
+> value. A hand-assembled document -- string concatenation, format
+> templating, or any second producer of the same shape -- is not a
+> conforming implementation, because it admits drift between the emitted
+> document and the type that describes it.
+
+> **[04-FIT-12]** Every `chelis check` failure SHALL be reported through
+> that same typed value, including Surf and Deep parse failures and any
+> preparation failure occurring before type checking begins. A failure
+> path that bypasses the report and emits a display string is not
+> conforming: a consumer cannot distinguish "no diagnostics" from
+> "the diagnostics were not transported".
+
+(Not fully implemented; tracked by chelis#886.)
+
+#### Document fields
+
+| field | type | presence |
+|---|---|---|
+| `score` | number | always |
+| `components` | object of `parse`, `structure`, `names`, `types` | always |
+| `typed_nodes`, `untyped_nodes`, `total_nodes` | integer | always |
+| `unresolved_names` | array of string | always, possibly empty |
+| `errors` | array of diagnostic | always, possibly empty |
+| `typed_ast` | annotated Deep carrying a type on every node | always |
+| `inferred_signatures` | structured signature tree | only when the caller requests inferred signatures |
+
+> **[04-FIT-13]** `typed_ast` and, when requested, `inferred_signatures`
+> SHALL be carried in the same typed value as the rest of the report.
+> They are members of the report's type -- `inferred_signatures` absent by
+> omission when not requested -- not separately spliced fragments.
+
+#### Diagnostic fields
+
+Each element of `errors` carries:
+
+| field | type | presence |
+|---|---|---|
+| `kind` | closed vocabulary member | always |
+| `message` | string | always |
+| `severity` | number | always |
+| `expected`, `got` | string | when the producing check determined them |
+| `suggestions` | array of string | when non-empty |
+| `span` | coordinate or range | when the producing node carried one |
+| `span_id` | producer-supplied identity | when the producing node carried one |
+| `deep_path` | Deep address | when the producing check determined it |
+
+> **[04-FIT-14]** `kind` SHALL be a member of a closed, validated
+> diagnostic-kind vocabulary. A debug rendering of a producer-internal
+> enumeration is not a conforming source for this field: it makes an
+> internal variant rename an unannounced change to a published interface.
+> Every diagnostic-producing stage SHALL map into that one vocabulary, and
+> a consumer SHALL be able to reject a member outside it.
+
+> **[04-FIT-15]** `expected`, `got`, `suggestions`, `severity`, and
+> `deep_path` SHALL be retained uniformly for checker, effect, and
+> linearity diagnostics alike. A field the producing stage populated SHALL
+> reach the document, and which fields the document carries SHALL NOT vary
+> by which stage produced the diagnostic.
+
+#### Location
+
+> **[04-FIT-16]** The document SHALL carry the source location as the
+> producing node held it: a local coordinate or range into the checked
+> source, and the producer-supplied identity when the node carried one. The
+> two are independently optional, and the document SHALL be able to carry
+> either without the other. An opaque or source-qualified identity SHALL be
+> transported rather than discarded, and SHALL NOT be reconstructed from a
+> coordinate: an identity minted by an external producer is not recoverable
+> from an offset and a length.
+>
+> Whether the coordinate and the identity occupy one member or two is a
+> shape choice this atom does not decide; independent optionality is the
+> requirement.
+
+
+> **[04-FIT-17]** The serializer SHALL NOT fabricate an extent it did not
+> measure. Where a producer supplied only a point, or only an opaque
+> identity, the document SHALL carry neither an invented length nor a
+> zero-width range: the extent SHALL be ABSENT. Where a producer supplied
+> no location at all, `span` SHALL be absent. A zero length and a
+> silently-defaulted length are both indistinguishable from a measured
+> extent, so a consumer that reasons about ranges cannot tell whether the
+> compiler measured one.
+
+#### Example
+
+Illustrative of the shape only; the atoms above are normative.
+
 ```json
 {
   "score": 0.73,
-  "components": {
-    "parse": 1.0,
-    "structure": 1.0,
-    "names": 0.85,
-    "types": 0.62
-  },
+  "components": {"parse": 1.0, "structure": 1.0, "names": 0.85, "types": 0.62},
+  "typed_nodes": 27,
+  "untyped_nodes": 4,
+  "total_nodes": 31,
+  "unresolved_names": ["typo_var"],
   "errors": [
     {
-      "kind": "precision_mismatch",
-      "loc": {"line": 12, "col": 5},
+      "kind": "PrecisionMismatch",
+      "message": "precision mismatch: expected f32, got bf16",
+      "severity": 0.8,
       "expected": "tensor[batch, hidden, f32]",
       "got": "tensor[batch, hidden, bf16]",
-      "suggestions": ["Insert cast(y, f32)"],
-      "severity": 0.8
+      "suggestions": ["Insert explicit cast"],
+      "span": {"span": "range", "offset": 786, "len": 20},
+      "span_id": "surf:786..806"
     }
   ],
-  "typed_ast": "... (annotated Deep with types on every node) ...",
-  "unresolved_names": ["typo_var"],
-  "untyped_nodes": 4,
-  "total_nodes": 31
+  "typed_ast": "... (annotated Deep with types on every node) ..."
 }
 ```
+
+> **[04-FIT-2]** Every `UnboundVariable` and `UnknownConstructor`
+> diagnostic SHALL contribute to the `names` component and SHALL add the
+> offending identifier to `unresolved_names`. The list contains one entry per
+> such diagnostic in checker diagnostic order; repeated diagnostics are not
+> deduplicated. A report containing either kind SHALL have `names < 1`, a
+> non-empty `errors` list, and `score < 1`. The fitness report adds no separate
+> name-resolution wire field: these invariants govern the existing
+> `components.names`, `errors`, and `unresolved_names` fields.
+
+### 6.5 Source Identity In Diagnostics
+
+A diagnostic names the entities the user wrote. The checker's internal
+identities for those entities -- `DimVar` and `TypeVar` ordinals, rendered
+`dN` and `?N` -- are inference bookkeeping, and a reader has no way to map
+one back to their source.
+
+> **[04-FIT-9]** Where source provenance exists for a binding, type variable,
+> or dimension variable, a user-facing diagnostic SHALL identify it by its
+> source spelling. A compiler-generated inference identity SHALL NOT be its
+> sole user-facing identity.
+
+Provenance survives resolution, generalization, and instantiation. A checker
+that reports on an instantiated signature therefore recovers the declared
+spelling rather than treating instantiation as the point where the name is
+lost; the fresh variables an instantiation mints are the same entities the
+source declared.
+
+> **[04-FIT-10]** Where provenance genuinely does not exist, a diagnostic
+> SHALL render the inference identity as synthesized, distinguishably from a
+> spelling the user wrote, and SHALL NOT invent a source name for it.
+
+Absent provenance is the only admissible route to [04-FIT-10]. A producer
+that holds a spelling and declines to thread it through is not covered by it.
+
+(The borrow and cast diagnostics do not yet satisfy [04-FIT-9]; chelis#260
+owns that gap.)
 
 ---
 
@@ -2076,7 +2487,9 @@ the `effects` key on checked `fn` nodes carries the inferred unhandled set.
 Chelis uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
 system. Tensor values are owned by default, but read-only calls borrow their tensor
 arguments. A consuming use makes the binding dead; a borrow leaves the owned binding
-live. The compiler inserts end-of-scope `Drop` operations for unconsumed local owners.
+live. For an unconsumed local owner, the compiler inserts `Drop` at the earliest
+post-dominating point after its last use, as [04-LIN-8] requires. Lexical scope
+exit is the fallback only when no earlier valid terminal point can be proved.
 
 ### 8.2 Type Representation
 
@@ -2097,8 +2510,10 @@ The user surface is type- and expression-based:
 - `copy(x)` accepts either owned `T` or borrowed `&T` and yields a fresh owned value;
   explicit and compiler-inserted copies lower to `RiscOp::Copy`
 - borrows cannot be stored in aggregates, returned, or captured by closures
-- borrow types are erased before IR and backend lowering; implicit linearity then
-  inserts explicit `RiscOp::Copy` and `RiscOp::Drop` nodes
+- source borrow syntax is erased before backend lowering, but the resolved ownership
+  disposition of every use remains explicit in ownership-lowered IR; implicit
+  linearity inserts explicit clone/move/borrow dispositions and terminal `Drop`
+  operations before any backend sees the program
 
 #### Borrow target classification (the `&x` inner type)
 
@@ -2108,14 +2523,16 @@ a tuple containing one). Borrowing a concretely non-tensor value (a scalar
 `t-prim`, `()`, a function, a non-tensor-carrying ADT, or a tuple of
 scalars) is a type error.
 
-The borrow inner's type is not always concrete at the borrow site. When the
-inner is the result of a polymorphic-return expression — for example
-`relu(prev_out)` or `mean(...)` whose dimension variables are pinned only
-by a later `&tensor[..]` parameter in the surrounding call — the inner is
+The borrow inner's type is not always known at the borrow site. When the
+inner's outer type constructor is still unknown — a parameter whose
+annotation is an inference hole, a bare authored binder, or a `let` binding
+or lambda parameter that takes its type from one of those — the inner is
 still an unresolved type variable when the borrow is first checked. In that
 case classification is **deferred**: the borrow is provisionally accepted
 and the surrounding flow's expected argument type pins the variable through
-unification.
+unification. A tensor whose dimension variables are unresolved is not such
+a case: its outer constructor is already a tensor, and it is classified
+immediately.
 
 The deferral is sound only when the variable is *eventually* pinned to a
 tensor or tensor carrier. If the consumer is itself fully polymorphic
@@ -2140,13 +2557,14 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 
 - A local owned linear binding must have exactly one terminal path in lowered IR:
   either a consuming use or an inserted `Drop`. Borrow sites do not count as consumes.
-- Function parameters are ownership-transfer boundaries: an owned parameter may be
-  borrowed throughout the function body and then leave the function scope without an
-  implicit local `drop` expression.
-- A local value that was borrowed but never consumed receives an inserted end-of-scope
-  `Drop` in lowered IR. This is not a user-facing type error.
-- `copy(x)` reads `x` without consuming it and yields a fresh tensor value.
-- `drop(x)` is an explicit consume. The compiler also inserts implicit end-of-scope
+- Function parameters are ownership-transfer boundaries: an owned parameter becomes
+  the callee's owner and must be moved into a result or another consuming destination,
+  or receive a `Drop`, on every return path.
+- A local value that was borrowed but never consumed receives an inserted `Drop` at
+  the earliest point after its last use that post-dominates that use on the applicable
+  control-flow path. This is not a user-facing type error.
+- `copy(x)` reads `x` without consuming it and yields a fresh owned value.
+- `drop(x)` is an explicit consume. The compiler also inserts implicit last-use
   drops for locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
@@ -2198,6 +2616,61 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > accepted. The sole forwarding is a consuming capture of a destructured
 > component (or of an alias of one), which consumes the component's
 > carrier binding.
+
+> **[04-LIN-3]** Evaluating an expression of an owned linear type SHALL
+> produce exactly one logical owner. Binding another name to that value does
+> not create a second owner. A second terminal use is legal only when an
+> explicit or compiler-inserted `copy` creates another owned value. Each
+> logical owner SHALL reach exactly one terminal consuming use or `Drop` on
+> every control-flow path; a borrow neither creates nor terminates an owner.
+
+> **[04-LIN-4]** An owned function parameter is a consuming call edge and a
+> borrowed parameter is a non-consuming call edge. Every function result of
+> an owned linear type is a new logical owner for the caller on every return
+> path, including a path whose result has the same value or physical storage
+> as an argument or capture. The result owner may be the owner transferred
+> through an owned parameter. A borrowed argument or still-live capture may
+> become an owned result only after the ordinary copy operation creates an
+> independent owner. A backend SHALL NOT infer a returned owner from pointer
+> equality, a source name, or a selected return arm.
+
+> **[04-LIN-5]** An `if`, `match`, loop, or fold that produces an owned linear
+> result SHALL join with exactly one owned incoming value from every
+> predecessor path. A path that forwards an existing owner transfers it into
+> the join; a path that preserves another live use first creates a copy.
+> Fold and loop-carried owners are block parameters: each iteration consumes
+> the previous owner exactly once and produces the next owner exactly once.
+> Alias provenance SHALL NOT be overwritten when the loop target is rebound.
+
+> **[04-LIN-6]** Each entry in a top-level root manifest is, in manifest
+> order, an implicit terminal consuming use of the binding it observes.
+> Root observation participates in the same copy insertion as any authored
+> consuming fan-out. Therefore two roots denoting one value receive two
+> independently owned results, while the final root may consume the original.
+> Every owned top-level value that is not consumed by a manifested root or an
+> authored use receives a `Drop`.
+
+> **[04-LIN-7]** A compiled artifact's externally supplied entry arguments
+> are borrowed for the complete invocation, irrespective of the owned
+> parameter modes used by calls inside the artifact. The artifact SHALL
+> neither mutate nor release their storage. Every owned result returned across
+> that boundary is an independent owner for the caller, even when its value is
+> equal to an entry argument. Before an entry value crosses an internal
+> owned-parameter edge, the compiler SHALL create an ordinary copy; an internal
+> borrowed-parameter edge may borrow the entry value directly. Passing the
+> result back transfers or borrows it
+> only according to the next invocation's boundary; ownership is never
+> inferred from address equality.
+
+> **[04-LIN-8]** After an owner's terminal use, that owner is no longer live;
+> a move may transfer the value to one explicit successor owner. A `Drop` or
+> consuming use with no successor owner SHALL make its storage reclaimable
+> before a following tail call or loop back-edge whose live set excludes it.
+> In-place reuse is permitted only for program-owned storage
+> proved unique at that point. Entry arguments, borrowed values, storage with
+> another live owner, and storage retained by a view never satisfy that proof.
+> An implementation may reclaim later only when an explicitly live owner or
+> view requires the storage; recursion depth alone is not such a reason.
 
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the
@@ -2346,23 +2819,32 @@ Scope:
 > escape hatch by construction), and requesting one on a non-integer
 > dtype is a checker-level type error.
 
-> **[04-NUM-8]** Every dtype declares an ARITHMETIC WIDTH in addition to
-> its storage width. Every op SHALL be performed at its operands'
-> arithmetic width and finalized to the storage width once per op, in
-> every lane and on every surface. No lane SHALL compute at any other
-> width. The arithmetic widths are:
+> **[04-NUM-8]** Every dtype declares a STORED REPRESENTATION and an
+> ARITHMETIC WIDTH in addition to its storage width. Every op SHALL be
+> performed at its operands' arithmetic width and finalized to the storage
+> width once per op, in every lane and on every surface. No lane SHALL compute
+> at any other width. The representations and arithmetic widths are:
 >
-> | dtype | storage width | arithmetic width |
-> |---|---|---|
-> | `f64` | 64 | f64 |
-> | `f32` | 32 | f32 |
-> | `f16` | 16 | f32 |
-> | `bf16` | 16 | f32 |
-> | `int64` | 64 | exact int64 |
-> | `int32` | 32 | exact int32 |
-> | `int16` | 16 | exact int16 |
-> | `int8` | 8 | exact int8 |
-> | `bool` | 8 | not an arithmetic dtype ([04-NUM-4]) |
+> | dtype | stored representation | storage width | arithmetic width |
+> |---|---|---|---|
+> | `f64` | IEEE-754 binary64 | 64 | f64 |
+> | `f32` | IEEE-754 binary32 | 32 | f32 |
+> | `f16` | IEEE-754 binary16 | 16 | f32 |
+> | `bf16` | bfloat16 | 16 | f32 |
+> | `int64` | signed two's-complement 64-bit integer | 64 | exact int64 |
+> | `int32` | signed two's-complement 32-bit integer | 32 | exact int32 |
+> | `int16` | signed two's-complement 16-bit integer | 16 | exact int16 |
+> | `int8` | signed two's-complement 8-bit integer | 8 | exact int8 |
+> | `bool` | canonical Bool8 (`0x00` false, `0x01` true) | 8 | not an arithmetic dtype ([04-NUM-4]) |
+>
+> Stored representation, storage width, and arithmetic width are separate
+> facts. Equal storage widths do not make two representations interchangeable:
+> for example, `f32` and `int32` are both 32 bits, and `bool` and `int8` are
+> both 8 bits, but neither pair may share a typed load, store, carrier, or
+> kernel element spelling. Every boundary and lane SHALL match the exact
+> representation identity, not only its byte width. No implementation may
+> infer arithmetic width from storage width or storage width from arithmetic
+> width.
 >
 > The `matmul`, `sum`, and `einsum` accumulator parameter of §5.7 is the ONLY
 > user-selectable widening; it is explicit, typed, defaulted per §5.7.1,
@@ -2450,9 +2932,10 @@ refuses the default.
 > evaluator plumbing. No additional prefix or suffix is permitted on any
 > user-facing numeric-trap line. A typed operation-precondition guard is
 > itself the trap-producing primitive for this rule and carries the guarded
-> builtin's canonical name and declared result dtype. A failure raised by
-> such a guard therefore names the guarded builtin; it is not a renamed trap
-> from a later primitive in the successful lowering.
+> builtin's canonical name and the dtype of the quantity that guard
+> finalizes. A failure raised by such a guard therefore names the guarded
+> builtin; it is not a renamed trap from a later primitive in the successful
+> lowering.
 
 > **[04-NUM-10]** A numeric trap SHALL be a VALUE inside a lane and SHALL
 > become a process failure only at that lane's boundary: `chelis eval`
@@ -2484,7 +2967,14 @@ named operations if introduced. Behaviors are named operations, never modes.
 > through a language binding, and read back. A representation that cannot
 > carry a dtype's full value set is not a conforming representation for
 > that dtype, and no stage SHALL substitute a wider or narrower one to
-> compensate.
+> compensate. A language binding or device descriptor SHALL preserve rank as int32
+> and each extent, stride, element count, and byte capacity as int64, matching
+> the domains of [05-DIM-1], [05-DIM-2], and [05-OP-31]. It SHALL carry the
+> exact dtype tag and dynamic rank; a fixed-rank carrier, a narrower metadata
+> field, or an element pointer not coupled to the exact tag in the same
+> validated descriptor is not a conforming substitute. A
+> boundary MAY reject a value outside the declared domain before crossing, but
+> it SHALL NOT narrow, clamp, wrap, or fabricate metadata to make it fit.
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
@@ -2622,3 +3112,26 @@ Reading notes:
 > checker SHALL be rejected with a diagnostic naming the tag and the
 > expected shape; deferring the failure to a later stage is not a
 > disposition.
+
+> **[04-TOT-4]** Every child of a Deep form whose content that form's
+> semantics reads SHALL be consumed by that form's checker disposition or
+> rejected with a pushed diagnostic. Where a form reads such a child
+> through a partial extraction - an integer axis, a symbol constructor
+> head, a function-typed operand - a failed extraction SHALL push a
+> diagnostic naming the form and the shape it expected. An omitted
+> optional child and a present child the form cannot read are distinct
+> inputs: only the omission MAY take the form's declared default.
+> Coverage is a property of the submitted program rather than of the
+> checked result, so a node inference never visited SHALL NOT be reported
+> as successfully checked on the ground that the result it is absent from
+> contains no error.
+
+> **[04-TOT-5]** A Deep program's checker verdict SHALL NOT depend on which
+> checker entry receives it, nor on which admitted representation carries it.
+> For one program, every entry SHALL accept or reject alike and SHALL report
+> the same defects; a check that one admitted representation receives SHALL be
+> applied to every other admitted representation of the same program. A
+> representation the checker admits but a check cannot read is a silent
+> exemption under [04-TOT-1] and SHALL be diagnosed rather than skipped.
+
+(Not fully implemented; see chelis#1125.)

@@ -813,6 +813,27 @@ Deliverables, with phase homes:
    release cuts and red-team passes remain additional manual
    invocations, not the only ones.
 
+   The census's lexical primitives live in
+   `tests/support/c_lexical.rs`, shared by `#[path]` the way
+   `capacity_census_authority.rs` already is: `strip_c_comments`,
+   `canonical_c_tokens`, `lex_c_tokens`, `resolve_words`, `classify`,
+   `NUMERIC_C_TYPES`, and the closed `NON_NUMERIC_C_TYPE_WORDS`. They moved
+   out of the tripwire body so the runtime-representation inventory
+   (chelis#893) could classify the type spellings clang reports for its
+   registered headers with the SAME closed word lists and alias resolver
+   rather than standing up a second type-word authority; the inventory's
+   declaration enumerator is the compiler, while the census keeps its own
+   `cc -E` enumerator over the published headers. Two behaviors widened in
+   that move and are locked by
+   `shared_capacity_census_primitives_keep_their_contract` and
+   `comment_stripping_respects_string_and_character_literals`: the stripper now
+   respects string, character, and C++ raw-string literals, so a comment
+   sequence inside a literal no longer truncates a declaration, and the
+   tokenizer recognizes `...` and the compound assignment operators. Both are
+   strictly more conservative. The rule that a type word in neither list is a
+   build failure is unchanged, and moving these primitives is a numbered-spec
+   change under the same review discipline as the chapter that owns them.
+
    `coverage_manifest()` in
    `crates/chelis-cli/tests/capacity_census_tripwire.rs` is the fixed
    executable coverage contract. Its typed `CoverageManifest` records
@@ -867,10 +888,10 @@ Deliverables, with phase homes:
 
    The foundation enforces that landing rule for every new or changed identity
    while the remaining migration proceeds. The primary baseline currently has
-   180 active legacy rows: 39 grandfather seams, three exact #1149 successors,
-   137 permanent plain rows, and the obsolete prelude `Json` row. Its 18 exact
-   nonnumeric rows and `chelis_tensor_shape` have final authority and no legacy
-   disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
+   119 active legacy rows: 21 grandfather seams, 97 permanent plain rows, and
+   the obsolete prelude `Json` row. Its 18 exact nonnumeric rows, its eight
+   tagged-carrier declarations, and its 34 registered numeric operations have
+   final authority and no legacy disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
    cohorts; Count's wire field is separately final-registered. These counts are
    progress evidence, not the zero-exception completion oracle.
 
@@ -1277,6 +1298,206 @@ root to Host adopts C's existing capability boundary without changing f64
 semantics. The full Phase 4B oracle is nevertheless rerun so that the unchanged
 numeric matrix is executable evidence rather than an inference from scope.
 
+[#1308] corrects the duplicated replace-scatter prose in the primitive-surface
+introduction and [05-OP-33] to cite §3.5's existing deterministic row-major
+last-write-wins rule. This deliberately moves the complete-file digest for
+`spec/05-risc-primitives.md` and the [05-OP-33] atom digest; it does not add a
+compatibility exception or change the governing sparse semantic. Static
+checking, host evaluation, generated C, and the HIP execution fixture all lock
+the same rule, while reverse-mode AD remains fail-closed.
+
+[#1343] amends `spec/04-type-system.md` §4.7 (the runtime extent guard
+placement rule and the §4.7.2 settlement order for coupled positional `expand`
+defaults), `spec/05-risc-primitives.md` §2.4.1 and §2.5.1 (an `expand` size is
+an `RtDim`; the `InputAxis` carrier realizes the extent-argument fold; the
+per-operation admission sentence) together with the [05-MOV-1] enumeration,
+which now names `expand` sizes and whose parenthetical links chelis#1277
+beside chelis#1298 (the atom is locked by the file digest only), and
+`spec/06-transformations.md` §3.3,
+§3.7, and §8.6 (runtime extents under `vmap`; `batch_varying_extent`). It
+deliberately moves the complete-file digests for those three chapters and for
+this document; it adds no atom and moves no atom or region digest, and it adds
+seven required-literal anchors with matching mutation tests over the new
+rules (the guard placement rule carries two; the `expand`-size sentence rests
+on the file digest) so the new rules are defended rather than only re-hashed,
+while connective sentences rest on the file digests. The [05-OP-7] blockquote and
+§4.7.1's anchored sentences are byte-identical to their prior state.
+
+[#1277] Slice A realizes that already-decided runtime-extent carrier at the
+public wire boundary. It corrects one connective sentence in
+`spec/05-risc-primitives.md` to name `InputAxis` rather than the retired
+symbolic recovery mechanism and bumps `spec/10-serialization.md` from exact
+WireDag version 6 to version 7, where `Expand.size` is the tagged `WireRtDim`
+and `InputAxis` is structural. This deliberately moves the complete-file
+digests for those two chapters and this document. It changes no frozen
+`[05-OP-N]` atom, numeric semantic, capability disposition, or frozen region;
+the version-rejection mutations and the runtime-extent wire corpus defend the
+new boundary before these digests move.
+
+[#1370] amends `spec/04-type-system.md` §4.7.2 to decide the order in which
+deferred positional `expand` defaults settle at the program freeze point, the
+settlement order that [#1338] exposed and `hash_order_determinism.md`
+implements, folding [#1343]'s settlement paragraph and its
+`positional expand settlement order` anchor into one paragraph that also
+defines the freeze point, the merged-obligation rule, and the `reshape`
+publication rule; it adds one determinism rule to `spec/00-context.md` §5.
+This deliberately moves the complete-file digest for
+`spec/04-type-system.md`; it does not touch a frozen [04-NUM] atom, the §9.1
+per-dtype table, the capability schema, or a numeric-surface identity, and
+every frozen atom and region digest and every required-literal anchor is
+unchanged. The script unit tests that call `validate_contract` are the
+executable evidence that only the file digest moved.
+
+That amendment is superseded. chelis#1532 rewrote §4.7.2 to give `expand` and
+`insert` one result shape each, so the settlement order this entry records has
+no subject, the `positional expand settlement order` anchor is gone from
+§4.7.2, and chelis#1277 S2b and S2c deleted the deferral machinery that
+implemented it. The entry stays as the record of what [#1370] did; it is not a
+description of current §4.7.2.
+
+[#1399] amends `spec/02-surf-syntax.md` to make unqualified value scope exact
+and invariant under unrelated unimported modules, and adds [04-FIT-2] to
+`spec/04-type-system.md` so unresolved-name fitness mirrors checker
+diagnostics exactly. These are checker and diagnostic-accounting rules outside
+the numeric contracts: they do not touch a frozen [04-NUM] atom, the §9.1
+per-dtype table, the capability schema, or a numeric-surface identity. The
+complete-file digests for `spec/02-surf-syntax.md`, `spec/04-type-system.md`,
+and this document move deliberately, and the generated rejection registry
+gains the new [04-FIT-2] atom. The full Phase 4B oracle is rerun so every
+numeric matrix and frozen numeric region remains executable evidence rather
+than an inference from scope.
+
+The 2026-09-01 ledger-and-scope change narrows the [#1296] composite pre-4C
+entry set so a child leg proves executable `eval`/`c-host`/`c-dag` behavior and
+carries a typed `Unimplemented { issue }` receipt for every unbuilt `hip` or
+`metal` cell. It deliberately moves the complete-file digests for this document
+and `capability_table.md` and the `capability schema`, `capability seed
+dispositions`, `Phase 4 handoff`, and `roadmap ownership` region digests. It
+authors no atom, moves no `[04-NUM]`, `[05-OP]`, or other numbered-spec atom or
+region digest, changes no Table-A/Table-B key or cell type, and leaves the
+generated rejection registry at byte agreement. The named consumers of the
+pre-4C composite are this document and `capability_table.md`; both are amended
+here, and the release ledger in `remediation_roadmap.md` records the same
+narrowing. The same change corrects the stale eighty-three-definition stdlib
+count to the eighty-four the `[05-OP-35]` registry and the census already
+carry, and settles the `capability_table.md` seed row that still cited the
+closed [#691] as an `Unimplemented` owner.
+
+[#1417] adds `spec/04-type-system.md` §5.9 and its [04-DTYPE-2] atom, which
+give the language an explicit dtype-family bound on a declaration's type
+binders, plus the `spec/02-surf-syntax.md` §P4c surface spelling (a `sig` gains
+the same binder list a `def` already has) and the `spec/03-deep-syntax.md`
+`dtype_bounds` metadata key that carries it. The stdlib signatures for `arange`
+and `linspace` spelled [05-OP-35]'s `p_int` and `p_float` metavariables as
+ordinary unconstrained binders, so each accepted the opposite family; the
+families are now expressible and those signatures declare them. This
+deliberately moves the complete-file digests for `spec/02-surf-syntax.md`,
+`spec/03-deep-syntax.md`, `spec/04-type-system.md`, and this document, and adds
+one atom to the generated rejection registry. It authors no `[05-OP]` atom and
+moves no `[05-OP]`, `[04-NUM]`, or region digest: [05-OP-35]'s metavariables
+already denoted these domains, and §5.9 names the families they denote rather
+than restating them. The `[05-OP-35]` registry is unchanged for the same
+reason: `(p_float)->p_float` is that chapter's notation for a domain, not the
+stdlib's binder spelling. It changes no Table-A/Table-B cell and no §C1
+semantics row.
+
+It does change two frozen surfaces. The §C3 shell wire schema gains two
+`TypeVariableDomain` families, so `SHELL_FORMAT_VERSION` moves 2 -> 3 with the
+encoder, decoder, and regenerated bundle artifacts in the same change set. The
+§C6 census changes in the way the ratchet prescribes for a renamed identity.
+Every stdlib signature that declared its domain through a `p_float`-style
+binder NAME now declares it as a bound, so fifteen `std-def-numeric` rows are
+removed and fifteen successors are registered; each successor carries the
+bound in its identity (`contracts::normal_cdf: [p: Float] (t-fn {} ...)`) and
+keeps its exact `[05-OP-35]` registration. The census's numeric-capacity rule
+is widened, never weakened: a declared bound is now capacity on its own, and
+the `p_float | p_int | p_numeric | q | Q` name list stays as a conservative
+backstop, so an unbounded metavariable spelling is still enumerated. Without
+that widening the rename would have silently dropped four signatures with no
+tensor type - `scalar::abs/max/min` and `contracts::normal_cdf` - out of the
+numeric surface entirely. Three controls defend it: a bounded signature with
+no other numeric spelling enumerates, the same signature without a bound does
+not, and two signatures differing only in family have distinct identities.
+
+The first review round found two further corrections, both narrowing. The
+chapter's own §7 PEG did not derive the Deep this change emits: `MetaValue` had
+no nested-`Meta` alternative and `MetaKey` admitted no underscore, so
+`{dtype_bounds: {p: int}}` was underivable on both counts, and
+`chelis validate --deep` - the second implementation of that grammar, in
+`crates/chelis-validate/src/deep.pest` - rejected every migrated stdlib module.
+Both productions are corrected to §1.1's declared charset and to admit a
+nested map, the validator's `meta_value` and `meta_key` gain the same two
+allowances, and its Surf grammar gains the binder list so the new syntax is
+not carried by that validator's "grammar rejects, parser accepts" rescue. The
+`MetaKey` correction is not new latitude: §1.1 has always declared the key
+charset as `[A-Za-z_][A-Za-z0-9_]*`, and `chelis_role`, `surf_path`, and
+`property_quantifiers` already relied on it while §7 derived none of them. Separately, §5.9's stdlib obligation cited §5.4, whose rows are
+operation classes rather than signatures; it now cites the `[05-OP-35]`
+registry domain, which is the authority its next sentence already named and the
+one that actually derives every declared bound. This moves the v0.19.0
+`roadmap ownership` region digest as well, because that row now names both of
+this change's shell-visible breaks.
+
+The second review round, and an audit of every normative sentence this change
+adds to the three chapters, found three more places where the new prose was
+broader than the decided rule. §P4c required every listed name to occur in its
+declared type, where [04-DTYPE-2] and the checker require it only of a bounded
+one - `sig f[zz]: p -> p` checks clean. §P4c also implied that listing an
+unbounded name does nothing, when a listed multi-letter dimension name resolves
+to a dimension variable where an unlisted one is a concrete symbolic axis.
+[04-DTYPE-2] promised that both bound failures name "the required family and
+the offending type", but an empty intersection names two families and no
+offending type. All three are narrowed to what the rule decides and the
+implementation enforces, and each gains an anchor and a mutation test rather
+than resting on a file digest.
+
+Required-literal anchors with matching mutation tests defend the new normative
+rules; connective prose rests on the file digests.
+
+[#1371] adds `spec/04-type-system.md` §6.5 with [04-FIT-9] and [04-FIT-10], the
+source-identity rule for diagnostics: where provenance exists a diagnostic
+identifies an entity by its source spelling, and a compiler-generated inference
+identity is never its sole user-facing identity. This is a diagnostic-rendering
+rule outside the numeric contracts: it does not touch a frozen [04-NUM] atom,
+the §9.1 per-dtype table, the capability schema, or a numeric-surface identity,
+and it changes no value, dtype, or acceptance decision. The complete-file
+digests for `spec/04-type-system.md` and this document move deliberately, every
+frozen atom and region digest and every required-literal anchor is unchanged,
+and the generated rejection registry gains exactly the [04-FIT-9] and
+[04-FIT-10] atoms. The full Phase 4B oracle is rerun so the unchanged numeric
+matrix remains executable evidence rather than an inference from scope.
+
+[#1384] rewrites `spec/04-type-system.md` §6.4 into the typed-transport
+contract for the `chelis check` report and adds [04-FIT-11] through
+[04-FIT-17]: the document is produced by serializing one typed value, every
+failure path is carried by that value, `kind` is drawn from a closed validated
+vocabulary, and a span is emitted only where its range is derivable. These are
+diagnostic-transport rules outside the numeric contracts: they do not touch a
+frozen [04-NUM] atom, the §9.1 per-dtype table, the capability schema, or a
+numeric-surface identity, and no diagnostic carries a numeric value the census
+does not already classify. The complete-file digests for
+`spec/04-type-system.md` and this document move deliberately, every frozen atom
+and region digest and every required-literal anchor is unchanged, and the
+generated rejection registry gains exactly the seven new atoms. The full Phase
+4B oracle is rerun so the unchanged numeric matrix remains executable evidence
+rather than an inference from scope.
+
+[#849] restates spec/02 §P12's newline-continuation boundary so the numbered
+spec matches the three boundary rules the parser actually implements: the
+closed `|>`/`then`/`else` continuation set governs the block sequencing
+contexts (`block_expr_end`), while a declaration body and a property predicate
+bound permissively at a declaration start (and, for a predicate, at `with`).
+It also admits `then` and `else` in the closed set, which is the 0.17
+regression the issue reports. Under the current merge-base acknowledgement
+gate, this contract edit requires explicit pull-request-body acknowledgements
+for `spec/02-surf-syntax.md` and this document. It does not touch either
+statement the Phase 4B oracle anchors in that file -- the Surf literal
+exclusion and `count`'s multi-axis lowering -- nor any dtype, capability,
+numeric-surface, or observation contract; the change is a surface-syntax
+boundary rule with no numeric content. The full Phase 4B oracle is rerun so
+the unchanged matrix is executable evidence rather than an inference from
+scope.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -1565,17 +1786,23 @@ work (none needed).
 **Oracle:** `.venv/bin/python scripts/dtype_phase3_oracle.py` is this phase's
 single authoritative command. Acceptance is exit 0 with the final line
 `DTYPE PHASE 3 ORACLE: PASS`. Its tested manifest inherits the complete dtype
-Phase 2 oracle and the faithful-observation Phase 3 oracle; runs the C rows of
+Phase 2 oracle and the faithful-observation Phase 3 oracle. The continuous
+runner flattens their 21 nextest selections into one filterset union, so a
+test owned by more than one inherited phase executes once, and writes the
+phase-to-selection receipt under `target/dtype-phase3/phase-ownership.json`.
+It runs the C rows of
 `narrow_dtype_matrix.rs`, `int_width_lane_matrix.rs`,
 `scalar_stub_matrix.rs`, `precision_matrix.rs`,
 `reduction_and_bitwise_matrix.rs`, `fold_static_cond_matrix.rs`, the checked
 cast/subnormal/reduced-float `to_string` fixtures, and the complete observation
 harness; runs the C
 emitter structural locks; and finishes with the numeric-surface capacity
-censuses. It never opts into Phase 4's ignored capability cells or HIP/Metal.
-The required Linux Integration job invokes this nested oracle after the
-normal integration gate, so Phases 0-3 remain continuous without duplicating
-their commands in `scripts/gate.py`.
+censuses. The Python dtype ingress, Hull reader, faithful-observation static
+and runtime receipts, and capacity liveness check each remain executable once.
+It never opts into Phase 4's ignored capability cells or HIP/Metal. The
+required Linux Integration aggregate invokes this oracle beside the workspace
+shards, so Phases 0-3 remain continuous without duplicating their commands in
+`scripts/gate.py`.
 
 ## Post-Phase-3 checked-cast maintenance ([#1150], [#1152])
 
@@ -1667,7 +1894,7 @@ callable from bypassing review while the capability tables are built.
 
 **Delivered:**
 
-1. This slice freezes the complete timeless [05-OP-1..41] authority set,
+1. This slice freezes the complete timeless [05-OP-1..43] authority set,
    including exact decimal rounding; source-faithful JSON/CSV boundaries;
    checked, truncating, saturating, and wrapping casts; runtime shape and
    movement values; all-active-dtype random and dropout parameters; recursive
@@ -1679,9 +1906,11 @@ callable from bypassing review while the capability tables are built.
    tensor carriers; byte-exact recursive runtime List/tuple/Dict/ADT
    observation; every active signed-integer sparse-index width across IR and
    public C; canonical gradient consumer-edge order by forward node ordinal
-   and input slot; the 83-definition stdlib manifest; legal compiled host
+   and input slot; the 84-definition stdlib manifest; legal compiled host
    effects with the exact language spelling `IO`; and target-independent
-   runtime reduction windows. Logical
+   runtime reduction windows, the [05-OP-42] `stop_gradient` transformation
+   barrier, and [05-OP-43]'s dedicated ReLU identity and zero-boundary
+   adjoint. Logical
    operations are bool-only and do not alias numeric primitives; arithmetic
    reductions reject bool and `count` is the dedicated bool-tensor reduction.
    The exact scalar, container, tensor-runtime, exported numeric ADT, and
@@ -1705,6 +1934,47 @@ callable from bypassing review while the capability tables are built.
    [#1306] owns replacing the trap- and stored-bit-changing `sub` and
    `min_elem` arithmetic surrogates with direct typed identities in every lane.
 
+**Authoritative direct-arithmetic oracle ([#1306]):**
+`.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`; exit 0 and final
+line `DTYPE DIRECT ARITHMETIC ORACLE: PASS`. It runs the exact-width typed
+kernels, direct IR lowering/evaluation/AD, constant folding, WireDag v6 and
+target-disposition tests, compiled-C boundary/overflow/stored-bit cases, HIP
+source-generation tests, exhaustive downstream compilation, and its standing
+anti-surrogate mutations. [#1296] consumes this exact child command and success
+line; it does not reconstruct #1306 evidence from prose.
+
+The normal oracle compiles the ignored HIP execution cases but cannot claim
+device execution. The manual hardware gate is:
+
+```text
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1
+```
+
+Expected success is four tests passed and zero failed: f32/f64 exact extrema
+and adjoints, f32/f64 subtraction agreement, fused direct subtraction followed
+by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
+wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
+pass; it does not weaken or remove the ignored hardware tests.
+
+**Authoritative ReLU oracle ([#1313]):** `.venv/bin/python
+scripts/dtype_relu_oracle.py`; exit 0 and final line `DTYPE RELU ORACLE:
+PASS`. It runs the sealed own-width kernels, dedicated lowering/evaluation/AD,
+exact current WireDag validation, compiled-C exact-bit cases, HIP all-width
+kernel structure, Metal f32/f16/bf16 kernel structure, rejection-registry
+agreement, and standing anti-surrogate mutations. [#1296] consumes this exact
+child command and success line. The device execution evidence is separate:
+
+```text
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu -- --ignored --test-threads=1
+```
+
+Expected HIP success is one test passed and zero failed after exercising
+f16/bf16/f32/f64 raw-bit inputs and outputs. Metal implements every float
+width admitted by [04-TGT-1]; f64 is deliberately rejected because Apple
+Silicon has no FP64 ALU, and [#737] remains the project-wide owner of the
+macOS runtime-execution evidence boundary rather than an unimplemented ReLU
+cell.
+
 **Frozen at exit:** the numbered-spec atoms authored or amended by this slice
 and the capability schema. This is not a claim that every older builtin already
 has exact atom authority: [#1294] owns that all-or-nothing closure before 4C.
@@ -1715,16 +1985,42 @@ reinterpret either.
 `.venv/bin/python scripts/dtype_phase4b_oracle.py`; exit 0 and final line
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the normative atoms in this slice,
 named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
-contract digests, phase naming, and generated rejection-registry agreement.
-Normative and schema inputs carry complete-file integrity fingerprints, and
-narrower atom/section fingerprints supply owning diagnostics. Updating a
-design or status document's integrity fingerprint is ordinary synchronized
-maintenance, not a semantic decision; only a change to the controlling
-numbered-spec atoms or frozen schema follows §B1. Roadmap and current-state
-documents are validated through required contract markers instead of whole-
-file semantic fingerprints.
+atom and region digests, the frozen-contract acknowledgement gate, phase
+naming, and generated rejection-registry agreement. Narrower atom and section
+fingerprints supply owning diagnostics for a changed clause. Roadmap and
+current-state documents are validated through required contract markers.
 Its success proves this freeze, not complete builtin-atom closure or any Phase
 4C implementation.
+
+The additive-contradiction leg is an acknowledgement, not a whole-file digest.
+An atom or region digest cannot defend its own boundaries, so the oracle also
+diffs every `CONTRACT_FILES` path against the merge base with the base branch
+and requires each changed file to be named in the pull request body:
+
+```text
+Frozen-contract-change: spec/04-type-system.md
+```
+
+one line per changed file, no leading whitespace, exactly one space after the
+colon, a repo-relative path with no glob and no `.`/`..` segment, and nothing
+after the path; lines inside fenced code blocks are ignored. An unacknowledged
+change and an acknowledgement naming an unchanged file both fail
+`--require-acknowledgement`, which is the mode CI runs on a pull request. A
+local run without that flag lists the changed contract files and the lines the
+body needs, then exits 0.
+
+Acknowledging a design or status document is ordinary synchronized
+maintenance, not a semantic decision; only a change to the controlling
+numbered-spec atoms or frozen schema follows §B1. Every earlier reference in
+this document to a "complete-file digest", a "full-file digest", or prose
+"resting on the file digests" describes the superseded mechanism, whether it
+records moving one or asserts what one defends: those digests are gone, the
+per-file granularity is unchanged, and the equivalent act is now the
+acknowledgement line. They were replaced because the digest table put every
+frozen contract file's hash in one Python dict, so two pull requests editing
+different chapters conflicted on adjacent lines and two editing the same
+chapter conflicted on a line whose correct post-rebase value was the digest of
+the merged text, which no side of the conflict held.
 
 ### Pre-4C - exact builtin-atom closure ([#1294])
 
@@ -1757,6 +2053,30 @@ skipped, stale, nonzero, or success-line-free leg and includes the structural
 mutations named by each child. It is wired to the normal gate; prose coverage
 or a manual waiver is not an entry receipt.
 
+**Amended 2026-09-01: what each leg must prove.** A child oracle satisfies this
+composite when the language contract executes on `eval`, `c-host`, and
+`c-dag`, and every `hip` or `metal` cell it leaves unbuilt carries the typed
+`Unimplemented { issue }` receipt its owner cites. Device execution is not an
+entry condition. That disposition is the one the frozen schema already
+assigns: `capability_table.md` states that current backend capacity "is never
+design authority and therefore uses `Unimplemented` under an open
+implementation owner", so an unbuilt device cell is an authored row rather
+than a hole in the composite. This narrows the entry set only. It weakens no
+host leg, narrows no Table-A signature, and still admits no host fallback,
+inert stub, silent default, zero adjoint, or target-shaped language
+restriction.
+
+Two consequences are accepted deliberately. Phase 4E asserts the typed
+diagnostic for each device cell this narrowing leaves unbuilt rather than
+executing it. For Metal that is already the only available outcome ([#737]:
+that runtime has never been executed). For HIP it reaches only the cells that
+stay `Unimplemented`: the backend has real kernels and a documented hardware
+gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
+owes that gate rather than a diagnostic. And [#1291] and the device residual of
+[#1306] stay open while their cells cite them, so the rejection-authority
+liveness gate keeps reporting honestly. Neither closes on this narrowing; each
+closes when its kernels land and its own hardware gate is green.
+
 The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with
 `DTYPE COUNT ORACLE: PASS`. It owns the checker grammar, dedicated non-alias
@@ -1772,11 +2092,13 @@ wired to the normal gate. It includes [#1294]'s exact builtin-atom closure and
 every acceptance oracle in the `v0.19 behavior` row of the issue map. In
 particular, chelis#1288's zero-exception census,
 chelis#893/chelis#1289's typed carrier, chelis#1290's balanced reductions,
-chelis#1287/chelis#1291's first-class count cells, chelis#1292's own-width
-tensor comparison, chelis#1293's complete 83-definition stdlib alignment,
+chelis#1287's first-class count cells, chelis#1292's own-width
+tensor comparison, chelis#1293's complete 84-definition stdlib alignment,
 chelis#1295's all-active-float random/rounding rules, chelis#1297's compiled
 host effects, chelis#1298's runtime-axis/window operations, and chelis#1306's
-direct subtraction/extrema identities have landed.
+direct subtraction/extrema identities have landed on the host lanes, with
+every unbuilt device cell carrying the typed receipt the composite gate
+admits above.
 No grandfather, permanent-disposition, successor-override,
 integer-plumbing, bare numeric-carrier, legacy callable, or semantics-divergent
 registered identity remains. Phase 4C may not populate tables around a
@@ -1875,6 +2197,14 @@ different decisions:
   move to or duplicate into vocab. This document owns finalization, value
   domains, the §C3 storage decision, cast behavior, operation legality, and
   kernel behavior.
+- [`runtime_representation.md`](runtime_representation.md) C1 adds the closed
+  `DTypeContract` projection of [04-NUM-8] to that dependency-bottom vocabulary:
+  exact stored representation, byte width derived from it, and arithmetic
+  representation. It does not move finalization, value domains, operation
+  legality, or backend capability policy out of this document. The runtime
+  consumes the projection in Phase 1; [#899] remains open until every backend
+  consumer and duplicate representation table is eliminated in that plan's
+  Phase 4.
 - `loud_unsupported.md` defines how every negative decision reaches the user.
   This document defines correct behavior for supported cells. A cell may move
   from silently wrong to loudly rejected under [#730], then to correctly
@@ -1917,6 +2247,32 @@ updates this section, `loud_unsupported.md` §I1, and
 
 ---
 
+## I2. Interlock with compiled value ownership ([#1286])
+
+This plan owns dtype identity, stored representation, numeric construction,
+and exact operation semantics. `compiled_value_ownership.md` owns who keeps a
+compiled value live, when that owner terminates, and what proof permits storage
+reuse. Neither can reconstruct the other's fact.
+
+The ownership design selects an opaque tagged carrier as its target, but this
+design-freeze change does not alter the exact current [05-OP-31..33]
+surface or its census partition. Before implementation begins, Phase 1 must
+amend those numbered atoms, all three normative registries, this document, the
+capability table, the generated rejection registry when required, every public
+header consumer, and the executable census in one atomic change. No old and
+new ABI may coexist. The old layout-visible tensor, `owns_data`,
+`chelis_free`, `chelis_alloc_view`, the by-value `chelis_option_scalar` and
+`chelis_option_value` carriers, and ambiguous value-conversion identities are
+deletion targets at that cut, not grandfather rows or compatibility aliases.
+
+After the cut, a tagged carrier still preserves its exact dtype and stored
+bits; opacity changes construction authority, not [04-NUM] semantics.
+`ReusableOwnedStorage` may permit mutation only after ownership uniqueness,
+while capability cells and dtype rules continue to decide whether the
+operation exists and what it computes.
+
+---
+
 # Part IV - bookkeeping
 
 ## Issue map
@@ -1929,7 +2285,7 @@ updates this section, `loud_unsupported.md` §I1, and
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
 | 4A-4B | §C6 capacity detection; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions; [05-OP-29] first-class `count` authority; [05-OP-40..41] direct extrema/subtraction authority; canonical reduction-order authority; WireDag v6 schema freeze |
 | pre-4C authority and executable closure | [#1294] closed exhaustive `BuiltinDecl` domain/case declarations plus exact `[05-OP-N]` authority for every discovered Table-A IR/RISC operation and sibling-builtin identity; [#1296] one normal-gate composite over every prerequisite oracle and structural mutation; no machine key/cell type, authoring macro, or row may land first |
-| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287]/[#1291] exact-only WireDag v6 plus first-class count delivery; [#1292] own-width tensor-close assertions; [#1293] the exact 83-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection across every admitted surface and lane |
+| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287] exact-only WireDag v6 plus first-class count delivery in eval/C, with [#1291]'s device kernels outside the Phase 4C entry set; [#1292] own-width tensor-close assertions; [#1293] the exact 84-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection across every admitted surface and lane |
 | 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] delivered the internal typed Pad carrier but not the exact-only v6 break owned by [#1287]; [#937] delivered the earlier f64 sampler repair but [#1295] owns the final same-dtype parameter contract; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
@@ -2006,6 +2362,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
 [#1282]: https://github.com/Chelis-Lang/chelis/issues/1282
 [#1284]: https://github.com/Chelis-Lang/chelis/issues/1284
+[#1286]: https://github.com/Chelis-Lang/chelis/issues/1286
 [#1294]: https://github.com/Chelis-Lang/chelis/issues/1294
 [#1295]: https://github.com/Chelis-Lang/chelis/issues/1295
 [#1296]: https://github.com/Chelis-Lang/chelis/issues/1296
@@ -2013,4 +2370,11 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
+[#849]: https://github.com/Chelis-Lang/chelis/issues/849
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310
+[#1343]: https://github.com/Chelis-Lang/chelis/pull/1343
+[#1338]: https://github.com/Chelis-Lang/chelis/issues/1338
+[#1370]: https://github.com/Chelis-Lang/chelis/pull/1370
+[#1399]: https://github.com/Chelis-Lang/chelis/pull/1399
+[#1371]: https://github.com/Chelis-Lang/chelis/pull/1371
+[#1384]: https://github.com/Chelis-Lang/chelis/pull/1384

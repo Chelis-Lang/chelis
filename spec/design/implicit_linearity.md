@@ -1,37 +1,48 @@
 # Implicit Linearity
 
-**Status:** Phase 0 contract for the `copy-drop` work.
+**Status:** Implemented verified ownership lowering over the `copy-drop` foundation.
+Its conservative scope-end lifetime strategy is superseded as a target contract by
+`compiled_value_ownership.md`; that plan retains last-use release as successor work.
 **Owning specs:** `spec/03-deep-syntax.md`, `spec/04-type-system.md`,
 `spec/05-risc-primitives.md`, and `spec/design/borrow_typed_primitives.md`.
 
 ## Summary
 
 Chelis keeps explicit `copy()` and `drop()` source forms for compatibility, but the
-compiler now owns routine linearity ceremony. It inserts drops at scope exits and
-copies at consuming fan-out sites. Drop timing is end-of-scope, not last-use. Last-use
-optimization is a future tightening.
+compiler now owns routine linearity ceremony. The shipped implementation inserts drops
+at scope exits and copies at consuming fan-out sites. The controlling [04-LIN-8]
+contract requires the successor ownership lowering to place terminal releases at the
+last-use/post-dominance boundary and before tail calls; that is correctness work for
+compiled heap values, not an optional allocation optimization.
 
-Lowered IR makes the result explicit. `RiscOp::Copy` and `RiscOp::Drop` are real IR
-nodes, and every lowered linear value has exactly one terminal path: a consuming use or
-a `Drop`. Slot planners treat `Drop` as the authoritative live-range close.
+The verified `OwnershipProgram` makes `RiscOp::Copy` and `RiscOp::Drop` real
+ownership operations: every lowered linear value has exactly one terminal path,
+and every backend receives the borrow/move/clone disposition before emission.
+Slot planners treat terminal consumes and `Drop` as authoritative live-range
+closes.
 
 ## Drop Insertion
 
-An owned linear value that reaches the end of its containing scope without a consuming
-use receives an inserted `Drop`. Multi-branch flow is branch-local: if a value is
-consumed on one branch and not the other, the unconsumed branch receives a `Drop`.
-`if` and `match` branches are analyzed independently.
+An owned linear value without a consuming use receives an inserted `Drop`. The shipped
+foundation places it at the end of the containing scope; the successor pass moves it to
+the earliest post-dominating point after last use as [04-LIN-8] requires. Multi-branch
+flow is branch-local: if a value is consumed on one branch and not the other, the
+unconsumed branch receives a `Drop`. `if` and `match` branches are analyzed
+independently.
 
 Loops introduce an iteration scope. Values defined inside a loop are consumed or
 dropped by the end of that iteration. Values defined outside a loop and consumed inside
 the loop require the existing loop-aware ownership rules; cases where the compiler
 cannot prove a single terminal path remain hard errors.
 
-`Drop` is a liveness marker, not a computation. Evaluators and backends emit no runtime
-operation for it. AD treats it as a gradient sink for the dropped value. Backends and
-slot planners must use `Drop` to close the dropped value's live range; when `Drop` is
-present, independent liveness may refine allocation details but must not extend the
-value past the drop.
+`Drop` is not a numerical computation. AD treats it as a gradient sink. For an owned
+source, tensor slot planners close the dropped value's live range there. C and HIP emit the exact
+descriptor release selected by the verified directive; Metal consumes the same
+directive as a typed no-device-owner disposition. A `Drop` over a borrowed DAG `Load`
+is instead a typed logical discard: it emits no release and leaves the external owner
+live; Metal consumes that disposition without inventing a device owner. Independent
+liveness may refine allocation details but must not extend a program owner past an
+owned terminal operation.
 
 ## Copy Insertion
 

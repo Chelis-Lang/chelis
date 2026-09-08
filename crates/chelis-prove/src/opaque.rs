@@ -15,7 +15,7 @@
 //! recomputed from the predicate via `chelis_pred::classify_predicate`.
 
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_pred::PredAmenability;
@@ -222,7 +222,7 @@ pub struct OpaqueInvariantRejection {
 pub fn collect_opaque_invariants_and_rejections(
     exprs: &[Expr],
 ) -> (Vec<OpaqueInvariant>, Vec<OpaqueInvariantRejection>) {
-    let mut deftypes: HashMap<String, &Expr> = HashMap::new();
+    let mut deftypes: UnordMap<String, &Expr> = UnordMap::new();
     index_deftypes(exprs, &mut deftypes);
     let mut oks = Vec::new();
     let mut errs = Vec::new();
@@ -241,7 +241,7 @@ pub fn collect_opaque_invariant_rejections(exprs: &[Expr]) -> Vec<OpaqueInvarian
 /// Index every `deftype` in the program (recursing module wrappers) by its
 /// type name, so a nested-record field type (`t-adt` naming another record)
 /// resolves while the field model is built.
-fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut HashMap<String, &'a Expr>) {
+fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut UnordMap<String, &'a Expr>) {
     for expr in exprs {
         if tag(expr) == Some(DeepTag::Deftype)
             && let Some(name) = children(expr).first().and_then(|n| symbol_text(n))
@@ -256,7 +256,7 @@ fn index_deftypes<'a>(exprs: &'a [Expr], out: &mut HashMap<String, &'a Expr>) {
 
 fn collect_in<'a>(
     expr: &'a Expr,
-    deftypes: &HashMap<String, &'a Expr>,
+    deftypes: &UnordMap<String, &'a Expr>,
     oks: &mut Vec<OpaqueInvariant>,
     errs: &mut Vec<OpaqueInvariantRejection>,
 ) {
@@ -280,7 +280,7 @@ fn collect_in<'a>(
 /// - `Some(Ok(_))` -- a modelable invariant.
 fn opaque_invariant_from_deftype(
     deftype: &Expr,
-    deftypes: &HashMap<String, &Expr>,
+    deftypes: &UnordMap<String, &Expr>,
 ) -> Option<Result<OpaqueInvariant, OpaqueInvariantRejection>> {
     // Require opaque: true and an invariant fn node in the metadata. Absent
     // either, this is not an invariant-carrying opaque type -> skip.
@@ -348,7 +348,7 @@ fn opaque_invariant_from_deftype(
                 "field `{fname}` of opaque type `{type_name}` has no type"
             ));
         };
-        let mut visiting = HashSet::new();
+        let mut visiting = UnordSet::new();
         let Some(fty) = field_type_from_deep(fty_node, deftypes, &mut visiting) else {
             return reject(format!(
                 "field `{fname}` of opaque type `{type_name}` has a representation type the prover \
@@ -415,8 +415,8 @@ fn predicate_binder(fn_node: &Expr) -> Option<String> {
 /// checker uses, so the checker and the prover agree on the value class.
 fn field_type_from_deep(
     ty: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> Option<FieldType> {
     match tag(ty)? {
         DeepTag::TPrim => {
@@ -482,8 +482,8 @@ fn field_type_from_deep(
 /// field model the prover flattens (`p.inner.value`).
 fn record_field_type(
     deftype: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> Option<FieldType> {
     let kids = children(deftype);
     let variants: Vec<_> = kids
@@ -518,7 +518,7 @@ fn record_field_type(
 /// (`sum(p.weights) >= 1.0 - eps` references `eps`). Resolved to concrete
 /// `f64` values by the caller (RFC D-WF: in-grammar constant defs whose
 /// bodies are themselves in-grammar).
-pub type ConstEnv = std::collections::HashMap<String, f64>;
+pub type ConstEnv = chelis_unord::UnordMap<String, f64>;
 
 /// Context threaded through predicate lowering: the binder name, the
 /// dotted path prefix of the binder value, the binder's fields (so `sum`
@@ -667,7 +667,7 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
     // referential chain instead. The declared (defsig) type is authoritative
     // over the body literal's own tag.
     let mut current = name.to_string();
-    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut visited: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     loop {
         if !visited.insert(current.clone()) {
             // Re-entered a name already on the chain: a cycle. No declared

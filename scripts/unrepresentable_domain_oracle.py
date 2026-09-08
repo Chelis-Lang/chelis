@@ -52,13 +52,14 @@ Usage:
 Acceptance is exit 0 with the final line ``ORACLE: PASS``.
 
 Wiring: `scripts/gate.py`'s `integration` stage and its `--local` pre-push
-subset. Hosted CI runs that stage in the `workspace-tests` job
-(`Workspace Tests (Linux)`), on every pull request that is not docs-only.
-The stage choice is not incidental: obligations 4 and 5 run `cargo nextest`,
-which the `lint-and-unit` job deliberately does not install, so the oracle
-would fail there with `no such command: nextest`. `scripts/test_gate.py`
-locks both memberships and the pairing between the oracle's stage and a job
-that installs cargo-nextest.
+subset. Hosted CI runs that stage in the `workspace-tests-shard` matrix,
+which feeds the stable `Workspace Tests (Linux)` aggregate on every pull
+request that is not docs-only. The stage choice is not incidental:
+obligations 4 and 5 run `cargo nextest`, which the `lint-rust` worker
+deliberately does not install, so the oracle would fail there with
+`no such command: nextest`. `scripts/test_gate.py` locks both memberships
+and the pairing between the oracle's stage and a worker that installs
+cargo-nextest.
 
 Binary handoff (chelis#1322): when a gate command list already builds
 `chelis` before it reaches this oracle, `scripts/gate.py` names the built
@@ -70,11 +71,14 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -279,8 +283,9 @@ class OracleBinaryError(RuntimeError):
 # `scripts/gate.py` names the `chelis` it already built in this variable when
 # the command list it is running provably builds that binary before reaching
 # this oracle. Unset means "build your own", which is what a standalone run
-# and hosted CI's `gate.py integration` job both do.
+# and hosted CI's `workspace-tests-shard` workers both do.
 ORACLE_BINARY_ENV = "CHELIS_ORACLE_BINARY"
+STYLE_GATE_DISABLE_ENV = "CHELIS_STYLE_GATE_DISABLE"
 
 
 def chelis_check_command() -> tuple[str, ...]:
@@ -427,12 +432,101 @@ def run_chelis_check(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         )
     else:
         cmd = chelis_check_command() + (str(fixture_path),)
-    return subprocess.run(
+    return run_bounded_child(
+        f"chelis check fixture {fixture_path.name}",
         cmd,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
         timeout=60,
+        env={**os.environ, STYLE_GATE_DISABLE_ENV: "1"},
+    )
+
+
+def run_bounded_child(
+    obligation: str,
+    command: Sequence[str],
+    *,
+    timeout: float,
+    cwd: Path = REPO_ROOT,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one oracle child, reaping its process group on timeout.
+
+    The failure is deliberately field-oriented: retained gate transcripts must
+    identify which obligation stalled, which child was alive, and whether the
+    termination itself completed. A timeout is never reinterpreted as a
+    semantic rejection.
+    """
+
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            tuple(command),
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as error:
+        raise OracleFailure(
+            "\n".join(
+                (
+                    f"obligation={obligation}",
+                    f"command={shlex.join(command)}",
+                    "state=spawn_failed",
+                    f"error={error}",
+                )
+            )
+        ) from error
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        termination = "SIGKILL" if os.name == "posix" else "kill"
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            termination = "already_exited"
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise OracleFailure(
+                "\n".join(
+                    (
+                        f"obligation={obligation}",
+                        f"command={shlex.join(command)}",
+                        f"pid={process.pid}",
+                        "state=termination_failed",
+                        f"elapsed={time.monotonic() - started:.3f}s",
+                        f"timeout={timeout:.3f}s",
+                        f"termination={termination}",
+                    )
+                )
+            ) from error
+        raise OracleFailure(
+            "\n".join(
+                (
+                    f"obligation={obligation}",
+                    f"command={shlex.join(command)}",
+                    f"pid={process.pid}",
+                    "state=timed_out",
+                    f"elapsed={time.monotonic() - started:.3f}s",
+                    f"timeout={timeout:.3f}s",
+                    f"termination={termination}",
+                    f"stdout={stdout.rstrip()}",
+                    f"stderr={stderr.rstrip()}",
+                )
+            )
+        )
+
+    return subprocess.CompletedProcess(
+        args=tuple(command),
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -473,12 +567,11 @@ def run_chelis_validate(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         )
     else:
         cmd = chelis_validate_command() + (str(fixture_path),)
-    return subprocess.run(
+    return run_bounded_child(
+        f"chelis validate fixture {fixture_path.name}",
         cmd,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
         timeout=60,
+        env={**os.environ, STYLE_GATE_DISABLE_ENV: "1"},
     )
 
 

@@ -63,31 +63,9 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
-    def test_additive_prose_in_an_integrity_fingerprinted_file_fails(self) -> None:
-        for relative_name in oracle.FROZEN_FILE_DIGESTS:
-            relative = Path(relative_name)
-            with self.subTest(relative=relative):
-                path = self.root / relative
-                original = path.read_text(encoding="utf-8")
-                path.write_text(
-                    "An implementation MAY ignore the frozen Phase 4B contract.\n\n"
-                    + original,
-                    encoding="utf-8",
-                )
-                try:
-                    self.assert_contract_fails("frozen contract file")
-                finally:
-                    path.write_text(original, encoding="utf-8")
-
-    def test_spec06_additive_count_grad_contradiction_fails(self) -> None:
-        path = self.root / "spec/06-transformations.md"
-        original = path.read_text(encoding="utf-8")
-        path.write_text(
-            original
-            + "\nCount may return a silent zero cotangent when used under grad.\n",
-            encoding="utf-8",
-        )
-        self.assert_contract_fails("frozen contract file spec/06-transformations.md")
+    # The whole-file digest tests these replaced now live in
+    # FrozenContractChangeTests, which runs the same mutations against the
+    # merge-base acknowledgement gate.
 
     def test_agent_numeric_surface_additive_successor_exception_fails(self) -> None:
         path = self.root / "AGENTS.md"
@@ -104,6 +82,60 @@ class ContractValidationTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assert_contract_fails("frozen agent numeric surface discipline")
+
+    def test_the_acknowledgement_gate_cannot_be_restated_as_a_digest(self) -> None:
+        # The Phase 4 handoff region digest moved when the plan's oracle
+        # description was rewritten. These three mutations are what defends the
+        # new text, so it rests on required literals rather than only on a
+        # re-hash.
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "The additive-contradiction leg is an acknowledgement, not a "
+            "whole-file digest.",
+            "The additive-contradiction leg is a whole-file digest.",
+        )
+        self.assert_contract_fails(
+            "Phase 4B acknowledgement gate replaces whole-file digests"
+        )
+
+    def test_the_acknowledgement_cannot_become_a_blanket_declaration(self) -> None:
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "requires each changed file to be named in the pull request body",
+            "requires the pull request to declare that contract files changed",
+        )
+        self.assert_contract_fails(
+            "Phase 4B acknowledgement is per changed file"
+        )
+
+    def test_a_stale_acknowledgement_cannot_be_made_advisory(self) -> None:
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "An unacknowledged\nchange and an acknowledgement naming an "
+            "unchanged file both fail\n`--require-acknowledgement`, which is "
+            "the mode CI runs on a pull request.",
+            "An unacknowledged change fails `--require-acknowledgement`; an "
+            "acknowledgement naming an unchanged file is tolerated.",
+        )
+        self.assert_contract_fails(
+            "Phase 4B acknowledgement enforcing mode"
+        )
+
+    def test_relu_device_completion_cannot_regress_to_issue_receipts(self) -> None:
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "No backend cell cites [#1313] after it closes",
+            "Every backend cell cites [#1313] after it closes",
+        )
+        self.assert_contract_fails("ReLU closed-issue receipt removal")
+
+    def test_relu_child_oracle_cannot_drop_the_exact_success_line(self) -> None:
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "DTYPE RELU ORACLE:\nPASS",
+            "DTYPE RELU ORACLE: MAYBE",
+        )
+        self.assert_contract_fails("ReLU child oracle success line")
 
     def test_missing_operation_atom_fails(self) -> None:
         self.replace(
@@ -170,6 +202,10 @@ class ContractValidationTests(unittest.TestCase):
                     self.assert_contract_fails(f"{atom}.*must begin")
                 finally:
                     path.write_text(original, encoding="utf-8")
+
+    # test_top_level_value_scope_is_frozen_in_both_owning_chapters moved to
+    # FrozenContractChangeTests: neither clause sits inside a frozen region, so
+    # the acknowledgement gate is the leg that catches those mutations.
 
     def test_exact_read_atom_freezes_json_and_csv_numeric_boundaries(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -1079,6 +1115,41 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-31.*unused high bits")
 
+    def test_tensor_read_view_lifetime_ends_before_a_write_begins(self) -> None:
+        mutations = (
+            (
+                Path("spec/05-risc-primitives.md"),
+                "until that descriptor is passed to\n> "
+                "`chelis_tensor_begin_write`, whichever comes first",
+                "for as long as any descriptor owner remains live",
+                "OP-31.*chelis_tensor_begin_write",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "A successful begin invalidates\n> every read view previously "
+                "returned for that descriptor",
+                "A successful begin preserves every prior read view",
+                "OP-44.*successful begin invalidates",
+            ),
+            (
+                Path("spec/design/compiled_value_ownership.md"),
+                "A successful begin invalidates every previously returned read view; "
+                "dereferencing\n  such a stale view violates the caller precondition",
+                "A successful begin preserves every previously returned read view",
+                "write-begin read-view invalidation",
+            ),
+        )
+        for path, old, new, message in mutations:
+            with self.subTest(message=message):
+                contract = self.root / path
+                original = contract.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                contract.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    contract.write_text(original, encoding="utf-8")
+
     def test_scalar_carrier_pins_exact_public_layouts(self) -> None:
         block = oracle.atom_blocks(
             (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
@@ -1086,10 +1157,11 @@ class ContractValidationTests(unittest.TestCase):
         for declaration in (
             "typedef uint8_t chelis_dtype;",
             "typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;",
-            "typedef struct { uint8_t is_some; uint8_t reserved[7]; chelis_scalar value; } chelis_option_scalar;",
+            "enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };",
             "typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;",
             "typedef struct { chelis_value_tag tag; uint8_t reserved[7]; chelis_value_payload payload; } chelis_value;",
-            "typedef struct { void *data; const int64_t *shape; const int64_t *strides; int64_t size; int64_t byte_capacity; int32_t rank; chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } chelis_tensor;",
+            "typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;",
             "typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;",
         ):
             with self.subTest(declaration=declaration):
@@ -1098,12 +1170,513 @@ class ContractValidationTests(unittest.TestCase):
     def test_scalar_carrier_layout_mutation_fails(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "const int64_t *shape; const int64_t *strides; int64_t size; "
-            "int64_t byte_capacity; int32_t rank",
-            "int64_t shape[8]; int64_t strides[8]; int64_t size; "
-            "int64_t byte_capacity; int32_t rank",
+            "typedef struct { const void *data; int64_t count; chelis_dtype dtype; "
+            "uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { const void *data; int32_t count; chelis_dtype dtype; "
+            "uint8_t reserved[3]; } chelis_read_view;",
         )
-        self.assert_contract_fails("OP-31.*chelis_tensor")
+        self.assert_contract_fails("OP-31.*chelis_read_view")
+
+    def test_compiled_owner_atoms_are_frozen(self) -> None:
+        mutations = (
+            (
+                Path("spec/04-type-system.md"),
+                "exactly one logical owner",
+                "zero or more logical owners",
+                "04-LIN-3.*logical owner",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "externally supplied entry arguments\n> are borrowed",
+                "externally supplied entry arguments\n> transfer ownership",
+                "04-LIN-7.*entry arguments",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "compiler SHALL create an ordinary copy",
+                "compiler MAY consume the entry borrow directly",
+                "04-LIN-7.*ordinary copy",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "result owner may be the owner transferred\n> through an owned parameter",
+                "result ownership is inferred from the returned address",
+                "04-LIN-4.*transferred",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "storage reclaimable\n> before a following tail call or loop back-edge",
+                "reclaimable only after the function returns",
+                "04-LIN-8.*tail call",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "move may transfer the value to one explicit successor owner",
+                "move may leave both source and successor owners live",
+                "04-LIN-8.*successor owner",
+            ),
+        )
+        for relative, old, new, message in mutations:
+            with self.subTest(message=message):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_ffi_entry_borrow_cannot_become_an_owned_input(self) -> None:
+        self.replace(
+            Path("spec/11-ffi.md"),
+            "compiled entry borrows every input runtime value",
+            "compiled entry owns every input runtime value",
+        )
+        self.assert_contract_fails("FFI entry borrow")
+
+    def test_linearity_model_cannot_restore_scope_end_drop(self) -> None:
+        mutations = (
+            (
+                "For an unconsumed local owner, the compiler inserts `Drop` at the "
+                "earliest\npost-dominating point after its last use",
+                "The compiler inserts end-of-scope `Drop` operations for "
+                "unconsumed local owners",
+                "linearity last-use Drop placement",
+            ),
+            (
+                "Lexical scope\nexit is the fallback only when no earlier valid "
+                "terminal point can be proved",
+                "Lexical scope exit is always the terminal point",
+                "linearity scope-exit fallback",
+            ),
+        )
+        path = self.root / "spec/04-type-system.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_primitive_marker_erasure_preserves_verified_ownership(self) -> None:
+        mutations = (
+            (
+                "Source borrow syntax and primitive-DAG borrow markers\n"
+                "are erased before backend emission",
+                "Every ownership fact is erased before IR lowering",
+                "primitive source-marker erasure",
+            ),
+            (
+                "The resolved disposition of every use is not erased; ownership\n"
+                "lowering first records explicit borrow, move, clone, and terminal "
+                "`Drop` obligations\nin the verified ownership representation "
+                "consumed by every backend",
+                "Backends infer ownership from emitted addresses",
+                "primitive verified ownership preservation",
+            ),
+        )
+        path = self.root / "spec/05-risc-primitives.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_keeps_the_complete_c_authority_range(self) -> None:
+        self.replace(
+            Path("spec/11-ffi.md"),
+            "governed by [05-OP-31..33]",
+            "governed by [05-OP-31] and [05-OP-33]",
+        )
+        self.assert_contract_fails("FFI complete C authority range")
+
+    def test_compiled_ownership_cannot_omit_option(self) -> None:
+        mutations = (
+            (
+                "    Option,\n    MappedFile,",
+                "    MappedFile,",
+                "Option heap kind",
+            ),
+            (
+                "| `Option<T>` where `T` has a target recursive-value representation "
+                "| `Option` | opaque `chelis_option *` handle and "
+                "`CHELIS_VALUE_OPTION` |",
+                "| `Option<T>` | none | legacy by-value carrier |",
+                "Option carrier mapping",
+            ),
+            (
+                "Every target-representable `Option<T>`, including `Option` of a "
+                "scalar, mapped\nresource, or another `Option`",
+                "Only an `Option` whose child is already a heap handle",
+                "recursive Option heap classification",
+            ),
+            (
+                "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
+                "ownership",
+                "balanced tensor/string/List/tuple/dictionary/ADT/mapped-file ownership",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION`",
+                "omit an unrelated host variant",
+                "Option omission mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_rejects_recursive_function_values_exactly(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "Each identity has\nexactly one disposition: structurally nonheap, "
+                "target-rejected with an owning\ncapability issue, direct heap "
+                "carrier, tagged heap payload, or private heap\nallocation",
+                "First-class functions may be omitted from the ownership registry",
+                "closed target-rejection disposition",
+            ),
+            (
+                "A function\nstored in `Option`, `List`, tuple, dictionary, or ADT "
+                "is a `FirstClassValue`,\nnot a contextual callback",
+                "A function in an aggregate is treated as a contextual callback",
+                "recursive function placement",
+            ),
+            (
+                "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
+                "`Unimplemented { issue: #879 }` after the sealed ownership "
+                "boundary certifies\nthe exact selected payload and before backend "
+                "emission",
+                "an empty scalar after the sealed ownership boundary",
+                "recursive function target rejection",
+            ),
+            (
+                "It is a target capability result, not a language type error, "
+                "scalar\nsubstitution, empty value, or permission to omit the type "
+                "from the registry",
+                "It is a permanent language rejection",
+                "function rejection semantics",
+            ),
+            (
+                "admit `Option[function]` or another recursive function container "
+                "without the\n  exact [#879] target rejection",
+                "admit every recursive function container",
+                "function-container omission mutation",
+            ),
+            (
+                "[#909]/[#879]:** own shared first-class function representation "
+                "and the\n  general C-host closure ABI",
+                "[#1286]:** owns the general C-host closure ABI",
+                "function-value external owners",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_cannot_omit_recursive_mapped_file(self) -> None:
+        mutations = (
+            (
+                "| `MappedFile` resource | `MappedFile` | opaque "
+                "`chelis_mapped_file *` handle and `CHELIS_VALUE_MAPPED_FILE` |",
+                "| `MappedFile` resource | `MappedFile` | opaque "
+                "`chelis_mapped_file *`; never a `chelis_value` |",
+                "mapped-file carrier mapping",
+            ),
+            (
+                "`CHELIS_VALUE_MAPPED_FILE` is the exact tagged representation "
+                "when that handle\nis stored in `Option`, `List`, tuple, "
+                "dictionary, or ADT",
+                "The resource is never stored in a recursive aggregate",
+                "recursive mapped-file representation",
+            ),
+            (
+                "including `Option[MappedFile]`, nested resource aggregates",
+                "excluding resource aggregates",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` "
+                "fixture",
+                "omit an unrelated resource fixture",
+                "mapped-file omission mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_cannot_omit_string_or_tensor_tags(self) -> None:
+        mutations = (
+            (
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target and `CHELIS_VALUE_STRING` |",
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target |",
+                "string carrier mapping",
+            ),
+            (
+                "| tensor value or internal tensor view | `Tensor` | opaque "
+                "`chelis_tensor *` handle and `CHELIS_VALUE_TENSOR` |",
+                "| tensor value or internal tensor view | `Tensor` | opaque "
+                "`chelis_tensor *` handle |",
+                "tensor carrier mapping",
+            ),
+            (
+                "tensor storage is the sole private heap allocation with no public "
+                "tag. Every\ndirectly carried public heap kind also has the table's "
+                "exact tagged\nrepresentation for recursive aggregates",
+                "Public heap kinds may omit tagged recursive representations",
+                "public heap tag totality",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_metal_cannot_gain_unverified_reuse(self) -> None:
+        mutations = (
+            (
+                "typed `MetalNeverReuse` plan whose input cannot carry "
+                "`ReusableOwnedStorage`",
+                "Metal plan that accepts `ReusableOwnedStorage`",
+                "Metal typed no-reuse plan",
+            ),
+            (
+                "Metal emission with distinct storage for every produced node and "
+                "no input",
+                "Metal emission may alias produced nodes and input storage",
+                "Metal no-alias fixture",
+            ),
+            (
+                "let the Metal plan accept `ReusableOwnedStorage`",
+                "let an unrelated plan accept an unrelated token",
+                "Metal no-reuse mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_launch_gate_stays_narrower_than_class_closure(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "scripts/compiled_value_ownership_oracle.py --phase launch",
+                "scripts/compiled_value_ownership_oracle.py --phase complete "
+                "--require-hip",
+                "launch ownership oracle command",
+            ),
+            (
+                "COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS",
+                "COMPILED VALUE OWNERSHIP ORACLE: PASS",
+                "launch ownership oracle success line",
+            ),
+            (
+                "The `complete --require-hip` invocation is the eventual [#1286] "
+                "class-closure\noracle. It is deliberately stronger than the "
+                "launch invocation",
+                "The launch invocation closes the entire class",
+                "launch and class-closure distinction",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                count = original.count(old)
+                self.assertGreater(count, 0)
+                replacement_count = count if message == "launch ownership oracle success line" else 1
+                path.write_text(
+                    original.replace(old, new, replacement_count), encoding="utf-8"
+                )
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_keeps_external_issue_owners(self) -> None:
+        mutations = (
+            (
+                "The top-level tuple missing-`main` observation is [#545], not an "
+                "ownership-oracle row",
+                "The top-level tuple missing-`main` observation joins this oracle",
+                "top-level tuple external owner",
+            ),
+            (
+                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
+                "recursive-host operation support remains [#729]/[#730] capability "
+                "work",
+                "All secondary recursion observations join this oracle",
+                "recursive support external owners",
+            ),
+            (
+                "[#1172] owns the span-key cause that can over-broaden hints; Surf "
+                "reachability is exposure evidence",
+                "Every reachability observation joins this oracle",
+                "reachability external owner",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_requires_runtime_seal_supersession(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "Phase 1 must\n  explicitly supersede its numbered-spec citations, "
+            "`runtime_representation.md`\n  target, guards, and public-layout "
+            "promise in the same atomic change",
+            "Both carrier contracts may coexist during migration",
+        )
+        self.assert_contract_fails("runtime representation supersession")
+
+    def test_implicit_linearity_distinguishes_current_and_successor_drop(self) -> None:
+        mutations = (
+            (
+                "The verified `OwnershipProgram` makes `RiscOp::Copy` and "
+                "`RiscOp::Drop` real\nownership operations",
+                "The ownership program may treat copy and drop as emission no-ops",
+                "current Drop implementation status",
+            ),
+            (
+                "C and HIP emit the exact\ndescriptor release selected by the "
+                "verified directive; Metal consumes the same\ndirective as a typed "
+                "no-device-owner disposition",
+                "Backends may reconstruct a terminal release after verification",
+                "successor Drop release",
+            ),
+        )
+        path = self.root / "spec/design/implicit_linearity.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_roadmap_cannot_replace_launch_subset_with_full_class_gate(self) -> None:
+        path = self.root / "spec/design/remediation_roadmap.md"
+        mutations = (
+            (
+                "[#1286]'s verified compiled ownership and opaque unified-heap ABI "
+                "through [#1362]'s C-lane `--phase launch` oracle",
+                "[#1286]'s ownership through the full HIP oracle",
+                "roadmap launch ownership gate",
+            ),
+            (
+                "full [#1286] class closure, including HIP and non-launch children, "
+                "remains tracker work and does not gate v0.19",
+                "full class closure gates v0.19",
+                "roadmap full ownership boundary",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_phase_one_cannot_skip_container_authority(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries",
+            "The exact ABI is [05-OP-31..33] and the three carrier registries",
+        )
+        self.assert_contract_fails("complete C ABI authority chain")
+
+    def test_compiled_ownership_phase_row_maps_are_exact(self) -> None:
+        path = Path("spec/design/compiled_value_ownership.md")
+        mutations = (
+            (
+                "This phase promotes exactly twenty-three oracle rows: the five [#543]",
+                "This phase promotes exactly twenty-two oracle rows: four [#543] rows",
+                "Phase 1 exact ownership row map",
+            ),
+            (
+                "This phase promotes exactly six oracle rows: the [#1346] fold row",
+                "This phase promotes five oracle rows and leaves depth one unresolved",
+                "Phase 2 exact ownership row map",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                contract = self.root / path
+                original = contract.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                contract.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    contract.write_text(original, encoding="utf-8")
+
+    def test_backend_cannot_accept_unverified_ownership(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "No arrow after verification may accept the pre-verification form",
+            "A backend may accept the pre-verification form as a fallback",
+        )
+        self.assert_contract_fails("verified backend boundary")
 
     def test_scalar_parse_nan_spelling_and_images_are_frozen(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -1592,6 +2165,12 @@ class ContractValidationTests(unittest.TestCase):
                 "JsonArray(List[Json]) | JsonObject(Dict[string,Json])",
                 "JsonArray(List[Json])",
             ),
+            "05-OP-44": (
+                "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar "
+                "rank, const chelis_scalar *shape)",
+                "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar "
+                "rank, chelis_scalar *shape)",
+            ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
                 "(T,((T,int64)->T!E),int64)->tensor[n,T]!E",
@@ -1841,6 +2420,155 @@ class ContractValidationTests(unittest.TestCase):
         )
         for old, new, message in mutations:
             with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_runtime_extent_amendments_are_defended(self) -> None:
+        mutations = (
+            (
+                Path("spec/04-type-system.md"),
+                "access whose shape depends on the guarded extent",
+                "access of the function",
+                "runtime extent guard placement",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "places guards by this rule",
+                "may place guards anywhere",
+                "runtime extent guard placement in every execution mode",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "`InputAxis(t, a)`",
+                "`AxisRead(t, a)`",
+                "folded tensor-axis extent carrier",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`",
+                "`reshape` admits `Lit` and `Node`",
+                "runtime extent owner admission",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "and the dtype of the quantity that guard\n> finalizes",
+                "and declared result dtype\n> ",
+                "precondition guard finalized-quantity dtype",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "`numeric trap: domain in <op> at int64`",
+                "`numeric trap: domain in <op> at <prim>`",
+                "runtime extent guard trap line",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "well formed only when the start\n  paired with it is `Lit(0)`",
+                "well formed with any start",
+                "ToEnd shrink end requires a zero start",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "`expand` sets the extent at `axis` and is well formed only "
+                "when the operand's\nextent at `axis` is 1",
+                "`expand` sets the extent at `axis` for any operand extent",
+                "expand requires a unit source extent",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "A literal operand extent at\n`axis` other than 1 is a type error. A symbolic or runtime operand extent at\n`axis` other than 1 fails that claim's runtime extent guard and traps\n`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and\n[04-NUM-9].",
+                "Any operand extent at\n`axis` is accepted.",
+                "expand non-unit source extent is rejected or traps",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `expand` | `insert(sum(g, axis), axis, 1i64)`",
+                "| `expand` | `sum(g, axis)` |",
+                "expand adjoint restores the unit axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `insert` | `sum(g, axis)`",
+                "| `insert` | `insert(g, axis, 1i64)` |",
+                "insert adjoint collapses the inserted axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
+                "\n> new-axis position SHALL be",
+                "A reduction axis SHALL be",
+                "axis atom names both movement primitives",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "names the\n> dimension it creates, which is by construction not a dimension of the\n> operand; that name SHALL be statically resolvable in the same sense",
+                "names any\n> dimension",
+                "insert names a dimension absent from the operand",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "> `insert(g / divisor, axis, original_extent)` at the "
+                "operand dtype.",
+                "> `expand(g / divisor, original_shape, axis)` at the "
+                "operand dtype.",
+                "mean adjoint reinserts the reduced axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "[05-AXIS-1] governs the reduction, `expand`, and `insert`\n> family",
+                "[05-AXIS-1] governs the static reduction/expand family",
+                "C axis family names both movement primitives",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "tensor[D_plus,p]` | Insert a new dimension of width `size` "
+                "at position `axis`, producing rank `rank(x) + 1`.",
+                "| `insert` | unspecified |",
+                "insert movement row",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "Each operation has exactly one result shape. `expand` sets "
+                "the extent at\n`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`\nat `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer\nselects between shapes, and no context supplies a default.",
+                "A consumer selects between two candidate shapes, and an unconsumed result\ntakes a default at the freeze point.",
+                "expand and insert each have one result shape",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "`insert` admits `axis` in `0..=rank(x)`, so\n`axis == rank(x)` appends a trailing axis. An axis outside its operation's\nrange is a type error.",
+                "`insert` admits any `axis`.",
+                "insert axis range",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "**Named-axis insert (`R+1`).** The inverse arithmetic "
+                "direction: `insert`\nadds a *named* axis",
+                "**Named-axis expand (`R+1`).** The inverse arithmetic "
+                "direction: `expand`\nadds a *named* axis",
+                "named-axis form belongs to insert",
+            ),
+            (
+                Path("spec/06-transformations.md"),
+                "over these) is not batched",
+                "over these) is batched",
+                "vmap runtime extent non-batching rule",
+            ),
+            (
+                Path("spec/06-transformations.md"),
+                "### 8.6 `batch_varying_extent` (vmap)",
+                "### 8.6 `batch_shared_extent` (vmap)",
+                "vmap batch-varying extent rejection",
+            ),
+        )
+        for relative, old, new, message in mutations:
+            with self.subTest(message=message):
+                path = self.root / relative
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(old, original)
                 path.write_text(original.replace(old, new, 1), encoding="utf-8")
@@ -2438,7 +3166,40 @@ class ContractValidationTests(unittest.TestCase):
             "`and` / `or` / `not` are the logical operations; counting is the "
             "explicit-cast idiom",
         )
-        self.assert_contract_fails("frozen contract file")
+        # Confined to the frozen "numeric value semantics" region, so the
+        # region digest catches it with no git history in play. See
+        # FrozenRegionIndependenceTests for the same mutation run against a
+        # tree the acknowledgement gate cannot see at all.
+        self.assert_contract_fails("frozen numeric value semantics digest")
+
+    def test_num8_keeps_representation_distinct_from_width(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "Equal storage widths do not make two representations interchangeable",
+            "Equal storage widths make two representations interchangeable",
+        )
+        self.assert_contract_fails("04-NUM-8.*representations interchangeable")
+
+    def test_num11_preserves_device_and_binding_metadata_domains(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A language binding or device descriptor SHALL preserve rank as int32\n"
+            "> and each extent, stride, element count, and byte capacity as int64",
+            "A language binding or device descriptor MAY narrow rank, extents,\n"
+            "> strides, element counts, and byte capacities to an implementation width",
+        )
+        self.assert_contract_fails("04-NUM-11.*device descriptor")
+
+    def test_shape_capacity_equivalence_never_saturates_into_equality(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "SHALL NOT wrap, saturate, truncate, or\n"
+            "> substitute an overflow sentinel that can make unequal mathematical counts\n"
+            "> equal",
+            "MAY saturate both overflowing products to one sentinel and treat them\n"
+            "> as equal",
+        )
+        self.assert_contract_fails("04-SHAPE-1.*overflow sentinel")
 
     def test_count_axes_remain_signature_checks_not_table_b_narrowing(self) -> None:
         self.replace(
@@ -2899,6 +3660,82 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("roadmap reduction owner")
 
+    def test_roadmap_keeps_the_runtime_representation_owner(self) -> None:
+        self.replace(
+            Path("spec/design/remediation_roadmap.md"),
+            "[`runtime_representation.md`](runtime_representation.md) ([#893])",
+            "[#893] has no design owner",
+        )
+        self.assert_contract_fails("runtime representation owner")
+
+    def test_runtime_capacity_key_preserves_partial_division_domain(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "Division is a partial exact-integer operation, not rational arithmetic",
+            "Division is normalized as unrestricted rational arithmetic",
+        )
+        self.assert_contract_fails("runtime capacity validity domain")
+
+    def test_runtime_zero_product_preserves_nested_partial_division(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "`0 * (1 / n)` retains the partial quotient and remains distinct "
+            "from zero\nunless `n != 0` and `n` divides 1 have both been proved",
+            "`0 * (1 / n)` always collapses to zero",
+        )
+        self.assert_contract_fails("runtime zero-product validity domain")
+
+    def test_runtime_capacity_key_is_carrier_independent(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "`CapacityKey` is deliberately carrier-independent",
+            "`CapacityKey` is coupled to `DimExpr`",
+        )
+        self.assert_contract_fails("runtime capacity carrier independence")
+
+    def test_runtime_guard_fact_stays_outside_capacity_predicates(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "The set is deliberately closed against equality learned only by "
+            "passing a\n[#1277] runtime guard",
+            "A passed runtime guard silently proves every later capacity reuse",
+        )
+        self.assert_contract_fails("runtime guard capacity boundary")
+
+    def test_runtime_extent_plan_disclaims_capacity_equality(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_extents.md"),
+            "capacity and reuse equality\nover typed extent expressions\n"
+            "([`runtime_representation.md`](runtime_representation.md), [#888])",
+            "capacity and reuse equality are part of this plan",
+        )
+        self.assert_contract_fails("runtime extent capacity boundary")
+
+    def test_runtime_phase0_debt_is_shrink_only(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "exact shrink-only transition-debt\nmanifest",
+            "editable transition-debt\nmanifest",
+        )
+        self.assert_contract_fails("runtime Phase 0 shrink-only debt")
+
+    def test_foreign_carrier_never_forms_rust_slices(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "A foreign carrier never constructs `TensorRef<T>`, `TensorMut<T>`, "
+            "`&[T]`, or\n`&mut [T]`",
+            "A foreign carrier may construct `TensorMut<T>` and `&mut [T]`",
+        )
+        self.assert_contract_fails("runtime foreign slice prohibition")
+
+    def test_runtime_launch_gate_keeps_the_host_field_seal(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "the Phase 3 `--host` field-seal evidence",
+            "no field-seal evidence",
+        )
+        self.assert_contract_fails("runtime launch-gate boundary")
+
     def test_additive_parent_absorption_clause_fails(self) -> None:
         self.replace(
             Path("spec/design/remediation_roadmap.md"),
@@ -3187,6 +4024,133 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("captured extrema tie rule")
 
+    def test_dtype_family_bound_production_is_a_closed_three_name_set(
+        self,
+    ) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "DtypeFamily   <- 'Float' / 'Int' / 'Numeric'",
+            "DtypeFamily   <- TypeName",
+        )
+        self.assert_contract_fails("Surf dtype-family bound production")
+
+    def test_a_bound_cannot_be_written_in_two_binder_lists(self) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "A bound belongs to one binder\nlist per declaration",
+            "A bound may be repeated in both binder\nlists when they agree",
+        )
+        self.assert_contract_fails("Surf single bound binder list")
+
+    def test_the_occurrence_rule_cannot_widen_past_bounded_binders(self) -> None:
+        # [04-DTYPE-2] makes only a BOUNDED binder owe an occurrence, and the
+        # checker agrees: `sig f[zz]: p -> p` checks clean. Asserting it for
+        # every listed name is normative prose broader than the decided rule.
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "A listed name **that declares a\nbound** must occur in the declared type.",
+            "A listed name must occur in the declared type.",
+        )
+        self.assert_contract_fails("Surf occurrence rule is bounded-binder only")
+
+    def test_the_two_bound_failures_cannot_claim_one_diagnostic_shape(
+        self,
+    ) -> None:
+        # An instantiation outside the bound names one family and the
+        # offending type; an empty intersection names two families and no
+        # offending type. One clause covering both over-promises the second.
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "an empty intersection SHALL be a `PrecisionMismatch` naming both\n"
+            "> families.",
+            "an empty intersection SHALL name the required family and the\n"
+            "> offending type.",
+        )
+        self.assert_contract_fails("empty intersection names both families")
+
+    def test_deep_carries_dtype_bounds_as_a_defined_metadata_key(self) -> None:
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
+            "`defsig`'s binders; see §2.2 |",
+            "| `dtype_bounds` | string | Producer-specific bound provenance |",
+        )
+        self.assert_contract_fails("Deep dtype-family bound metadata key")
+
+    def test_bounded_variables_unify_by_intersection_not_equality(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "Unifying two bounded variables SHALL\n> yield the intersection "
+            "of their families.",
+            "Unifying two bounded variables SHALL\n> require identical families.",
+        )
+        self.assert_contract_fails("dtype-family bound intersection")
+
+    def test_an_unbounded_binder_is_not_narrowed_to_a_dtype(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A binder that declares no bound\n> remains an unconstrained type "
+            "variable admitting every type, not only a\n> dtype.",
+            "A binder that declares no bound\n> ranges over every active dtype.",
+        )
+        self.assert_contract_fails(
+            "unbounded binder stays a general type variable"
+        )
+
+    def test_deep_grammar_must_derive_a_map_valued_metadata_key(self) -> None:
+        # The chapter's own PEG has to derive the Deep the language emits.
+        # `chelis validate --deep` is the second implementation of exactly
+        # this production, and it rejected every migrated stdlib module while
+        # `MetaValue` had no nested-`Meta` alternative.
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "MetaValue   \u2190 Meta / Node / Literal / Identifier / TypeName",
+            "MetaValue   \u2190 Node / Literal / Identifier / TypeName",
+        )
+        self.assert_contract_fails(
+            "Deep grammar derives a map-valued metadata key"
+        )
+
+    def test_deep_grammar_must_derive_the_declared_metadata_key_charset(
+        self,
+    ) -> None:
+        # §1.1 declares `[A-Za-z_][A-Za-z0-9_]*`; the pre-#1417 §7 production
+        # was `[a-z]+`, which derives neither `dtype_bounds` nor the four
+        # underscored keys already shipping.
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "MetaKey     \u2190 [A-Za-z_] [A-Za-z0-9_]*",
+            "MetaKey     \u2190 [a-z]+",
+        )
+        self.assert_contract_fails(
+            "Deep grammar derives the declared metadata key charset"
+        )
+
+    def test_stdlib_bound_obligation_cannot_cite_the_operation_class_table(
+        self,
+    ) -> None:
+        # §5.4's rows are operation classes, not signatures. Citing it would
+        # make `arange`'s `Int` bound optional and `assert_close`'s `Float`
+        # bound wrong, contradicting [05-OP-35].
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A public stdlib signature whose `[05-OP-35]` registry domain is "
+            "exactly one of\nthese families declares that family as a bound.",
+            "A public stdlib signature whose §5.4 row admits exactly one "
+            "family declares\nthat family as a bound.",
+        )
+        self.assert_contract_fails(
+            "stdlib bound obligation cites the registry domain"
+        )
+
+    def test_numeric_family_is_the_union_of_float_and_int(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "| `Numeric` | the union of `Float` and `Int` |",
+            "| `Numeric` | every active float dtype of §1.1 |",
+        )
+        self.assert_contract_fails("dtype-family membership table")
+
 
 class RunnerTests(unittest.TestCase):
     @mock.patch.object(oracle.subprocess, "run")
@@ -3213,6 +4177,839 @@ class RunnerTests(unittest.TestCase):
         run.side_effect = subprocess.CalledProcessError(1, [])
         with self.assertRaisesRegex(SystemExit, "rejection registry disagreement"):
             oracle.run_oracle(sys.executable, REPO_ROOT)
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ("git", "-C", str(root), *args),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _git_ok(root: Path, *args: str) -> str:
+    completed = _git(root, *args)
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed in {root}: {completed.stderr}"
+        )
+    return completed.stdout
+
+
+def _commit_all(root: Path, message: str) -> str:
+    _git_ok(root, "add", "-A")
+    _git_ok(
+        root,
+        "-c",
+        "user.name=Frozen Contract Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--no-verify",
+        "-q",
+        "-m",
+        message,
+    )
+    return _git_ok(root, "rev-parse", "HEAD").strip()
+
+
+class AcknowledgementGrammarTests(unittest.TestCase):
+    """The line grammar is exact, case-sensitive, and glob-free."""
+
+    def parse(self, body: str) -> tuple[list[str], list[str]]:
+        return oracle.parse_acknowledgements(body)
+
+    def test_canonical_line_is_accepted(self) -> None:
+        paths, errors = self.parse(
+            "Some prose.\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "Frozen-contract-change: AGENTS.md\n"
+        )
+        self.assertEqual(paths, ["spec/04-type-system.md", "AGENTS.md"])
+        self.assertEqual(errors, [])
+
+    def test_carriage_returns_from_a_github_body_are_tolerated(self) -> None:
+        # The pull request body arrives from the GitHub event payload with
+        # CRLF line endings; a lost acknowledgement here would read as an
+        # unacknowledged change and block every PR that edits a contract file.
+        paths, errors = self.parse(
+            "Body.\r\nFrozen-contract-change: spec/11-ffi.md\r\nMore.\r\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_lowercase_key_is_a_malformed_line_not_a_silent_miss(self) -> None:
+        paths, errors = self.parse("frozen-contract-change: spec/11-ffi.md\n")
+        self.assertEqual(paths, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("malformed frozen contract acknowledgement", errors[0])
+
+    def test_list_bullet_and_indentation_are_malformed_lines(self) -> None:
+        for line in (
+            "- Frozen-contract-change: spec/11-ffi.md",
+            "  Frozen-contract-change: spec/11-ffi.md",
+            "> Frozen-contract-change: spec/11-ffi.md",
+            "* Frozen-contract-change: spec/11-ffi.md",
+        ):
+            with self.subTest(line=line):
+                paths, errors = self.parse(line + "\n")
+                self.assertEqual(paths, [])
+                self.assertEqual(len(errors), 1)
+
+    def test_missing_or_doubled_space_is_a_malformed_line(self) -> None:
+        for line in (
+            "Frozen-contract-change:spec/11-ffi.md",
+            "Frozen-contract-change:  spec/11-ffi.md",
+            "Frozen-contract-change: ",
+            "Frozen-contract-change:",
+        ):
+            with self.subTest(line=line):
+                paths, errors = self.parse(line + "\n")
+                self.assertEqual(paths, [])
+                self.assertEqual(len(errors), 1, errors)
+
+    def test_trailing_content_after_the_path_is_a_malformed_line(self) -> None:
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md (adds a sentence)\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(len(errors), 1)
+
+    def test_globs_and_traversal_are_rejected_paths(self) -> None:
+        for candidate in (
+            "spec/*.md",
+            "spec/0?-ffi.md",
+            "spec/[01]1-ffi.md",
+            "/spec/11-ffi.md",
+            "spec/../spec/11-ffi.md",
+            "./spec/11-ffi.md",
+            "spec\\11-ffi.md",
+            "spec//11-ffi.md",
+        ):
+            with self.subTest(candidate=candidate):
+                paths, errors = self.parse(
+                    f"Frozen-contract-change: {candidate}\n"
+                )
+                self.assertEqual(paths, [], candidate)
+                self.assertEqual(len(errors), 1, candidate)
+
+    def test_fenced_code_blocks_do_not_acknowledge(self) -> None:
+        # A body has to be able to quote the grammar without acknowledging a
+        # file, and a quoted example must not be mistaken for a real line.
+        paths, errors = self.parse(
+            "The grammar is:\n\n"
+            "```\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "frozen-contract-change: wrong case\n"
+            "```\n\n"
+            "Frozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_a_tilde_run_does_not_close_a_backtick_fence(self) -> None:
+        # Round 1 F1. One boolean let any fence run close any other, so a line
+        # that GitHub renders as code could still acknowledge a change.
+        paths, errors = self.parse(
+            "```\n"
+            "~~~\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "```\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(errors, [])
+
+    def test_a_short_run_does_not_close_a_longer_fence(self) -> None:
+        # Round 1 F1. CommonMark requires the closing run to be at least as
+        # long as the opening one, so an inner ``` stays inside an outer ````.
+        paths, errors = self.parse(
+            "````\n"
+            "```\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "```\n"
+            "````\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(errors, [])
+
+    def test_a_longer_run_closes_a_shorter_fence(self) -> None:
+        paths, errors = self.parse(
+            "```\n"
+            "quoted\n"
+            "````\n"
+            "Frozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_a_tilde_fence_still_hides_its_contents(self) -> None:
+        paths, errors = self.parse(
+            "~~~\nFrozen-contract-change: spec/04-type-system.md\n~~~\n"
+        )
+        self.assertEqual((paths, errors), ([], []))
+
+    def test_an_unclosed_fence_is_an_error_not_a_silent_swallow(self) -> None:
+        # Round 1 F2. Without this the acknowledgement vanishes and the gate
+        # tells the author to add a line the body already carries.
+        paths, errors = self.parse(
+            "```\nFrozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unclosed", errors[0])
+
+    def test_an_unclosed_fence_errors_even_beside_a_valid_line(self) -> None:
+        # Round 2 RT2-5. Reporting the unclosed fence only when nothing parsed
+        # survived the round-1 suite: an author who acknowledges one file and
+        # then opens a fence loses every line after it with no diagnostic.
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md\n"
+            "```\n"
+            "Frozen-contract-change: spec/10-serialization.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unclosed", errors[0])
+
+    def test_trailing_whitespace_after_the_path_is_accepted(self) -> None:
+        # Round 2 RT2-5. `raw.rstrip()` is the reason, and it was untested in
+        # either direction, so replacing it with `rstrip("\n")` survived.
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md   \t\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_lone_carriage_returns_still_separate_lines(self) -> None:
+        # Round 2 RT2-5. Dropping the lone-CR normalization survived, because
+        # every other test used LF or CRLF.
+        paths, errors = self.parse(
+            "Body.\rFrozen-contract-change: spec/11-ffi.md\rMore.\r"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_a_closed_fence_reports_no_unclosed_error(self) -> None:
+        paths, errors = self.parse("```\nquoted\n```\n")
+        self.assertEqual((paths, errors), ([], []))
+
+    def test_a_mid_sentence_mention_acknowledges_nothing(self) -> None:
+        paths, errors = self.parse(
+            "Each change adds a `Frozen-contract-change: <path>` line.\n"
+        )
+        self.assertEqual((paths, errors), ([], []))
+
+
+class FrozenContractChangeTests(unittest.TestCase):
+    """The merge-base diff plus acknowledgement gate.
+
+    Each test builds a real git repository so the check runs the same git
+    plumbing it runs in CI.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        _git_ok(self.root, "init", "-q", "-b", "main")
+        for relative in CONTRACT_FILES:
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO_ROOT / relative, destination)
+        self.base = _commit_all(self.root, "baseline")
+        _git_ok(self.root, "update-ref", "refs/remotes/origin/main", self.base)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def check(self, **kwargs: object) -> list[str]:
+        parameters: dict[str, object] = {
+            "root": self.root,
+            "require_acknowledgement": True,
+        }
+        parameters.update(kwargs)
+        return oracle.validate_frozen_contract_changes(**parameters)  # type: ignore[arg-type]
+
+    def assert_fails(self, message: str, **kwargs: object) -> None:
+        with self.assertRaisesRegex(oracle.OracleError, message):
+            self.check(**kwargs)
+
+    def append(self, relative: str, text: str) -> None:
+        path = self.root / relative
+        path.write_text(
+            path.read_text(encoding="utf-8") + text, encoding="utf-8"
+        )
+
+    def test_unchanged_tree_passes(self) -> None:
+        report = self.check()
+        self.assertIn("0 of 29 contract files changed", report[0])
+
+    def test_every_contract_file_is_watched(self) -> None:
+        # The converted whole-file-digest test. Contradictory prose prepended
+        # to any contract file must fail, and the failure must name the file.
+        # The watched set is now all 29 CONTRACT_FILES, a superset of the 22
+        # that carried a whole-file digest.
+        self.assertEqual(len(CONTRACT_FILES), 29)
+        for relative in oracle.CONTRACT_FILES:
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                path.write_text(
+                    "An implementation MAY ignore the frozen Phase 4B "
+                    "contract.\n\n" + original,
+                    encoding="utf-8",
+                )
+                try:
+                    self.assert_fails(
+                        "unacknowledged frozen contract change: "
+                        + re.escape(relative)
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_top_level_value_scope_is_frozen_in_both_owning_chapters(self) -> None:
+        # [04-INF-4] and the spec/02 value-scope clause it qualifies move
+        # together; weakening either half must trip the freeze. This arrived on
+        # `main` asserting a whole-file digest mismatch. Neither clause is
+        # inside a frozen region, so the acknowledgement gate is what catches
+        # them now: same mutations, same guarantee.
+        mutations = (
+            (
+                "spec/04-type-system.md",
+                "body-type\n> metadata SHALL NOT make that later value visible",
+                "body-type\n> metadata MAY make that later value visible",
+            ),
+            (
+                "spec/04-type-system.md",
+                "A reference to an\n> earlier value SHALL resolve",
+                "A reference to an\n> earlier value MAY resolve",
+            ),
+            (
+                "spec/02-surf-syntax.md",
+                "a non-function value declared earlier in the enclosing module",
+                "a non-function value declared anywhere in the enclosing module",
+            ),
+        )
+        for relative, old, new in mutations:
+            with self.subTest(message=f"{relative}: {old[:40]}"):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_fails(
+                        "unacknowledged frozen contract change: "
+                        + re.escape(relative)
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_transitive_top_level_initialization_frontier_is_frozen(self) -> None:
+        mutations = (
+            (
+                "every non-function\n> top-level value in `V`'s eager reference set ([04-INF-7]) SHALL be available",
+                "every non-function\n> top-level value in `V`'s eager reference set ([04-INF-7]) MAY be available",
+            ),
+            (
+                "If `V` itself occurs in the set,\n> [04-INF-7]'s `CycleDetected` verdict takes precedence",
+                "If `V` itself occurs in the set,\n> `UnboundVariable` MAY take precedence",
+            ),
+        )
+        relative = "spec/04-type-system.md"
+        for old, new in mutations:
+            with self.subTest(message=old[:60]):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_fails(
+                        "unacknowledged frozen contract change: "
+                        + re.escape(relative)
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_spec06_additive_count_grad_contradiction_fails(self) -> None:
+        self.append(
+            "spec/06-transformations.md",
+            "\nCount may return a silent zero cotangent when used under grad.\n",
+        )
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/06-transformations.md"
+        )
+
+    def test_an_acknowledged_change_passes(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        report = self.check(acknowledgements=("spec/11-ffi.md",))
+        self.assertIn("1 of 29 contract files changed", report[0])
+        self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
+
+    def test_a_body_line_acknowledges_the_change(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.check(body="Frozen-contract-change: spec/11-ffi.md\n")
+
+    def test_acknowledging_one_file_does_not_cover_another(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.append("spec/10-serialization.md", "\nAn unreviewed sentence.\n")
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/10-serialization.md",
+            body="Frozen-contract-change: spec/11-ffi.md\n",
+        )
+
+    def test_a_stale_acknowledgement_fails(self) -> None:
+        self.assert_fails(
+            "stale frozen contract acknowledgement for spec/11-ffi.md",
+            body="Frozen-contract-change: spec/11-ffi.md\n",
+        )
+
+    def test_a_stale_acknowledgement_fails_beside_a_live_one(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "stale frozen contract acknowledgement for spec/10-serialization.md",
+            body=(
+                "Frozen-contract-change: spec/11-ffi.md\n"
+                "Frozen-contract-change: spec/10-serialization.md\n"
+            ),
+        )
+
+    def test_a_wrong_case_path_is_not_the_contract_file(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "names SPEC/11-ffi.md, which is not a frozen contract file",
+            body="Frozen-contract-change: SPEC/11-ffi.md\n",
+        )
+
+    def test_a_glob_never_acknowledges_a_change(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "malformed frozen contract acknowledgement path",
+            body="Frozen-contract-change: spec/*.md\n",
+        )
+
+    def test_a_non_contract_file_cannot_be_acknowledged(self) -> None:
+        self.assert_fails(
+            "names README.md, which is not a frozen contract file",
+            body="Frozen-contract-change: README.md\n",
+        )
+
+    def test_a_duplicate_acknowledgement_fails(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "duplicate frozen contract acknowledgement for spec/11-ffi.md",
+            body=(
+                "Frozen-contract-change: spec/11-ffi.md\n"
+                "Frozen-contract-change: spec/11-ffi.md\n"
+            ),
+        )
+
+    def test_a_deleted_contract_file_is_a_change(self) -> None:
+        (self.root / "spec/11-ffi.md").unlink()
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/11-ffi.md"
+        )
+
+    def test_a_whitespace_only_edit_is_a_change(self) -> None:
+        self.append("spec/11-ffi.md", "\n")
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/11-ffi.md"
+        )
+
+    def test_a_change_reverted_in_the_working_tree_is_not_a_change(self) -> None:
+        path = self.root / "spec/11-ffi.md"
+        original = path.read_text(encoding="utf-8")
+        path.write_text(original + "\nTemporary.\n", encoding="utf-8")
+        path.write_text(original, encoding="utf-8")
+        self.check()
+
+    def test_a_committed_change_on_the_branch_is_still_a_change(self) -> None:
+        # The comparison point is content, not the working tree's dirtiness:
+        # committing the edit must not clear the acknowledgement requirement.
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        self.append("spec/11-ffi.md", "\nA committed sentence.\n")
+        _commit_all(self.root, "edit the contract")
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/11-ffi.md"
+        )
+
+    def test_a_change_inherited_from_the_base_is_not_this_branch_s(self) -> None:
+        # The merge base, not the base tip, is the comparison point. A contract
+        # file that moved on `main` after this branch forked must not demand an
+        # acknowledgement from a branch that never touched it.
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        self.append("spec/10-serialization.md", "\nThis branch's edit.\n")
+        _commit_all(self.root, "branch edit")
+        _git_ok(self.root, "checkout", "-q", "main")
+        self.append("spec/11-ffi.md", "\nA later main-branch sentence.\n")
+        moved = _commit_all(self.root, "main moves on")
+        _git_ok(self.root, "update-ref", "refs/remotes/origin/main", moved)
+        _git_ok(self.root, "checkout", "-q", "topic")
+        report = self.check(
+            acknowledgements=("spec/10-serialization.md",)
+        )
+        self.assertIn("1 of 29 contract files changed", report[0])
+
+    def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
+        # Round 1 F3. Reading a failed `git show` as "absent at the merge base"
+        # would report a changed file as unchanged whenever the object store is
+        # degraded. The tree listing and the blob read are now separate.
+        merge_base = oracle.resolve_merge_base(self.root, "origin/main")
+        present = oracle.contract_files_at(
+            self.root, merge_base, oracle.CONTRACT_FILES
+        )
+        self.assertEqual(present, set(oracle.CONTRACT_FILES))
+
+        real_git = oracle._git
+
+        def failing_show(root: Path, *args: str):
+            if args and args[0] == "show":
+                return subprocess.CompletedProcess(
+                    args, 128, b"", b"fatal: unable to read object"
+                )
+            return real_git(root, *args)
+
+        with mock.patch.object(oracle, "_git", failing_show):
+            with self.assertRaisesRegex(
+                oracle.OracleError, r"cannot read .* at "
+            ):
+                oracle.changed_contract_files(
+                    self.root, merge_base, oracle.CONTRACT_FILES
+                )
+
+    def test_an_unlistable_merge_base_tree_is_an_error(self) -> None:
+        with self.assertRaisesRegex(
+            oracle.OracleError, "cannot list frozen contract files"
+        ):
+            oracle.contract_files_at(
+                self.root, "0" * 40, oracle.CONTRACT_FILES
+            )
+
+    def test_a_contract_file_absent_at_the_merge_base_is_a_change(self) -> None:
+        # The other half of F3: a genuine absence must still read as a change,
+        # not as an error.
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        new_path = self.root / "spec/11-ffi.md"
+        merge_base = oracle.resolve_merge_base(self.root, "origin/main")
+        present = oracle.contract_files_at(
+            self.root, merge_base, ("spec/11-ffi.md", "docs/absent-probe.md")
+        )
+        self.assertEqual(present, {"spec/11-ffi.md"})
+        self.assertTrue(new_path.exists())
+        (self.root / "docs/absent-probe.md").write_text("new\n", encoding="utf-8")
+        self.assertIn(
+            "docs/absent-probe.md",
+            oracle.changed_contract_files(
+                self.root, merge_base, ("docs/absent-probe.md",)
+            ),
+        )
+
+    def test_a_missing_merge_base_fails_loudly_in_strict_mode(self) -> None:
+        _git_ok(self.root, "update-ref", "-d", "refs/remotes/origin/main")
+        self.assert_fails("cannot determine the frozen contract merge base")
+
+    def test_a_non_repository_root_fails_loudly_in_strict_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as plain:
+            self.assert_fails(
+                "is not a git work tree", root=Path(plain)
+            )
+
+    def test_an_unreadable_tree_reports_and_exits_zero_in_advisory_mode(
+        self,
+    ) -> None:
+        # Round 2 RT2-4. The unreadable-blob repair made `changed_contract_files`
+        # raise, and advisory mode caught `OracleError` only around the merge
+        # base, so a degraded object store aborted the run before the atom and
+        # region digests. Advisory mode reports and continues.
+        real_git = oracle._git
+
+        def failing_listing(root: Path, *args: str):
+            if args and args[0] == "ls-tree":
+                return subprocess.CompletedProcess(
+                    args, 128, b"", b"fatal: not a tree object"
+                )
+            return real_git(root, *args)
+
+        with mock.patch.object(oracle, "_git", failing_listing):
+            report = self.check(require_acknowledgement=False)
+            self.assertTrue(
+                any("cannot list frozen contract files" in line for line in report),
+                report,
+            )
+            self.assertTrue(
+                any("change detection skipped" in line for line in report), report
+            )
+            with self.assertRaisesRegex(
+                oracle.OracleError, "cannot list frozen contract files"
+            ):
+                self.check(require_acknowledgement=True)
+
+    def test_a_missing_merge_base_reports_and_exits_zero_in_advisory_mode(
+        self,
+    ) -> None:
+        _git_ok(self.root, "update-ref", "-d", "refs/remotes/origin/main")
+        report = self.check(require_acknowledgement=False)
+        self.assertTrue(
+            any("cannot determine" in line for line in report), report
+        )
+        self.assertTrue(
+            any("change detection skipped" in line for line in report), report
+        )
+
+    def test_advisory_mode_reports_but_does_not_raise(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        report = self.check(require_acknowledgement=False)
+        self.assertTrue(
+            any(
+                "ISSUE unacknowledged frozen contract change: spec/11-ffi.md"
+                in line
+                for line in report
+            ),
+            report,
+        )
+
+    def test_an_explicit_base_ref_is_honoured(self) -> None:
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.check(base=self.base, acknowledgements=("spec/11-ffi.md",))
+
+
+class FrozenRegionIndependenceTests(unittest.TestCase):
+    """A change inside a frozen region trips its digest on its own.
+
+    The acknowledgement gate replaces the whole-file digests. It does not
+    replace the atom and region digests, and it must not be the only thing
+    standing between a rewritten normative clause and a green oracle.
+    """
+
+    def test_a_region_edit_fails_without_any_git_history(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            for relative in CONTRACT_FILES:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(REPO_ROOT / relative, destination)
+            path = root / "spec/04-type-system.md"
+            original = path.read_text(encoding="utf-8")
+            old = (
+                "`and` / `or` / `not` are the\n  logical operations and "
+                "`count` is the bool-tensor counting operation"
+            )
+            self.assertIn(old, original)
+            path.write_text(
+                original.replace(
+                    old,
+                    "`and` / `or` / `not` are the logical operations; counting "
+                    "is the explicit-cast idiom",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                oracle.OracleError, "frozen numeric value semantics digest"
+            ):
+                oracle.validate_contract(root)
+
+
+class MergeConflictFreedomTests(unittest.TestCase):
+    """The property the acknowledgement gate exists to buy.
+
+    Two pull requests that edit different frozen contract files, or disjoint
+    sections of one, must not conflict in any tracked file other than the spec
+    files they each edited. The control leg reproduces the whole-file digest
+    table and shows the same pair of edits conflicting, so a clean merge in the
+    main leg is evidence rather than an artifact of the harness.
+    """
+
+    def build(self, root: Path, with_digest_table: bool) -> None:
+        (root / "spec").mkdir(parents=True, exist_ok=True)
+        (root / "spec/a.md").write_text(
+            "# A\n\n" + "".join(f"clause a{i}\n" for i in range(40)),
+            encoding="utf-8",
+        )
+        (root / "spec/b.md").write_text(
+            "# B\n\n" + "".join(f"clause b{i}\n" for i in range(40)),
+            encoding="utf-8",
+        )
+        if with_digest_table:
+            (root / "oracle.py").write_text(
+                "FROZEN_FILE_DIGESTS = {\n"
+                '    "spec/a.md": "' + "0" * 64 + '",\n'
+                '    "spec/b.md": "' + "1" * 64 + '",\n'
+                "}\n",
+                encoding="utf-8",
+            )
+
+    def edit(self, root: Path, relative: str, line: str, replacement: str) -> None:
+        path = root / relative
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(line, text)
+        path.write_text(text.replace(line, replacement, 1), encoding="utf-8")
+
+    def move_digest(self, root: Path, relative: str, digit: str) -> None:
+        path = root / "oracle.py"
+        text = path.read_text(encoding="utf-8")
+        line = [entry for entry in text.splitlines() if relative in entry][0]
+        path.write_text(
+            text.replace(line, f'    "{relative}": "{digit * 64}",'),
+            encoding="utf-8",
+        )
+
+    def merge_is_clean(self, root: Path) -> bool:
+        merged = _git(root, "merge-tree", "--write-tree", "pr-one", "pr-two")
+        self.assertIn(
+            merged.returncode,
+            (0, 1),
+            f"git merge-tree errored: {merged.stderr}",
+        )
+        return merged.returncode == 0
+
+    def scenario(
+        self, with_digest_table: bool, same_file: bool
+    ) -> tuple[bool, str]:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            _git_ok(root, "init", "-q", "-b", "main")
+            self.build(root, with_digest_table)
+            _commit_all(root, "baseline")
+
+            _git_ok(root, "checkout", "-q", "-b", "pr-one")
+            self.edit(root, "spec/a.md", "clause a3\n", "clause a3 revised\n")
+            if with_digest_table:
+                self.move_digest(root, "spec/a.md", "a")
+            _commit_all(root, "pr one")
+
+            _git_ok(root, "checkout", "-q", "main")
+            _git_ok(root, "checkout", "-q", "-b", "pr-two")
+            if same_file:
+                self.edit(
+                    root, "spec/a.md", "clause a37\n", "clause a37 revised\n"
+                )
+                if with_digest_table:
+                    self.move_digest(root, "spec/a.md", "b")
+            else:
+                self.edit(
+                    root, "spec/b.md", "clause b3\n", "clause b3 revised\n"
+                )
+                if with_digest_table:
+                    self.move_digest(root, "spec/b.md", "b")
+            _commit_all(root, "pr two")
+
+            clean = self.merge_is_clean(root)
+            conflicts = _git(
+                root, "merge-tree", "--write-tree", "pr-one", "pr-two"
+            ).stdout
+            return clean, conflicts
+
+    def test_disjoint_contract_edits_merge_cleanly_without_the_digest_table(
+        self,
+    ) -> None:
+        for same_file in (False, True):
+            with self.subTest(same_file=same_file):
+                clean, _ = self.scenario(
+                    with_digest_table=False, same_file=same_file
+                )
+                self.assertTrue(
+                    clean,
+                    "edits to disjoint contract text must not conflict",
+                )
+
+    def test_the_digest_table_is_what_made_those_edits_conflict(self) -> None:
+        # Control. Without this leg a green test above would prove only that
+        # the harness cannot detect a conflict.
+        for same_file in (False, True):
+            with self.subTest(same_file=same_file):
+                clean, conflicts = self.scenario(
+                    with_digest_table=True, same_file=same_file
+                )
+                self.assertFalse(
+                    clean,
+                    "the whole-file digest table must reproduce the conflict "
+                    "this change removes",
+                )
+                self.assertIn("oracle.py", conflicts)
+                self.assertNotIn("spec/b.md", conflicts)
+
+
+class OracleEntryPointTests(unittest.TestCase):
+    """`main` runs the acknowledgement leg before it can print the pass line."""
+
+    def test_strict_mode_fails_before_the_success_line(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            _git_ok(root, "init", "-q", "-b", "main")
+            for relative in CONTRACT_FILES:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(REPO_ROOT / relative, destination)
+            base = _commit_all(root, "baseline")
+            _git_ok(root, "update-ref", "refs/remotes/origin/main", base)
+            path = root / "spec/11-ffi.md"
+            path.write_text(
+                path.read_text(encoding="utf-8") + "\nUnreviewed.\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with self.assertRaisesRegex(
+                    SystemExit, "unacknowledged frozen contract change"
+                ):
+                    oracle.main(["--require-acknowledgement"], root=root)
+            self.assertNotIn(oracle.PASS_LINE, output.getvalue())
+
+    def test_at_most_one_acknowledgement_source(self) -> None:
+        parser = oracle.build_parser()
+        args = parser.parse_args(
+            ["--acknowledgements-file", "x", "--acknowledgements-env", "Y"]
+        )
+        with self.assertRaisesRegex(SystemExit, "at most one"):
+            oracle.acknowledgement_body(args)
+
+    def test_an_unset_acknowledgement_environment_variable_fails(self) -> None:
+        parser = oracle.build_parser()
+        args = parser.parse_args(
+            ["--acknowledgements-env", "CHELIS_ACK_ABSENT_FOR_TEST"]
+        )
+        with mock.patch.dict(oracle.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(SystemExit, "is not set"):
+                oracle.acknowledgement_body(args)
+
+    def test_the_acknowledgement_environment_variable_is_read_verbatim(
+        self,
+    ) -> None:
+        parser = oracle.build_parser()
+        args = parser.parse_args(["--acknowledgements-env", "CHELIS_ACK_BODY"])
+        body = "Frozen-contract-change: spec/11-ffi.md\n"
+        with mock.patch.dict(oracle.os.environ, {"CHELIS_ACK_BODY": body}):
+            self.assertEqual(oracle.acknowledgement_body(args), body)
+
+    def test_an_acknowledgements_file_is_read(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "body.md"
+            path.write_text(
+                "Frozen-contract-change: spec/11-ffi.md\n", encoding="utf-8"
+            )
+            args = oracle.build_parser().parse_args(
+                ["--acknowledgements-file", str(path)]
+            )
+            self.assertEqual(
+                oracle.acknowledgement_body(args),
+                "Frozen-contract-change: spec/11-ffi.md\n",
+            )
+
+    def test_a_missing_acknowledgements_file_fails(self) -> None:
+        args = oracle.build_parser().parse_args(
+            ["--acknowledgements-file", "/nonexistent/body.md"]
+        )
+        with self.assertRaisesRegex(SystemExit, "cannot read acknowledgements"):
+            oracle.acknowledgement_body(args)
+
+    def test_the_default_mode_does_not_require_acknowledgement(self) -> None:
+        args = oracle.build_parser().parse_args([])
+        self.assertFalse(args.require_acknowledgement)
+        self.assertEqual(args.base, oracle.DEFAULT_BASE_REF)
+        self.assertEqual(args.acknowledge, [])
 
 
 if __name__ == "__main__":

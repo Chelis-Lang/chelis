@@ -3,7 +3,7 @@
 // Tests organized by language behavior, not by crate. Each test exercises the
 // full pipeline or relevant subset and asserts specific expected values.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::io::Write;
 use std::process::Command;
 
@@ -290,7 +290,7 @@ fn spec_unbound_variable_is_error() {
     let has_unbound = result
         .errors
         .iter()
-        .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
+        .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }));
     assert!(
         has_unbound,
         "expected UnboundVariable error, got: {:?}",
@@ -303,32 +303,19 @@ fn spec_unbound_variable_is_error() {
 // =========================================================================
 
 #[test]
-fn spec_relu_decomposes_to_max_elem() {
+fn spec_relu_survives_as_dedicated_identity() {
     let src = r#"
         (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
         (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} relu) (var {} x)))
     "#;
     let dag = lower_deep(src);
-    let has_max_elem = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::MaxElem));
-    let has_const_zero = dag
-        .nodes()
-        .iter()
-        .any(|n| matches!(n.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0));
-    assert!(has_max_elem, "relu should decompose to MaxElem");
-    assert!(has_const_zero, "relu should decompose with Const(0)");
-    // No standalone Relu op should exist in the DAG.
-    let has_no_relu_tag = dag.nodes().iter().all(|n| {
-        !matches!(
-            &n.op,
-            RiscOp::Load { name } if name == "relu"
-        )
-    });
-    assert!(has_no_relu_tag, "RISC DAG must not contain a relu Load");
+    assert!(dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Relu)));
+    assert!(!dag.nodes().iter().any(|n| matches!(n.op, RiscOp::MaxElem)));
 }
 
 #[test]
-fn spec_sub_decomposes_to_add_neg() {
+fn spec_sub_lowers_to_direct_identity_without_arithmetic_surrogate() {
     let src = r#"
         (def {} a (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a))
         (def {} b (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} b))
@@ -336,10 +323,20 @@ fn spec_sub_decomposes_to_add_neg() {
             (var {} sub) (var {} a) (var {} b)))
     "#;
     let dag = lower_deep(src);
-    let has_add = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Add));
-    let has_neg = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Neg));
-    assert!(has_add, "sub should decompose to include Add");
-    assert!(has_neg, "sub should decompose to include Neg");
+    assert_eq!(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Sub))
+            .count(),
+        1,
+        "sub should lower to exactly one direct Sub identity"
+    );
+    assert!(
+        dag.nodes()
+            .iter()
+            .all(|node| !matches!(node.op, RiscOp::Add | RiscOp::Neg)),
+        "direct Sub lowering must not reconstruct subtraction as Add/Neg"
+    );
 }
 
 #[test]
@@ -474,7 +471,15 @@ fn runtime_library_path() -> std::path::PathBuf {
 
 fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     assert!(gcc_available(), "gcc not available -- skipping");
-    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(verified, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let write = |name: &str, content: &str| {
@@ -507,12 +512,14 @@ void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int 
 int main() {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+    const float *output_data = (const float *)output_view.data;
+    for (int64_t i = 0; i < output_view.count; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[0]->data[i]);
+        printf("%.6f", output_data[i]);
     }}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -571,7 +578,15 @@ fn spec_generated_c_compiles() {
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
-    let result = chelis_backend_c::codegen(&dag, "spec_test").unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(verified, "spec_test").unwrap();
     assert!(
         !result.c_source.is_empty(),
         "codegen should produce non-empty C source"
@@ -692,7 +707,8 @@ fn spec_grad_add_is_one() {
     let dx_node = grad_result.grad_nodes[&x];
     let dy_node = grad_result.grad_nodes[&y];
 
-    let inputs: HashMap<String, f64> = [("x".into(), 3.0), ("y".into(), 7.0)].into_iter().collect();
+    let inputs: UnordMap<String, f64> =
+        [("x".into(), 3.0), ("y".into(), 7.0)].into_iter().collect();
     let vals = eval_scalar(&grad_result.dag, &inputs);
 
     assert!(
@@ -708,10 +724,10 @@ fn spec_grad_add_is_one() {
 
     // Verify by finite differences: f(x+h)-f(x-h) / 2h ~ 1.0
     let h = 1e-5;
-    let f_plus: HashMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 7.0)]
+    let f_plus: UnordMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 7.0)]
         .into_iter()
         .collect();
-    let f_minus: HashMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 7.0)]
+    let f_minus: UnordMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 7.0)]
         .into_iter()
         .collect();
     let v_plus = eval_scalar(&dag, &f_plus);
@@ -744,7 +760,8 @@ fn spec_grad_mul_is_cross() {
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
 
-    let inputs: HashMap<String, f64> = [("x".into(), 3.0), ("y".into(), 5.0)].into_iter().collect();
+    let inputs: UnordMap<String, f64> =
+        [("x".into(), 3.0), ("y".into(), 5.0)].into_iter().collect();
     let vals = eval_scalar(&grad_result.dag, &inputs);
 
     let dx = vals[&grad_result.grad_nodes[&x]];
@@ -760,10 +777,10 @@ fn spec_grad_mul_is_cross() {
 
     // Finite difference check for df/dx.
     let h = 1e-5;
-    let f_p: HashMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 5.0)]
+    let f_p: UnordMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 5.0)]
         .into_iter()
         .collect();
-    let f_m: HashMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 5.0)]
+    let f_m: UnordMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 5.0)]
         .into_iter()
         .collect();
     let v_p = eval_scalar(&dag, &f_p);
@@ -793,7 +810,7 @@ fn spec_grad_composed_chain() {
     let dx_node = grad_result.grad_nodes[&x];
 
     let x_val = 2.0;
-    let inputs: HashMap<String, f64> = [("x".into(), x_val)].into_iter().collect();
+    let inputs: UnordMap<String, f64> = [("x".into(), x_val)].into_iter().collect();
     let vals = eval_scalar(&grad_result.dag, &inputs);
     let analytic = -(-x_val).exp(); // -exp(-x)
     assert!(
@@ -804,8 +821,8 @@ fn spec_grad_composed_chain() {
 
     // Finite differences verification.
     let h = 1e-5;
-    let f_p: HashMap<String, f64> = [("x".into(), x_val + h)].into_iter().collect();
-    let f_m: HashMap<String, f64> = [("x".into(), x_val - h)].into_iter().collect();
+    let f_p: UnordMap<String, f64> = [("x".into(), x_val + h)].into_iter().collect();
+    let f_m: UnordMap<String, f64> = [("x".into(), x_val - h)].into_iter().collect();
     let v_p = eval_scalar(&dag, &f_p);
     let v_m = eval_scalar(&dag, &f_m);
     let fd = (v_p[&out] - v_m[&out]) / (2.0 * h);
@@ -832,7 +849,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
             1.0, -2.0, 3.0, -4.0, 0.5, 1.5, -2.5, 4.5, -3.0, 2.0, 1.0, -0.5,
         ],
     );
-    let inputs = HashMap::from([
+    let inputs = UnordMap::from([
         ("xs".to_string(), xs.clone()),
         (
             "x".to_string(),
@@ -877,7 +894,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
 
     let mut expected = Vec::with_capacity(xs.len());
     for example in xs.to_f64_lossy_vec().chunks(4) {
-        let baseline_inputs = HashMap::from([(
+        let baseline_inputs = UnordMap::from([(
             "x".to_string(),
             TensorValue::from_vec(vec![4], example.to_vec()),
         )]);
@@ -1026,7 +1043,7 @@ fn spec_eval_matmul_correct() {
     "#;
     let dag = lower_deep(src);
 
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "a".into(),
         TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
@@ -1053,7 +1070,7 @@ fn spec_eval_softmax_sums_to_one() {
     "#;
     let dag = lower_deep(src);
 
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -1093,7 +1110,7 @@ fn spec_eval_relu_preserves_positive() {
     "#;
     let dag = lower_deep(src);
 
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![5], vec![-1.0, 0.0, 2.0, -3.0, 5.0]),

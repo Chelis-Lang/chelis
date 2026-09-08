@@ -12,10 +12,8 @@
 //! tool reach one Surf->SMT lowering through the shared property runner.
 
 use chelis_deep::DeepTag;
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-};
+use chelis_unord::{UnordMap, UnordSet};
+use std::cell::RefCell;
 
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::{BinOp, Decl, Expr, LetPattern, Literal, Param, TypeExpr, UnaryOp};
@@ -326,12 +324,15 @@ fn trusted_quantile_symbols(decls: &[Decl]) -> Vec<String> {
         .filter_map(|decl| match decl {
             Decl::FunDef {
                 name,
-                dim_params,
+                type_binders,
                 params,
                 ret_ty,
                 ..
             } if name == LINKED_NAUTILUS_QUANTILE
-                && dim_params.as_slice() == ["n"]
+                && type_binders
+                    .iter()
+                    .map(|binder| (binder.name.as_str(), binder.bound))
+                    .eq([("n", None)])
                 && params.len() == 2
                 && matches!(
                     params[0].ty.as_ref(),
@@ -641,7 +642,7 @@ fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::Smt
 
 fn deep_arith_subst(
     expr: &DeepExpr,
-    subst: &std::collections::HashMap<String, crate::solver::SmtExpr>,
+    subst: &chelis_unord::UnordMap<String, crate::solver::SmtExpr>,
     ctx: &DeepInlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
@@ -733,7 +734,7 @@ fn deep_arith_subst(
 
 fn deep_expr_to_smt_subst(
     expr: &DeepExpr,
-    subst: &std::collections::HashMap<String, crate::solver::SmtExpr>,
+    subst: &chelis_unord::UnordMap<String, crate::solver::SmtExpr>,
     ctx: &DeepInlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
@@ -1001,7 +1002,7 @@ fn scalar_float_type(ty: Option<&TypeExpr>) -> bool {
 /// recognizes only the same small floating arithmetic subset the symbolic-dual
 /// lowering accepts. In particular, a bare/typed integer result is never
 /// promoted to a Real merely because its derivative is zero.
-fn inline_scalar_float_result(expr: &Expr, float_names: &HashSet<String>, decls: &[Decl]) -> bool {
+fn inline_scalar_float_result(expr: &Expr, float_names: &UnordSet<String>, decls: &[Decl]) -> bool {
     match expr {
         Expr::Var(name, _) => float_names.contains(name),
         Expr::Lit(Literal::Float(_) | Literal::TypedFloat(_, _), _) => true,
@@ -1129,7 +1130,7 @@ fn scalar_grad_application(
             let float_names = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             inline_scalar_float_result(body, &float_names, ctx.decls)
         }
     };
@@ -1194,7 +1195,7 @@ fn scalar_grad_application(
 
 fn scalar_dual(
     expr: &Expr,
-    env: &HashMap<String, ScalarDual>,
+    env: &UnordMap<String, ScalarDual>,
     ctx: &InlineCtx,
 ) -> Result<ScalarDual, String> {
     use crate::solver::{ArithOp, SmtExpr};
@@ -1263,7 +1264,7 @@ fn scalar_dual(
                         "scalar grad SMT lowering found wrong arity for `{name}`"
                     ));
                 };
-                let helper_env = HashMap::from([
+                let helper_env = UnordMap::from([
                     ("left".to_string(), left.clone()),
                     ("right".to_string(), right.clone()),
                 ]);
@@ -1332,7 +1333,7 @@ fn scalar_dual(
                 let float_names = params
                     .iter()
                     .map(|param| param.name.clone())
-                    .collect::<HashSet<_>>();
+                    .collect::<UnordSet<_>>();
                 ret_ty.is_none() && inline_scalar_float_result(body, &float_names, ctx.decls)
             };
             if params.len() != dual_args.len()
@@ -1507,7 +1508,7 @@ pub(super) fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::
                 // Expr inside the callee body would resolve its free vars in
                 // the WRONG (callee) scope -- the chelis#426 collapse, where
                 // two call-sites with different args produced identical SMT.
-                let subst: std::collections::HashMap<String, SmtExpr> = params
+                let subst: chelis_unord::UnordMap<String, SmtExpr> = params
                     .iter()
                     .zip(smt_args.iter())
                     .map(|(p, a)| (p.name.clone(), a.clone()))
@@ -1543,7 +1544,7 @@ pub(super) fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::
 
 fn surf_arith_subst(
     expr: &Expr,
-    subst: &std::collections::HashMap<String, SmtExpr>,
+    subst: &chelis_unord::UnordMap<String, SmtExpr>,
     ctx: &InlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, BoolOp as SB, CmpOp as SC, SmtExpr};
@@ -1698,7 +1699,7 @@ fn surf_arith_subst(
                 // bindings flow into the nested callee body. Binding the raw
                 // argument Expr and re-lowering it inside the callee would lose
                 // the parent bindings -- the chelis#426 nested-call collapse.
-                let inner_subst: std::collections::HashMap<String, SmtExpr> = params
+                let inner_subst: chelis_unord::UnordMap<String, SmtExpr> = params
                     .iter()
                     .zip(smt_args.iter())
                     .map(|(p, a)| (p.name.clone(), a.clone()))
@@ -1745,7 +1746,7 @@ fn surf_arith_subst(
 
 fn surf_expr_to_smt_subst(
     expr: &Expr,
-    subst: &std::collections::HashMap<String, SmtExpr>,
+    subst: &chelis_unord::UnordMap<String, SmtExpr>,
     ctx: &InlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{BoolOp as SB, CmpOp as SC, SmtExpr};
@@ -1973,7 +1974,7 @@ mod tests {
     fn fun_def(name: &str, params: &[&str], body: Expr) -> Decl {
         Decl::FunDef {
             name: name.to_string(),
-            dim_params: Vec::new(),
+            type_binders: Vec::new(),
             params: params.iter().map(|p| param(p)).collect(),
             ret_ty: None,
             effects: None,

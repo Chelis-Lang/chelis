@@ -43,7 +43,7 @@
 //! | optim.tensor_div (#178)     |  Y  |  Y  |  Y   |  Y  |   N  |   N   |   N   |   N   |
 //! | optim.tensor_floor_div      |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
 //! | optim.tensor_trunc_div      |  N  |  N  |  N   |  N  |   Y  |   Y   |   Y   |   Y   |
-//! | test.assert_close_tensor    |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
+//! | test.assert_close_tensor    |  Y  |  Y  |  Y   |  Y  |   N  |   N   |   N   |   N   |
 //! | test.assert_shape           |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
 //!
 //! Linear / attention reject integers because the underlying matmul
@@ -116,6 +116,26 @@ fn expect_any_error(json: &Value, label: &str) {
     );
 }
 
+fn expect_one_active_float_error(json: &Value, dtype: &str, label: &str) {
+    let errs = errors(json);
+    assert_eq!(
+        errs.len(),
+        1,
+        "{label}: expected exactly one diagnostic, never an empty-error fallback or cascade; got {errs:?}"
+    );
+    let error = errs[0];
+    assert_eq!(
+        error.get("kind").and_then(Value::as_str),
+        Some("PrecisionMismatch"),
+        "{label}: expected PrecisionMismatch; got {error:?}"
+    );
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        message.contains("active float dtype") && message.contains(dtype),
+        "{label}: expected an active-float diagnostic naming {dtype}; got {message:?}"
+    );
+}
+
 // =================================================================
 // 1. WS-A6 + WS-A7 sanity reproducer.
 //
@@ -149,7 +169,7 @@ fn linear_forward_accepts_all_float_dtypes() {
         let src = format!(
             r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
-  bias = expand(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)
@@ -314,23 +334,85 @@ fn optim_tensor_trunc_div_accepts_integer_rejects_float_dtypes() {
     }
 }
 
-/// Std.Test.assert_close_tensor and assert_shape shape: precision-
-/// generalized over the underlying tensor type. Accepts every active
-/// dtype.
+/// Std.Test.assert_close_tensor is precision-generalized over the active
+/// float dtypes, with one shared tensor/tolerance precision variable.
 #[test]
-fn test_assert_close_tensor_accepts_all_arithmetic_dtypes() {
+fn test_assert_close_tensor_accepts_exactly_active_float_dtypes() {
     for dtype in ARITHMETIC_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_close_t.ch");
         let src = format!(
-            r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> unit ! {{ Test }}
-def assert_close_tensor(actual, expected, tolerance, label) = test_assert(true, label)
-def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
+            r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! {{ Test }}
+def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
+def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, {dtype}), "label")
 "#
         );
         write_file(&path, &src);
         let json = run_check(&path);
-        expect_clean(&json, &format!("test.assert_close_tensor[{dtype}]"));
+        if FLOAT_DTYPES.contains(dtype) {
+            expect_clean(&json, &format!("test.assert_close_tensor[{dtype}]"));
+        } else {
+            expect_any_error(&json, &format!("test.assert_close_tensor[{dtype}]"));
+        }
+    }
+}
+
+/// The public `chelis check` route must preserve the builtin's active-float
+/// domain when the function value is aliased or passed through a higher-order
+/// parameter. A literal callee-name check cannot satisfy this contract.
+#[test]
+fn test_assert_close_tensor_aliases_reject_every_non_float_dtype() {
+    for dtype in ["int8", "int16", "int32", "int64", "bool"] {
+        for (route, declarations) in [
+            (
+                "top-level alias",
+                "close_alias = test_assert_close_tensor\n".to_string(),
+            ),
+            (
+                "nested alias",
+                "close_alias = test_assert_close_tensor\nnested_alias = close_alias\n"
+                    .to_string(),
+            ),
+            (
+                "higher-order alias",
+                "close_alias = test_assert_close_tensor\ndef invoke(f, actual, expected, tol) = f(actual, expected, tol, \"cli\")\n"
+                    .to_string(),
+            ),
+        ] {
+            let callee = if route == "nested alias" {
+                "nested_alias"
+            } else if route == "higher-order alias" {
+                "invoke(close_alias"
+            } else {
+                "close_alias"
+            };
+            let closing = if route == "higher-order alias" {
+                ", actual, expected, tol)"
+            } else {
+                "(actual, expected, tol, \"cli\")"
+            };
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("assert_close_alias_neg.ch");
+            let source = format!(
+                "{declarations}def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = {callee}{closing}\n"
+            );
+            write_file(&path, &source);
+            let json = run_check(&path);
+            expect_one_active_float_error(&json, dtype, route);
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("assert_close_local_alias_neg.ch");
+        let source = format!(
+            r#"def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = {{
+  close_alias = test_assert_close_tensor
+  close_alias(actual, expected, tol, "cli")
+}}
+"#
+        );
+        write_file(&path, &source);
+        let json = run_check(&path);
+        expect_one_active_float_error(&json, dtype, "local alias");
     }
 }
 
@@ -340,9 +422,9 @@ fn test_assert_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_shape.ch");
         let src = format!(
-            r#"sig assert_shape: &tensor[n, p] -> int64 -> string -> unit ! {{ Test }}
-def assert_shape(t, expected_size, label) = test_assert(true, label)
-def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, cast(3, int64), "label")
+            r#"sig assert_shape: &tensor[..r, p] -> List[int64] -> string -> unit ! {{ Test }}
+def assert_shape(t, expected_shape, label) = ()
+def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, [cast(3, int64)], "label")
 "#
         );
         write_file(&path, &src);
@@ -366,7 +448,7 @@ fn linear_forward_rejects_mismatched_input_weight_precision() {
         &path,
         r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {
-  bias = expand(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, int32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)
@@ -449,8 +531,8 @@ fn test_assert_close_tensor_rejects_mismatched_precision() {
     let path = dir.path().join("assert_close_neg.ch");
     write_file(
         &path,
-        r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> unit ! { Test }
-def assert_close_tensor(actual, expected, tolerance, label) = test_assert(true, label)
+        r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! { Test }
+def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
 def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#,
     );

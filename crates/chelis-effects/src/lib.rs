@@ -1,5 +1,5 @@
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -48,6 +48,10 @@ fn take_effect_work_profile() -> EffectWorkProfile {
     EFFECT_WORK_PROFILE.with(|profile| std::mem::take(&mut *profile.borrow_mut()))
 }
 
+/// An effect diagnostic's kind.
+///
+/// Its published spelling is the governed `chelis_vocab::DiagnosticKind`
+/// identity that `Diagnostic::from_effect_error` maps it to (chelis#886).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {
     UnhandledEffect,
@@ -86,7 +90,14 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
     let annotated_exprs: Vec<Expr> = program
         .annotated_exprs()
         .iter()
-        .map(|expr| annotate_effects(expr, &effects_by_def, &top_level_callables, &HashMap::new()))
+        .map(|expr| {
+            annotate_effects(
+                expr,
+                &effects_by_def,
+                &top_level_callables,
+                &BTreeMap::new(),
+            )
+        })
         .collect();
 
     let mut errors = Vec::new();
@@ -153,7 +164,14 @@ pub fn check_effects_with_context(
     let annotated_exprs: Vec<Expr> = new_program
         .annotated_exprs()
         .iter()
-        .map(|expr| annotate_effects(expr, &effects_by_def, &top_level_callables, &HashMap::new()))
+        .map(|expr| {
+            annotate_effects(
+                expr,
+                &effects_by_def,
+                &top_level_callables,
+                &BTreeMap::new(),
+            )
+        })
         .collect();
 
     let mut errors = Vec::new();
@@ -226,8 +244,8 @@ pub fn validate_build_target(
     }
 }
 
-fn infer_program_effects(exprs: &[Expr]) -> (HashMap<String, EffectSet>, HashSet<String>) {
-    infer_program_effects_with_context(exprs, &HashMap::new(), &HashSet::new())
+fn infer_program_effects(exprs: &[Expr]) -> (BTreeMap<String, EffectSet>, BTreeSet<String>) {
+    infer_program_effects_with_context(exprs, &BTreeMap::new(), &BTreeSet::new())
 }
 
 /// Iterative-fixed-point effect inference that lets new-code defs see an
@@ -239,22 +257,22 @@ fn infer_program_effects(exprs: &[Expr]) -> (HashMap<String, EffectSet>, HashSet
 /// The function does NOT mutate the library inputs; merging is local.
 fn infer_program_effects_with_context(
     new_exprs: &[Expr],
-    library_effects: &HashMap<String, EffectSet>,
-    library_callables: &HashSet<String>,
-) -> (HashMap<String, EffectSet>, HashSet<String>) {
+    library_effects: &BTreeMap<String, EffectSet>,
+    library_callables: &BTreeSet<String>,
+) -> (BTreeMap<String, EffectSet>, BTreeSet<String>) {
     let bodies = top_level_def_bodies(new_exprs);
     let new_callables = top_level_callable_names(&bodies);
 
     // Union of library + new callables. New-code names are present
     // because they are added below; both must be visible during inference.
-    let mut top_level_callables: HashSet<String> = library_callables.clone();
+    let mut top_level_callables: BTreeSet<String> = library_callables.clone();
     top_level_callables.extend(new_callables.iter().cloned());
 
     // Seed the effects map with the library's already-validated effect
     // rows. New-code defs are *not* in this map yet — the loop below will
     // populate them, shadowing library entries for any name the new code
     // re-defines.
-    let mut effects: HashMap<String, EffectSet> = library_effects.clone();
+    let mut effects: BTreeMap<String, EffectSet> = library_effects.clone();
 
     // Track which names are owned by the new code so we don't accidentally
     // overwrite a library entry that has the same name as a new-code def
@@ -266,7 +284,7 @@ fn infer_program_effects_with_context(
         let mut changed = false;
         for (name, body) in &bodies {
             let inferred =
-                infer_expr_effects(body, &effects, &top_level_callables, &HashMap::new());
+                infer_expr_effects(body, &effects, &top_level_callables, &BTreeMap::new());
             if effects.get(name) != Some(&inferred) {
                 effects.insert(name.clone(), inferred);
                 changed = true;
@@ -307,8 +325,8 @@ fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
     out
 }
 
-fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, &Expr> {
-    let mut defs = HashMap::new();
+fn top_level_def_bodies(exprs: &[Expr]) -> BTreeMap<String, &Expr> {
+    let mut defs = BTreeMap::new();
     for expr in flattened_top_level(exprs) {
         if let Some(kids) = stamped_children(expr, DeepTag::Def)
             && kids.len() >= 2
@@ -320,7 +338,7 @@ fn top_level_def_bodies(exprs: &[Expr]) -> HashMap<String, &Expr> {
     defs
 }
 
-fn top_level_callable_names(bodies: &HashMap<String, &Expr>) -> HashSet<String> {
+fn top_level_callable_names(bodies: &BTreeMap<String, &Expr>) -> BTreeSet<String> {
     bodies
         .iter()
         .filter(|(_, body)| body.tag() == Some(DeepTag::Fn))
@@ -356,9 +374,9 @@ fn shallow_node_list(node: &chelis_deep::node::Node, span: Span) -> List {
 
 fn infer_expr_effects(
     expr: &Expr,
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     record_effect_work(|profile| profile.infer_expr_visits += 1);
     match expr {
@@ -423,9 +441,9 @@ fn infer_expr_effects(
 
 fn infer_children_effects(
     children: &[Expr],
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     children
         .iter()
@@ -440,9 +458,9 @@ fn infer_tagged_effects(
     tag: DeepTag,
     kids: &[Expr],
     handled_effect: Option<EffectKind>,
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     match tag {
         DeepTag::Var => kids
@@ -480,9 +498,9 @@ fn infer_tagged_effects(
 
 fn infer_app_effects(
     kids: &[Expr],
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     let mut effects = EffectSet::new();
     for kid in kids {
@@ -518,13 +536,7 @@ fn infer_app_effects(
     if matches!(
         builtin_name,
         Some(
-            "test_assert"
-                | "test_assert_eq_f32"
-                | "test_assert_eq_int"
-                | "test_assert_eq_bool"
-                | "test_assert_eq_string"
-                | "test_assert_close_tensor"
-                | "test_assert_eq_tensor_int64"
+            "test_assert" | "test_assert_eq" | "test_assert_close_tensor" | "test_assert_eq_tensor"
         )
     ) {
         effects.insert(Effect::Test);
@@ -535,9 +547,9 @@ fn infer_app_effects(
 
 fn infer_let_effects(
     kids: &[Expr],
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     if kids.len() < 2 {
         return EffectSet::new();
@@ -577,9 +589,9 @@ fn infer_let_effects(
 fn infer_handle_effects(
     kids: &[Expr],
     handled_effect: Option<EffectKind>,
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     if kids.len() < 2 {
         return EffectSet::new();
@@ -600,9 +612,9 @@ fn infer_handle_effects(
 
 fn annotate_effects(
     expr: &Expr,
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) -> Expr {
     record_effect_work(|profile| profile.annotation_expr_visits += 1);
     match expr {
@@ -752,9 +764,9 @@ fn annotate_effects(
 
 fn annotate_let_children(
     kids: &[Expr],
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    local_scope: &mut HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    local_scope: &mut BTreeMap<String, EffectSet>,
 ) -> Vec<Expr> {
     let Some(bind_kids) = stamped_children(&kids[0], DeepTag::Bind) else {
         return vec![
@@ -827,9 +839,9 @@ fn annotate_let_children(
 fn update_effect_metadata(
     meta_expr: &mut Expr,
     expr: &Expr,
-    top_level_effects: &HashMap<String, EffectSet>,
-    top_level_callables: &HashSet<String>,
-    locals: &HashMap<String, EffectSet>,
+    top_level_effects: &BTreeMap<String, EffectSet>,
+    top_level_callables: &BTreeSet<String>,
+    locals: &BTreeMap<String, EffectSet>,
 ) {
     let Expr::Map(meta, _) = meta_expr else {
         return;
@@ -935,7 +947,7 @@ fn validate_handler_kind(
 
 fn validate_unhandled_random_roots(
     exprs: &[Expr],
-    effects_by_def: &HashMap<String, EffectSet>,
+    effects_by_def: &BTreeMap<String, EffectSet>,
     errors: &mut Vec<EffectError>,
 ) {
     for expr in flattened_top_level(exprs) {
@@ -1007,10 +1019,10 @@ fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
 /// `Test` via a call to `test_assert_*`.
 fn validate_declared_vs_inferred(
     exprs: &[Expr],
-    effects_by_def: &HashMap<String, EffectSet>,
+    effects_by_def: &BTreeMap<String, EffectSet>,
     errors: &mut Vec<EffectError>,
 ) {
-    let mut declared_by_name: HashMap<String, EffectSet> = HashMap::new();
+    let mut declared_by_name: BTreeMap<String, EffectSet> = BTreeMap::new();
     for expr in flattened_top_level(exprs) {
         if let Some(kids) = stamped_children(expr, DeepTag::Defsig) {
             let Some(name) = kids.first().and_then(symbol_name) else {
@@ -1303,7 +1315,7 @@ mod tests {
         let mut lines = vec![
             format!("module FrontEndPerformance.{module}N{operations}"),
             "def bc(c: f32) -> tensor[8, f32] = \
-             reshape(expand(to_tensor([c]), 0, 8i64), [8i64])"
+             reshape(insert(to_tensor([c]), 0, 8i64), [8i64])"
                 .to_string(),
         ];
         if flat {

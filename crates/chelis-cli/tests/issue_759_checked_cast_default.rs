@@ -445,7 +445,7 @@ fn checked_cast_product_program() -> String {
 }
 
 fn assert_checked_cast_product_observations(stdout: &str, lane: &str) {
-    let lines = stdout.lines().collect::<std::collections::HashSet<_>>();
+    let lines = stdout.lines().collect::<chelis_unord::UnordSet<_>>();
     for source in ACTIVE_CAST_PRIMS {
         for target in ACTIVE_CAST_PRIMS {
             let scalar_value = match target {
@@ -560,7 +560,7 @@ fn compiled_checked_casts_round_directly_at_reduced_float_width() {
         ok,
         "direct target-width rounding probe must compile and run; stderr={stderr}"
     );
-    let observed = stdout.lines().collect::<std::collections::HashSet<_>>();
+    let observed = stdout.lines().collect::<chelis_unord::UnordSet<_>>();
     for line in expected {
         assert!(
             observed.contains(line.as_str()),

@@ -1,54 +1,24 @@
 name: Nix Packages
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 concurrency:
-  group: nix-packages-${{ github.event.pull_request.number || github.ref }}
+  group: nix-packages-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  # Same docs-only detector as ci.yml's `changes` job (chelis#419). The
-  # Nix package build lives in its own workflow file, so `needs:` cannot
-  # reach ci.yml's changes job; this replicates it here so the
-  # `Nix Packages (x86_64-linux)` context skips on a docs-only PR (a
-  # skipped required job reports success) while running on every code PR
-  # and push. The darwin job keeps its own manual-dispatch gate.
-  changes:
-    name: Detect docs-only changes (nix)
-    runs-on: ubuntu-latest
-    outputs:
-      docs_only: ${{ steps.detect.outputs.docs_only }}
-    steps:
-      # Shallow checkout (depth 1) on every event: the local
-      # detect-docs-only action needs the repo on disk. See ci.yml's
-      # changes job.
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-      - name: Compute docs_only
-        id: detect
-        uses: ./.github/actions/detect-docs-only
-
   nix-linux-x86-64:
     name: Nix Packages (x86_64-linux)
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success, and the `if` fails safe (runs when the changes job did
-    # not succeed) so a broken detector never skips the build on a code
-    # PR. Only package derivations are content-addressed away from
-    # prose; the runner still cold-builds them, so a pure-prose PR
-    # skips the whole job instead.
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    # The complete native package checks take tens of minutes on hosted
+    # runners, so they run only on an explicit dispatch or a published release.
     env:
       # max-jobs bounds concurrent derivation builds to the hosted runner
       # memory; cores = 0 gives each build every runner core.
@@ -101,10 +71,7 @@ jobs:
 
   nix-darwin-arm64:
     name: Nix Packages (aarch64-darwin)
-    # Manual gate: hosted macOS runners are the scarcest CI resource, so
-    # pull requests run only the Linux job. Dispatch this workflow to run
-    # the identical darwin check set.
-    if: github.event_name == 'workflow_dispatch'
+    # Keep release and manual coverage native on both supported systems.
     runs-on: macos-latest
     timeout-minutes: 120
     env:

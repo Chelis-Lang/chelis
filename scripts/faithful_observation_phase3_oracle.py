@@ -59,6 +59,7 @@ REQUIRED_TESTS = {
     PARITY_SOURCE: {
         "parity_dict_foundation",
         "parity_count_bool_axes",
+        "parity_hash_order_determinism",
         "parity_constraint_directed_risk_guards_library_only",
         "parity_iter_foundation",
         "parity_list_foundation",
@@ -103,7 +104,7 @@ REQUIRED_TESTS = {
     },
     REJECTED_SOURCE: {
         "rejected_cells_fail_the_build_with_their_pinned_diagnostics",
-        "metal_rank2_abort_stub_names_itself_in_the_emission",
+        "metal_rank2_gap_rejects_without_an_artifact",
         "runtime_rejected_cells_abort_with_their_pinned_diagnostics",
     },
 }
@@ -139,6 +140,13 @@ REQUIRED_EVAL_RECEIPTS = {
 # chelis#1287 adds parity_count_bool_axes and count_bool_axes.ch together; the
 # executable parity row itself plus the dedicated Count oracle are the
 # independent evidence for extending this guard.
+# chelis#1338 adds hash_order_determinism.ch and its eval/C parity row together.
+# The Phase A oracle invokes that exact row and the 24-process acceptance and
+# rejection matrix independently, so extending the frozen corpus cannot replace
+# the behavior evidence that justified it.
+# chelis#1247/#1258 add parity_kinded_nominal_dimensions and its executable
+# example. The dedicated issue_1247_integer_type_application suite supplies
+# independent check/test/Surf/eval/C-backend evidence for the corpus change.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_comparator_accepts_byte_identical_tensor_lines": "9224411d844dc758300d5880b424edd89deea5eb9dfa9d12a34ba7257a58e38f",
@@ -148,8 +156,9 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "b6f6656ee9c69f86386ed4f71f0ed7bd195a864295cfda8e1204628937005f2a",
+        "parity_corpus_is_complete": "d5db9d33729fbc1bf028688505216e725e49d11354afd2b48f6d6d70745cd3ee",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
+        "parity_hash_order_determinism": "148c637280b238c9a119e22196960703873e291f1f0df59323c33ddb96b47170",
         # chelis#912 applies [05-OBS-7] uniformly: hello_tensor's pure
         # nullary `main` and opaque_invariants_simplex's top-level `eps`
         # are now owed manifest roots. Their definitions changed only from
@@ -200,14 +209,22 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "agreement_mul": "ba21fed3999506c32eb163bcdaaa10a135c744008f7b908e5f7fc98c0338fc97",
         "agreement_neg": "71fb3152676dbfbbd06487b493cc2201e3730163b7cceff01801b930bc003a30",
         "agreement_operation_identity_is_derived_from_ir": "b35dd2f9eac4362f5c38639c8a882b38872d5400d2399d8963cfe2427340dec6",
-        "agreement_relu": "51c6c9b881398cff2f1e7c263e7ccb919641bb014d2b4ac0853e97a6c9c25d61",
+        # Chelis#1313 intentionally replaces only this row's generic
+        # `MaxElem(x, synth_const(0))` spelling with the dedicated
+        # `RiscOp::Relu(x)` identity. Its negative and positive cases retain
+        # the same labels, comparator calls, and exact expected outputs. The
+        # independent dtype ReLU oracle proves the dedicated identity's exact
+        # per-width semantic/bit contract and evaluator/C agreement (with HIP
+        # and Metal structural coverage), while this row preserves both
+        # negative-input and positive-input parity.
+        "agreement_relu": "d8bfd8d952bcac571f5e7f8b028bf12b367c642b329c9ad22ecc3854727c1659",
         "agreement_sin": "7d1c26bc002402b089c6c035eb756dedd70de05f06c2253ad362462d8243a170",
         "agreement_sqrt_is_exact": "63ee422b92eef85a5635892c57282dbd9cec0154bd3d79ae4c57ca1744f0ac6a",
         "agreement_tan": "33480e20e37c50cbd1ba8ae7864b77f860831c1ecce8577dcf22b28640e0116e",
         "agreement_width_nonconformance_is_behavioral": "8b99a54287fe3517ab80544f77a25eadda35a9d84ec85f0687e15fa4910feb86",
     },
     REJECTED_SOURCE: {
-        "metal_rank2_abort_stub_names_itself_in_the_emission": "24edf2a745fc9665b0a2d9497040752cecf77cfdac153990d4c7dcfe0ed81f74",
+        "metal_rank2_gap_rejects_without_an_artifact": "bfc6fefc2678cea4e76a9bf9935e00e23b7dd1af4a8c98ecfe982cca3f7ff18e",
         "rejected_cells_fail_the_build_with_their_pinned_diagnostics": "c1751e1db4ab78e882ed73710c3a4367c724fb223f718ccb800430c40a1ebd12",
         "runtime_rejected_cells_abort_with_their_pinned_diagnostics": "d37afb668293c790033ab1f469f7535ff780a19a4c68cc1e5b88092013ec2a60",
     },
@@ -466,7 +483,7 @@ def comparator_violations(sources: Mapping[Path, str] | None = None) -> list[str
         PARITY_SOURCE: ("compare_exact_observations",),
         EVAL_AGREEMENT_SOURCE: (
             "compare_rendered_elements",
-            "chelis_format_shortest",
+            "chelis_string_from_scalar",
             "agreement_op_for_risc",
             "agreement_compiled_observation_reaches_comparator",
             "agreement_width_nonconformance_is_behavioral",
@@ -535,22 +552,25 @@ def run_command(
     return True
 
 
-def main() -> int:
+def preflight_violations() -> list[str]:
+    """Return every static-contract or required-tool failure."""
     violations = (
         source_violations()
         + comparator_violations()
         + definition_digest_violations()
     )
+    if shutil.which("cc") is None:
+        violations.append("a host C compiler (`cc`) is required")
+    if shutil.which("cargo") is None:
+        violations.append("cargo is required")
+    return violations
+
+
+def main() -> int:
+    violations = preflight_violations()
     if violations:
         for violation in violations:
             print(f"PHASE 3 ORACLE: FAIL: {violation}", file=sys.stderr)
-        return 1
-
-    if shutil.which("cc") is None:
-        print("PHASE 3 ORACLE: FAIL: a host C compiler (`cc`) is required", file=sys.stderr)
-        return 1
-    if shutil.which("cargo") is None:
-        print("PHASE 3 ORACLE: FAIL: cargo is required", file=sys.stderr)
         return 1
 
     for index, (label, command) in enumerate(SUITE_COMMANDS):

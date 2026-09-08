@@ -5,18 +5,18 @@ version = "0.1.0"
 [[dependencies]]
 name = "chelis-std"
 version = "0.4.0"
-compiler = "=0.18.5"
-archive_sha256 = "1c2a0b7183976280bbc97e8bcb6e9e15ae51fcb9cc95a00d11bd3ce27e62a95c"
-shell_sha256 = "b8149eaecc320d796147ecc10eeca2798fd63fa8115de64d076a1e83a43c74e0"
+compiler = "=0.18.6"
+archive_sha256 = "78c131ece0f87e0fe2a23015e99184c48935ceefed583e1bf7400f35c2aff42c"
+shell_sha256 = "23f86b238dace0907ff1a24d713a9cadfc92f877b2a0e574129d3a247ff649dd"
 
 [dependencies.source]
 kind = "bundled"
-compiler_version = "0.18.5"
+compiler_version = "0.18.6"
 
 [[dependencies]]
 name = "nautilus"
 version = "0.7.36"
-compiler = "=0.18.5"
+compiler = "=0.18.6"
 archive_sha256 = ""
 shell_sha256 = ""
 

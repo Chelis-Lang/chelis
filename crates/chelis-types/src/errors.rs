@@ -163,10 +163,31 @@ pub(crate) fn error_sentinel_for_test() -> Type {
     Type::Error(ErrorWitness(()))
 }
 
+/// A check-time diagnostic.
+///
+/// This is checker-internal state, NOT a wire type (chelis#886).
+///
+/// It briefly derived `Serialize` so the CLI could emit it directly. That
+/// made a `chelis-types` struct a numeric wire root: its public
+/// `severity: f64` became published surface while the §C6 wire census is
+/// rooted in `chelis-compiler-api`'s schema, so the field was exposed with
+/// no census row and no final authority class. The wire projection now lives
+/// at `chelis_compiler_api::schema::Diagnostic::from_check_error`, on a
+/// carrier the census already enumerates.
+///
+/// Field order is still load-bearing: `chelis-reef` baselines the derived
+/// `Debug` string byte-for-byte in its rejection-path parity contract, and
+/// `Debug` honours declaration order. See the guard test below.
 #[derive(Debug, Clone)]
 pub struct CheckError {
     pub kind: CheckErrorKind,
     pub message: String,
+    /// Repair hints. The hand-assembled document never carried them, so
+    /// emitting them through the typed carrier is a deliberate field-set
+    /// change under [04-FIT-15], not a side effect of typing the producer.
+    /// This struct is not itself serialized; the change is visible only
+    /// where `Diagnostic::from_check_error` copies the field across.
+    /// Position here is load-bearing for `Debug`; see the type docs.
     pub suggestions: Vec<String>,
     pub severity: f64,
     /// Expected type (for structured error reports).
@@ -179,13 +200,20 @@ pub struct CheckError {
     pub span_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// A check diagnostic's kind.
+///
+/// Its published spelling is the governed `chelis_vocab::DiagnosticKind`
+/// identity that `Diagnostic::from_check_error` maps it to, not this Rust
+/// identifier, so renaming a variant here cannot move the wire.
+#[derive(Clone)]
 pub enum CheckErrorKind {
     TypeMismatch,
     PrecisionMismatch,
     DimensionMismatch,
     ArityMismatch,
-    UnboundVariable,
+    UnboundVariable {
+        identifier: String,
+    },
     /// A constructor reference (uppercase-leading name in expression or
     /// pattern position) names an ADT variant that is not in scope: it is
     /// neither declared in the current module nor brought into scope by an
@@ -198,7 +226,9 @@ pub enum CheckErrorKind {
     /// reference to a foreign tag and deferred the failure to a runtime
     /// `non-exhaustive match`; this rejects it at `check` instead, the same
     /// way an `UnboundVariable` rejects an unknown value name.
-    UnknownConstructor,
+    UnknownConstructor {
+        identifier: String,
+    },
     NotAFunction,
     NonExhaustiveMatch,
     OccursCheck,
@@ -246,17 +276,15 @@ pub enum CheckErrorKind {
     /// one module and constructs/inspects opaque types as in-module).
     ReservedLinkerName,
     /// A top-level `def` or `sig` (Deep `defsig`) reuses a name from the
-    /// closed builtin vocabulary (`BUILTIN_NAMES`). Call sites are
-    /// dispatched builtin-first by name in both the host evaluator
-    /// (`runtime/host_ops.rs::builtin_name`) and IR lowering
-    /// (`lower.rs`), so a user definition with a builtin name can never
-    /// be reached by name: pre-fix, the chelis#353 reproducer
-    /// (`def sum`) checked clean, hit the builtin's arity error under
-    /// eval, and segfaulted on the C backend. Rejected at declaration
-    /// time instead (spec/04-type-system.md §8.6). Reef package modules
-    /// are unaffected: their decls are internal-name-rewritten
-    /// (`pkg__...`) before the checker runs, and their call sites are
-    /// rewritten with them.
+    /// closed builtin vocabulary (`BUILTIN_NAMES`). Top-level builtin names
+    /// identify the intrinsic call surface and cannot be rebound with a user
+    /// signature, so they are rejected at declaration time
+    /// (spec/04-type-system.md §8.6). Ordinary lexical bindings are
+    /// different: function parameters, block locals, and pattern bindings
+    /// take precedence over builtin dispatch in every lane
+    /// (chelis#1076). Reef package modules are also unaffected: their decls
+    /// are internal-name-rewritten (`pkg__...`) before the checker runs, and
+    /// their call sites are rewritten with them.
     BuiltinShadowing,
     /// chelis#731 / spec/04-type-system.md §10 [04-TOT-1]: a Deep tag
     /// reached `infer_expr`'s dispatch with no checker disposition. The
@@ -276,13 +304,62 @@ pub enum CheckErrorKind {
     Other,
 }
 
+impl std::fmt::Debug for CheckErrorKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.diagnostic_name())
+    }
+}
+
 impl CheckErrorKind {
+    /// Stable machine-facing spelling used by `chelis check`. This is
+    /// intentionally independent of `Debug`, because name diagnostics carry
+    /// structured data that must not leak into or invalidate the JSON kind.
+    pub fn diagnostic_name(&self) -> &'static str {
+        match self {
+            CheckErrorKind::TypeMismatch => "TypeMismatch",
+            CheckErrorKind::PrecisionMismatch => "PrecisionMismatch",
+            CheckErrorKind::DimensionMismatch => "DimensionMismatch",
+            CheckErrorKind::ArityMismatch => "ArityMismatch",
+            CheckErrorKind::UnboundVariable { .. } => "UnboundVariable",
+            CheckErrorKind::UnknownConstructor { .. } => "UnknownConstructor",
+            CheckErrorKind::NotAFunction => "NotAFunction",
+            CheckErrorKind::NonExhaustiveMatch => "NonExhaustiveMatch",
+            CheckErrorKind::OccursCheck => "OccursCheck",
+            CheckErrorKind::CastNonTensor => "CastNonTensor",
+            CheckErrorKind::TupleIndexOutOfBounds => "TupleIndexOutOfBounds",
+            CheckErrorKind::UseAfterConsume => "UseAfterConsume",
+            CheckErrorKind::UnconsumedLinear => "UnconsumedLinear",
+            CheckErrorKind::InvalidBorrow => "InvalidBorrow",
+            CheckErrorKind::CycleDetected => "CycleDetected",
+            CheckErrorKind::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
+            CheckErrorKind::DuplicateDefinition => "DuplicateDefinition",
+            CheckErrorKind::DuplicateModule => "DuplicateModule",
+            CheckErrorKind::OpaqueTypeViolation => "OpaqueTypeViolation",
+            CheckErrorKind::ReservedLinkerName => "ReservedLinkerName",
+            CheckErrorKind::BuiltinShadowing => "BuiltinShadowing",
+            CheckErrorKind::UnknownForm => "UnknownForm",
+            CheckErrorKind::MalformedForm => "MalformedForm",
+            CheckErrorKind::Other => "Other",
+        }
+    }
+
+    /// The exact unresolved source identifier carried by a name-resolution
+    /// diagnostic. Fitness accounting consumes this structured value instead
+    /// of attempting to recover it from the rendered diagnostic message.
+    pub fn unresolved_identifier(&self) -> Option<&str> {
+        match self {
+            CheckErrorKind::UnboundVariable { identifier }
+            | CheckErrorKind::UnknownConstructor { identifier } => Some(identifier),
+            _ => None,
+        }
+    }
+
     pub fn default_severity(&self) -> f64 {
         match self {
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
             CheckErrorKind::ArityMismatch => 0.7,
-            CheckErrorKind::UnboundVariable => 0.6,
-            CheckErrorKind::UnknownConstructor => 0.6,
+            CheckErrorKind::UnboundVariable { .. } => 0.6,
+            CheckErrorKind::UnknownConstructor { .. } => 0.6,
             CheckErrorKind::NotAFunction => 0.5,
             CheckErrorKind::TypeMismatch => 0.5,
             CheckErrorKind::NonExhaustiveMatch => 0.7,
@@ -372,7 +449,7 @@ impl From<TypeError> for CheckError {
         let severity = match &kind {
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
             CheckErrorKind::ArityMismatch => 0.7,
-            CheckErrorKind::UnboundVariable => 0.6,
+            CheckErrorKind::UnboundVariable { .. } => 0.6,
             _ => 0.5,
         };
         let mut suggestions = match &kind {
@@ -507,4 +584,46 @@ fn to_snake_case(s: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod check_error_debug_contract {
+    use super::{CheckError, CheckErrorKind};
+
+    /// `CheckError`'s DERIVED `Debug` string is a consumed contract, not
+    /// incidental output: `chelis-reef` baselines it byte-for-byte in its
+    /// rejection-path parity fixtures. Nothing in this crate recorded that,
+    /// so reordering fields for the wire broke Reef while every JSON
+    /// assertion here stayed green.
+    ///
+    /// This pins the field ORDER independently of the serialization order,
+    /// because the two are now deliberately different: `suggestions` is
+    /// skipped on the wire but sits third in `Debug`. A reorder for wire
+    /// reasons must fail here rather than in a downstream crate's fixture.
+    #[test]
+    fn the_derived_debug_field_order_is_the_reef_parity_order() {
+        let rendered = format!(
+            "{:?}",
+            CheckError {
+                kind: CheckErrorKind::UnboundVariable {
+                    identifier: "x".to_string(),
+                },
+                message: "m".to_string(),
+                suggestions: vec!["s".to_string()],
+                severity: 0.6,
+                expected: None,
+                got: None,
+                span_offset: Some(52),
+                span_id: Some("surf:52..65".to_string()),
+            }
+        );
+        assert_eq!(
+            rendered,
+            "CheckError { kind: UnboundVariable, message: \"m\", suggestions: [\"s\"], \
+             severity: 0.6, expected: None, got: None, span_offset: Some(52), \
+             span_id: Some(\"surf:52..65\") }",
+            "the derived Debug order is baselined by chelis-reef's pipeline_parity \
+             fixtures; changing it is a downstream-visible break"
+        );
+    }
 }

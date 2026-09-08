@@ -30,14 +30,20 @@ pub(super) fn infer_tuple(
 /// Returns `None` for any other shape or a negative literal, which the
 /// sole caller maps to `Type::Error`.
 pub(super) fn tuple_get_index(expr: &deep::Expr) -> Option<usize> {
-    match expr {
-        deep::Expr::Atom(deep::Atom::Int(n), _) => usize::try_from(*n).ok(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match children(list).first() {
-                Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => usize::try_from(*n).ok(),
-                _ => None,
-            }
-        }
+    // chelis#1125 PP7 / [04-TOT-5]: read the `lit` wrapper through the
+    // carrier-preserving `stamped_parts`. The `Expr::List`-only arm returned
+    // `None` for a stamped index node, and the sole caller turned that into
+    // `invalid tuple index: ... found a non-literal expression` -- so
+    // `check_typed_program` REJECTED a well-formed projection that
+    // `check_ir_program` accepted. This is the set's one fail-closed row.
+    if let deep::Expr::Atom(deep::Atom::Int(n), _) = expr {
+        return usize::try_from(*n).ok();
+    }
+    match stamped_parts(expr) {
+        Some((DeepTag::Lit, _, lit_kids)) => match lit_kids.first() {
+            Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => usize::try_from(*n).ok(),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -46,9 +52,15 @@ pub(super) fn tuple_get_index(expr: &deep::Expr) -> Option<usize> {
 /// diagnostic the sole caller pushes when `tuple_get_index` returns
 /// `None`. Peeks through a `lit` wrapper to the payload atom.
 pub(super) fn describe_tuple_index(expr: &deep::Expr) -> String {
-    let atom = match expr {
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => children(list).first(),
-        other => Some(other),
+    // chelis#1125 PP7 / [04-TOT-5]: peek through the `lit` wrapper on either
+    // carrier. The `Expr::List`-only match made every stamped index -- valid
+    // or not -- describe as "a non-literal expression", so the two ingresses
+    // rejected a malformed index with DIFFERENT text. A verdict includes its
+    // diagnostic, so an agreeing rejection with disagreeing reasons is still
+    // a divergence.
+    let atom = match stamped_parts(expr) {
+        Some((DeepTag::Lit, _, lit_kids)) => lit_kids.first(),
+        _ => Some(expr),
     };
     match atom {
         Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => format!("integer literal {n}"),
@@ -86,30 +98,40 @@ pub(super) fn infer_tuple_get(
     // silently erasing the element type — `Type::Error` then unifies
     // with anything, so a value derived from a tuple projection lost
     // its nominal type at every downstream boundary (chelis#707).
-    let index = match tuple_get_index(&kids[1]) {
-        Some(index) => index,
-        None => {
-            // A malformed index (negative, float, symbol, or any
-            // non-literal) is not a valid projection. Diagnose it
-            // rather than returning a silent `Type::Error`: a bare
-            // negative `Int` used to blow up as `-1 as usize` into a
-            // loud out-of-bounds error, and every other shape was
-            // silently swallowed — both are undiagnosed `Type::Error`
-            // under an empty error vector, the §04-TOT-2 hole this fix
-            // otherwise closes (chelis#707, rt-707).
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::TupleIndexOutOfBounds,
-                    format!(
-                        "invalid tuple index: expected a non-negative integer \
-                     literal, found {}",
-                        describe_tuple_index(&kids[1]),
-                    ),
-                    vec![],
-                ),
-            );
-        }
+    // A malformed index (negative, float, symbol, or any non-literal) is not a
+    // valid projection. Diagnosing it rather than returning a silent
+    // `Type::Error` is chelis#707/rt-707: a bare negative `Int` used to blow up
+    // as `-1 as usize` into a loud out-of-bounds error, and every other shape
+    // was silently swallowed.
+    //
+    // chelis#874 Slice 2 moves it onto the shared seam. The KIND changes from
+    // `TupleIndexOutOfBounds` to `MalformedForm`, which is the honest one: an
+    // unreadable index is not out of bounds, and the genuine out-of-bounds
+    // arm below keeps the kind so it means only what it says. The caller
+    // detail keeps `describe_tuple_index`, which peels a `lit` wrapper to name
+    // the payload atom -- chelis#1107's PP7 [04-TOT-5] row exists because the
+    // two ingresses once disagreed on exactly that wording. It is suppressed
+    // for a bare atom, which `describe_slot_child` already names identically.
+    let index = match read_required_slot_detailed(
+        kids,
+        DeepTag::TupleGet,
+        1,
+        SlotShape::TupleIndex,
+        tuple_get_index,
+        |child| {
+            // Suppressed for a bare atom: `describe_slot_child` already names
+            // it identically, and "found integer literal -1 (integer literal
+            // -1)" would be noise.
+            if matches!(child, deep::Expr::Atom(..)) {
+                None
+            } else {
+                Some(describe_tuple_index(child))
+            }
+        },
+        errors,
+    ) {
+        Ok(index) => index,
+        Err(witness) => return propagate(&witness),
     };
     match resolved {
         Type::Tuple(ref elems) => {
@@ -167,8 +189,14 @@ pub(super) fn infer_tuple_get(
 /// opacity, RFC D-CHECK). Returns the canonical constructor name.
 pub(super) fn resolve_record_head<'a>(
     head: &'a str,
+    env: &'a Env,
     adt_reg: &'a AdtRegistry,
 ) -> Option<(&'a str, &'a crate::adt::VariantInfo, String)> {
+    if let Some((adt_name, _, variant)) =
+        constructor_for_shape(head, CallShape::Record, env, adt_reg)
+    {
+        return Some((adt_name, variant, variant.name.clone()));
+    }
     if let Some((adt_name, variant)) = adt_reg
         .lookup_variant_preferring_shape(head, CallShape::Record)
         .or_else(|| adt_reg.lookup_variant_terminal_unique(head))
@@ -178,7 +206,7 @@ pub(super) fn resolve_record_head<'a>(
     // Alias head: `type P2 = Probability` makes `P2 { ... }` mean
     // `Probability { ... }`.
     let alias = adt_reg.resolve_alias(head)?;
-    if let Type::Adt(target, _) = &alias.body {
+    if let Type::Adt(target, _) | Type::KindedAdt(target, _) = &alias.body {
         let (adt_name, variant) = adt_reg.lookup_variant(target)?;
         return Some((adt_name, variant, variant.name.clone()));
     }
@@ -209,7 +237,7 @@ pub(super) fn infer_record(
         );
     };
 
-    let Some((adt_name, variant, ctor_name)) = resolve_record_head(head, adt_reg) else {
+    let Some((adt_name, variant, ctor_name)) = resolve_record_head(head, env, adt_reg) else {
         // Infer field values so nested errors still surface, then
         // reject the unknown constructor.
         for kv_expr in kids.iter().skip(1) {
@@ -223,9 +251,14 @@ pub(super) fn infer_record(
         return report(
             errors,
             CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("unknown record constructor `{head}`"),
-                vec![format!("declare `type {head} = | {head} {{ ... }}`")],
+                CheckErrorKind::UnknownConstructor {
+                    identifier: head.to_string(),
+                },
+                format!("unknown constructor: {head}"),
+                vec![format!(
+                    "Constructor '{head}' is not in scope. Declare it locally or \
+                     add it to an import (e.g. `import Mod ({head})`)"
+                )],
             ),
         );
     };
@@ -237,7 +270,8 @@ pub(super) fn infer_record(
     // keeps the #317 record-constructor guard while leaving opacity rejection
     // (D-CHECK) for opaque heads.
     let head_is_opaque = adt_reg.lookup(adt_name).is_some_and(|d| d.opaque);
-    if !head_is_opaque && constructor_out_of_scope(head, env) {
+    let head_is_alias = adt_reg.resolve_alias(head).is_some();
+    if !head_is_opaque && !head_is_alias && constructor_out_of_scope(head, env) {
         for kv_expr in kids.iter().skip(1) {
             if let deep::Expr::List(kv_list, _) = kv_expr
                 && get_tag(kv_list) == Some(DeepTag::Kv)
@@ -249,7 +283,9 @@ pub(super) fn infer_record(
         return report(
             errors,
             CheckError::new(
-                CheckErrorKind::UnknownConstructor,
+                CheckErrorKind::UnknownConstructor {
+                    identifier: head.to_string(),
+                },
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unknown constructor: {head}"),
@@ -273,7 +309,7 @@ pub(super) fn infer_record(
 
     let declared_field_names: Vec<Option<String>> =
         variant.fields.iter().map(|(n, _)| n.clone()).collect();
-    let known_field_set: HashSet<&str> = declared_field_names
+    let known_field_set: UnordSet<&str> = declared_field_names
         .iter()
         .filter_map(|n| n.as_deref())
         .collect();
@@ -303,12 +339,36 @@ pub(super) fn infer_record(
         if kv_tag != DeepTag::Kv {
             continue;
         }
-        let (Some(field_name), Some(value)) =
-            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
-        else {
+        // chelis#874 R5 / [04-TOT-4]: this was
+        // `let (Some(..), Some(..)) = (..) else { continue };`. The `continue`
+        // skipped the `infer_expr(value, ..)` below, so an unreadable key left
+        // the VALUE unvisited and unstamped, and section C4.1's owner-stamp
+        // tripwire fired on that value as an `internal:` invariant violation
+        // naming `lit`. The program was rejected, but for a node the author did
+        // not write wrongly. Read the key at its own slot, and infer the value
+        // either way so the walk still covers it.
+        let field_name = read_required_slot(
+            kv_kids,
+            DeepTag::Kv,
+            0,
+            SlotShape::FieldName,
+            symbol_name,
+            errors,
+        )
+        .ok();
+        // The ABSENT value child is not this class and is not claimed here.
+        // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
+        // the stamp boundary, so `(kv {} r)` is rejected as
+        // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
+        // ever runs; this arm is reachable only from the producerless legacy
+        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        let Some(value) = kv_kids.get(1) else {
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
+        let Some(field_name) = field_name else {
+            continue;
+        };
         if known_field_set.contains(field_name) {
             let pos = declared_field_names
                 .iter()
@@ -369,7 +429,14 @@ pub(super) fn instantiate_variant_of(
     vg: &mut VarGen,
 ) -> (Vec<Type>, Type) {
     let mut type_vars = adt_def.param_vars.clone();
-    let mut dim_vars = Vec::new();
+    let mut dim_vars = adt_def
+        .param_args
+        .iter()
+        .filter_map(|argument| match argument {
+            NominalArg::Dimension(Dim::Var(var)) => Some(*var),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let mut rank_vars = Vec::new();
     for (_, field_type) in &variant.fields {
         for var in crate::env::free_tvars(field_type) {
@@ -391,7 +458,9 @@ pub(super) fn instantiate_variant_of(
 
     let mut renaming = Subst::new();
     for var in type_vars {
-        renaming.insert_type(var, vg.fresh_type());
+        renaming
+            .insert_type(var, vg.fresh_type())
+            .expect("fresh constructor-field type renaming is valid");
     }
     for var in dim_vars {
         renaming.insert_dim(var, vg.fresh_dim());
@@ -405,14 +474,28 @@ pub(super) fn instantiate_variant_of(
         .iter()
         .map(|(_, field_type)| renaming.apply(field_type))
         .collect();
-    let ret = Type::Adt(
-        adt_def.name.clone(),
-        adt_def
-            .param_vars
-            .iter()
-            .map(|var| renaming.apply(&Type::Var(*var)))
-            .collect(),
-    );
+    let renamed_args = adt_def
+        .param_args
+        .iter()
+        .map(|argument| match argument {
+            NominalArg::Type(ty) => NominalArg::Type(renaming.apply(ty)),
+            NominalArg::Dimension(dim) => NominalArg::Dimension(renaming.apply_dim(dim)),
+        })
+        .collect::<Vec<_>>();
+    let ret = if adt_def.param_kinds.contains(&NominalParamKind::Dimension) {
+        Type::KindedAdt(adt_def.name.clone(), renamed_args)
+    } else {
+        Type::Adt(
+            adt_def.name.clone(),
+            renamed_args
+                .into_iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => ty,
+                    NominalArg::Dimension(_) => unreachable!("type-only nominal definition"),
+                })
+                .collect(),
+        )
+    };
     (args, ret)
 }
 
@@ -458,13 +541,22 @@ pub(super) fn infer_access(
         );
     }
     let target_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let Some(field_name) = symbol_name(&kids[1]) else {
-        return malformed_form(
-            list,
-            "access",
-            "a symbol field name as its second child",
-            errors,
-        );
+    // chelis#874 Slice 2: this read was already total, and its failure branch
+    // already pushed. Migrating it onto the shared seam is what makes ONE
+    // mechanism own every role-slot read, which is chelis#874's condition. The
+    // message improves in passing: `malformed_form` reported the node's CHILD
+    // COUNT as what it "found", which says nothing about a two-child `access`
+    // whose second child is the wrong shape; the seam names that child.
+    let field_name = match read_required_slot(
+        kids,
+        DeepTag::Access,
+        1,
+        SlotShape::FieldName,
+        symbol_name,
+        errors,
+    ) {
+        Ok(name) => name,
+        Err(witness) => return propagate(&witness),
     };
     // Peel borrow layers: an `&T` target reads through the borrow.
     let mut resolved = subst.apply(&target_ty);
@@ -472,7 +564,7 @@ pub(super) fn infer_access(
         resolved = *inner;
     }
     match resolved {
-        Type::Adt(ref adt_name, _) => {
+        Type::Adt(ref adt_name, _) | Type::KindedAdt(ref adt_name, _) => {
             // RFC D-CHECK: field access on an out-of-module opaque
             // type is rejected; inference continues so the access
             // still yields its true field type (no cascades).
@@ -620,12 +712,31 @@ pub(super) fn infer_record_update(
         if kv_tag != DeepTag::Kv {
             continue;
         }
-        let (Some(field_name), Some(value)) =
-            (kv_kids.first().and_then(symbol_name), kv_kids.get(1))
-        else {
+        // chelis#874 / [04-TOT-4]: `infer_record`'s repair, applied to the
+        // identical `else { continue }` here. This site produced the same
+        // owner-stamp misattribution on the update value.
+        let field_name = read_required_slot(
+            kv_kids,
+            DeepTag::Kv,
+            0,
+            SlotShape::FieldName,
+            symbol_name,
+            errors,
+        )
+        .ok();
+        // The ABSENT value child is not this class and is not claimed here.
+        // `arity_contract(Kv)` is `Fixed(2)` and `Node::try_new` enforces it at
+        // the stamp boundary, so `(kv {} r)` is rejected as
+        // `wrong child count for 'kv': expected Fixed(2), got 1` before inference
+        // ever runs; this arm is reachable only from the producerless legacy
+        // `Expr::List` carrier, and it keeps the pre-fix behaviour untouched.
+        let Some(value) = kv_kids.get(1) else {
             continue;
         };
         let value_ty = infer_expr(value, env, vg, subst, adt_reg, errors, product);
+        let Some(field_name) = field_name else {
+            continue;
+        };
         kv_pairs.push((field_name, value_ty));
     }
     let mut resolved = subst.apply(&target_ty);
@@ -633,7 +744,7 @@ pub(super) fn infer_record_update(
         resolved = *inner;
     }
     match resolved {
-        Type::Adt(ref adt_name, _) => {
+        Type::Adt(ref adt_name, _) | Type::KindedAdt(ref adt_name, _) => {
             // RFC D-CHECK: record update of an out-of-module opaque
             // type is rejected; inference continues and returns the
             // target's true type (no cascades).
@@ -726,33 +837,35 @@ pub(super) fn infer_cast(
     if kids.len() < 2 {
         return malformed_form(list, "cast", "an expression and a target type", errors);
     }
-    let mode = match deep::cast_mode_of(kids) {
-        Ok(mode) => mode,
-        Err(selector) => {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::CastNonTensor,
-                    format!("`{selector}` is not a recognized cast mode selector"),
-                    vec![
-                        "the only named cast rung is `trunc` (`cast_trunc`, \
-                         [05-OP-6]); omit the selector for the checked default"
-                            .to_string(),
-                    ],
-                ),
-            );
-        }
+    // chelis#874 Slice 2: the optional [05-OP-6] mode selector at child 2.
+    // `deep::cast_mode_of` handled absence internally and returned a `Result`,
+    // which is the seam's shape in miniature; reading it through the seam makes
+    // the absence-versus-unreadability split visible AT the call site and puts
+    // the last `Selector` slot on one mechanism. The kind changes from
+    // `CastNonTensor` to `MalformedForm`, which is again the honest one: an
+    // unrecognized selector is a malformed form, not a non-tensor cast, and
+    // `CastNonTensor` keeps its two real users (the cast target and the
+    // operand).
+    //
+    // `deep::cast_mode_of` itself is deliberately untouched: `chelis-ir`'s
+    // `lower.rs` and `host.rs` and `chelis-compiler-api`'s `eval.rs` each
+    // format their own copy of the old message from it, and a CHECKED program
+    // never reaches those arms.
+    let mode = match read_optional_slot(
+        kids,
+        DeepTag::Cast,
+        2,
+        SlotShape::ModeSelector,
+        |child| symbol_name(child).and_then(deep::CastMode::from_deep_selector),
+        errors,
+    ) {
+        Ok(Some(mode)) => mode,
+        Ok(None) => deep::CastMode::Checked,
+        Err(witness) => return propagate(&witness),
     };
 
     let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let resolved = match subst.apply(&expr_ty) {
-        Type::Var(v) => match subst.materialize_deferred_expand_default(v) {
-            Ok(Some(ty)) => ty,
-            Ok(None) => Type::Var(v),
-            Err(error) => return report(errors, error.into()),
-        },
-        other => other,
-    };
+    let resolved = subst.apply(&expr_ty);
 
     // Every target spelling first crosses the centralized resolver. Bare
     // primitive symbols are retained for historical compatibility; canonical
@@ -762,7 +875,7 @@ pub(super) fn infer_cast(
     let (resolved_target, target_location) = {
         let mut resolver = DeepTypeResolver::new(
             TypeUseSite::CastTarget,
-            BinderMode::ClosedInput,
+            annotation_binder_mode(env),
             adt_reg.resolution_env(),
             vg,
             errors,
@@ -810,7 +923,7 @@ pub(super) fn infer_cast(
 
     // RFC D-CHECK cast gates operate on the same resolved target as ordinary
     // cast typing, including transparent alias expansion.
-    if let Type::Adt(target_adt, _) = &target_ty
+    if let Type::Adt(target_adt, _) | Type::KindedAdt(target_adt, _) = &target_ty
         && crate::opacity::check_opaque_use(
             crate::opacity::OpaqueAction::CastInto,
             target_adt,
@@ -824,7 +937,7 @@ pub(super) fn infer_cast(
     while let Type::Ref(inner) = peeled {
         peeled = inner.as_ref();
     }
-    if let Type::Adt(source_adt, _) = peeled
+    if let Type::Adt(source_adt, _) | Type::KindedAdt(source_adt, _) = peeled
         && crate::opacity::check_opaque_use(
             crate::opacity::OpaqueAction::CastOut,
             source_adt,
@@ -836,6 +949,29 @@ pub(super) fn infer_cast(
     }
 
     let new_prec = match target_ty {
+        Type::Var(target) => {
+            // A cast inside a declaration may name one of that declaration's
+            // quantified scalar type variables. Keep the target symbolic and
+            // let the declared signature plus its numeric consumers select the
+            // concrete active dtype. This is the source-level spelling needed
+            // by [05-OP-35]'s same-p `linspace` and `arange` graphs; a closed
+            // cast outside such a declaration still rejects the name in the
+            // resolver above.
+            return match resolved {
+                Type::Prim(source) if source.is_numeric() => Type::Var(target),
+                Type::Var(_) | Type::Error(_) => Type::Var(target),
+                other => report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::CastNonTensor,
+                        format!(
+                            "cast to a quantified scalar dtype requires a numeric scalar, got {other}"
+                        ),
+                        vec![],
+                    ),
+                ),
+            };
+        }
         Type::Prim(p) => p,
         other => {
             return report(
@@ -890,6 +1026,7 @@ pub(super) fn infer_cast(
         other @ (Type::Fn(_, _)
         | Type::Ref(_)
         | Type::Adt(_, _)
+        | Type::KindedAdt(_, _)
         | Type::Var(_)
         | Type::Tuple(_)
         | Type::Unit) => report(
@@ -966,83 +1103,6 @@ pub(super) fn report_unknown_cast_target(
     );
     let error = location.map_or(error.clone(), |location| location.attach(error));
     report(errors, error)
-}
-
-/// True if `name` is one of the unsigned integer dtype names reserved
-/// as deferred by `spec/04-type-system.md` §1.1.1 (§1.1.2 names the
-/// `uint*` spellings canonical; the short `u*` spellings are not
-/// reserved). Covers both the short form (`u8`/`u16`/`u32`/`u64`) and
-/// the canonical `uint*` family that LLMs and cross-language users
-/// tend to write.
-pub(super) fn is_unsigned_dtype_name(name: &str) -> bool {
-    matches!(
-        name,
-        "u8" | "u16" | "u32" | "u64" | "uint8" | "uint16" | "uint32" | "uint64"
-    )
-}
-
-/// Build a §1.1.1 diagnostic for an unsigned dtype name appearing as a
-/// cast target or a tensor element type. Returns `None` for non-unsigned
-/// names so call sites can short-circuit with `&&`.
-pub(super) fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
-    if !is_unsigned_dtype_name(name) {
-        return None;
-    }
-    let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-    Some(CheckError::new(
-        CheckErrorKind::UnsupportedTensorPrecision,
-        format!(
-            "cannot use `{name}` as a {surface} dtype: unsigned integer types \
-             are deferred per spec/04-type-system.md §1.1.1 (canonical \
-             spelling uint8/uint16/uint32/uint64 per §1.1.2; active set: \
-             {active_set})"
-        ),
-        vec![
-            "spec/04-type-system.md §1.1.2 documents the workaround: cast to \
-             int32 or int64 and reason at the wider signed precision; or use \
-             a tensor of int8 / int16 / int32 / int64 if the bit-width matters"
-                .to_string(),
-        ],
-    ))
-}
-
-/// True if `name` is one of the remaining reserved-but-deferred dtype
-/// names of `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because
-/// it is a real `Prim` variant and takes the `Prim::parse_name` path;
-/// the unsigned family has its own predicate above). These spellings
-/// never resolve through `Prim::parse_name`, so without a dedicated arm
-/// they would fall to the generic unknown-name rejections with no
-/// §1.1.1 citation.
-pub(super) fn is_deferred_dtype_name(name: &str) -> bool {
-    matches!(
-        name,
-        "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128" | "decimal256"
-    )
-}
-
-/// Build a §1.1.1 diagnostic for a reserved-but-deferred dtype name
-/// appearing as a cast target or a tensor element type. Returns `None`
-/// for other names so call sites can short-circuit.
-pub(super) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
-    if !is_deferred_dtype_name(name) {
-        return None;
-    }
-    let surface = if tensor { "tensor element" } else { "scalar" };
-    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-    Some(CheckError::new(
-        CheckErrorKind::UnsupportedTensorPrecision,
-        format!(
-            "cannot use `{name}` as a {surface} dtype: {name} is reserved \
-             but deferred per spec/04-type-system.md §1.1.1 (active set: \
-             {active_set})"
-        ),
-        vec![format!(
-            "spec/04-type-system.md §1.1.1 records the deferral rationale \
-             and {name}'s declared arithmetic width; pick one of \
-             {active_set} until it activates"
-        )],
-    ))
 }
 
 /// Emit the canonical "unsupported precision" diagnostic for either a

@@ -37,8 +37,17 @@ REMOTE_CI_ACTION = re.compile(
 BARE_DEVENV_COMMAND = re.compile(r"(?<![A-Za-z0-9_-])devenv(?![A-Za-z0-9_-])(?=[ \t])")
 
 
+# Authored as JSON rather than block YAML; `job_blocks` reads the block-YAML
+# shape only and this workflow composes no shared ci action.
+NON_BLOCK_YAML_WORKFLOWS = frozenset({"ownership-hip.yml"})
+
+
 def workflow_texts() -> dict[str, str]:
-    paths = [*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]
+    paths = [
+        path
+        for path in [*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]
+        if path.name not in NON_BLOCK_YAML_WORKFLOWS
+    ]
     return {path.name: path.read_text(encoding="utf-8") for path in paths}
 
 
@@ -193,7 +202,7 @@ def assert_policy_contract(workflows: dict[str, str]) -> None:
     if "Co-authored-by: Claude" in authorship or "Generated-by:" in authorship:
         raise AssertionError("the inline authorship marker loop remains")
 
-    lint = ci["lint-and-unit"]
+    lint = ci["lint-rust"]
     actionlint_markers = (
         f"Chelis-Lang/ci/actions/actionlint@{CI_REVISION}",
         f"actionlint-version: '{ACTIONLINT_VERSION}'",
@@ -207,7 +216,7 @@ def assert_policy_contract(workflows: dict[str, str]) -> None:
     )
     for marker in (*actionlint_markers, *zizmor_markers):
         if marker not in lint:
-            raise AssertionError(f"lint-and-unit missing {marker!r}")
+            raise AssertionError(f"lint-rust missing {marker!r}")
 
     openspec = workflows["openspec-validate.yml"]
     setup_at = openspec.find(f"Chelis-Lang/ci/actions/setup-devenv@{CI_REVISION}")

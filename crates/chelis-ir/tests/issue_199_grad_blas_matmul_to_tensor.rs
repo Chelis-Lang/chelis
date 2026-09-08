@@ -33,7 +33,7 @@ use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, grad_dag, grad_dag_checked};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 /// Build a forward DAG `Y = A @ B` (BlasMatmul) followed by a scalar
 /// reduction `sum(sum(Y, 1), 0)`. Returns the DAG plus handles for the
@@ -136,7 +136,7 @@ fn issue_199_blas_matmul_grad_wrt_lhs_is_finite_and_correct() {
         vec![0.0, 1.0, 0.0, 0.0],
         vec![0.0, 0.0, 1.0, 0.0],
     ]);
-    let mut inputs: HashMap<String, chelis_ir::eval::TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, chelis_ir::eval::TensorValue> = UnordMap::new();
     inputs.insert("a".into(), a_val);
     inputs.insert("b".into(), b_val);
     let values = eval_tensor(&result.dag, &inputs).expect("eval gradient DAG");
@@ -166,7 +166,7 @@ fn issue_199_blas_matmul_grad_wrt_rhs_is_finite_and_correct() {
         vec![0.0, 1.0, 0.0, 0.0],
         vec![0.0, 0.0, 1.0, 0.0],
     ]);
-    let mut inputs: HashMap<String, chelis_ir::eval::TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, chelis_ir::eval::TensorValue> = UnordMap::new();
     inputs.insert("a".into(), a_val);
     inputs.insert("b".into(), b_val);
     let values = eval_tensor(&result.dag, &inputs).expect("eval gradient DAG");
@@ -198,7 +198,7 @@ fn issue_199_blas_matmul_grad_matches_finite_difference() {
     let grad_a = result.grad_nodes[&a];
     let a_val = tensor_2d(vec![vec![0.7, -0.4, 1.1], vec![0.2, 0.9, -0.3]]);
     let b_val = tensor_2d(vec![vec![0.5, 1.2], vec![-0.7, 0.3], vec![0.1, -1.1]]);
-    let mut inputs: HashMap<String, chelis_ir::eval::TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, chelis_ir::eval::TensorValue> = UnordMap::new();
     inputs.insert("a".into(), a_val.clone());
     inputs.insert("b".into(), b_val.clone());
     let analytical_values = eval_tensor(&result.dag, &inputs).expect("analytical eval");

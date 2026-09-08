@@ -10,11 +10,11 @@ identity; row order is not semantic and no ordinal is part of any identity.
 |---|---|
 | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
 | scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
-| value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
-| value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
+| value boxing | `chelis_value chelis_value_box_scalar(chelis_scalar value)` |
+| value extraction | `chelis_scalar chelis_value_unbox_scalar(chelis_value value)` |
 | rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
 | rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
-| tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
+| tensor fill | `void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value)` |
 | scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
-| scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
-| exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |
+| scalar parsing | `chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
+| exact dictionary scalar lookup | `chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |

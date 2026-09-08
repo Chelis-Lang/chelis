@@ -20,14 +20,14 @@
 //! The names are compiler-internal, so the fix is simply never to reuse
 //! one within a `DesugarCtx`. These tests are the structural guard.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;
 
 /// Every `__chelis_tmpN` occurrence in the printed program, counted.
-fn temp_occurrences(source: &str) -> HashMap<String, usize> {
+fn temp_occurrences(source: &str) -> UnordMap<String, usize> {
     let decls = parse_str(source).expect("surf parse should succeed");
     let deep = desugar_program(&decls);
     let printed = deep
@@ -36,7 +36,7 @@ fn temp_occurrences(source: &str) -> HashMap<String, usize> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut counts: UnordMap<String, usize> = UnordMap::new();
     let marker = "__chelis_tmp";
     let mut rest = printed.as_str();
     while let Some(start) = rest.find(marker) {

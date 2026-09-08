@@ -54,8 +54,9 @@ impl IrHandle {
 
 **① RESOLVED.** Beacon's sign-off corrected the default assumption: Beacon does
 not consume a `node: u64` index, nor a borrow of an in-memory `chelis_ir::Dag`.
-It consumes the SERIALIZED exact-version `WireDag` v6 JSON bytes out of process:
-it parses the slice, asserts `schema_version == 6`, validates the complete
+It consumes the SERIALIZED exact-version `WireDag` JSON bytes out of process:
+it parses the slice, requires the current `WIRE_DAG_SCHEMA_VERSION` (version 7
+in the chelis#1277 Slice A change), validates the complete
 cross-node wire contract, computes a sha256 over those bytes, and
 selects the output by `root_index`. So `IrHandle` addresses that artifact by its
 content hash (lowercase hex) plus a root index, NOT by a node id.

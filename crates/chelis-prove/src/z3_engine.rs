@@ -47,7 +47,8 @@ use crate::discharge::{
 };
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use crate::tier_b::{SmtProperty, TierBResult};
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
+use std::collections::BTreeMap;
 use z3::ast::{Ast, Bool, Int, Real};
 use z3::{Params, SatResult, Solver};
 
@@ -187,8 +188,8 @@ fn property_exceeds_smt_depth(property: &SmtProperty) -> bool {
 /// down; `sorts` carries each variable's declared sort.
 fn lower_to_z3(
     expr: &SmtExpr,
-    vars: &HashMap<String, Z3Var>,
-    sorts: &HashMap<String, SmtSort>,
+    vars: &BTreeMap<String, Z3Var>,
+    sorts: &UnordMap<String, SmtSort>,
 ) -> Result<Z3Term, String> {
     match expr {
         SmtExpr::Var(name) => {
@@ -432,8 +433,8 @@ fn lower_ite(cond: Bool, then_term: Z3Term, else_term: Z3Term) -> Result<Z3Term,
 fn lower_apply(
     name: &str,
     args: &[SmtExpr],
-    vars: &HashMap<String, Z3Var>,
-    sorts: &HashMap<String, SmtSort>,
+    vars: &BTreeMap<String, Z3Var>,
+    sorts: &UnordMap<String, SmtSort>,
 ) -> Result<Z3Term, String> {
     let arity = z3_lowerable_arity(name).ok_or_else(|| unsupported_apply_reason(name))?;
     if args.len() != arity {
@@ -497,8 +498,8 @@ fn lower_quantifier(
     is_forall: bool,
     bindings: &[(String, SmtSort)],
     body: &SmtExpr,
-    vars: &HashMap<String, Z3Var>,
-    sorts: &HashMap<String, SmtSort>,
+    vars: &BTreeMap<String, Z3Var>,
+    sorts: &UnordMap<String, SmtSort>,
 ) -> Result<Z3Term, String> {
     let mut extended_vars = vars.clone();
     let mut extended_sorts = sorts.clone();
@@ -587,8 +588,8 @@ pub fn solve_property_z3(property: &SmtProperty, timeout_ms: u64) -> TierBResult
     solver.set_params(&params);
 
     // 1. Declare variables.
-    let mut vars: HashMap<String, Z3Var> = HashMap::new();
-    let mut sorts: HashMap<String, SmtSort> = HashMap::new();
+    let mut vars: BTreeMap<String, Z3Var> = BTreeMap::new();
+    let mut sorts: UnordMap<String, SmtSort> = UnordMap::new();
     for (name, sort) in &property.variables {
         vars.insert(name.clone(), Z3Var::new(name, *sort));
         sorts.insert(name.clone(), *sort);

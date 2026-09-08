@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -82,11 +83,11 @@ struct TopLevelSymbol {
 
 #[derive(Debug, Clone, Default)]
 struct TopLevelIndex {
-    defs: HashMap<String, TopLevelSymbol>,
-    exports: HashSet<String>,
+    defs: UnordMap<String, TopLevelSymbol>,
+    exports: UnordSet<String>,
     has_explicit_exports: bool,
     module_name: Option<String>,
-    imports: HashMap<String, String>,
+    imports: UnordMap<String, String>,
 }
 
 pub fn analyze_document(uri: &Url, text: &str) -> DocumentAnalysis {
@@ -217,7 +218,7 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
     let mut references = Vec::new();
     let mut completions = builtin_completions(full_document_range(text));
 
-    for symbol in top_level.defs.values() {
+    for (_, symbol) in top_level.defs.to_sorted() {
         definitions.push(Definition {
             name: symbol.name.clone(),
             range: symbol.range,
@@ -231,7 +232,7 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
             visible_in: full_document_range(text),
         });
     }
-    for (name, module) in &top_level.imports {
+    for (name, module) in top_level.imports.to_sorted() {
         completions.push(VisibleName {
             name: name.clone(),
             detail: format!("imported from {module}"),
@@ -1169,7 +1170,20 @@ fn diagnostics_from_api(
         .map(|diagnostic| Diagnostic {
             range: diagnostic
                 .span
-                .map(|span| range_for_span(text, DeepSpan::new(span.offset, span.len)))
+                // chelis#1395: a `Point` carries no extent, and rendering it
+                // as a zero-width LSP range is a presentation choice, not a
+                // fabrication. [04-FIT-17] forbids the WIRE claiming a
+                // measured extent it never had; LSP's own convention is that
+                // a zero-width range is a caret position, which is exactly
+                // what "the producer knew where, not how wide" means to an
+                // editor. The document stays honest and the editor still
+                // points at the right character.
+                .map(|span| {
+                    range_for_span(
+                        text,
+                        DeepSpan::new(span.offset(), span.extent().unwrap_or(0)),
+                    )
+                })
                 .or(fallback)
                 .unwrap_or_else(|| full_document_range(text)),
             severity: Some(severity(diagnostic.severity)),
@@ -1319,7 +1333,27 @@ fn first_decl_range(text: &str, decls: &[Decl]) -> Option<Range> {
 
 fn parse_error_offset(text: &str, err: &chelis_surf::parser::ParseError) -> usize {
     match err {
-        chelis_surf::parser::ParseError::Lex(_) => 0,
+        // chelis#1395: every `LexError` variant carries a byte offset, so
+        // reporting 0 put the editor's caret at the start of the file for
+        // every lexical error. Exhaustive rather than a catch-all, so a new
+        // variant has to choose its coordinate.
+        chelis_surf::parser::ParseError::Lex(lex) => {
+            use chelis_surf::lexer::LexError as Lex;
+            match lex {
+                Lex::UnterminatedString { offset }
+                | Lex::InvalidEscape { offset, .. }
+                | Lex::UnescapedControl { offset, .. }
+                | Lex::InvalidNumber { offset, .. }
+                | Lex::UnexpectedChar { offset, .. }
+                | Lex::ReservedForFuture { offset, .. }
+                | Lex::UnterminatedBlockComment { offset }
+                | Lex::DeferredSuffix { offset, .. }
+                | Lex::UnsignedSuffix { offset, .. }
+                | Lex::IntegerSuffixOnFloat { offset, .. }
+                | Lex::HexFloatSuffix { offset, .. }
+                | Lex::UnknownSuffix { offset, .. } => *offset,
+            }
+        }
         chelis_surf::parser::ParseError::UnexpectedEof => text.len(),
         chelis_surf::parser::ParseError::Expected { offset, .. }
         | chelis_surf::parser::ParseError::ReservedWordBinding { offset, .. }
@@ -1336,7 +1370,21 @@ fn parse_error_offset(text: &str, err: &chelis_surf::parser::ParseError) -> usiz
 
 fn parse_error_offset_deep(err: &chelis_deep::parser::ParseError) -> usize {
     match err {
-        chelis_deep::parser::ParseError::Lex(_) => 0,
+        // See `parse_error_offset` above (chelis#1395).
+        chelis_deep::parser::ParseError::Lex(lex) => {
+            use chelis_deep::lexer::LexError as Lex;
+            match lex {
+                Lex::UnterminatedString { offset }
+                | Lex::InvalidEscape { offset, .. }
+                | Lex::InvalidNumber { offset, .. }
+                | Lex::UnexpectedChar { offset, .. }
+                | Lex::DeferredSuffix { offset, .. }
+                | Lex::UnsignedSuffix { offset, .. }
+                | Lex::IntegerSuffixOnFloat { offset, .. }
+                | Lex::HexFloatSuffix { offset, .. }
+                | Lex::UnknownSuffix { offset, .. } => *offset,
+            }
+        }
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
         | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
@@ -1500,6 +1548,7 @@ fn format_type_params(params: &[String]) -> String {
 fn format_type_expr(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) => name.clone(),
+        TypeExpr::DimensionLiteral(value, _) => value.to_string(),
         TypeExpr::Tensor(items, precision, _) => {
             let inner = items
                 .iter()
@@ -1568,6 +1617,79 @@ mod tests {
 
     fn deep_uri() -> Url {
         Url::parse("file:///tmp/test.dp").expect("uri")
+    }
+
+    /// chelis#1395: a CHECK diagnostic carrying a point renders as a
+    /// zero-width caret.
+    ///
+    /// Distinct from the parse-error test below, and not redundant with it:
+    /// the two arrive by different routes. A parse error is rendered by
+    /// `parse_error_diagnostic`, while an API diagnostic goes through
+    /// `diagnostics_from_api`, which is the site that turns a missing extent
+    /// into a width. Only this route can catch a `Point` being widened to a
+    /// one-character underline.
+    #[test]
+    fn a_check_diagnostic_point_renders_as_a_zero_width_caret() {
+        let text = "def f(x: f32) -> f32 = add(x, nope)\n";
+        let analysis = analyze_document(&surf_uri(), text);
+        let diagnostic = analysis
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("nope"))
+            .expect("an unbound variable is reported");
+        assert_eq!(
+            diagnostic.range.start, diagnostic.range.end,
+            "a check error carries a coordinate and no measured extent, so it \
+             must present as a caret rather than underlining a character \
+             width nobody measured; got {:?}",
+            diagnostic.range
+        );
+        let offset = text.find("nope").expect("the fixture names nope") as u32;
+        assert_eq!(
+            (
+                diagnostic.range.start.line,
+                diagnostic.range.start.character
+            ),
+            (0, offset),
+            "the caret must sit at the producer's coordinate"
+        );
+    }
+
+    /// chelis#1395: a diagnostic whose producer knew WHERE but not HOW WIDE
+    /// renders as a zero-width caret, not as a one-character underline.
+    ///
+    /// The distinction is invisible to a test that only checks the start
+    /// position: presenting a `Point` as a 1-wide range would underline a
+    /// character the producer never claimed, and LSP's own convention is that
+    /// a zero-width range IS a caret. A lexer error is the natural fixture
+    /// because it carries an offset and no extent.
+    #[test]
+    fn a_point_diagnostic_renders_as_a_zero_width_caret() {
+        // No trailing newline: a newline INSIDE the string is a different
+        // (and correctly located) `UnescapedControl` at the newline, so this
+        // fixture keeps the error at the opening quote.
+        let text = "def f() -> f32 = \"unterminated";
+        let analysis = analyze_document(&surf_uri(), text);
+        let diagnostic = analysis
+            .diagnostics
+            .first()
+            .expect("an unterminated string is rejected");
+        assert_eq!(
+            diagnostic.range.start, diagnostic.range.end,
+            "a point must present as a zero-width caret, got {:?}",
+            diagnostic.range
+        );
+        // Not the whole-document fallback: the caret is at the coordinate the
+        // lexer reported, which is what makes the zero width meaningful.
+        let quote = text.find('"').expect("the fixture has a quote") as u32;
+        assert_eq!(
+            (
+                diagnostic.range.start.line,
+                diagnostic.range.start.character
+            ),
+            (0, quote),
+            "the caret must sit at the lexer's offset"
+        );
     }
 
     #[test]

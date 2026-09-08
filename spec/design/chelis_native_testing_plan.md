@@ -16,24 +16,22 @@ Core assertion functions:
 
 ```chelis
 -- Equality
-def assert_eq(actual: f32, expected: f32, label: String) -> unit ! { Test }
-def assert_eq_int(actual: int64, expected: int64, label: String) -> unit ! { Test }
-def assert_eq_bool(actual: bool, expected: bool, label: String) -> unit ! { Test }
-def assert_eq_string(actual: String, expected: String, label: String) -> unit ! { Test }
+def assert_eq[q](actual: q, expected: q, label: string) -> unit ! { Test }
 
 -- Approximate equality (for floating point)
 def assert_close(actual: f32, expected: f32, tol: f32, label: String) -> unit ! { Test }
-def assert_close_tensor(actual: tensor[n, f32], expected: tensor[n, f32], tol: f32, label: String) -> unit ! { Test }
+def assert_close_tensor[p_float](actual: &tensor[..r, p_float], expected: &tensor[..r, p_float], tol: p_float, label: string) -> unit ! { Test }
+def assert_eq_tensor[p](actual: &tensor[..r, p], expected: &tensor[..r, p], label: string) -> unit ! { Test }
 
 -- Boolean
-def assert_true(cond: bool, label: String) -> unit ! { Test }
-def assert_false(cond: bool, label: String) -> unit ! { Test }
+def assert_true(cond: bool, label: string) -> unit ! { Test }
+def assert_false(cond: bool, label: string) -> unit ! { Test }
 
 -- Tensor shape / properties
-def assert_shape(t: tensor[n, f32], expected_n: int64, label: String) -> unit ! { Test }
+def assert_shape[p](t: &tensor[..r, p], expected: List[int64], label: string) -> unit ! { Test }
 
 -- Failure (unconditional)
-def fail(msg: String) -> unit ! { Test }
+def fail(msg: string) -> unit ! { Test }
 ```
 
 The `Test` effect is a new algebraic effect. Assertion functions perform the `Test` effect. The `chelis test` CLI command handles `Test` by collecting pass/fail results. This means:
@@ -197,13 +195,13 @@ Currently, the entire test suite is Python (golden generation via pandas, runtim
 
 ```chelis
 import Coral.Frame (from_pairs, get_float_col, filter, nrows, ncols, with_column, columns)
-import Std.Test (assert_eq_int, assert_close_tensor, assert_true)
+import Std.Test (assert_eq, assert_close_tensor, assert_true)
 
 def test_construction() = {
   prices = to_tensor([100.0, 200.0, 300.0])
   df = from_pairs([("price", FloatCol(prices))])
-  assert_eq_int(nrows(df), 3, "nrows = 3")
-  assert_eq_int(ncols(df), 1, "ncols = 1")
+  assert_eq(nrows(df), 3, "nrows = 3")
+  assert_eq(ncols(df), 1, "ncols = 1")
 }
 
 def test_filter_by_mask() = {
@@ -211,7 +209,7 @@ def test_filter_by_mask() = {
   df = from_pairs([("price", FloatCol(prices))])
   mask = gt(get_float_col(df, "price"), 150.0)
   filtered = filter(df, mask)
-  assert_eq_int(nrows(filtered), 2, "filter keeps 2 rows")
+  assert_eq(nrows(filtered), 2, "filter keeps 2 rows")
 }
 
 def test_with_column_preserves_existing() = {
@@ -219,7 +217,7 @@ def test_with_column_preserves_existing() = {
   vols = to_tensor([0.1, 0.2, 0.3])
   df = from_pairs([("price", FloatCol(prices))])
   df2 = with_column(df, "vol", FloatCol(vols))
-  assert_eq_int(ncols(df2), 2, "added column")
+  assert_eq(ncols(df2), 2, "added column")
   -- Original price column unchanged
   assert_close_tensor(get_float_col(df2, "price"), prices, 1e-10, "price preserved")
 }
@@ -425,28 +423,30 @@ with `cargo test` and `pytest` ergonomics.
 
 Directory runs use `--batch-mode auto` by default. The parent builds the shared package
 context once, groups batch-eligible test files into a suite batch, compiles that batch
-once, and evaluates every selected test root from the shared handle. Files with top-level
-module-init bindings or top-level name collisions use the per-file worker path instead.
+once, and evaluates every selected test root from the shared handle. Sharing the package
+and evaluator does not merge source scope: before combination, each test file and its
+synthetic roots are rewritten as an independent module under a deterministic reserved
+identity, and the combined unit contains only exact internal names. A declaration in one
+test file is therefore invisible to another unless the language's ordinary import rule
+made it visible. Files with top-level module-init bindings or conservatively detected
+top-level name collisions may still use the per-file worker path instead.
 
 If the shared package context fails to compile, `chelis test` fails fast and does not fan
 out identical per-worker errors.
 
-#### What counts as a top-level name collision
+#### Batch admission is not scope authority
 
-The batch merges every batched file's flattened declarations into one compilation unit,
-so the batch has a single top-level scope. A collision is therefore any way two batched
-files can disagree about what one name means, not only two declarations of it:
+The parent keeps a conservative admission guard so obviously conflicting files can take
+the established per-file path without constructing a batch that will fail. It recognizes
+these conditions:
 
 - two files declare the same name (including ADT variant constructors, which share one
-  namespace in the merged unit);
+  namespace before isolated rewriting);
 - one file declares a name that another file explicitly imported, in either order. This
-  is the same defect either way round: the merged unit resolves the import to the
-  sibling's declaration, so a file is recompiled against a binding it never asked for
-  (chelis#1261);
+  is the chelis#1261 collision that the original raw merge misresolved;
 - two files import the same name from different modules;
 - a file carries a wildcard import, whose name set the runner cannot enumerate without
-  resolving the package graph, so it cannot prove no sibling declaration captures one of
-  those names.
+  resolving the package graph.
 
 Importing the same name from the same module is agreement, not collision, and must not
 demote either file: nearly every suite shares one assertion helper import, and demoting
@@ -456,6 +456,13 @@ on that would delete the batch path entirely. A file that repeats a name interna
 The parent's eligibility classifier and the batch worker's own duplicate guard admit
 files through one shared rule. A worker guard stricter than the classifier rejects
 manifests the parent already built, which surfaces only as an unexplained fallback.
+That rule is a performance/admission policy, not proof of language scope. It cannot
+enumerate a file's unresolved bare references, and a future declaration shape must not
+be able to confer scope merely because the guard has no arm for it. Correctness comes
+from independently rewriting each file through the ordinary module resolver, then
+combining only the rewritten declarations and exact synthetic-root identities. The
+cached-context and legacy prepared-graph workers consume the same isolated rewrite
+product, and neither re-runs the eval-entry rewriter over that product.
 
 Demotion is the sanctioned per-file path, not a degradation, and is not reported by
 default: `--batch-mode file` produces the same rows and the same exit code. The reason is
@@ -463,6 +470,13 @@ computed anyway, so it is available on demand. Setting `CHELIS_TEST_EXPLAIN_BATC
 prints one stderr line per demoted file naming the collision (or the read, parse,
 enumeration, or module-init reason). Without it, a maintainer whose suite quietly lost the
 batch path has to bisect the colliding names by hand.
+
+`--batch-mode auto` and `--batch-mode file` are verdict-equivalent: they emit the same
+file/test pass-fail rows and the same exit status for the same sources. A resolver or
+checker failure in an attempted batch may use the reported per-file fallback to recover
+source attribution, but it must remain a failing `<file>` row rather than becoming green
+after scope flattening. The fallback record and summary marker are additional execution-
+mode evidence and do not change that row/verdict equivalence.
 
 #### Reporting an abandoned batch
 

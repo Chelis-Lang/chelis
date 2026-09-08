@@ -74,7 +74,7 @@ fn genuinely_unknown_callable_still_reports_exactly_once() {
         .filter(|error| {
             matches!(
                 error.kind,
-                chelis_types::errors::CheckErrorKind::UnboundVariable
+                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
             )
         })
         .collect::<Vec<_>>();
@@ -99,9 +99,8 @@ def use_bool() = identity(true)
 
 #[test]
 fn bare_acyclic_later_helper_remains_textually_unavailable() {
-    // Raw Deep deliberately carries no predeclared `defsig`; a Surf
-    // parameter annotation would synthesize one and make the name visible
-    // during declaration collection for a reason unrelated to SCC prebinding.
+    // Raw Deep carries no synthesized `defsig`; [04-INF-4] does not widen
+    // the existing function-inference contract while aligning eager values.
     let deep = chelis_deep::parser::parse_str(
         r#"
 (def {} caller
@@ -121,7 +120,7 @@ fn bare_acyclic_later_helper_remains_textually_unavailable() {
         .filter(|error| {
             matches!(
                 error.kind,
-                chelis_types::errors::CheckErrorKind::UnboundVariable
+                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
             )
         })
         .collect::<Vec<_>>();

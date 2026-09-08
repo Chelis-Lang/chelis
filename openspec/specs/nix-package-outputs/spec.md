@@ -211,11 +211,11 @@ The repository MUST provide a parity checker with positive and negative tests. A
 ### Requirement: Native Nix checks protect every supported system
 Each supported system MUST define checks for package construction, package contents, executable behavior, launcher shell lint, app paths, SMT activation, and lock parity.
 
-CI MUST run the complete check set, the Nix flake contract suite, and the three named Devenv package builds on native `x86_64-linux` and `aarch64-darwin` builders. The Devenv outputs MUST resolve to the root flake packages. The `x86_64-linux` job MUST run on every code pull request and push to `main`. A docs-only pull request MUST skip the `x86_64-linux` job through a job-level gate fed by the shared docs-only detector; the skipped required context reports success. The `aarch64-darwin` job MUST run the identical steps and MUST be a documented manual dispatch gate; default CI does not run it. A system MUST NOT count as supported from evaluation-only evidence.
+The native Nix workflow MUST run the complete check set, the Nix flake contract suite, and the three named Devenv package builds on native `x86_64-linux` and `aarch64-darwin` builders when it is manually dispatched or a GitHub release is published. The Devenv outputs MUST resolve to the root flake packages. Each configured event MUST run both native jobs. Pull requests, pushes, and scheduled events MUST NOT invoke the native Nix workflow. A system MUST NOT count as supported from evaluation-only evidence.
 
 The supported-system list and the named native CI jobs MUST have exact parity. The repository script suite MUST fail when either list contains an unmatched system.
 
-The authoritative completion oracle MUST be the two successful native CI check jobs: the pull-request `x86_64-linux` job and the dispatched `aarch64-darwin` job.
+The authoritative completion oracle MUST be both successful native check jobs from one manually dispatched or published-release workflow run.
 
 #### Scenario: Linux checks pass
 - **WHEN** CI runs the complete flake check set and Devenv package builds on `x86_64-linux`
@@ -225,17 +225,21 @@ The authoritative completion oracle MUST be the two successful native CI check j
 - **WHEN** a named Devenv output does not resolve to its root flake package
 - **THEN** the native package job fails before the system can count as supported
 
-#### Scenario: A docs-only pull request skips the Linux job
-- **WHEN** a pull request changes only documentation paths
-- **THEN** the shared detector reports docs-only and the `x86_64-linux` job skips with a successful context
+#### Scenario: Routine repository activity does not schedule native Nix
+- **WHEN** a pull request, push, or scheduled event occurs
+- **THEN** the native Nix workflow schedules neither supported-system job
 
 #### Scenario: The generated launcher fails shell lint
 - **WHEN** the built `chelisup` launcher fails `bash -n` or `shellcheck`
 - **THEN** the launcher lint check fails the native check set
 
-#### Scenario: macOS checks pass
-- **WHEN** a manually dispatched CI run executes the complete flake check set and Devenv package builds on `aarch64-darwin`
-- **THEN** every package and contract check exits with status 0
+#### Scenario: A manual dispatch checks both supported systems
+- **WHEN** a maintainer manually dispatches the native Nix workflow
+- **THEN** both native jobs execute the complete check set and the Devenv package builds, and every package and contract check exits with status 0
+
+#### Scenario: A published release checks both supported systems
+- **WHEN** GitHub publishes a release
+- **THEN** both native jobs execute the complete check set and the Devenv package builds, and every package and contract check exits with status 0
 
 #### Scenario: One package check fails
 - **WHEN** any required package or contract check fails on a supported system

@@ -160,8 +160,11 @@ fn check_bypass_reports_offsets_in_the_authored_noncanonical_source() {
                 .is_some_and(|message| message.contains("missing"))
         })
         .expect("unbound-name diagnostic");
+    // chelis#886 moved the coordinate into the schema carrier's `span`.
+    // The claim is unchanged: the offset addresses the AUTHORED source, not
+    // the canonical formatter output the style gate would have produced.
     assert_eq!(
-        diagnostic["span_offset"].as_u64(),
+        diagnostic["span"]["offset"].as_u64(),
         Some(source.find("missing").expect("fixture contains missing") as u64),
         "the diagnostic offset must address the authored source, not canonical formatter output"
     );

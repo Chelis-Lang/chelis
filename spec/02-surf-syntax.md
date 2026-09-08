@@ -102,8 +102,10 @@ cast  cast_trunc  par  do  quote  unquote  splice  true  false
 **Total: 29.**
 
 `property`, `forall`, `where`, `opaque`, `invariant`, `wrt`, `axis`,
-`seed`, `device`, and the property-option names are contextual words only in
-the productions that name them. `effect`, `handler`, `perform`, `resume`, and
+`seed`, `device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
+the property-option names are contextual words only in the productions that
+name them. A dtype-family name is a family only in a type binder's bound
+position; everywhere else it is an ordinary type name. `effect`, `handler`, `perform`, `resume`, and
 `borrow` are reserved words and cannot be used as identifiers.
 The read-only borrow expression is spelled `&expr`.
 
@@ -209,7 +211,7 @@ consumer that imports two modules exporting the same type name can annotate
 against one:
 
 ```
-def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)
+def relay(m: Demo.Dropout.Mode) -> int64 = Demo.Dropout.use(m)
 ```
 
 This is the disambiguation escape hatch when two imported modules export the
@@ -220,6 +222,18 @@ reference; qualifying resolves it. In every position — value, constructor,
 pattern, and type — a qualified reference whose head names an imported module
 but whose trailing name that module does not export is rejected with a
 `module \`M\` does not export \`N\`` error, not silently accepted.
+
+**Value scope (unqualified references).** A bare value reference is in scope
+only when it names a lexical binding, a function declared in the enclosing
+module, a non-function value declared earlier in the enclosing module
+(`spec/04-type-system.md` [04-INF-4]), a builtin, or a value brought into
+unqualified scope by an `import`.
+An exported value in another linked module does not enter scope merely because
+its terminal name is a unique match. A bare name with no in-scope binding is an
+`unbound variable: X` error at `chelis check`; adding, removing, or renaming an
+unimported module cannot change that verdict. The qualified forms above remain
+available after importing the declaring module, and naming the value in a
+selective import brings it into unqualified scope.
 
 **Constructor scope (unqualified references).** A bare (unqualified)
 constructor reference — at a construction site (`Alpha`, `Alpha(x)`,
@@ -349,6 +363,14 @@ def multi_head_attn(q, k, v, mask) = ...
 
 **⟹** `(defsig {} multi_head_attn (t-fn {} ...arg_types... ret_type))`
 
+A `sig` may carry the same bracketed binder list a `def` carries, in the
+same position — immediately after the declared name:
+
+```text
+sig arange[p: Int]: p -> p -> tensor[n, p]
+def arange(start, stop) = ...
+```
+
 `sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
 Effect annotations are optional suffixes on either `sig` or `def`:
@@ -397,7 +419,11 @@ The `spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`,
 `u32`, `u64`, `uint8`, `uint16`, `uint32`, `uint64`) are explicitly
 excluded from implicit collection so they reach the type-checker's
 §1.1.2 rejection path with a precise diagnostic, rather than being
-silently absorbed as quantifiers.
+silently absorbed as quantifiers. The exclusion is not confined to
+implicit collection: a dtype spelling that `spec/04-type-system.md`
+[04-DTYPE-1] rejects names no type variable in any type position, so a
+`[..]` clause does not rebind one. The clause overrides the case-split
+of §3.1, not the rejected and primitive spellings.
 
 The same identifier in a def's `[..]` clause may act as either a
 dim-var or a precision tvar depending on its position inside a
@@ -469,6 +495,44 @@ Writing `def f[a, b](x: &tensor[3, p])` (where `p` is not in
 See `spec/04-type-system.md` §5.8 for the type-system semantics and
 the `TensorPrec` representation that backs this surface rule.
 
+#### P4c: Dtype-Family Bounds
+
+A binder in a `[..]` clause may declare a **dtype-family bound**,
+written after the binder name:
+
+```text
+sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+def linspace(start, stop, count) = ...
+
+def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
+```
+
+The bound is one of `Float`, `Int`, or `Numeric`, and it restricts the
+binder to the active dtypes of that family per
+`spec/04-type-system.md` §5.9 [04-DTYPE-2]. Any other name in the
+bound position is a syntax error, so an ADT name never becomes a
+silent bound and a user type named `Float` is unaffected outside this
+position. A binder with no bound keeps its existing meaning: an
+unconstrained type variable, not a dtype.
+
+A `sig`'s `[..]` clause is **partial**: every name it does not list
+stays implicitly quantified exactly as above, so dimension names and
+`..r` rank spreads need no entry. A name it does list is an
+authoritative binder, as in a `def`, so listing a multi-letter
+dimension name makes it a dimension *variable* where an unlisted one
+would be a concrete symbolic axis. A listed name **that declares a
+bound** must occur in the declared type. A bound belongs to one binder
+list per declaration: when a standalone `sig` declares the name, the
+bound goes on the `sig`, and a bound in that `def`'s `[..]` clause is
+an error.
+
+A bounded binder is a type binder only. Using one in a dimension slot
+or as a rank spread is an error, since a dtype family cannot name an
+extent.
+
+The formatter prints a bound as `name: Family` with one space after the
+colon and preserves the authored binder order.
+
 ### P4a: Canonical Surf Style
 
 The parser accepts only `def f(x: T) -> U = ...`. A colon result annotation is
@@ -499,7 +563,8 @@ Additional canonical style rules:
 Braces define binding blocks. Inside them, bindings are sequential and
 newlines are the only separators. The final expression is the block's value.
 That tail expression, like a binding value, is newline-bounded unless the next
-line begins `|>` or the break is inside `()`/`[]`/`{}`. A binding block has at
+line begins with one of the exact continuation tokens `|>`, `then`, or `else`,
+or the break is inside `()`/`[]`/`{}`. A binding block has at
 least one binding followed by exactly one tail expression. A bare non-tail
 expression statement and a one-expression binding block are rejected.
 
@@ -574,7 +639,7 @@ The handler argument rules are:
 Surf has top-level macro definitions:
 
 ```text
-macro linear_layer(x, w, b) = add(matmul(x, w), expand(b, 0, batch))
+macro linear_layer(x, w, b) = add(matmul(x, w), insert(b, 0, batch))
 macro relu_ref(x) = max_elem(x, 0.0)
 ```
 
@@ -584,6 +649,9 @@ Macro rules:
 
 - resolution order is lexical blockers first, then user-defined top-level macros, then
   the standard macro prelude, then ordinary function call resolution
+- an ordinary top-level `def` or `sig` may not use the name of a loaded standard
+  prelude macro; the declaration is rejected during macro expansion because its calls
+  would otherwise expand as the standard macro before ordinary function resolution
 - a local binding named `linear_layer` or `cross_entropy` blocks macro expansion for
   that identifier
 - hygiene renames only binders introduced by the macro expansion (block-binding names, `fn`
@@ -594,7 +662,7 @@ Macro rules:
 
 Standard prelude macros:
 
-- `linear_layer(x, w, b)` -> `add(matmul(x, w), expand(b, 0, batch))`
+- `linear_layer(x, w, b)` -> `add(matmul(x, w), insert(b, 0, batch))`
 - `residual(x, f)` -> `add(x, f(x))`
 - `cross_entropy(logits, labels)` -> the standard `softmax` / `log` / `sum` / `mean`
   composition
@@ -827,6 +895,15 @@ Suffixes are expression-literal syntax. A Deep `pat-lit` contains only its raw
 value and has no precision slot, so Surf literal patterns are unsuffixed and a
 suffixed literal pattern is rejected.
 
+The four short integer names `i8`, `i16`, `i32` and `i64` are also accepted in
+a TYPE position, where they name the same primitives as `int8`, `int16`,
+`int32` and `int64`. They are input spellings only: the canonical formatter
+rewrites each to its long name, canonical Deep carries the long name, and a
+Deep `(t-prim {} i64)` written by hand is not a primitive. This is the P10-P12
+pattern, a wider accepted input set than the canonical output set, and it is
+what keeps a short name from being read as an implicitly quantified type
+variable under `spec/04-type-system.md` §5.8.1.
+
 ### P10b: Contextual Tensor-Literal Inference
 
 When a tensor literal `[e1, e2, ...]` appears in a position with a **known
@@ -893,7 +970,18 @@ x
   |> transform_b
 ```
 
-The one qualification is at separator boundaries in a sequencing context (block bindings, block tail, declaration bodies): there, a top-level newline acts as a `Sep` and ends the expression being parsed unless the next line begins `|>` or the break is inside `()`/`[]`/`{}`. This is the same boundary rule that binding values and declaration bodies already follow (see P5 and `BlockBody`); it is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application. The leading-`|>` continuation above is exactly the escape hatch that keeps a multi-line pipeline as one expression.
+The one qualification is at separator boundaries in a **block sequencing context**: block bindings, block tails, `do` and `par` items, and property option values. There a top-level newline acts as a `Sep` and ends the expression being parsed unless the break is inside `()`/`[]`/`{}` or the next line begins with one of the exact continuation tokens below. That is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application.
+
+In those contexts the continuation set is exactly `|>`, `then`, and `else`. Each selected token is safe because it cannot head an expression: `|>` is an infix pipeline stage, and an `if` is not a legal expression without both `then` and `else`, so a newline before one is unambiguous. That safety property is necessary but does not itself define membership. Other infix tokens such as `+`, `*`, `==`, `&&`, and `||` are not selected and remain separators when they lead the next physical line. A token that CAN head an expression -- `with`, `match`, an identifier -- is likewise not a continuation there: after a newline it would be genuinely ambiguous, and admitting it would reintroduce the silent juxtaposition this boundary exists to reject. The leading-`|>` continuation above is one instance of the exact rule, not a special case.
+
+**A declaration body and a property predicate bound differently, and the closed set above does not govern them.** A declaration body runs to the next token that begins a declaration (or to end of input); a property predicate runs to the next `with`, the next declaration start, or end of input. Every other token continues the expression across a top-level newline, so a newline-led `with` continues a declaration body:
+
+```chelis
+def update(p: Point) -> Point = p
+  with { x: 1.0 }
+```
+
+Those two contexts are therefore permissive where a block sequencing context is closed. They never exhibited the missing-continuation defect the closed set fixes, because a leading `then` or `else` does not begin a declaration and so already continued.
 
 The parser accepts one trailing comma or semicolon in a nonempty delimited
 family, and the formatter removes it. This includes arguments, parameters,
@@ -1051,7 +1139,7 @@ FieldDecl     <- Ident S ':' S TypeExpr
 #  TYPE SIGNATURES
 # ═══════════════════════════════════════════════════
 
-SigDecl       <- 'sig' S Ident S ':' S TypeExpr EffectClause?
+SigDecl       <- 'sig' S Ident TypeBinders? S ':' S TypeExpr EffectClause?
 
 # ═══════════════════════════════════════════════════
 #  PROPERTY DECLARATIONS
@@ -1096,10 +1184,17 @@ proof. The source bridges for `std.quantile.range` and
 #  FUNCTION DEFINITIONS
 # ═══════════════════════════════════════════════════
 
-FunDecl       <- 'def' S Ident DimParams? Params
+FunDecl       <- 'def' S Ident TypeBinders? Params
                   ReturnType? EffectClause? S '=' S Expr
 
-DimParams     <- '[' S Ident (S ',' S Ident)* (S ',')? S ']'
+# The declaration binder list. It is unkinded (§P4b): a listed name
+# resolves to a dimension variable, a precision type variable, or a
+# general type variable according to its position. A bound restricts
+# the binder to one dtype family (§P4b, spec/04-type-system.md §5.9);
+# `TypeParams` on a `type` declaration has no bound production.
+TypeBinders   <- '[' S TypeBinder (S ',' S TypeBinder)* (S ',')? S ']'
+TypeBinder    <- Ident (S ':' S DtypeFamily)?
+DtypeFamily   <- 'Float' / 'Int' / 'Numeric'
 Params        <- '(' S (Param (S ',' S Param)* (S ',')?)? S ')'
 Param         <- Ident (S ':' S TypeExpr)?
 ReturnType    <- S '->' S TypeExpr
@@ -1218,7 +1313,8 @@ WithHandler   <- 'with' S ('seed' / 'device') S '(' S Expr (S ',')? S ')'
                   S HandlerBlock
 HandlerBlock  <- '{' S (Expr / BlockBody) S '}'
 # The tail Expr, like a BlockBinding value, is Sep-bounded: a top-level
-# newline ends it unless the next line begins '|>' or the break is
+# newline ends it unless the next line begins with one of the exact
+# continuation tokens ('|>', 'then', 'else'), or the break is
 # inside ()/[]/{}. There is exactly one tail (no `Expr (Sep Expr)*`), so a
 # second top-level expression is a bare non-tail statement and is rejected
 # — bind it with `_ = <expr>` or move it to tail position.
@@ -1498,6 +1594,7 @@ tensor[a, b, f32]  (polymorphic)  ⟹  (t-tensor {} (d-var {} a) (d-var {} b) (t
 A -> B -> C                       ⟹  (t-fn {} A' B' C')  -- flat, last is return
 (A -> B) -> C                     ⟹  (t-fn {} (t-fn {} A' B') C')  -- arg is a function
 Option[f32]                       ⟹  (t-adt {} Option (t-prim {} f32))
+Frame[2]                          ⟹  (t-adt {} Frame (d-lit {} 2))
 (f32, f32)                        ⟹  (t-tuple {} (t-prim {} f32) (t-prim {} f32))
 unit                              ⟹  (t-unit {})
 ```
@@ -1591,7 +1688,7 @@ def predict(
   w: tensor[features, 1, f32],
   b: tensor[1, f32]
 ) -> tensor[samples, 1, f32] =
-  add(matmul(x, w), expand(b, 0, samples))
+  add(matmul(x, w), insert(b, 0, samples))
 
 def mse_loss(
   y_pred: tensor[samples, 1, f32],

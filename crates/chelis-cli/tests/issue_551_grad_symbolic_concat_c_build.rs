@@ -134,12 +134,12 @@ fn issue_551_grad_symbolic_concat_c_build_linear() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[2] = {2, 2};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    memcpy(x->data, xd, sizeof(xd));
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
     chelis_tensor* g = out(x);
-    if (g->size != 4) { printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }
-    for (int i = 0; i < 4; i++) printf("%.6f\n", g->data[i]);
+    if (chelis_tensor_numel(g) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(g)); return 1; }
+    for (int i = 0; i < 4; i++) printf("%.6f\n", ((const float *)chelis_tensor_read_view(g).data)[i]);
     return 0;
 }
 "#;
@@ -187,18 +187,18 @@ extern float loss(chelis_tensor* x);
 
 static float call_loss(const float* xd) {
     int64_t shape[2] = {2, 2};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
-    memcpy(x->data, xd, sizeof(float) * 4);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(float) * 4); chelis_tensor_end_write(x_guard); }
     return loss(x);
 }
 
 int main(void) {
     float base[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     int64_t shape[2] = {2, 2};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
-    memcpy(x->data, base, sizeof(base));
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, base, sizeof(base)); chelis_tensor_end_write(x_guard); }
     chelis_tensor* g = out(x);
-    if (g->size != 4) { printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }
+    if (chelis_tensor_numel(g) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(g)); return 1; }
 
     const float h = 1e-2f;
     for (int i = 0; i < 4; i++) {
@@ -209,7 +209,7 @@ int main(void) {
         xm[i] -= h;
         float fd = (call_loss(xp) - call_loss(xm)) / (2.0f * h);
         /* analytic (10 x), C grad, and finite-difference all on one line */
-        printf("%.6f %.6f %.6f\n", 10.0f * base[i], g->data[i], fd);
+        printf("%.6f %.6f %.6f\n", 10.0f * base[i], ((const float *)chelis_tensor_read_view(g).data)[i], fd);
     }
     return 0;
 }
@@ -265,12 +265,12 @@ fn issue_551_host_lane_concat_reduce_c_build() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[2] = {2, 2};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    memcpy(x->data, xd, sizeof(xd));
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
     chelis_tensor* r = out(x);
-    if (r->size != 4) { printf("FAIL_SIZE %lld\n", (long long)r->size); return 1; }
-    for (int i = 0; i < 4; i++) printf("%.6f\n", r->data[i]);
+    if (chelis_tensor_numel(r) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(r)); return 1; }
+    for (int i = 0; i < 4; i++) printf("%.6f\n", ((const float *)chelis_tensor_read_view(r).data)[i]);
     return 0;
 }
 "#;
@@ -325,12 +325,12 @@ fn issue_593_leading_axis_symbolic_concat_reduce_builds_and_runs() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[2] = {2, 3};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[6] = {1,2,3,4,5,6};
-    memcpy(x->data, xd, sizeof(xd));
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
     chelis_tensor* r = out(x);
-    if (r->size != 3) { printf("FAIL_SIZE %lld\n", (long long)r->size); return 1; }
-    for (int i = 0; i < 3; i++) printf("%.1f\n", r->data[i]);
+    if (chelis_tensor_numel(r) != 3) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(r)); return 1; }
+    for (int i = 0; i < 3; i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(r).data)[i]);
     return 0;
 }
 "#;
@@ -371,15 +371,15 @@ fn issue_593_bare_leading_axis_symbolic_concat_builds_and_runs() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[2] = {2, 3};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[6] = {1,2,3,4,5,6};
-    memcpy(x->data, xd, sizeof(xd));
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
     chelis_tensor* c = out(x);
-    if (c->ndim != 2 || c->shape[0] != 4 || c->shape[1] != 3) {
-        printf("FAIL_SHAPE %d %lld %lld\n", c->ndim, (long long)c->shape[0], (long long)c->shape[1]);
+    if (chelis_tensor_rank(c) != 2 || chelis_tensor_shape(c, 0) != 4 || chelis_tensor_shape(c, 1) != 3) {
+        printf("FAIL_SHAPE %d %lld %lld\n", chelis_tensor_rank(c), (long long)chelis_tensor_shape(c, 0), (long long)chelis_tensor_shape(c, 1));
         return 1;
     }
-    for (int i = 0; i < c->size; i++) printf("%.1f\n", c->data[i]);
+    for (int i = 0; i < chelis_tensor_numel(c); i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(c).data)[i]);
     return 0;
 }
 "#;
@@ -422,12 +422,12 @@ fn issue_593_concrete_leading_axis_concat_still_builds_and_runs() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[2] = {2, 3};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[6] = {1,2,3,4,5,6};
-    memcpy(x->data, xd, sizeof(xd));
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
     chelis_tensor* r = out(x);
-    if (r->size != 3) { printf("FAIL_SIZE %lld\n", (long long)r->size); return 1; }
-    for (int i = 0; i < 3; i++) printf("%.1f\n", r->data[i]);
+    if (chelis_tensor_numel(r) != 3) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(r)); return 1; }
+    for (int i = 0; i < 3; i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(r).data)[i]);
     return 0;
 }
 "#;
@@ -453,12 +453,12 @@ fn issue_593_last_axis_symbolic_concat_grad_still_builds_and_runs() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[2] = {2, 2};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    memcpy(x->data, xd, sizeof(xd));
+    { chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); memcpy(x_view.data, xd, sizeof(xd)); chelis_tensor_end_write(x_guard); }
     chelis_tensor* g = out(x);
-    if (g->size != 4) { printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }
-    for (int i = 0; i < 4; i++) printf("%.1f\n", g->data[i]);
+    if (chelis_tensor_numel(g) != 4) { printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(g)); return 1; }
+    for (int i = 0; i < 4; i++) printf("%.1f\n", ((const float *)chelis_tensor_read_view(g).data)[i]);
     return 0;
 }
 "#;

@@ -775,7 +775,19 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// transition watermarks, lowering overrides, and persisted-context resume
 /// floors. Bincode is positional, so every V9 payload has the old checker
 /// state shape and must be rejected before decode.
+/// V11 adds quantified type-variable restrictions and their live
+/// substitution ledger, so constrained function values retain their domain
+/// through a compiled-context round trip.
+/// V14 combines two independent V13 formats: chelis#1341 canonicalizes every
+/// unordered collection that can reach encoded compiler-context bytes, while
+/// chelis#1247 adds checker-owned nominal parameter kinds and kinded nominal
+/// arguments. Either V13 payload has a branch-specific positional shape and
+/// must clean-miss.
 ///
+/// V12 records canonical source positions on deferred positional-expand and
+/// reshape obligations. Their serialized checker state is therefore
+/// structurally different from V11 even when a program has no cache-visible
+/// type changes.
 /// V9 unified two independent V8 formats. The pipeline-core
 /// extraction sealed the lowered-library proof identity into the cached
 /// context (branch V8). On main (main V8), chelis#878 (`RiscOp::Pad::fill`
@@ -788,13 +800,23 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V10\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V16\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 10;
+///
+/// V16 removes both deferred-shape ledgers from the serialized `Subst` inside
+/// `TypeEnv`. `spec/04-type-system.md` section 4.7.2 gives `expand` and
+/// `insert` one result shape each, so nothing is deferred and the two fields
+/// are gone. Bincode is positional, so a V15 entry carries two fields where
+/// the following ones are now expected.
+///
+/// V15: that ledger carried a `DeferredShapeObligation` enum rather than a
+/// bare expand constraint, so a comparison result could mirror its operand's
+/// open choice.
+const CACHE_FORMAT_VERSION: u32 = 16;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1195,11 +1217,13 @@ fn build_checked_library_layered(
     // once; every later process reads it back. A build failure here is a
     // genuine chelis-std regression, surfaced rather than hidden behind the
     // monolithic fallback.
-    let stdlib_ctx =
-        match crate::stdlib_cache::load_or_build_stdlib_context(&reef_state.linked_stdlib_decls) {
-            Ok(ctx) => ctx,
-            Err(err) => return Some(Err(err)),
-        };
+    let stdlib_ctx = match crate::stdlib_cache::load_or_build_stdlib_context(
+        &reef_state.linked_stdlib_decls,
+        reef_state.stdlib_source_digest(),
+    ) {
+        Ok(ctx) => ctx,
+        Err(err) => return Some(Err(err)),
+    };
 
     // Layer 2: desugar + macro-expand only the non-chelis-std library decls
     // (the package's own modules + non-stdlib path-deps). A macro-expansion
@@ -1309,9 +1333,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_typecheck_generalization_levels() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V10\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 10);
+    fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V16\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 16);
+    }
+
+    #[test]
+    fn cache_format_version_tracks_the_deferred_ledger_removal() {
+        assert_eq!(CACHE_FORMAT_VERSION, 16);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

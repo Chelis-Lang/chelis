@@ -3,23 +3,18 @@
 Run via: `python3 -m unittest scripts.test_gate_parity_adversarial`
 from repo root, or `python3 scripts/test_gate_parity_adversarial.py`.
 
-`scripts/test_gate.py` ships the parity lock: it greps
-`.github/workflows/ci.yml` and fails if a gate job hand-inlines a
-command that `gate.py` does not produce. `scripts/test_gate.py`'s own
+`scripts/test_gate.py` ships the parity lock: it parses every single-line
+`run:` scalar in each gate-owned job and fails unless the complete command
+is in that job's reviewed allowlist. `scripts/test_gate.py`'s own
 tests assert it passes on the *current* workflow. This file is the
 adversarial complement: it MUTATES a copy of `ci.yml`, points the
 parity test at the mutation, and asserts the lock actually fails. A
 parity lock that never fails on a real drift is theater.
 
-It also covers bare `chelis ...` invocations. RT-2 found that the
-parity parser originally only inspected commands starting with
-`cargo `, so a gate job that hand-inlined a bare `chelis ...` command
-(rather than the `cargo run -p chelis-cli ... -- ...` form) slipped
-past the lock, contradicting the "every `cargo`/`chelis` invocation"
-claim in the `test_gate.py` docstring and the design note.
-`_is_gate_relevant_command` in `scripts/test_gate.py` now matches both
-prefixes; `test_bare_chelis_command_is_caught` is the adversarial proof
-that the gap is closed.
+The structural rule covers bare `chelis ...`, direct Cargo, shell quoting,
+parameter expansion, and command substitution without trying to reconstruct
+Bash execution semantics. Even a benign extra command is rejected as an
+unreviewed workflow change, not misidentified as a Cargo invocation.
 """
 
 import importlib.util
@@ -31,7 +26,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-ANCHOR = "      - name: Test-timing budget (informational)"
+ANCHOR = "      - name: Gate (workspace test shard)"
+CACHE_JOB_ANCHOR = "\n  workspace-tests-shard:"
 
 
 def _load_test_gate():
@@ -83,7 +79,7 @@ class GateParityAdversarialTests(unittest.TestCase):
         )
 
     def test_hand_inlined_cargo_command_is_caught(self):
-        # Plant a hand-inlined `cargo test` step into the `integration`
+        # Plant a hand-inlined `cargo test` step into the workspace-test
         # gate job. The parity lock MUST fail.
         mutated = self.ci_text.replace(
             ANCHOR,
@@ -138,13 +134,250 @@ class GateParityAdversarialTests(unittest.TestCase):
             "a `run: |` multiline block in a gate job",
         )
 
+    def test_cargo_inside_plain_continuation_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky plain continuation\n"
+            "        run:\n"
+            "          python3 scripts/gate.py integration --support-only;\n"
+            "          cargo check -p chelis-types\n\n" + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT catch cargo in a plain continued scalar",
+        )
+
+    def test_quoted_cargo_command_with_yaml_comment_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky quoted command\n"
+            "        run: 'cargo check -p chelis-types' # valid YAML comment\n\n"
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT catch quoted cargo before a YAML comment",
+        )
+
+    def test_escaped_double_quoted_cargo_command_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky escaped command\n"
+            '        run: "\\x63argo check -p chelis-types"\n\n'
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT fail closed on a YAML-escaped command",
+        )
+
+    def test_aliased_cargo_command_is_caught(self):
+        mutated = self.ci_text.replace(
+            "jobs:\n",
+            "env:\n"
+            "  HIDDEN_COMMAND: &hidden_command "
+            "cargo check -p chelis-types\n\n"
+            "jobs:\n",
+            1,
+        ).replace(
+            ANCHOR,
+            "      - name: Sneaky aliased command\n"
+            "        run: *hidden_command\n\n"
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored an aliased cargo command",
+        )
+
+    def test_tagged_escaped_cargo_command_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky tagged escaped command\n"
+            '        run: !!str "\\x63argo check -p chelis-types"\n\n'
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored a tagged escaped cargo command",
+        )
+
+    def test_shell_quoted_cargo_executable_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky shell-quoted executable\n"
+            "        run: c'a'rgo check -p chelis-types\n\n"
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored a shell-quoted cargo executable",
+        )
+
+    def test_shell_expansion_cargo_executables_are_caught(self):
+        commands = (
+            "$'cargo' check -p chelis-types",
+            "${TOOL:-cargo} check -p chelis-types",
+            "$(printf car)go check -p chelis-types",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                mutated = self.ci_text.replace(
+                    ANCHOR,
+                    "      - name: Sneaky expanded executable\n"
+                    f"        run: {command}\n\n" + ANCHOR,
+                    1,
+                )
+                self.assertNotEqual(
+                    mutated, self.ci_text, "mutation did not apply"
+                )
+                result = _run_parity_against(mutated)
+                self.assertGreater(
+                    len(result.failures) + len(result.errors),
+                    0,
+                    f"the parity lock ignored expanded executable {command!r}",
+                )
+
+    def test_unreviewed_benign_run_command_is_caught_structurally(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Unreviewed diagnostic\n"
+            "        run: echo cargo\n\n" + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the structural parity lock allowed an unreviewed run command",
+        )
+
+    def test_cache_census_rejects_every_valid_hidden_writer_spelling(self):
+        with_maps = (
+            '        with:\n          shared-key: "linux-workspace"\n'
+            "          save-if: true\n",
+            "        with:\n          shared-key: 'linux-workspace'\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: &workspace_key linux-workspace\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: !!str linux-workspace\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: >-\n"
+            "            linux-workspace\n          save-if: true\n",
+            '        with:\n          "shared-key": linux-workspace\n'
+            "          save-if: true\n",
+            "        with:\n          ? shared-key\n"
+            "          : linux-workspace\n          save-if: true\n",
+            "        with: {shared-key: linux-workspace, save-if: true}\n",
+            "        with:\n          shared-key: linux-workspace # writer\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key : linux-workspace\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: ${{ 'linux-workspace' }}\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: "
+            "${{ format('linux-{0}', 'workspace') }}\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: linux-${{ 'workspace' }}\n"
+            "          save-if: true\n",
+        )
+        for with_map in with_maps:
+            with self.subTest(with_map=with_map):
+                step = (
+                    "\n      - name: Hidden competing cache writer\n"
+                    "        uses: Swatinem/rust-cache@v2\n"
+                    + with_map
+                )
+                mutated = self.ci_text.replace(
+                    CACHE_JOB_ANCHOR,
+                    step + CACHE_JOB_ANCHOR,
+                    1,
+                )
+                self.assertNotEqual(
+                    mutated, self.ci_text, "mutation did not apply"
+                )
+                result = _run_parity_against(mutated)
+                self.assertGreater(
+                    len(result.failures) + len(result.errors),
+                    0,
+                    "the workflow-wide cache census accepted a hidden writer",
+                )
+
+    def test_underscore_job_id_with_direct_cargo_is_caught(self):
+        mutated = self.ci_text.rstrip() + (
+            "\n  Unclassified_job:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: cargo check -p chelis-types\n"
+        )
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored a valid job id containing underscore "
+            "and uppercase characters",
+        )
+
+    def test_quoted_job_id_with_direct_cargo_is_caught(self):
+        mutated = self.ci_text.rstrip() + (
+            '\n  "Quoted_Job":\n'
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: cargo check -p chelis-types\n"
+        )
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored a valid quoted job id",
+        )
+
+    def test_anchored_job_with_direct_cargo_is_caught(self):
+        mutated = self.ci_text.rstrip() + (
+            "\n  Hidden_Job: &hidden_job\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: cargo check -p chelis-types\n"
+        )
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored an anchored job",
+        )
+
     def test_bare_chelis_command_is_caught(self):
         # RT-2 finding, now closed: the parser originally only inspected
         # commands starting with `cargo `, so a gate job that
         # hand-inlined a bare `chelis ...` command (rather than the
         # `cargo run -p chelis-cli ... -- ...` form) slipped past the
-        # lock. `_is_gate_relevant_command` now matches `chelis ` too.
-        # Plant a hand-inlined bare `chelis` step into the `integration`
+        # lock. The exact run-command allowlist covers `chelis ` too.
+        # Plant a hand-inlined bare `chelis` step into the workspace-test
         # gate job. The parity lock MUST fail.
         mutated = self.ci_text.replace(
             ANCHOR,
@@ -158,7 +391,7 @@ class GateParityAdversarialTests(unittest.TestCase):
             len(result.failures) + len(result.errors),
             0,
             "the parity lock did NOT catch a hand-inlined bare `chelis` "
-            "command in the `integration` gate job -- the RT-2 gap is "
+            "command in the workspace-test gate job -- the RT-2 gap is "
             "still open",
         )
 
@@ -181,7 +414,7 @@ class GateParityAdversarialTests(unittest.TestCase):
             0,
             "the parity lock did NOT catch a hand-inlined `cargo run -p "
             "chelis-cli --bin chelis -- ...` command in the "
-            "`integration` gate job",
+            "workspace-test gate job",
         )
 
 

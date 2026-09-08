@@ -160,6 +160,12 @@ pub fn binary_op(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
     match op {
         RiscOp::Add => Some("+"),
         RiscOp::Mul => Some("*"),
+        RiscOp::Sub
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::ReluAdjoint => None,
         _ => None,
     }
 }

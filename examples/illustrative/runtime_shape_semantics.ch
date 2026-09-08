@@ -1,5 +1,5 @@
 sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
-def bias_broadcast(x, b) -> tensor[n, 4, f32] = expand(b, 0, shape(x, cast(0, int32)))
+def bias_broadcast(x, b) -> tensor[n, 4, f32] = insert(b, 0, shape(x, cast(0, int32)))
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) -> tensor[n, 4, f32] = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
 sig flatten_two: &tensor[n, m, f32] -> tensor[n, m, f32]

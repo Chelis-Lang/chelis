@@ -1,20 +1,238 @@
 use chelis_deep::DeepTag;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
+use chelis_ir::dag::{DimInfo, NodeId, RiscOp};
 use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_kernel};
 use chelis_ir::tier2;
-use chelis_types::{CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, types::Prim};
+use chelis_types::{
+    CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
+};
 use chelis_vocab::EffectKind;
+use std::sync::Arc;
 
 use super::host_ops::*;
 use super::named_axis::*;
 use super::transforms::*;
 use super::*;
 
+fn close_at_f32_width(actual: f32, expected: f32, tolerance: f32) -> bool {
+    if actual.is_nan() || expected.is_nan() {
+        return false;
+    }
+    if actual == expected {
+        return true;
+    }
+    if !actual.is_finite() || !expected.is_finite() {
+        return false;
+    }
+    (actual - expected).abs() <= tolerance
+}
+
+fn close_at_f64_width(actual: f64, expected: f64, tolerance: f64) -> bool {
+    if actual.is_nan() || expected.is_nan() {
+        return false;
+    }
+    if actual == expected {
+        return true;
+    }
+    if !actual.is_finite() || !expected.is_finite() {
+        return false;
+    }
+    (actual - expected).abs() <= tolerance
+}
+
+fn first_f32_mismatch(
+    actual: impl Iterator<Item = f32>,
+    expected: impl Iterator<Item = f32>,
+    tolerance: f32,
+) -> Option<usize> {
+    actual
+        .zip(expected)
+        .enumerate()
+        .find_map(|(index, (actual, expected))| {
+            (!close_at_f32_width(actual, expected, tolerance)).then_some(index)
+        })
+}
+
+fn first_f64_mismatch(
+    actual: impl Iterator<Item = f64>,
+    expected: impl Iterator<Item = f64>,
+    tolerance: f64,
+) -> Option<usize> {
+    actual
+        .zip(expected)
+        .enumerate()
+        .find_map(|(index, (actual, expected))| {
+            (!close_at_f64_width(actual, expected, tolerance)).then_some(index)
+        })
+}
+
+fn float_element_is_nan(value: ElementRef) -> bool {
+    match value {
+        ElementRef::F16(value) => value.is_nan(),
+        ElementRef::Bf16(value) => value.is_nan(),
+        ElementRef::F32(value) => value.is_nan(),
+        ElementRef::F64(value) => value.is_nan(),
+        ElementRef::I8(_)
+        | ElementRef::I16(_)
+        | ElementRef::I32(_)
+        | ElementRef::I64(_)
+        | ElementRef::Bool(_) => false,
+    }
+}
+
+fn bind_checked_precision(
+    name: &str,
+    prim: Prim,
+    bindings: &mut UnordMap<String, Prim>,
+) -> Result<(), String> {
+    match bindings.get(name) {
+        Some(existing) if *existing != prim => Err(format!(
+            "generic precision `{name}` actualized as both `{}` and `{}`",
+            existing.name(),
+            prim.name()
+        )),
+        Some(_) => Ok(()),
+        None => {
+            bindings.insert(name.to_string(), prim);
+            Ok(())
+        }
+    }
+}
+
+fn checked_precision_leaf(actual: &Expr, caller_bindings: &UnordMap<String, Prim>) -> Option<Prim> {
+    let (actual_tag, actual_children) = tagged_expr_children(actual)?;
+    match actual_tag {
+        DeepTag::TPrim | DeepTag::TVar => actual_children
+            .first()
+            .and_then(symbol_name)
+            .and_then(|name| prim_from_name(name).or_else(|| caller_bindings.get(name).copied())),
+        DeepTag::TRef => actual_children
+            .first()
+            .and_then(|inner| checked_precision_leaf(inner, caller_bindings)),
+        _ => None,
+    }
+}
+
+/// Match a declared callee type against the checker's concrete call-site type
+/// and collect numeric precision actualizations. This consumes only static
+/// type evidence: runtime values cannot recover an empty container's element
+/// type and textual binder names are not identities across nested calls.
+fn collect_checked_precision_bindings(
+    declared: &Expr,
+    actual: &Expr,
+    caller_bindings: &UnordMap<String, Prim>,
+    bindings: &mut UnordMap<String, Prim>,
+) -> Result<(), String> {
+    let Some((declared_tag, declared_children)) = tagged_expr_children(declared) else {
+        return Ok(());
+    };
+    if declared_tag == DeepTag::TRef {
+        let Some(declared_inner) = declared_children.first() else {
+            return Ok(());
+        };
+        let actual_inner = tagged_expr_children(actual)
+            .filter(|(tag, _)| *tag == DeepTag::TRef)
+            .and_then(|(_, children)| children.first())
+            .unwrap_or(actual);
+        return collect_checked_precision_bindings(
+            declared_inner,
+            actual_inner,
+            caller_bindings,
+            bindings,
+        );
+    }
+    if declared_tag == DeepTag::TVar {
+        if let (Some(name), Some(prim)) = (
+            declared_children.first().and_then(symbol_name),
+            checked_precision_leaf(actual, caller_bindings),
+        ) {
+            return bind_checked_precision(name, prim, bindings);
+        }
+        return Ok(());
+    }
+
+    let Some((actual_tag, actual_children)) = tagged_expr_children(actual) else {
+        return Ok(());
+    };
+    if declared_tag != actual_tag {
+        return Ok(());
+    }
+
+    match declared_tag {
+        DeepTag::TTensor => {
+            let (Some(declared_precision), Some(actual_precision)) =
+                (declared_children.last(), actual_children.last())
+            else {
+                return Ok(());
+            };
+            collect_checked_precision_bindings(
+                declared_precision,
+                actual_precision,
+                caller_bindings,
+                bindings,
+            )
+        }
+        DeepTag::TAdt | DeepTag::TTuple | DeepTag::TFn => {
+            for (declared_child, actual_child) in declared_children.iter().zip(actual_children) {
+                collect_checked_precision_bindings(
+                    declared_child,
+                    actual_child,
+                    caller_bindings,
+                    bindings,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn checked_list_element(actual: &Expr) -> Option<&Expr> {
+    let (tag, children) = tagged_expr_children(actual)?;
+    match tag {
+        DeepTag::TRef => children.first().and_then(checked_list_element),
+        DeepTag::TAdt if children.first().and_then(symbol_name) == Some("List") => children.get(1),
+        _ => None,
+    }
+}
+
+fn checked_function_children(actual: &Expr) -> Option<&[Expr]> {
+    let (tag, children) = tagged_expr_children(actual)?;
+    match tag {
+        DeepTag::TRef => children.first().and_then(checked_function_children),
+        DeepTag::TFn => Some(children),
+        _ => None,
+    }
+}
+
+fn render_shape(shape: &[usize]) -> String {
+    let dimensions = shape
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{dimensions}]")
+}
+
 impl<'a> EvalContext<'a> {
+    /// Resolve a builtin only when ordinary lexical lookup did not select a
+    /// runtime binding of the same name (spec/04-type-system.md §8.6,
+    /// chelis#1076). Every evaluator builtin fast path goes through this
+    /// predicate so a new early dispatch cannot silently bypass scope.
+    fn active_builtin_name<'expr>(&self, expr: &'expr Expr) -> Option<&'expr str> {
+        let name = builtin_name(expr)?;
+        self.active_builtin_symbol(name).then_some(name)
+    }
+
+    fn active_builtin_symbol(&self, name: &str) -> bool {
+        !self.bindings.contains_key(name) && !self.tensor_bindings.contains_key(name)
+    }
+
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
         if let Some(value) = self.bindings.get(name) {
             return Ok(value.clone());
@@ -30,13 +248,149 @@ impl<'a> EvalContext<'a> {
             return Err(format!("cyclic top-level runtime definition `{name}`"));
         }
         self.resolving_top_levels.push(resolved_name.clone());
-        let value = self.eval_expr(&expr)?;
+        let value = self.eval_expr(&expr);
         self.resolving_top_levels.pop();
+        let value = stamp_def_closure(value?, &resolved_name, &expr);
         self.bindings.insert(resolved_name.clone(), value.clone());
         if resolved_name != name {
             self.bindings.insert(name.to_string(), value.clone());
         }
         Ok(value)
+    }
+
+    /// chelis#1277 B2h: the kernel the C lane emits for def `name`, or `None`
+    /// for the host lane. The decision is `chelis_ir::host::host_def_kernel`,
+    /// the function `lower_host_function` itself uses, so the two lanes cannot
+    /// disagree about which defs are kernels. A kernel whose DAG draws no
+    /// Random is cached per def; one that draws is re-lowered on every
+    /// application so its ordinals start at the current stream position, as
+    /// the transforms re-lower per application. A kernel decision whose
+    /// lowering fails is the evaluation's error, never a fall-through to the
+    /// interpreter (the C lane's fall-through is chelis#1515 and is not
+    /// inherited here).
+    pub(super) fn def_kernel(&mut self, name: &str) -> Result<Option<Arc<HostDefKernel>>, String> {
+        if let Some(cached) = self.def_kernels.get(name) {
+            return Ok(cached.clone());
+        }
+        let Some(program) = self.program else {
+            return Ok(None);
+        };
+        let random = RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        };
+        let kernel = host_def_kernel(program, name, Some(random))
+            .map_err(|diagnostic| diagnostic.to_string())?
+            .map(Arc::new);
+        if !kernel
+            .as_ref()
+            .is_some_and(|kernel| kernel_draws_random(kernel))
+        {
+            self.def_kernels.insert(name.to_string(), kernel.clone());
+        }
+        Ok(kernel)
+    }
+
+    /// Apply def `name` through its kernel: the evaluated arguments become the
+    /// kernel's `Load`s by declared parameter name (an unreferenced parameter
+    /// is dropped, as the C wrapper drops it), a captured top-level tensor is
+    /// served through `resolve_top_level`, the DAG evaluator runs with the
+    /// Random stream threaded as `apply_transform` threads it, and the roots
+    /// pack back into a runtime value. The evaluator's error text passes
+    /// through unchanged: a [04-NUM-9] trap line takes no prefix.
+    fn apply_def_kernel(
+        &mut self,
+        name: &str,
+        kernel: &HostDefKernel,
+        params: &[String],
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        if params.len() != args.len() {
+            return Err(format!(
+                "closure expected {} args, got {}",
+                params.len(),
+                args.len()
+            ));
+        }
+        let mut staged: UnordMap<String, IrTensorValue> = UnordMap::new();
+        for input in &kernel.inputs {
+            let value = match kernel
+                .params
+                .iter()
+                .position(|param| param.name == input.name)
+            {
+                Some(index) => {
+                    stage_kernel_argument(name, &input.name, &args[index], input.ty.precision)?
+                }
+                // A captured top-level binding: served through the same
+                // resolution a plain reference takes (the transforms'
+                // chelis#377 rule) and staged like a parameter, so a captured
+                // scalar becomes the rank-0 input the C wrapper passes.
+                None => {
+                    let captured = self.resolve_top_level(&input.name)?;
+                    let staged_value =
+                        stage_kernel_argument(name, &input.name, &captured, input.ty.precision)?;
+                    // chelis#377: a `vmap` inside the body types a captured
+                    // binding's `Load` at the batched rank while the binding
+                    // keeps its declared rank; the transforms reject that
+                    // before evaluation (`apply_transform`), and so does the
+                    // kernel path, with the same diagnostic, rather than
+                    // reaching an elementwise op with disagreeing operands.
+                    if staged_value.shape.len() != input.ty.dims.len() {
+                        return Err(format!(
+                            "host runtime: kernel `{name}` over a def capturing top-level \
+                             binding `{}` is unsupported: the kernel types the capture as \
+                             rank {} but the binding is rank {}. vmap-with-captures must \
+                             broadcast the capture across the batch axis, not batch it \
+                             (tracked residual, chelis#377).",
+                            input.name,
+                            input.ty.dims.len(),
+                            staged_value.shape.len(),
+                        ));
+                    }
+                    staged_value
+                }
+            };
+            staged.insert(input.name.clone(), value);
+        }
+        let roots: Vec<NodeId> = kernel.dag.roots().to_vec();
+        if roots.is_empty() {
+            return Err(format!(
+                "host runtime: kernel `{name}` lowering produced no roots"
+            ));
+        }
+        let draws_random = kernel_draws_random(kernel);
+        let path_sensitive_random =
+            kernel.dag.nodes().iter().any(|node| {
+                matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2
+            });
+        let starting_counter = self.random_counter;
+        let tensor_bindings = self.tensor_bindings;
+        let host_bindings = &self.bindings;
+        let (values, executed_counter) =
+            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                &kernel.dag,
+                &roots,
+                starting_counter,
+                |load| {
+                    staged
+                        .get(load)
+                        .cloned()
+                        .or_else(|| tensor_bindings.get(load).map(|t| t.value.clone()))
+                        .or_else(|| match host_bindings.get(load) {
+                            Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
+                            _ => None,
+                        })
+                },
+            )?;
+        if draws_random {
+            self.random_counter = if path_sensitive_random {
+                executed_counter
+            } else {
+                kernel.next_random_counter.unwrap_or(executed_counter)
+            };
+        }
+        pack_dag_roots(&kernel.dag, &roots, &values, name)
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
@@ -45,7 +399,8 @@ impl<'a> EvalContext<'a> {
             .cloned()
             .map(|expr| (name.to_string(), expr))
             .or_else(|| {
-                let mut matches = self.top_level_defs.iter().filter_map(|(key, value)| {
+                let sorted = self.top_level_defs.to_sorted();
+                let mut matches = sorted.into_iter().filter_map(|(key, value)| {
                     terminal_name_matches(key, name).then_some((key, value))
                 });
                 let (key, value) = matches.next()?;
@@ -54,6 +409,20 @@ impl<'a> EvalContext<'a> {
                     .is_none()
                     .then_some((key.clone(), value.clone()))
             })
+    }
+
+    fn lookup_declared_signature(&self, name: &str) -> Option<&Expr> {
+        self.declared_signatures.get(name).or_else(|| {
+            let mut matches =
+                self.declared_signatures
+                    .to_sorted()
+                    .into_iter()
+                    .filter_map(|(key, signature)| {
+                        terminal_name_matches(key, name).then_some(signature)
+                    });
+            let signature = matches.next()?;
+            matches.next().is_none().then_some(signature)
+        })
     }
 
     pub(super) fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
@@ -283,7 +652,7 @@ impl<'a> EvalContext<'a> {
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| "record missing constructor name".to_string())?;
-        let mut fields_by_name = HashMap::new();
+        let mut fields_by_name = UnordMap::new();
         let mut source_order = Vec::new();
         for field in kids.iter().skip(1) {
             let Some(field_list) = as_list(field) else {
@@ -316,7 +685,7 @@ impl<'a> EvalContext<'a> {
             })?;
             ordered.push(value);
         }
-        if let Some(extra) = fields_by_name.keys().next() {
+        if let Some((extra, _)) = fields_by_name.to_sorted().into_iter().next() {
             return Err(format!(
                 "record `{ctor}` has unknown field `{extra}` at runtime"
             ));
@@ -379,7 +748,18 @@ impl<'a> EvalContext<'a> {
         // Honor that meta where present so a context-typed literal
         // (e.g. `(lit {type: (t-prim {} int64)} 42)`) carries the
         // surrounding-position dtype, not just the bare default.
-        let meta_dtype = get_meta(list).and_then(lit_meta_prim);
+        // [02-SURF-P10b]: a literal in `cast(<literal>, p)` binds at `p`.
+        // Resolve that stamp through the call frame's precision bindings.
+        let meta = get_meta(list);
+        let meta_dtype = match meta.and_then(lit_meta_prim) {
+            Some(prim) => Some(prim),
+            None => match meta.and_then(lit_meta_type_var_name) {
+                // Internal callee binders may remain unbound until inlining;
+                // preserve the default when no call-site binding exists.
+                Some(binder) => self.precision_bindings.get(binder).copied(),
+                None => None,
+            },
+        };
         match value {
             Expr::Atom(Atom::Int(value), _) => match meta_dtype {
                 Some(dtype) if dtype.is_integer() || dtype.is_float() => {
@@ -467,16 +847,30 @@ impl<'a> EvalContext<'a> {
             .get(1)
             .ok_or_else(|| "fn missing body".to_string())?
             .clone();
+        let return_type = self
+            .resolving_top_levels
+            .last()
+            .and_then(|name| self.lookup_declared_signature(name))
+            .and_then(|signature| {
+                tagged_expr_children(signature)
+                    .filter(|(tag, _)| *tag == DeepTag::TFn)
+                    .and_then(|(_, children)| children.last())
+            })
+            .cloned();
         Ok(RuntimeValue::Closure {
             params,
             param_types,
+            return_type,
             body,
             env: self
                 .bindings
-                .iter()
+                .to_sorted()
+                .into_iter()
                 .filter(|(name, _)| !self.top_level_defs.contains_key(*name))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
+            precision_env: self.precision_bindings.clone(),
+            def_name: None,
         })
     }
 
@@ -493,7 +887,7 @@ impl<'a> EvalContext<'a> {
         // axis. It must be intercepted BEFORE generic argument evaluation
         // (which would fail with `unknown runtime name`) and routed
         // through IR lowering, where name -> index resolution lives.
-        if let Some(reduce_name) = builtin_name(func)
+        if let Some(reduce_name) = self.active_builtin_name(func)
             && REDUCTION_BUILTIN_NAMES.contains(&reduce_name)
             && kids.len() >= 3
             && kids[2..].iter().any(|axis| var_name(axis).is_some())
@@ -507,18 +901,54 @@ impl<'a> EvalContext<'a> {
         // routing lane: IR lowering resolves the insertion point against
         // the operand's named dims. The positional form (integer axis,
         // possibly with a symbolic size) keeps the host path.
-        if let Some(expand_name) = builtin_name(func)
-            && expand_name == "expand"
+        if let Some(expand_name) = self.active_builtin_name(func)
+            && (expand_name == "expand" || expand_name == "insert")
             && kids.len() >= 4
             && var_name(&kids[2]).is_some()
         {
             return self.eval_named_axis_reduction_app(expand_name, kids);
         }
 
+        let arg_type_exprs = kids[1..]
+            .iter()
+            .map(|arg| self.static_type_expr_of(arg))
+            .collect::<Vec<_>>();
+        let result_type_expr = get_meta(list)
+            .and_then(|meta| meta.entries.iter().find(|(key, _)| key == "type"))
+            .map(|(_, ty)| ty.clone());
         let args = kids[1..]
             .iter()
             .map(|arg| self.eval_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Std.Io.Json's private serializer intrinsic. Keep generic
+        // `dict_entries` insertion-ordered for CSV/tokenizer callers; only
+        // the owning JSON boundary canonicalizes string keys. Rust `str` Ord
+        // is UTF-8 lexicographic, which preserves Unicode scalar-value order
+        // for valid Rust strings.
+        if let Some(name) = var_name(func)
+            && self
+                .lookup_top_level_def(name)
+                .is_some_and(|(resolved, _)| {
+                    matches!(
+                        resolved.as_str(),
+                        "Pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                            | "pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                    )
+                })
+        {
+            let mut entries = expect_dict_arg(&args, 0)?;
+            entries.sort_by(|(lhs, _), (rhs, _)| match (lhs, rhs) {
+                (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => lhs.cmp(rhs),
+                _ => std::cmp::Ordering::Equal,
+            });
+            return Ok(RuntimeValue::List(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| RuntimeValue::Tuple(vec![key, value]))
+                    .collect(),
+            ));
+        }
 
         if let Some(name) = var_name(func)
             && name.chars().next().is_some_and(|ch| ch.is_uppercase())
@@ -543,8 +973,8 @@ impl<'a> EvalContext<'a> {
             });
         }
 
-        if let Some(name) = builtin_name(func) {
-            return self.eval_builtin(name, &args);
+        if let Some(name) = self.active_builtin_name(func) {
+            return self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
         }
 
         // chelis#338 site B: a call to a top-level def whose body needs
@@ -561,15 +991,15 @@ impl<'a> EvalContext<'a> {
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
             && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
             && self.def_requires_named_axis_routing(&resolved)
+            // chelis#1277 B2h: a def the C lane lowers as a kernel takes that
+            // kernel at application; site B keeps only the defs C also
+            // handles per call (rank- and precision-polymorphic ones).
+            && self.def_kernel(&resolved)?.is_none()
             && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args)?
         {
             return Ok(routed);
         }
 
-        let arg_type_exprs = kids[1..]
-            .iter()
-            .map(|arg| self.static_type_expr_of(arg))
-            .collect::<Vec<_>>();
         // chelis#721: when the callee names a `(fn …)`-bodied top-level def and
         // is NOT a local binding, resolve it directly to its Closure. A nullary
         // (or otherwise DAG-lowerable) def folds to a constant that lands in
@@ -588,7 +1018,12 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(func)?
         };
-        self.apply_resolved_callable_with_arg_types(callable, args, &arg_type_exprs)
+        self.apply_resolved_callable_with_arg_types(
+            callable,
+            args,
+            &arg_type_exprs,
+            result_type_expr.as_ref(),
+        )
     }
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -700,7 +1135,7 @@ impl<'a> EvalContext<'a> {
                 &mut self.bindings,
                 &self.adt_fields,
             )? {
-                for name in self.bindings.keys() {
+                for (name, _) in self.bindings.to_sorted() {
                     if !saved.contains_key(name) {
                         self.binding_types.insert(name.clone(), None);
                     }
@@ -733,7 +1168,7 @@ impl<'a> EvalContext<'a> {
         let mut value = self.eval_expr(head)?;
         for stage in kids.iter().skip(1) {
             let next_ty = self.pipe_stage_output_type(stage, value_ty.as_ref());
-            value = self.apply_callable(stage, vec![value], &[value_ty])?;
+            value = self.apply_callable(stage, vec![value], &[value_ty], next_ty.as_ref())?;
             value_ty = next_ty;
         }
         Ok(value)
@@ -780,7 +1215,9 @@ impl<'a> EvalContext<'a> {
     /// the input type for shape-preserving (Identity-class) builtins,
     /// or a top-level def's declared return type.
     fn callee_output_type(&self, callee: &str, input_ty: Option<&Expr>) -> Option<Expr> {
-        if chelis_types::shape_class(callee) == chelis_types::ShapeClass::Identity {
+        if self.active_builtin_symbol(callee)
+            && chelis_types::shape_class(callee) == chelis_types::ShapeClass::Identity
+        {
             return input_ty.cloned();
         }
         let (resolved, _) = self.lookup_top_level_def(callee)?;
@@ -799,14 +1236,19 @@ impl<'a> EvalContext<'a> {
         stage: &Expr,
         args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
-        if let Some(name) = builtin_name(stage) {
-            return self.eval_builtin(name, &args);
+        if let Some(name) = self.active_builtin_name(stage) {
+            return self.eval_builtin(name, &args, arg_type_exprs, result_type_expr);
         }
         match self.eval_expr(stage)? {
-            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => {
-                self.apply_resolved_callable_with_arg_types(value, args, arg_type_exprs)
-            }
+            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => self
+                .apply_resolved_callable_with_arg_types(
+                    value,
+                    args,
+                    arg_type_exprs,
+                    result_type_expr,
+                ),
             other => Err(format!("pipe stage is not callable: {other:?}")),
         }
     }
@@ -816,7 +1258,7 @@ impl<'a> EvalContext<'a> {
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
-        self.apply_resolved_callable_with_arg_types(callable, args, &[])
+        self.apply_resolved_callable_with_arg_types(callable, args, &[], None)
     }
 
     /// Like [`Self::apply_resolved_callable`], but additionally records a
@@ -829,14 +1271,29 @@ impl<'a> EvalContext<'a> {
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
                 params,
                 param_types,
+                return_type,
                 body,
                 env,
+                precision_env,
+                def_name,
             } => {
+                // chelis#1277 B2h: a def the C lane lowers as a kernel is
+                // applied through that kernel, so eval runs the DAG C emits
+                // for it and the runtime-extent classes and guards derived
+                // from that DAG fire on both lanes ([05-MOV-1],
+                // runtime_extents.md C2.7). The host-lane decision for the
+                // same def interprets the body below, exactly as before.
+                if let Some(name) = def_name.as_deref()
+                    && let Some(kernel) = self.def_kernel(name)?
+                {
+                    return self.apply_def_kernel(name, &kernel, &params, args);
+                }
                 if params.len() != args.len() {
                     return Err(format!(
                         "closure expected {} args, got {}",
@@ -846,31 +1303,105 @@ impl<'a> EvalContext<'a> {
                 }
                 let saved = self.bindings.clone();
                 let saved_types = std::mem::take(&mut self.binding_types);
+                let saved_precisions = std::mem::take(&mut self.precision_bindings);
                 self.bindings = env;
-                for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
-                    let declared = param_types
-                        .get(index)
-                        .cloned()
-                        .flatten()
-                        .or_else(|| arg_type_exprs.get(index).cloned().flatten());
-                    // chelis#729 Phase 1: a tensor argument ingress-finalizes
-                    // at the param's DECLARED element dtype (the host-lane
-                    // mirror of the DAG evaluator's Load ingress). Without
-                    // this, an Int64-tagged `to_tensor` literal flows into an
-                    // int8-typed param and the arithmetic runs at the wrong
-                    // width (the chelis#718 eval-tensor cell).
-                    let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
-                        (Some(prim), RuntimeValue::Tensor(tensor)) => {
-                            RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                self.precision_bindings = precision_env;
+                let value = (|| {
+                    // A dimension variable declared by a tensor parameter is
+                    // also an exact runtime int64 value in the callee frame.
+                    // Recover it from the actual tensor shape before the
+                    // arguments are moved into their ordinary bindings. This
+                    // makes `expand(b, 0, k)` consume the same witnessed
+                    // extent as compiled lowering instead of looking up an
+                    // unbound textual runtime name (chelis#1382).
+                    let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
+                    for (declared, arg) in param_types.iter().zip(args.iter()) {
+                        let (Some(declared), RuntimeValue::Tensor(tensor)) = (declared, arg) else {
+                            continue;
+                        };
+                        let Ok(actualized) = declared_tensor_type_for_shape(
+                            declared,
+                            &tensor.value.shape,
+                            tensor.precision,
+                            true,
+                        ) else {
+                            // Rank-polymorphic declarations are handled by
+                            // their existing routed path; they do not expose
+                            // an unambiguous fixed-axis witness here.
+                            continue;
+                        };
+                        for dim in actualized.dims {
+                            let DimInfo::Named(name, Some(size)) = dim else {
+                                continue;
+                            };
+                            match dimension_bindings.insert(name.clone(), size) {
+                                Some(previous) if previous != size => {
+                                    return Err(format!(
+                                        "dimension binder `{name}` has inconsistent runtime witnesses: {previous} and {size}"
+                                    ));
+                                }
+                                _ => {}
+                            }
                         }
-                        (_, arg) => arg,
-                    };
-                    self.binding_types.insert(param.clone(), declared);
-                    self.bindings.insert(param, arg);
-                }
-                let value = self.eval_expr(&body);
+                    }
+                    let caller_precisions = saved_precisions.clone();
+                    let mut call_precisions = UnordMap::new();
+                    for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
+                        if let (Some(declared), Some(actual)) = (declared, actual) {
+                            collect_checked_precision_bindings(
+                                declared,
+                                actual,
+                                &caller_precisions,
+                                &mut call_precisions,
+                            )?;
+                        }
+                    }
+                    if let (Some(declared), Some(actual)) = (return_type.as_ref(), result_type_expr)
+                    {
+                        collect_checked_precision_bindings(
+                            declared,
+                            actual,
+                            &caller_precisions,
+                            &mut call_precisions,
+                        )?;
+                    }
+                    // The call-site instantiation is fresh (spec/04 §5.8):
+                    // callee-owned binders shadow a same-spelled lexical
+                    // binding instead of conflicting with it.
+                    self.precision_bindings.merge(call_precisions);
+                    // Dimension-name order is canonical for extending the callee frame.
+                    for (name, size) in dimension_bindings.into_sorted() {
+                        let size = i64::try_from(size).map_err(|_| {
+                            format!("dimension binder `{name}` exceeds the exact int64 range")
+                        })?;
+                        self.bindings.insert(name, RuntimeValue::int64(size));
+                    }
+                    for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
+                        let declared = param_types
+                            .get(index)
+                            .cloned()
+                            .flatten()
+                            .or_else(|| arg_type_exprs.get(index).cloned().flatten());
+                        // chelis#729 Phase 1: a tensor argument ingress-finalizes
+                        // at the param's DECLARED element dtype (the host-lane
+                        // mirror of the DAG evaluator's Load ingress). Without
+                        // this, an Int64-tagged `to_tensor` literal flows into an
+                        // int8-typed param and the arithmetic runs at the wrong
+                        // width (the chelis#718 eval-tensor cell).
+                        let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
+                            (Some(prim), RuntimeValue::Tensor(tensor)) => {
+                                RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                            }
+                            (_, arg) => arg,
+                        };
+                        self.binding_types.insert(param.clone(), declared);
+                        self.bindings.insert(param, arg);
+                    }
+                    self.eval_expr(&body)
+                })();
                 self.bindings = saved;
                 self.binding_types = saved_types;
+                self.precision_bindings = saved_precisions;
                 value
             }
             RuntimeValue::Transform {
@@ -898,7 +1429,10 @@ impl<'a> EvalContext<'a> {
         // active dtype map. The type checker has already rejected
         // f8e4m3 (spec/04-type-system.md §1.1.1) at this point so the
         // host eval lane just needs to pick the right re-pack.
+        //
+        // Binder targets actualize from the call site's concrete precision.
         let target_prim = prim_from_name(target)
+            .or_else(|| self.precision_bindings.get(target).copied())
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
         // [05-OP-6]: the truncating rung has its own sealed kernel and
         // its own trap brand. The checker has already pinned the pair to
@@ -962,7 +1496,13 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_builtin(&mut self, name: &str, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    fn eval_builtin(
+        &mut self,
+        name: &str,
+        args: &[RuntimeValue],
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+    ) -> Result<RuntimeValue, String> {
         match name {
             "add" => numeric_binop(args, Some(IntBinOp::Add), Some(FloatBinOp::Add)),
             "sub" => numeric_binop(args, Some(IntBinOp::Sub), Some(FloatBinOp::Sub)),
@@ -979,14 +1519,11 @@ impl<'a> EvalContext<'a> {
             // zero divisor with the shared diagnostic.
             "floor_div" => eval_floor_div(args),
             "trunc_div" => eval_trunc_div(args),
-            // Tier-1 `max_elem` and Tier-2 `min_elem` are element-wise
-            // binary ops. The IR evaluator emits
-            // `binary_map(.., f64::max)` for `RiscOp::MaxElem` and
-            // `lower_min_elem` (`crates/chelis-ir/src/tier2.rs:364`)
-            // synthesizes `neg(max_elem(neg a, neg b))`; the host-runtime
-            // closure form fuses that into a direct `f64::min` for the
-            // same observable result. Wired for issue
-            // Chelis-Lang/chelis#185.
+            // Tier-1 `max_elem` and `min_elem` are direct element-wise
+            // selection identities. The integer path compares at the
+            // declared width, and the float path returns the exact operand
+            // selected by [05-OP-40], including its stored NaN payload or
+            // signed-zero bits. Wired for Chelis-Lang/chelis#185/#1306.
             "max_elem" => numeric_binop(args, Some(IntBinOp::Max), Some(FloatBinOp::Max)),
             "min_elem" => numeric_binop(args, Some(IntBinOp::Min), Some(FloatBinOp::Min)),
             "mod" => eval_mod(args),
@@ -1228,9 +1765,20 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "map expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
+                let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    out.push(self.apply_resolved_callable(callback.clone(), vec![item])?);
+                    out.push(self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?);
                 }
                 Ok(RuntimeValue::List(out))
             }
@@ -1240,10 +1788,19 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "filter expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut out = Vec::new();
                 for item in items {
-                    let keep =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let keep = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        None,
+                    )?;
                     match keep {
                         RuntimeValue::Bool(true) => out.push(item),
                         RuntimeValue::Bool(false) => {}
@@ -1264,8 +1821,21 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "fold expects 3 arguments".to_string())?;
                 let items = expect_list_arg(args, 2)?;
+                let callback_arg_types = [
+                    arg_type_exprs.get(1).cloned().flatten(),
+                    arg_type_exprs
+                        .get(2)
+                        .and_then(Option::as_ref)
+                        .and_then(checked_list_element)
+                        .cloned(),
+                ];
                 for item in items {
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, item],
+                        &callback_arg_types,
+                        result_type_expr,
+                    )?;
                 }
                 Ok(acc)
             }
@@ -1279,9 +1849,23 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "scan expects 3 arguments".to_string())?;
                 let items = expect_list_arg(args, 2)?;
+                let callback_arg_types = [
+                    arg_type_exprs.get(1).cloned().flatten(),
+                    arg_type_exprs
+                        .get(2)
+                        .and_then(Option::as_ref)
+                        .and_then(checked_list_element)
+                        .cloned(),
+                ];
+                let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, item],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?;
                     out.push(acc.clone());
                 }
                 Ok(RuntimeValue::List(out))
@@ -1335,9 +1919,24 @@ impl<'a> EvalContext<'a> {
                 let mut ints: Vec<i64> = Vec::new();
                 let mut floats: Vec<f64> = Vec::new();
                 let mut acc = initial;
+                let callback_type_children = arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_function_children);
+                let initial_type = arg_type_exprs.first().cloned().flatten();
+                let callback_arg_types = [
+                    initial_type.clone(),
+                    callback_type_children.and_then(|children| children.get(1).cloned()),
+                ];
+                let callback_result_type = initial_type.as_ref();
                 for i in 0..n {
                     let index = RuntimeValue::int64(i as i64);
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, index])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, index],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?;
                     // Validate per-step that the accumulator stayed the same
                     // scalar precision; this catches a misbehaving callback
                     // that returns a different dtype before it corrupts the
@@ -1387,11 +1986,20 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "partition expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut kept = Vec::new();
                 let mut rejected = Vec::new();
                 for item in items {
-                    let keep =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let keep = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        None,
+                    )?;
                     match keep {
                         RuntimeValue::Bool(true) => kept.push(item),
                         RuntimeValue::Bool(false) => rejected.push(item),
@@ -1413,10 +2021,19 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "flat_map expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut out = Vec::new();
                 for item in items {
-                    let mapped =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let mapped = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        result_type_expr,
+                    )?;
                     let RuntimeValue::List(inner) = mapped else {
                         return Err(format!(
                             "flat_map callback must return List, got {mapped:?}"
@@ -1620,186 +2237,6 @@ impl<'a> EvalContext<'a> {
                     .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
                 Ok(RuntimeValue::String(text))
             }
-            // Host-lane JSON I/O (chelis#890). Eval-only; the build backends
-            // reject these via `find_eval_only_host_builtin`. The core logic
-            // (parser, serializer, path navigation, decimal rounding) lives
-            // in `runtime/json.rs`; every failure is a loud eval error
-            // naming the builtin, the path, and the failing segment -- no
-            // silent defaults ([05-OP-1..5]).
-            "parse_json" => {
-                let text = expect_string_arg(args, 0)?;
-                super::json::parse_json_text(&text)
-            }
-            "to_json" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "to_json expects 1 argument".to_string())?;
-                super::json::json_value_to_text(value).map(RuntimeValue::String)
-            }
-            "json_f64" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_f64 expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_f64_at(value, &path).map(RuntimeValue::float64)
-            }
-            "json_int" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_int expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_int_at(value, &path).map(RuntimeValue::int64)
-            }
-            "json_str" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_str expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_str_at(value, &path).map(RuntimeValue::String)
-            }
-            "json_list" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_list expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_list_at(value, &path).map(RuntimeValue::List)
-            }
-            "json_f64s" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_f64s expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_f64s_at(value, &path).map(|values| {
-                    RuntimeValue::List(values.into_iter().map(RuntimeValue::float64).collect())
-                })
-            }
-            "json_ints" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_ints expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_ints_at(value, &path).map(|values| {
-                    RuntimeValue::List(values.into_iter().map(RuntimeValue::int64).collect())
-                })
-            }
-            "jnum" => {
-                // Exactly f64 ([05-OP-4]): the checker rejects other
-                // precisions; this guard keeps the byte-exact serialization
-                // contract even on dynamically-constructed calls -- an f32
-                // widened here would emit `0.10000000149011612` for `0.1f32`.
-                let value = match args.first() {
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
-                        payload.as_f64_lossy()
-                    }
-                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-                        return Err(format!(
-                            "jnum: expected an f64 value, got {} (suffix the literal, \
-                             `0.1f64`, or use cast(n, f64); an f32 value would quantize \
-                             through the byte-exact serializer)",
-                            describe_value(value)
-                        ));
-                    }
-                    other => {
-                        return Err(format!(
-                            "expected f64 arg at index 0, got {}",
-                            describe_argument(other)
-                        ));
-                    }
-                };
-                Ok(super::json::jnum(value))
-            }
-            "jint" => {
-                // Exactly int64, mirroring `jnum`'s f64-only guard
-                // ([05-OP-4]): a narrower integer widened here would be
-                // indistinguishable in the ADT from an exact int64 the user
-                // meant, and the whole point of the variant is that the
-                // width is honest.
-                let value = match args.first() {
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
-                        payload.as_i64()
-                    }
-                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-                        return Err(format!(
-                            "jint: expected an int64 value, got {} (suffix the literal, \
-                             `1i64`, or use cast(n, int64))",
-                            describe_value(value)
-                        ));
-                    }
-                    other => {
-                        return Err(format!(
-                            "expected int64 arg at index 0, got {}",
-                            describe_argument(other)
-                        ));
-                    }
-                };
-                Ok(super::json::jint(value))
-            }
-            "jstr" => {
-                let value = expect_string_arg(args, 0)?;
-                Ok(super::json::jstr(value))
-            }
-            "jlist" => {
-                let items = expect_list_arg(args, 0)?;
-                for (index, item) in items.iter().enumerate() {
-                    super::json::ensure_json_value(item)
-                        .map_err(|err| format!("jlist: element {index}: {err}"))?;
-                }
-                Ok(super::json::jlist(items))
-            }
-            "jdict" => {
-                let entries = expect_list_arg(args, 0)?;
-                let mut out = OrderedStringDictBuilder::new();
-                for (index, entry) in entries.into_iter().enumerate() {
-                    let RuntimeValue::Tuple(items) = entry else {
-                        return Err(format!(
-                            "jdict expects a List of (string, Json) 2-tuples, got \
-                             non-tuple element at index {index}"
-                        ));
-                    };
-                    if items.len() != 2 {
-                        return Err(format!(
-                            "jdict expects (string, Json) 2-tuples, got a {}-tuple \
-                             at index {index}",
-                            items.len()
-                        ));
-                    }
-                    let mut items = items.into_iter();
-                    let key = match items.next() {
-                        Some(RuntimeValue::String(key)) => key,
-                        other => {
-                            return Err(format!(
-                                "jdict keys must be strings, got {} at index {index}",
-                                describe_argument(other.as_ref())
-                            ));
-                        }
-                    };
-                    let value = items.next().expect("length checked above");
-                    super::json::ensure_json_value(&value)
-                        .map_err(|err| format!("jdict: value for key `{key}`: {err}"))?;
-                    // Duplicate keys: first position, last value -- the same
-                    // upsert semantics as `dict_of` and `parse_json`, via
-                    // the shared hash-assisted builder (chelis#891 review
-                    // findings 11 and 15).
-                    out.upsert(key, value);
-                }
-                Ok(RuntimeValue::Adt {
-                    ctor: "JDict".to_string(),
-                    fields: vec![RuntimeValue::Dict(out.into_entries())],
-                    field_names: None,
-                })
-            }
-            "json_set" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                let new_value = args
-                    .get(2)
-                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
-                super::json::ensure_json_value(new_value)
-                    .map_err(|err| format!("json_set: replacement value: {err}"))?;
-                super::json::json_set_at(value, &path, new_value)
-            }
             "round_to" => {
                 // [05-OP-1]: per-dtype at declared widths, f64 and f32
                 // only, dispatched STRICTLY on the operand's own dtype --
@@ -1810,12 +2247,14 @@ impl<'a> EvalContext<'a> {
                 match args.first() {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
                         let rounded =
-                            super::json::round_to_f64_impl(payload.as_f64_lossy(), places)?;
+                            super::numeric_text::round_to_f64_impl(payload.as_f64_lossy(), places)?;
                         Ok(RuntimeValue::float64(rounded))
                     }
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F32 => {
-                        let rounded =
-                            super::json::round_to_f32_impl(payload.as_f64_lossy() as f32, places)?;
+                        let rounded = super::numeric_text::round_to_f32_impl(
+                            payload.as_f64_lossy() as f32,
+                            places,
+                        )?;
                         RuntimeValue::scalar_like_float(Prim::F32, f64::from(rounded))
                     }
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
@@ -1832,13 +2271,8 @@ impl<'a> EvalContext<'a> {
                     )),
                 }
             }
-            // Host-lane CSV I/O (chelis#903). Eval-only, like the JSON
-            // family above. A Csv document rides the prelude `Json` ADT as
-            // the fixed shape `{"columns": .., "rows": ..}` (see
-            // `runtime/csv.rs`), so the `json_*` accessors compose with it;
-            // the `csv_*` builtins are the column-oriented surface. Every
-            // failure is a loud eval error naming the builtin, column, and
-            // row -- no silent NaN/defaults.
+            // Host-lane CSV I/O (chelis#903) over the canonical
+            // List[Dict[string,string]] text-table carrier.
             "parse_csv" => {
                 let text = expect_string_arg(args, 0)?;
                 super::csv::parse_csv_text(&text)
@@ -1987,15 +2421,24 @@ impl<'a> EvalContext<'a> {
                 let path = expect_string_arg(args, 0)?;
                 let entries = fs::read_dir(&path)
                     .map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                let mut out = Vec::new();
+                let mut names = Vec::new();
                 for entry in entries {
                     let entry =
                         entry.map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                    out.push(RuntimeValue::String(
-                        entry.file_name().to_string_lossy().into_owned(),
-                    ));
+                    names.push(entry.file_name());
                 }
-                Ok(RuntimeValue::List(out))
+                // [05-HOST-4]: order by the host's own name bytes, before the
+                // lossy conversion below. `to_string_lossy` maps every invalid
+                // UTF-8 sequence to U+FFFD, so two distinct names can collapse
+                // to one string; sorting after it would leave those tie-broken
+                // by directory order, which is the order the atom forbids.
+                names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+                Ok(RuntimeValue::List(
+                    names
+                        .into_iter()
+                        .map(|name| RuntimeValue::String(name.to_string_lossy().into_owned()))
+                        .collect(),
+                ))
             }
             "mmap_file" => {
                 let path = expect_string_arg(args, 0)?;
@@ -2214,83 +2657,45 @@ impl<'a> EvalContext<'a> {
                     Err(format!("assert failed: {label}"))
                 }
             }
-            "test_assert_eq_f32" => {
-                let actual = expect_float_arg(args, 0)?;
-                let expected = expect_float_arg(args, 1)?;
+            "test_assert_eq" => {
+                let actual = args
+                    .first()
+                    .ok_or_else(|| "test_assert_eq expects 3 arguments".to_string())?;
+                let expected = args
+                    .get(1)
+                    .ok_or_else(|| "test_assert_eq expects 3 arguments".to_string())?;
                 let label = expect_string_arg(args, 2)?;
-                if actual == expected {
+                if runtime_values_equal(actual, expected)? {
                     Ok(RuntimeValue::Unit)
                 } else {
                     Err(format!(
-                        "assert_eq_f32 ({label}): expected {expected}, got {actual}"
+                        "assert_eq ({label}): expected {}, got {}",
+                        render_value(expected),
+                        render_value(actual)
                     ))
                 }
             }
-            "test_assert_eq_int" => {
-                let actual = expect_int_arg(args, 0)?;
-                let expected = expect_int_arg(args, 1)?;
-                let label = expect_string_arg(args, 2)?;
-                if actual == expected {
-                    Ok(RuntimeValue::Unit)
-                } else {
-                    Err(format!(
-                        "assert_eq_int ({label}): expected {expected}, got {actual}"
-                    ))
-                }
-            }
-            "test_assert_eq_bool" => {
-                let actual = expect_bool_arg(args, 0)?;
-                let expected = expect_bool_arg(args, 1)?;
-                let label = expect_string_arg(args, 2)?;
-                if actual == expected {
-                    Ok(RuntimeValue::Unit)
-                } else {
-                    Err(format!(
-                        "assert_eq_bool ({label}): expected {expected}, got {actual}"
-                    ))
-                }
-            }
-            "test_assert_eq_string" => {
-                let actual = expect_string_arg(args, 0)?;
-                let expected = expect_string_arg(args, 1)?;
-                let label = expect_string_arg(args, 2)?;
-                if actual == expected {
-                    Ok(RuntimeValue::Unit)
-                } else {
-                    Err(format!(
-                        "assert_eq_string ({label}): expected {expected:?}, got {actual:?}"
-                    ))
-                }
-            }
-            "test_assert_eq_tensor_int64" => {
-                // Bit-exact tensor equality for int64 tensors. Std.Test
-                // exposes this as `assert_eq_tensor_int64` because
-                // `assert_close_tensor` types only on f32 tensors and is
-                // tolerance-based — neither fits int64 reduction outputs
-                // (e.g. `argmax`/`argmin` which return int64 indices).
+            "test_assert_eq_tensor" => {
                 let actual = expect_tensor_arg(args, 0)?;
                 let expected = expect_tensor_arg(args, 1)?;
                 let label = expect_string_arg(args, 2)?;
-                let actual_data = actual.value.storage().to_i64_exact_vec().ok_or_else(|| {
-                    format!("assert_eq_tensor_int64 ({label}): actual tensor is not integer-typed")
-                })?;
-                let expected_data =
-                    expected.value.storage().to_i64_exact_vec().ok_or_else(|| {
-                        format!(
-                            "assert_eq_tensor_int64 ({label}): expected tensor is not integer-typed"
-                        )
-                    })?;
-                if actual_data.len() != expected_data.len() {
+                if actual.precision != expected.precision
+                    || actual.value.shape != expected.value.shape
+                {
                     return Err(format!(
-                        "assert_eq_tensor_int64 ({label}): length mismatch, expected {} elements, got {}",
-                        expected_data.len(),
-                        actual_data.len()
+                        "assert_eq_tensor ({label}): expected tensor shape {:?} at {}, got {:?} at {}",
+                        expected.value.shape,
+                        expected.precision.name(),
+                        actual.value.shape,
+                        actual.precision.name()
                     ));
                 }
-                for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
-                    if a != e {
+                for index in 0..actual.value.storage().len() {
+                    if actual.value.storage().scalar_at(index)
+                        != expected.value.storage().scalar_at(index)
+                    {
                         return Err(format!(
-                            "assert_eq_tensor_int64 ({label}): at index {i} expected {e} got {a}"
+                            "assert_eq_tensor ({label}): first mismatch at row-major index {index}"
                         ));
                     }
                 }
@@ -2299,35 +2704,98 @@ impl<'a> EvalContext<'a> {
             "test_assert_close_tensor" => {
                 let actual = expect_tensor_arg(args, 0)?;
                 let expected = expect_tensor_arg(args, 1)?;
-                let tol = expect_float_arg(args, 2)?;
+                let tolerance = match args.get(2) {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => *payload,
+                    _ => {
+                        return Err(format!(
+                            "assert_close_tensor: expected float tolerance, got {}",
+                            describe_argument(args.get(2))
+                        ));
+                    }
+                };
                 let label = expect_string_arg(args, 3)?;
-                if tol.is_nan() || tol < 0.0 {
+                let tensor_prim = actual.value.prim();
+                if tensor_prim != expected.value.prim() || tensor_prim != tolerance.dtype() {
                     return Err(format!(
-                        "assert_close_tensor ({label}): invalid tolerance {tol} (must be finite and non-negative)"
+                        "assert_close_tensor ({label}): actual, expected, and tolerance must have one common active float dtype"
                     ));
                 }
-                let actual_data = actual.value.to_f64_lossy_vec();
-                let expected_data = expected.value.to_f64_lossy_vec();
-                if actual_data.len() != expected_data.len() {
+                if !tensor_prim.is_float() {
+                    return Err(format!(
+                        "assert_close_tensor ({label}): tensor dtype {} is not an active float dtype",
+                        tensor_prim.name()
+                    ));
+                }
+                if actual.value.shape != expected.value.shape {
+                    return Err(format!(
+                        "assert_close_tensor ({label}): shape mismatch, expected {}, got {}",
+                        render_shape(&expected.value.shape),
+                        render_shape(&actual.value.shape)
+                    ));
+                }
+                let tolerance_f64 = tolerance.as_f64_lossy();
+                if !tolerance_f64.is_finite() || tolerance_f64 < 0.0 {
+                    let rendered_tolerance = chelis_types::format_element(
+                        tolerance.dtype(),
+                        tolerance.value().element_ref(),
+                    );
+                    return Err(format!(
+                        "assert_close_tensor ({label}): invalid tolerance {rendered_tolerance} (must be finite and non-negative)"
+                    ));
+                }
+                if actual.value.len() != expected.value.len() {
                     return Err(format!(
                         "assert_close_tensor ({label}): length mismatch, expected {} elements, got {}",
-                        expected_data.len(),
-                        actual_data.len()
+                        expected.value.len(),
+                        actual.value.len()
                     ));
                 }
-                for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
-                    if a.is_nan() || e.is_nan() {
-                        return Err(format!(
-                            "assert_close_tensor ({label}): at index {i} expected {e}, got {a}, tol {tol} (NaN is never close)"
-                        ));
-                    }
-                    let diff = (a - e).abs();
-                    let mismatch = if tol == 0.0 { a != e } else { diff > tol };
-                    if mismatch {
-                        return Err(format!(
-                            "assert_close_tensor ({label}): at index {i} expected {e}, got {a}, tol {tol}"
-                        ));
-                    }
+
+                let mismatch = match (
+                    actual.value.storage().view(),
+                    expected.value.storage().view(),
+                ) {
+                    (StorageView::F64(actual), StorageView::F64(expected)) => first_f64_mismatch(
+                        actual.iter().copied(),
+                        expected.iter().copied(),
+                        tolerance_f64,
+                    ),
+                    (StorageView::F32(actual), StorageView::F32(expected)) => first_f32_mismatch(
+                        actual.iter().copied(),
+                        expected.iter().copied(),
+                        tolerance_f64 as f32,
+                    ),
+                    (StorageView::F16(actual), StorageView::F16(expected)) => first_f32_mismatch(
+                        actual.iter().map(|value| value.to_f32()),
+                        expected.iter().map(|value| value.to_f32()),
+                        tolerance_f64 as f32,
+                    ),
+                    (StorageView::Bf16(actual), StorageView::Bf16(expected)) => first_f32_mismatch(
+                        actual.iter().map(|value| value.to_f32()),
+                        expected.iter().map(|value| value.to_f32()),
+                        tolerance_f64 as f32,
+                    ),
+                    _ => unreachable!("common active-float dtype check makes storage exhaustive"),
+                };
+                if let Some(index) = mismatch {
+                    let actual = actual.value.storage().scalar_at(index);
+                    let expected = expected.value.storage().scalar_at(index);
+                    let nan_suffix = if float_element_is_nan(actual.element_ref())
+                        || float_element_is_nan(expected.element_ref())
+                    {
+                        " (NaN is never close)"
+                    } else {
+                        ""
+                    };
+                    let rendered_actual =
+                        chelis_types::format_element(tensor_prim, actual.element_ref());
+                    let rendered_expected =
+                        chelis_types::format_element(tensor_prim, expected.element_ref());
+                    let rendered_tolerance =
+                        chelis_types::format_element(tensor_prim, tolerance.value().element_ref());
+                    return Err(format!(
+                        "assert_close_tensor ({label}): at index {index} expected {rendered_expected}, got {rendered_actual}, tol {rendered_tolerance}{nan_suffix}"
+                    ));
                 }
                 Ok(RuntimeValue::Unit)
             }
@@ -2420,17 +2888,32 @@ impl<'a> EvalContext<'a> {
                 }
                 tensor_permute_host(&tensor, &axes).map(RuntimeValue::Tensor)
             }
-            "expand" => {
+            // The match scrutinee `name` carries the spelling the program
+            // actually used, so this shared arm reports it without binding a
+            // new alternative. A `callee @ (...)` binder would say the same
+            // thing and would stop the host-runtime dispatch invariant, which
+            // reads arm names off a leading `"`, from seeing an arm here at
+            // all -- for either name.
+            "expand" | "insert" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 let count = expect_int_arg(args, 2)?;
                 if axis < 0 {
-                    return Err(format!("expand requires non-negative axis, got {axis}"));
+                    return Err(format!("{name} requires non-negative axis, got {axis}"));
                 }
-                if count <= 0 {
-                    return Err(format!("expand requires positive count, got {count}"));
+                if count < 0 {
+                    return Err(format!("{name} requires non-negative extent, got {count}"));
                 }
-                tensor_expand_host(&tensor, axis as usize, count as usize).map(RuntimeValue::Tensor)
+                // One shape per operation (spec/04-type-system.md section
+                // 4.7.2), so the name selects the evaluator rather than a
+                // heuristic over the operand's shape.
+                if name == "insert" {
+                    tensor_insert_host(name, &tensor, axis as usize, count as usize)
+                        .map(RuntimeValue::Tensor)
+                } else {
+                    tensor_expand_host(name, &tensor, axis as usize, count as usize)
+                        .map(RuntimeValue::Tensor)
+                }
             }
             "softmax" => {
                 let tensor = expect_tensor_arg(args, 0)?;
@@ -2583,5 +3066,146 @@ impl<'a> EvalContext<'a> {
             "gelu" => numeric_unop(args, None, Some(FloatUnOp::Gelu)),
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
+    }
+}
+
+fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, String> {
+    match (lhs, rhs) {
+        (RuntimeValue::Scalar(lhs), RuntimeValue::Scalar(rhs)) => Ok(lhs == rhs),
+        (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => Ok(lhs == rhs),
+        (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => Ok(lhs == rhs),
+        (RuntimeValue::Unit, RuntimeValue::Unit) => Ok(true),
+        (RuntimeValue::List(lhs), RuntimeValue::List(rhs))
+        | (RuntimeValue::Tuple(lhs), RuntimeValue::Tuple(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Ok(false);
+            }
+            for (lhs, rhs) in lhs.iter().zip(rhs) {
+                if !runtime_values_equal(lhs, rhs)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (RuntimeValue::Dict(lhs), RuntimeValue::Dict(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Ok(false);
+            }
+            let mut matched = vec![false; rhs.len()];
+            for (lhs_key, lhs_value) in lhs {
+                let mut found = None;
+                for (index, (rhs_key, rhs_value)) in rhs.iter().enumerate() {
+                    if !matched[index]
+                        && runtime_values_equal(lhs_key, rhs_key)?
+                        && runtime_values_equal(lhs_value, rhs_value)?
+                    {
+                        found = Some(index);
+                        break;
+                    }
+                }
+                let Some(index) = found else {
+                    return Ok(false);
+                };
+                matched[index] = true;
+            }
+            Ok(true)
+        }
+        (
+            RuntimeValue::Adt {
+                ctor: lhs_ctor,
+                fields: lhs_fields,
+                ..
+            },
+            RuntimeValue::Adt {
+                ctor: rhs_ctor,
+                fields: rhs_fields,
+                ..
+            },
+        ) => {
+            if lhs_ctor != rhs_ctor || lhs_fields.len() != rhs_fields.len() {
+                return Ok(false);
+            }
+            for (lhs, rhs) in lhs_fields.iter().zip(rhs_fields) {
+                if !runtime_values_equal(lhs, rhs)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (RuntimeValue::Tensor(lhs), RuntimeValue::Tensor(rhs)) => {
+            if lhs.precision != rhs.precision || lhs.value.shape != rhs.value.shape {
+                return Ok(false);
+            }
+            for index in 0..lhs.value.storage().len() {
+                if lhs.value.storage().scalar_at(index) != rhs.value.storage().scalar_at(index) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (RuntimeValue::MappedFile(_), _)
+        | (_, RuntimeValue::MappedFile(_))
+        | (RuntimeValue::Closure { .. }, _)
+        | (_, RuntimeValue::Closure { .. })
+        | (RuntimeValue::Transform { .. }, _)
+        | (_, RuntimeValue::Transform { .. }) => {
+            Err("assert_eq does not admit functions or resource handles".to_string())
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Whether a kernel's DAG draws from the Random stream; such a kernel is
+/// lowered per application and advances `random_counter` when applied.
+fn kernel_draws_random(kernel: &HostDefKernel) -> bool {
+    kernel
+        .dag
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::UniformLike { .. } | RiscOp::Dropout { .. }))
+}
+
+/// One evaluated argument as the kernel `Load` its declared parameter names.
+/// A tensor finalizes at the declared element dtype, the same ingress the
+/// interpreter applies to its own frame (chelis#729); a scalar becomes an
+/// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
+/// one and the way the C wrapper boxes a scalar parameter.
+fn stage_kernel_argument(
+    def: &str,
+    param: &str,
+    value: &RuntimeValue,
+    prim: Prim,
+) -> Result<IrTensorValue, String> {
+    match value {
+        RuntimeValue::Tensor(tensor) => Ok(ingress_tensor_to_declared(tensor.clone(), prim)?.value),
+        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+            Ok(RuntimeTensorValue::from_wide_int(
+                "kernel argument",
+                prim,
+                vec![],
+                vec![payload.as_i64()],
+            )?
+            .value)
+        }
+        RuntimeValue::Scalar(payload) => Ok(RuntimeTensorValue::from_wide(
+            "kernel argument",
+            prim,
+            vec![],
+            vec![payload.as_f64_lossy()],
+        )?
+        .value),
+        RuntimeValue::Bool(flag) => Ok(RuntimeTensorValue::from_wide_int(
+            "kernel argument",
+            prim,
+            vec![],
+            vec![i64::from(*flag)],
+        )?
+        .value),
+        // Rendered through the runtime's one diagnostic renderer, never a
+        // Debug format (faithful_observation.md B2.4).
+        other => Err(format!(
+            "kernel `{def}` parameter `{param}` expects a tensor or scalar argument, got {}",
+            describe_value(other)
+        )),
     }
 }

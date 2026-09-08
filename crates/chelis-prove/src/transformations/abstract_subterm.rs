@@ -32,7 +32,8 @@
 //! extends outside the envelope's covered domain, or violates the function's
 //! domain guard, the transformation DECLINES (returns identity). It never guesses.
 
-use std::collections::{BTreeMap, HashMap};
+use chelis_unord::UnordMap;
+use std::collections::BTreeMap;
 
 use crate::discharge::{Goal, GoalShape};
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
@@ -45,12 +46,12 @@ pub struct AbstractSubterm {
     /// Committed certified envelopes to consult, keyed by function name. In
     /// production this is loaded from [`SpecialFnRegistry::committed`] (today:
     /// `erf` only). A function with no entry here DECLINES.
-    envelopes: HashMap<String, SpecialFnEnvelope>,
+    envelopes: UnordMap<String, SpecialFnEnvelope>,
 }
 
 impl AbstractSubterm {
     pub fn new() -> Self {
-        let mut envelopes = HashMap::new();
+        let mut envelopes = UnordMap::new();
         for &f in SpecialFnRegistry::known_functions() {
             if let Some(env) = SpecialFnRegistry::committed(f) {
                 envelopes.insert(f.to_string(), env);
@@ -85,7 +86,7 @@ impl AbstractSubterm {
     /// `exp`/`log`/`sqrt` before their real certified data lands. Production only
     /// ever loads committed data via [`AbstractSubterm::new`].
     #[cfg(test)]
-    fn with_envelopes(envelopes: HashMap<String, SpecialFnEnvelope>) -> Self {
+    fn with_envelopes(envelopes: UnordMap<String, SpecialFnEnvelope>) -> Self {
         Self { envelopes }
     }
 
@@ -868,7 +869,7 @@ mod tests {
         Domain, EnvelopeArm, Monotonicity, SpecialFnEnvelope, SpecialFnEnvelopeBox,
         SpecialFnProvenance,
     };
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     /// A structurally-valid single-box synthetic envelope (a constant Saturation
     /// arm) for exercising the finder's mechanics without certified data.
@@ -1049,7 +1050,7 @@ mod tests {
     fn abstracts_exp_with_injected_envelope() {
         // With a synthetic exp envelope over [0,1], the finder abstracts exp(x)
         // into a fresh `__exp_abs_0` var and removes exp from the postcondition.
-        let mut envs = HashMap::new();
+        let mut envs = UnordMap::new();
         envs.insert(
             "exp".to_string(),
             synthetic_env("exp", Domain::AllReals, 0.0, 1.0, 2.0, 0.9),
@@ -1077,7 +1078,7 @@ mod tests {
     fn log_domain_guard_declines_nonpositive_range() {
         // log needs arg > 0. A range that dips to/below 0 must DECLINE even with
         // an envelope present; a strictly-positive range transforms.
-        let mut envs = HashMap::new();
+        let mut envs = UnordMap::new();
         envs.insert(
             "log".to_string(),
             synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),
@@ -1105,7 +1106,7 @@ mod tests {
     #[test]
     fn sqrt_domain_guard_allows_zero_declines_negative() {
         // sqrt needs arg >= 0: 0 is allowed, a negative lower edge declines.
-        let mut envs = HashMap::new();
+        let mut envs = UnordMap::new();
         envs.insert(
             "sqrt".to_string(),
             synthetic_env("sqrt", Domain::NonNegative, 0.0, 9.0, 0.0, 3.0),
@@ -1131,7 +1132,7 @@ mod tests {
     fn declines_when_range_outside_envelope_coverage() {
         // The envelope covers only [0,1]; a bounded arg range outside it declines
         // (the sound_range_bound coverage check), even though the domain admits it.
-        let mut envs = HashMap::new();
+        let mut envs = UnordMap::new();
         envs.insert(
             "exp".to_string(),
             synthetic_env("exp", Domain::AllReals, 0.0, 1.0, 2.0, 0.9),
@@ -1326,7 +1327,7 @@ mod tests {
         // milestone 1: a compound argument containing a NESTED transcendental —
         // log(s/k) — is bounded by resolving log through its (injected) envelope
         // over the interval-arithmetic bound of s/k.
-        let mut envs = HashMap::new();
+        let mut envs = UnordMap::new();
         // log envelope over [0.25, 4], constant hull [-1.5, 1.5] (Saturation eps).
         envs.insert(
             "log".to_string(),
@@ -1351,7 +1352,7 @@ mod tests {
         // must exclude 0) over nested transcendental hulls. The REAL BS d1 test
         // (with certified log/sqrt data + an independent interval) lands in
         // milestone 2 once that data is committed.
-        let mut envs = HashMap::new();
+        let mut envs = UnordMap::new();
         envs.insert(
             "log".to_string(),
             synthetic_env("log", Domain::Positive, 0.25, 4.0, 0.0, 1.5),

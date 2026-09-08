@@ -173,6 +173,45 @@ fn scalar_number(line: &str, context: &str) -> f64 {
     })
 }
 
+/// [05-OP-43] requires reduced-float scalar ReLU to select the stored input
+/// bits, rather than round-trip a selected NaN through f32. Keep this check
+/// independent of the emitter's temporary names: recover the predicate
+/// operand from the emitted selection and require the selected operand to be
+/// that same raw value.
+fn assert_reduced_relu_raw_selection(run_body: &str, dtype: &str, name: &str) {
+    let decoder = format!("chelis_{dtype}_to_f32(");
+    let selection = run_body
+        .lines()
+        .find(|line| line.contains(&decoder) && line.contains(") < 0) ? 0 : "))
+        .unwrap_or_else(|| {
+            panic!("{name}: no decoded-predicate/raw-value ReLU selection:\n{run_body}")
+        });
+    let (_, after_decoder) = selection
+        .split_once(&decoder)
+        .expect("selection line contains the decoder");
+    let (predicate_arg, selected) = after_decoder
+        .split_once(") < 0) ? 0 : ")
+        .expect("selection line has the closed conditional spelling");
+    let selected_arg = selected
+        .strip_suffix(");")
+        .unwrap_or_else(|| panic!("{name}: ReLU selection has an unexpected tail: {selection}"));
+    assert_eq!(
+        selected_arg, predicate_arg,
+        "{name}: ReLU must select the same raw value used by its decoded predicate"
+    );
+
+    for forbidden in [
+        format!("chelis_host_relu_{dtype}("),
+        format!("chelis_host_finalize_{dtype}("),
+        format!("chelis_f32_to_{dtype}("),
+    ] {
+        assert!(
+            !run_body.contains(&forbidden),
+            "{name}: reduced ReLU must not call `{forbidden}`:\n{run_body}"
+        );
+    }
+}
+
 /// The scalar activation surface decided on chelis#712: every active float
 /// width is admitted, eval and compiled C both execute it, and each lane
 /// follows the Tier-2 composition. The non-zero input makes the former C stub
@@ -200,14 +239,19 @@ fn assert_activation_width_matrix(op: &str) {
             "{name}: emitted the historical unsupported-builtin stub"
         );
         let run_body = emitted
-            .rfind(" run() {")
+            .rfind(" run__chelis_owned_body() {")
             .and_then(|start| emitted.get(start..))
-            .unwrap_or_else(|| panic!("{name}: emitted C has no `run` definition:\n{emitted}"));
-        let helper_call = format!("chelis_host_{op}_{dtype}(");
-        assert!(
-            run_body.contains(&helper_call),
-            "{name}: no call site selects `{helper_call}`:\n{emitted}"
-        );
+            .unwrap_or_else(|| panic!("{name}: emitted C has no consuming `run` body:\n{emitted}"));
+        let reduced_relu = op == "relu" && matches!(dtype, "f16" | "bf16");
+        if reduced_relu {
+            assert_reduced_relu_raw_selection(run_body, dtype, &name);
+        } else {
+            let helper_call = format!("chelis_host_{op}_{dtype}(");
+            assert!(
+                run_body.contains(&helper_call),
+                "{name}: no call site selects `{helper_call}`:\n{emitted}"
+            );
+        }
         for wrong_width in ["f16", "bf16", "f32", "f64"]
             .into_iter()
             .filter(|width| *width != dtype)

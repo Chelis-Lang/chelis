@@ -11,16 +11,29 @@ use chelis_types::types::Prim;
 // inside an otherwise-empty arm body is the clearer expression of intent.
 #[allow(clippy::collapsible_match)]
 pub fn verify(dag: &Dag) -> Vec<String> {
+    verify_with_dangling_policy(dag, true)
+}
+
+/// Structural verifier used immediately before ownership lowering. Dangling
+/// producers are intentionally admitted here because the ownership plan
+/// attaches their required `ScopeDrop`; every other DAG invariant remains
+/// identical to [`verify`].
+pub(crate) fn verify_ownership_input(dag: &Dag) -> Vec<String> {
+    verify_with_dangling_policy(dag, false)
+}
+
+#[allow(clippy::collapsible_match)]
+fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> {
     let mut errors = Vec::new();
     let mut consumers = vec![0usize; dag.len()];
-    let mut load_types = std::collections::HashMap::<String, crate::dag::TensorType>::new();
+    let mut load_types = chelis_unord::UnordMap::<String, crate::dag::TensorType>::new();
     for node in dag.nodes() {
         for &input_id in &node.inputs {
             if input_id.0 < consumers.len() {
                 consumers[input_id.0] += 1;
             }
         }
-        // chelis#384/#397/#616: a shape-only dependency (a Form-3 `expand`
+        // chelis#384/#397/#616: a shape-only dependency (an `expand` shape
         // source or a runtime-dim declarer kept alive for its extent) is a
         // real consumption — the dependent reads the node's shape, not its
         // value — so its target is not dangling.
@@ -65,12 +78,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         let arity = node.inputs.len();
         match &node.op {
             RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::CmpLt
-            | RiscOp::MaxElem => {
+            | RiscOp::MaxElem
+            | RiscOp::MinElem => {
                 if arity != 2 {
                     errors.push(format!(
                         "binary op at node {} has {} inputs (expected 2)",
@@ -123,6 +138,36 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         "reduce_window_grad at node {} has {} inputs (expected 2)",
                         node.id.0, arity
                     ));
+                }
+            }
+            RiscOp::ExtremaAdjoint { .. } => {
+                if arity != 3 {
+                    errors.push(format!(
+                        "extrema adjoint at node {} has {} inputs (expected 3)",
+                        node.id.0, arity
+                    ));
+                } else {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .filter_map(|input| dag.get(*input))
+                        .collect::<Vec<_>>();
+                    if inputs.len() == 3 {
+                        for input in &inputs {
+                            if input.output_type != node.output_type {
+                                errors.push(format!(
+                                    "extrema adjoint at node {} has input type {:?}, expected {:?}",
+                                    node.id.0, input.output_type, node.output_type
+                                ));
+                            }
+                        }
+                        if !node.output_type.precision.is_float() {
+                            errors.push(format!(
+                                "extrema adjoint at node {} requires a float dtype, found {:?}",
+                                node.id.0, node.output_type.precision
+                            ));
+                        }
+                    }
                 }
             }
             RiscOp::BlasMatmul {
@@ -351,6 +396,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::Neg
+            | RiscOp::Relu
             | RiscOp::Recip
             | RiscOp::Exp
             | RiscOp::Log
@@ -363,7 +409,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Copy
             | RiscOp::Drop
@@ -376,7 +421,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::Permute { .. }
-            | RiscOp::Expand { .. }
             | RiscOp::OneHot { .. }
             | RiscOp::Shape { .. }
             | RiscOp::Cast { .. }
@@ -388,6 +432,32 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             }
+            RiscOp::ReluAdjoint => {
+                if arity != 2 {
+                    errors.push(format!(
+                        "relu adjoint at node {} has {} inputs (expected 2)",
+                        node.id.0, arity
+                    ));
+                }
+            }
+            RiscOp::UniformLike { .. } => {
+                if !matches!(arity, 1 | 2) {
+                    errors.push(format!(
+                        "op {:?} at node {} expects 1 or 2 inputs, got {}",
+                        node.op, node.id.0, arity
+                    ));
+                }
+                if arity == 2
+                    && let Some(activation) = dag.get(node.inputs[1])
+                    && (activation.output_type.precision != Prim::Bool
+                        || !activation.output_type.dims.is_empty())
+                {
+                    errors.push(format!(
+                        "uniform_like at node {} requires a scalar Bool path activation, got {:?}",
+                        node.id.0, activation.output_type
+                    ));
+                }
+            }
             // chelis#616: movement ops (and `Reshape`, whose runtime target
             // extents work the same way) carry a tensor at `inputs[0]` plus zero
             // or more rank-0 integer bound scalars at `inputs[1..]` (node-valued
@@ -396,7 +466,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
-            | RiscOp::Reshape { .. } => {
+            | RiscOp::Reshape { .. }
+            | RiscOp::Expand { .. } => {
                 if arity < 1 {
                     errors.push(format!(
                         "movement op at node {} has {} inputs (expected at least 1)",
@@ -427,6 +498,26 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             }
         }
 
+        if matches!(node.op, RiscOp::Relu | RiscOp::ReluAdjoint) {
+            if !node.output_type.precision.is_float() {
+                errors.push(format!(
+                    "relu op at node {} requires a float output, got {:?}",
+                    node.id.0, node.output_type.precision
+                ));
+            }
+            for input in &node.inputs {
+                if let Some(input) = dag.get(*input)
+                    && (input.output_type != node.output_type
+                        || !input.output_type.precision.is_float())
+                {
+                    errors.push(format!(
+                        "relu op at node {} requires same-shape, same-dtype float inputs",
+                        node.id.0
+                    ));
+                }
+            }
+        }
+
         // C3: validate reduction axis bounds.
         match &node.op {
             RiscOp::Sum { axis, .. }
@@ -451,9 +542,9 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         }
 
         // Shape query (chelis#513/#558): the read axis must be in range
-        // of the input rank, and the output must be a rank-0 integer
-        // scalar (the runtime extent). A non-scalar or non-integer output
-        // would misdeclare the value node's type to the backend.
+        // of the input rank, and the output must be a rank-0 exact int64
+        // scalar (the runtime extent). A different output type would
+        // misdeclare the value node to the backend or narrow its carrier.
         if let RiscOp::Shape { axis } = &node.op {
             if arity == 1
                 && let Some(input) = dag.get(node.inputs[0])
@@ -473,9 +564,9 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     node.output_type.dims.len()
                 ));
             }
-            if !node.output_type.precision.is_integer() {
+            if node.output_type.precision != Prim::Int64 {
                 errors.push(format!(
-                    "shape read at node {} must produce an integer scalar, got precision `{}`",
+                    "shape read at node {} must produce an exact int64 scalar, got precision `{}`",
                     node.id.0,
                     node.output_type.precision.name()
                 ));
@@ -666,7 +757,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::UniformLike { .. } => {
-                if arity == 1
+                if matches!(arity, 1 | 2)
                     && let Some(input) = dag.get(node.inputs[0])
                 {
                     if !input.output_type.precision.is_float() {
@@ -765,6 +856,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             }
+            check_exact_bound_inputs(node, new_shape, "reshape", &mut errors);
         }
 
         // C8: Cast validation — dims must not change, output precision must match target.
@@ -812,7 +904,38 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         // C10: Movement op shape validation.
         match &node.op {
             RiscOp::Expand { axis, size } => {
-                if arity == 1 {
+                let expected_arity = match size {
+                    RtDim::Lit(_) => 1,
+                    RtDim::Node(1) | RtDim::InputAxis { tensor: 1, .. } => 2,
+                    RtDim::Node(_) | RtDim::InputAxis { .. } => {
+                        errors.push(format!(
+                            "expand at node {}: runtime size must reference absolute input slot 1, got {size:?}",
+                            node.id.0
+                        ));
+                        arity
+                    }
+                    RtDim::ToEnd | RtDim::Sym(_) => {
+                        errors.push(format!(
+                            "expand at node {}: size carrier {size:?} is forbidden; expected Lit, Node, or InputAxis",
+                            node.id.0
+                        ));
+                        arity
+                    }
+                };
+                if arity != expected_arity {
+                    errors.push(format!(
+                        "expand at node {} has {} inputs (expected {} for {size:?})",
+                        node.id.0, arity, expected_arity
+                    ));
+                }
+                check_bound_source(
+                    dag,
+                    node,
+                    size,
+                    &format!("Expand at node {}", node.id.0),
+                    &mut errors,
+                );
+                if arity >= 1 {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
                     let output_rank = node.output_type.dims.len();
@@ -821,9 +944,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             "expand at node {}: axis {} > input rank {}",
                             node.id.0, axis, input_rank
                         ));
-                    }
-                    if matches!(size.as_concrete(), Some(0)) {
-                        errors.push(format!("expand at node {}: size must be > 0", node.id.0));
                     }
                     if node.output_type.precision != input.output_type.precision {
                         errors.push(format!(
@@ -836,11 +956,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             if out_i == *axis {
                                 if let Some(out_size) =
                                     dim_known_size(&node.output_type.dims[out_i])
-                                    && size.as_concrete().is_some_and(|size| out_size != size)
+                                    && size.as_lit().is_some_and(|size| out_size != size)
                                 {
                                     errors.push(format!(
                                         "expand at node {}: inserted axis {} has size {}, expected {}",
-                                        node.id.0, axis, out_size, size
+                                        node.id.0,
+                                        axis,
+                                        out_size,
+                                        size.as_lit().unwrap()
                                     ));
                                 }
                             } else {
@@ -872,11 +995,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 ));
                             }
                             if let Some(out_size) = dim_known_size(&node.output_type.dims[*axis])
-                                && size.as_concrete().is_some_and(|size| out_size != size)
+                                && size.as_lit().is_some_and(|size| out_size != size)
                             {
                                 errors.push(format!(
                                     "expand at node {}: output axis {} has size {}, expected {}",
-                                    node.id.0, axis, out_size, size
+                                    node.id.0,
+                                    axis,
+                                    out_size,
+                                    size.as_lit().unwrap()
                                 ));
                             }
                             for out_i in 0..output_rank {
@@ -990,7 +1116,21 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        if matches!(before, RtDim::InputAxis { .. })
+                            || matches!(after, RtDim::InputAxis { .. })
+                        {
+                            errors.push(format!(
+                                "Pad at node {} axis {} cannot own RtDim::InputAxis; folded shape reads are legal only for Expand and Reshape",
+                                node.id.0, axis
+                            ));
+                        }
                     }
+                    check_exact_bound_inputs(
+                        node,
+                        padding.iter().flat_map(|(before, after)| [before, after]),
+                        "pad",
+                        &mut errors,
+                    );
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "pad at node {}: output rank {} != input rank {}",
@@ -1064,6 +1204,18 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        // chelis#1480, `spec/05` section 2.4.1: a `ToEnd` end
+                        // is well formed only when the start paired with it is
+                        // `Lit(0)`. A `ToEnd` end over any other start is a
+                        // malformed bound, rejected rather than resolved to a
+                        // slice.
+                        if matches!(end, RtDim::ToEnd) && start.as_lit() != Some(0) {
+                            errors.push(format!(
+                                "shrink at node {}: axis {} pairs the ToEnd sentinel with a \
+                                 start that is not Lit(0), which is a malformed bound",
+                                node.id.0, axis
+                            ));
+                        }
                         if matches!(start, RtDim::Sym(_)) || matches!(end, RtDim::Sym(_)) {
                             errors.push(format!(
                                 "shrink at node {}: axis {} uses a symbolic dim, which is \
@@ -1071,7 +1223,21 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        if matches!(start, RtDim::InputAxis { .. })
+                            || matches!(end, RtDim::InputAxis { .. })
+                        {
+                            errors.push(format!(
+                                "Shrink at node {} axis {} cannot own RtDim::InputAxis; materialize the shape read as a Node bound",
+                                node.id.0, axis
+                            ));
+                        }
                     }
+                    check_exact_bound_inputs(
+                        node,
+                        bounds.iter().flat_map(|(start, end)| [start, end]),
+                        "shrink",
+                        &mut errors,
+                    );
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "shrink at node {}: output rank {} != input rank {}",
@@ -1159,7 +1325,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        if matches!(step, RtDim::InputAxis { .. }) {
+                            errors.push(format!(
+                                "Stride at node {} axis {} cannot own RtDim::InputAxis; materialize the shape read as a Node bound",
+                                node.id.0, axis
+                            ));
+                        }
                     }
+                    check_exact_bound_inputs(node, strides, "stride", &mut errors);
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "stride at node {}: output rank {} != input rank {}",
@@ -1228,7 +1401,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         }
 
         let is_implicit_root = dag.roots().is_empty() && node.id.0 + 1 == dag.len();
-        if !dag.is_root(node.id)
+        if reject_dangling
+            && !dag.is_root(node.id)
             && !is_implicit_root
             && consumers[node.id.0] == 0
             && !matches!(node.op, RiscOp::Store { .. } | RiscOp::Drop)
@@ -1239,6 +1413,17 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             ));
         }
     }
+
+    // chelis#1277 C4.1: every realized output axis has one checked extent
+    // source. `verify` is one of the production paths this runs on, not the
+    // only one: it runs in tests and at the end of `grad_dag`, while eval
+    // and the three codegen entries call `check_axis_sources` themselves.
+    if let Err(unsupported) =
+        crate::axis_sources::check_axis_sources(dag, chelis_types::unsupported::Stage::Lowering)
+    {
+        errors.push(unsupported.to_string());
+    }
+
     errors
 }
 
@@ -1397,10 +1582,8 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
 }
 
 /// chelis#616: validate a single movement `RtDim` against the owning node. A
-/// `RtDim::Node(i)` must reference a real bound-scalar input slot
-/// (`1 <= i < inputs.len()`) that is a rank-0 integer node. Pushes an error for
-/// each violation. `Lit` / `ToEnd` carry no input reference and are accepted
-/// here (`ToEnd`'s position legality is checked by the caller).
+/// `RtDim::Node(i)` must reference a rank-0 int64 input; `InputAxis` must
+/// reference a tensor input and a normalized in-range axis.
 fn check_bound_source(
     dag: &Dag,
     node: &crate::dag::DagNode,
@@ -1408,32 +1591,82 @@ fn check_bound_source(
     label: &str,
     errors: &mut Vec<String>,
 ) {
-    let RtDim::Node(i) = bound else {
-        return;
-    };
-    let i = *i;
-    if i == 0 || i >= node.inputs.len() {
-        errors.push(format!(
-            "{label}: node-valued bound references invalid input slot {i} \
-             (inputs len {})",
-            node.inputs.len()
-        ));
-        return;
+    match bound {
+        RtDim::Node(i) => {
+            let i = *i;
+            if i == 0 || i >= node.inputs.len() {
+                errors.push(format!(
+                    "{label}: node-valued bound references invalid input slot {i} \
+                     (inputs len {})",
+                    node.inputs.len()
+                ));
+                return;
+            }
+            let src = dag.get(node.inputs[i]).unwrap();
+            if !src.output_type.dims.is_empty() {
+                errors.push(format!(
+                    "{label}: node-valued bound source (input slot {i}) must be a rank-0 \
+                     scalar, got rank {}",
+                    src.output_type.dims.len()
+                ));
+            }
+            if src.output_type.precision != Prim::Int64 {
+                errors.push(format!(
+                    "{label}: node-valued bound source (input slot {i}) must be int64, got `{}`",
+                    src.output_type.precision.name()
+                ));
+            }
+        }
+        RtDim::InputAxis {
+            tensor,
+            axis: crate::dag::RtAxis::Lit(axis),
+        } => {
+            if *tensor == 0 || *tensor >= node.inputs.len() {
+                errors.push(format!(
+                    "{label}: InputAxis references invalid tensor input slot {tensor} (inputs len {})",
+                    node.inputs.len()
+                ));
+                return;
+            }
+            let source = dag.get(node.inputs[*tensor]).unwrap();
+            let Ok(axis) = usize::try_from(*axis) else {
+                errors.push(format!("{label}: InputAxis axis {axis} is not normalized"));
+                return;
+            };
+            if axis >= source.output_type.dims.len() {
+                errors.push(format!(
+                    "{label}: InputAxis axis {axis} out of bounds for rank {} tensor in input slot {tensor}",
+                    source.output_type.dims.len()
+                ));
+            }
+        }
+        RtDim::Lit(_) | RtDim::ToEnd | RtDim::Sym(_) => {}
     }
-    let src = dag.get(node.inputs[i]).unwrap();
-    if !src.output_type.dims.is_empty() {
-        errors.push(format!(
-            "{label}: node-valued bound source (input slot {i}) must be a rank-0 \
-             scalar, got rank {}",
-            src.output_type.dims.len()
-        ));
-    }
-    if !src.output_type.precision.is_integer() {
-        errors.push(format!(
-            "{label}: node-valued bound source (input slot {i}) must be an integer, \
-             got `{}`",
-            src.output_type.precision.name()
-        ));
+}
+
+/// Every non-data movement input is an explicit runtime-extent edge. Reject
+/// stale or accidental inputs that no typed `RtDim` owns instead of letting
+/// serialization or a rebuild silently preserve an ambiguous dependency.
+fn check_exact_bound_inputs<'a>(
+    node: &crate::dag::DagNode,
+    bounds: impl IntoIterator<Item = &'a RtDim>,
+    label: &str,
+    errors: &mut Vec<String>,
+) {
+    let owned = bounds
+        .into_iter()
+        .filter_map(|bound| match bound {
+            RtDim::Node(input) | RtDim::InputAxis { tensor: input, .. } => Some(*input),
+            RtDim::Lit(_) | RtDim::ToEnd | RtDim::Sym(_) => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for input in 1..node.inputs.len() {
+        if !owned.contains(&input) {
+            errors.push(format!(
+                "{label} at node {} has unowned runtime extent input slot {input}",
+                node.id.0
+            ));
+        }
     }
 }
 
@@ -1532,6 +1765,34 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    #[test]
+    fn shape_read_requires_exact_int64_scalar_output() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_ty(&[3], Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Shape { axis: 0 },
+            vec![input],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            },
+            None,
+        );
+
+        let errors = verify(&dag);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("shape read") && error.contains("int64")),
+            "int32 shape output must fail the exact runtime-extent invariant: {errors:?}"
+        );
     }
 
     #[test]
@@ -2189,7 +2450,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             TensorType {
@@ -2213,7 +2474,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             TensorType {
@@ -2236,7 +2497,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             TensorType {
@@ -2327,6 +2588,46 @@ mod tests {
             verify(&dag)
                 .iter()
                 .any(|error| error.contains("requires a float template"))
+        );
+    }
+
+    #[test]
+    fn uniform_like_path_activation_requires_scalar_bool() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let wrong_activation = dag.add_node(
+            RiscOp::Load {
+                name: "activation".into(),
+            },
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 7,
+            },
+            vec![template, wrong_activation],
+            ty,
+            None,
+        );
+        assert!(
+            verify(&dag)
+                .iter()
+                .any(|error| error.contains("requires a scalar Bool path activation"))
         );
     }
 

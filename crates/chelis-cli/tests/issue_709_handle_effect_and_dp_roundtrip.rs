@@ -309,10 +309,12 @@ fn unsuffixed_seed_literal_is_rejected() {
 
 /// Negative parity for the §C1.5 negative-seed rule (chelis#731 red team F2): a
 /// negative int64-literal seed is `.dp`-reachable (Surf's `-1i64` desugars to a
-/// non-literal `neg` the effects gate rejects), and the RNG lanes fold a
-/// negative seed to 0, so distinct-stream determinism ([05-RNG-1]) cannot hold.
-/// The checker rejects it. Positive parity is `with_seed_well_typed_body_checks_clean`
-/// (a non-negative `42i64` seed checks clean).
+/// non-literal `neg` the effects gate rejects). The lanes themselves honor
+/// [05-RNG-1]'s two's-complement reinterpretation of a signed seed
+/// (chelis#794); the checker rejects it anyway, narrowing the accepted
+/// front-end surface until chelis#735 authors the `with seed` contract.
+/// Positive parity is `with_seed_well_typed_body_checks_clean` (a non-negative
+/// `42i64` seed checks clean).
 #[test]
 fn negative_int64_seed_literal_is_rejected() {
     let score = check_score(

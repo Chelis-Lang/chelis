@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import re
 import tempfile
 import unittest
 
@@ -47,7 +48,17 @@ class DiagnosticKindOracleTests(unittest.TestCase):
         mutated = oracle.mutate_diagnostic_vocabulary(source)
         self.assertNotEqual(mutated, source)
         self.assertEqual(mutated.count("Phase3OracleKind"), 3)
-        self.assertIn("pub const ALL: [Self; 49]", mutated)
+        # Derived from the source rather than hard-coded. The property
+        # under test is "the mutation adds exactly one variant and grows
+        # `ALL` by one", which is independent of how many kinds the
+        # vocabulary holds. A literal goes stale every time a kind is
+        # added and then fails for a reason unrelated to the oracle.
+        declared = re.search(r"pub const ALL: \[Self; (\d+)\]", source)
+        self.assertIsNotNone(declared, "the vocabulary must declare `ALL`")
+        assert declared is not None
+        self.assertIn(
+            f"pub const ALL: [Self; {int(declared.group(1)) + 1}]", mutated
+        )
         self.assertIn(
             'Self::Phase3OracleKind => "phase3_oracle_kind"',
             mutated,

@@ -6,12 +6,64 @@ Acceptance is exit 0 with the final line ``DTYPE PHASE 4B ORACLE: PASS``.
 Usage:
 
     .venv/bin/python scripts/dtype_phase4b_oracle.py
+
+The freeze has three legs. Narrow ``FROZEN_ATOM_DIGESTS`` and
+``FROZEN_REGION_DIGESTS`` pin the exact text of individual normative atoms and
+delimited contract regions. The third leg is the additive-contradiction gate:
+a region digest cannot defend its own boundaries, so contradictory prose can be
+inserted immediately before a region's start or after its end, and prose can be
+appended to a contract file that carries no region at all. That leg is an
+explicit per-file acknowledgement, not a whole-file digest.
+
+Acknowledgement gate
+--------------------
+
+For every path in ``CONTRACT_FILES`` the oracle compares the working-tree bytes
+against the bytes at the merge base with the base branch. Any contract file
+whose content differs must be acknowledged by name. The acknowledgement is a
+line in the pull request body::
+
+    Frozen-contract-change: spec/04-type-system.md
+
+one line per changed file. The grammar is exact and case-sensitive: no leading
+whitespace, exactly one space after the colon, a repo-relative POSIX path with
+no glob metacharacter and no ``.``/``..`` segment, and nothing after the path.
+An unacknowledged change and an acknowledgement naming a file that did not
+change are both failures: a stale acknowledgement is how a reviewer stops
+reading them.
+
+Lines inside fenced code blocks are ignored so a body can quote the grammar.
+That exemption is pragmatic, not a CommonMark implementation: it tracks the
+opening run's character and length, and it can still disagree with GitHub's
+renderer in both directions (an HTML comment hides a line from a reader but not
+from this parser; an indented fence hides it from this parser but not always
+from a reader). The disagreement costs reviewer visibility, never soundness: no
+shape of it admits an unacknowledged change, because a line the parser does not
+read is a file that goes unacknowledged and fails.
+
+``--require-acknowledgement`` is the enforcing mode and is what CI runs on a
+pull request. Without it the oracle reports the changed contract files and the
+exact lines the body must carry, then exits 0, so a local run is a checklist
+rather than a gate. An unresolvable merge base fails the enforcing mode loudly;
+it can never be read as "nothing changed".
+
+This replaces a table of whole-file SHA-256 digests. That table made two pull
+requests that edited *different* contract files conflict on adjacent lines of
+one Python dict, and two that edited the *same* file conflict on one line whose
+correct post-rebase value is the digest of the merged text, so the conflict was
+unresolvable by picking a side. The acknowledgement lives in the pull request
+body, which no other pull request shares. Deliberateness is preserved: naming a
+frozen contract file in the body is the same review-visible act that moving a
+digest was, and it still owes the owning spec/design update, every consuming
+contract, and an adversarial mutation.
 """
 
 from __future__ import annotations
 
+import argparse
 from collections import Counter
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -28,11 +80,16 @@ CONTRACT_FILES = (
     "spec/05-risc-primitives.md",
     "spec/06-transformations.md",
     "spec/10-serialization.md",
+    "spec/11-ffi.md",
     "spec/design/capability_table.md",
+    "spec/design/compiled_value_ownership.md",
     "spec/design/dtype_semantics.md",
+    "spec/design/implicit_linearity.md",
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
     "spec/design/remediation_roadmap.md",
+    "spec/design/runtime_extents.md",
+    "spec/design/runtime_representation.md",
     "docs/CHELIS_SURFACE.md",
     "docs/investigations/remediation_status_2026_08_04.md",
     "openspec/specs/risc-primitives/spec.md",
@@ -42,68 +99,10 @@ CONTRACT_FILES = (
     "spec/registry/c_scalar_carrier.md",
     "spec/registry/c_container_boundary.md",
     "spec/registry/c_tensor_runtime.md",
+    "spec/registry/c_heap_lifetime.md",
     "spec/registry/stdlib_adt_identities.md",
     "spec/registry/stdlib_numeric_manifest.md",
 )
-FROZEN_FILE_DIGESTS = {
-    "spec/02-surf-syntax.md": (
-        "15e690f490c57d1a5a9629f87901900accb07ae14f7ec83d22195eea1d26904c"
-    ),
-    "spec/03-deep-syntax.md": (
-        "fc5230f7c06e39f8a17f6f4f856fccdbbfb7a685f1b0edcdaf1c4420d87711dd"
-    ),
-    "spec/04-type-system.md": (
-        "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
-    ),
-    "spec/05-risc-primitives.md": (
-        "fbdbca01e5bd5c4df4ad3b8d8f54ae13b7fb52009635a3c4ec80beec98a191d5"
-    ),
-    "spec/06-transformations.md": (
-        "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
-    ),
-    "spec/10-serialization.md": (
-        "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
-    ),
-    "spec/design/capability_table.md": (
-        "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
-    ),
-    "spec/design/dtype_semantics.md": (
-        "0b3042b7debc377981f63aff84808af54db13a04f0fe09efafd63cc0950edf0e"
-    ),
-    "spec/design/loud_unsupported.md": (
-        "9eb1a2dbb304ddaa3076ca4a5a78617eb7e4afd8194175aaf6614b02c38ee5e5"
-    ),
-    "spec/design/spec_provenance.md": (
-        "6e206f634ce6062d56701f0dea0bf57bcbdca4fbf630a6c12264a904f14ea426"
-    ),
-    "openspec/specs/risc-primitives/spec.md": (
-        "875f1094b4fba6842f90fc96c17aa37c6c2be7a5a40957b0140a10992be601a6"
-    ),
-    "openspec/specs/serialization/spec.md": (
-        "ef0139de7e1da5ec986ec5ec4bfb12710a5cee8e77e9c91840d478404907b5ed"
-    ),
-    "openspec/specs/transformations/spec.md": (
-        "a927fa0540c9bbb03a24fb752838409980af83d918f8f6bc8498b32ea7ab0e6f"
-    ),
-    "openspec/specs/type-system/spec.md": (
-        "135fd5d18b3bbbffa851720973984e3b61ed18ee0b83fa8884eb7e728b38c811"
-    ),
-    "spec/registry/c_scalar_carrier.md": (
-        "2e7b6a27b84e8c71d179b0ee10cd6c44651c4fcf66bb13dd56f0476245ffd22e"
-    ),
-    "spec/registry/c_container_boundary.md": (
-        "4a462ef8b452b5d744e8f8207d69cffd10512cd178c759a6c112f2600a6e56f5"
-    ),
-    "spec/registry/c_tensor_runtime.md": (
-        "cc57955f030ad18616333d6e1048e8607e54e9fd9c907bcd0698e6345b621f15"
-    ),
-    "spec/registry/stdlib_adt_identities.md": (
-        "59c8654819ffd315028f68a91e049a5f603464f4511ae604c3634e79f8667ce5"
-    ),
-    "spec/registry/stdlib_numeric_manifest.md": (
-        "2d6286daca1e7b16b79fcc863190d030c1291d54236b13f64a0a065090f22438"
-    ),
-}
 OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
 ATOM_START = re.compile(
     r"^> \*\*\[(\d{2}-[A-Z]+-\d+)\]\*\*", re.MULTILINE
@@ -152,6 +151,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     41: "`sub(left, right) -> result`",
     42: "`stop_gradient(value) -> result`",
     43: "`relu(x) -> result`",
+    44: "`heap_lifetime(handle, parameters...) -> result`",
 }
 
 # These are independent, executable copies of the exact normative manifests.
@@ -163,14 +163,14 @@ EXPECTED_OP_MANIFESTS = {
         """\
 | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
 | scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
-| value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
-| value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
+| value boxing | `chelis_value chelis_value_box_scalar(chelis_scalar value)` |
+| value extraction | `chelis_scalar chelis_value_unbox_scalar(chelis_value value)` |
 | rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
 | rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
-| tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
+| tensor fill | `void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value)` |
 | scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
-| scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
-| exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |""".splitlines()
+| scalar parsing | `chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
+| exact dictionary scalar lookup | `chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |""".splitlines()
     ),
     "05-OP-32": tuple(
         """\
@@ -193,7 +193,7 @@ EXPECTED_OP_MANIFESTS = {
 | dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
 | dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
 | dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
-| dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
+| dictionary lookup | `chelis_option *chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
 | dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
 | dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
 | dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |
@@ -208,7 +208,6 @@ EXPECTED_OP_MANIFESTS = {
     "05-OP-33": tuple(
         """\
 | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
-| borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
 | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
 | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
@@ -326,6 +325,61 @@ EXPECTED_OP_MANIFESTS = {
 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
     ),
+    "05-OP-44": tuple(
+        """\
+| string retain | `void chelis_string_retain(chelis_string value)` |
+| string release | `void chelis_string_release(chelis_string value)` |
+| tensor retain | `void chelis_tensor_retain(const chelis_tensor *tensor)` |
+| tensor release | `void chelis_tensor_release(const chelis_tensor *tensor)` |
+| list retain | `void chelis_list_retain(const chelis_list *list)` |
+| list release | `void chelis_list_release(const chelis_list *list)` |
+| tuple retain | `void chelis_tuple_retain(const chelis_tuple *tuple)` |
+| tuple release | `void chelis_tuple_release(const chelis_tuple *tuple)` |
+| dictionary retain | `void chelis_dict_retain(const chelis_dict *dict)` |
+| dictionary release | `void chelis_dict_release(const chelis_dict *dict)` |
+| ADT retain | `void chelis_adt_retain(const chelis_adt *adt)` |
+| ADT release | `void chelis_adt_release(const chelis_adt *adt)` |
+| option retain | `void chelis_option_retain(const chelis_option *option)` |
+| option release | `void chelis_option_release(const chelis_option *option)` |
+| mapped-file retain | `void chelis_mapped_file_retain(const chelis_mapped_file *mapped)` |
+| mapped-file release | `void chelis_mapped_file_release(const chelis_mapped_file *mapped)` |
+| value clone | `chelis_value chelis_value_clone(chelis_value value)` |
+| value release | `void chelis_value_release(chelis_value value)` |
+| string take into value | `chelis_value chelis_value_take_string(chelis_string value)` |
+| tensor take into value | `chelis_value chelis_value_take_tensor(chelis_tensor *tensor)` |
+| list take into value | `chelis_value chelis_value_take_list(chelis_list *list)` |
+| tuple take into value | `chelis_value chelis_value_take_tuple(chelis_tuple *tuple)` |
+| dictionary take into value | `chelis_value chelis_value_take_dict(chelis_dict *dict)` |
+| ADT take into value | `chelis_value chelis_value_take_adt(chelis_adt *adt)` |
+| option take into value | `chelis_value chelis_value_take_option(chelis_option *option)` |
+| mapped-file take into value | `chelis_value chelis_value_take_mapped_file(chelis_mapped_file *mapped)` |
+| string take out of value | `chelis_string chelis_string_take_value(chelis_value value)` |
+| string borrow from value | `chelis_string chelis_string_borrow_value(chelis_value value)` |
+| tensor take out of value | `chelis_tensor *chelis_tensor_take_value(chelis_value value)` |
+| tensor borrow from value | `const chelis_tensor *chelis_tensor_borrow_value(chelis_value value)` |
+| list take out of value | `chelis_list *chelis_list_take_value(chelis_value value)` |
+| list borrow from value | `const chelis_list *chelis_list_borrow_value(chelis_value value)` |
+| tuple take out of value | `chelis_tuple *chelis_tuple_take_value(chelis_value value)` |
+| tuple borrow from value | `const chelis_tuple *chelis_tuple_borrow_value(chelis_value value)` |
+| dictionary take out of value | `chelis_dict *chelis_dict_take_value(chelis_value value)` |
+| dictionary borrow from value | `const chelis_dict *chelis_dict_borrow_value(chelis_value value)` |
+| ADT take out of value | `chelis_adt *chelis_adt_take_value(chelis_value value)` |
+| ADT borrow from value | `const chelis_adt *chelis_adt_borrow_value(chelis_value value)` |
+| option take out of value | `chelis_option *chelis_option_take_value(chelis_value value)` |
+| option borrow from value | `const chelis_option *chelis_option_borrow_value(chelis_value value)` |
+| mapped-file take out of value | `chelis_mapped_file *chelis_mapped_file_take_value(chelis_value value)` |
+| mapped-file borrow from value | `const chelis_mapped_file *chelis_mapped_file_borrow_value(chelis_value value)` |
+| option none | `chelis_option *chelis_option_none(void)` |
+| option some | `chelis_option *chelis_option_some(chelis_value value)` |
+| option discriminant | `bool chelis_option_is_some(const chelis_option *option)` |
+| option unwrap | `chelis_value chelis_option_unwrap(const chelis_option *option)` |
+| tensor entry borrow | `chelis_tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape, chelis_dtype dtype, const void *data, int64_t byte_capacity)` |
+| tensor read view | `chelis_read_view chelis_tensor_read_view(const chelis_tensor *tensor)` |
+| tensor begin write | `chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor)` |
+| tensor write view | `chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard)` |
+| tensor end write | `void chelis_tensor_end_write(chelis_tensor_write *guard)` |
+| tensor repurpose | `void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape)` |""".splitlines()
+    ),
     "05-OP-38": tuple(
         """\
 > | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
@@ -337,10 +391,19 @@ EXPECTED_OP_MANIFESTS = {
 }
 
 FROZEN_ATOM_DIGESTS = {
+    "04-LIN-3": "52a61c21d53b8eaf194feebed4eee608f49bc30ebb0008fcc4d366fd93c3e649",
+    "04-LIN-4": "ab21050a84236c40236b7d8d53453767dc15839a44ae1fd012d33bed411fecf9",
+    "04-LIN-5": "2ad4e07442bf890a6fdd434362f50ab86215d6bd35c3d680e515de6fba5f9a29",
+    "04-LIN-6": "6cfcc780a3f5b9836507772cf7ef76ce231a0505f07e9a06b3c1ba55e0946d92",
+    "04-LIN-7": "6c1d8d77d251d245df6e1aa6e2138458048bdac31a407adfeba586302b0f3625",
+    "04-LIN-8": "3e0013311e070716145da9245eea66361c8cf91fc6914ad200b68790b41313eb",
     "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
     "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
+    "04-NUM-8": "8887537f42a0c8263569296700826dc7466a0a3bf05e5c854ffff2406f075028",
+    "04-NUM-11": "903b437e9aaa98b7c4d7c0c019393bee203d8bf76621902fc2ad53d872945f3f",
     "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
     "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
+    "04-SHAPE-1": "0f3f3f71731481b457b226bbcc8877d54962d268ec8787fbc6aa56ab4324d17c",
     "05-OP-1": "c2fb6c19db7ada4f86af7436f4f531ee0adb1395c7080ea94b25fe2e0f0b8d6c",
     "05-OP-2": "86fe2002cebd6192d15078ed0e8144936e38ba14f925802d2d526b7bf880ecd3",
     "05-OP-3": "b5a3ee9ca9a4f3161e20e729467d044878080ac8fb302af14b512bea66a58d3b",
@@ -351,7 +414,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
     "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
     "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
-    "05-OP-11": "688952d434f31b332cd82a871a4da3e0a6e64e2d440f258ff9d24e5be8a37945",
+    "05-OP-11": "a9db7bb96766662e5c520e7714d0a6d266aebe9eb17603d4fd9750698c33133b",
     "05-OP-12": "6e99f2ecbb3c7fbf3ae4f852104b03bdf65f5edf7ead1cae02c9e1d833708353",
     "05-OP-13": "3fd84ffa594776abc51a8c277c5d9a0dbc2b7b8fc11ab1bf32209b30c7d97890",
     "05-OP-14": "cba4686a8a31fb18cf9c5213af5ac4a545b03ce548b5c7bcd96e8f7f76648a40",
@@ -371,9 +434,9 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
     "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
-    "05-OP-31": "31e1d9d5be4b12496c6a5f9d3ee3cd8f134d9868e2c0e526bb36dea97b813538",
-    "05-OP-32": "e8102df69288ef68e023b236ef6e74bd82b327b50fd94f9aa9880cc6c8dfdeeb",
-    "05-OP-33": "fc529223469d814e4b9964bd95e721cd1ceabdd2033e8cbddb9e36151eb72ee1",
+    "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
+    "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
+    "05-OP-33": "ca99addff76d91d2125e820dcadbd31c0460f9e0de6ec69bfaec5894d51b1e08",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -384,6 +447,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
     "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
     "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
+    "05-OP-44": "5da56d56c928f228c0ed069c078696b648863e440c732ee41e8a23626757ea4e",
 }
 
 # The markers are part of the freeze contract: each must occur exactly once,
@@ -395,19 +459,19 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "1b13effce22cc367b9a1e27525e26e049926f2cb9cd6156c4715babc3e3d888f",
+        "de1f56b43a92495cc8a71d7e543b888372f4fb803946a1fed78eb603fb67f917",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
         "## 9. Numeric Value Semantics",
         "## 10. Checker Totality",
-        "436433f8e9f0ed1f4a3529d1135ff4c7e76181a3ce2c0684c6708382105dae9f",
+        "edb150de60effbadeaff33f02ba39929dbde7ae61db4bdedaa8f4bfb3e334086",
     ),
     "numeric primitive contracts": (
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "53fc4eb2ab078b587f18e70fd187671ed4f907277cefa9534e953872324a968f",
+        "a8fc522c8db143bce747512c7c64c52f62b2fb40c18e1e7906bf03ebcf027cf0",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -419,7 +483,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "#### 4.5.3 Name-Preserving Rank Polymorphism",
         "#### 4.5.4 Concat Result Typing",
-        "8f7ed49ec2a00115a9fc9d423c0e56040f68b42d31580b259597da98ec859733",
+        "3c84ab77716d7d9f2d5f2024141086c209f3f094a1949a3bdd06685d65b25aea",
     ),
     "window extrema contract": (
         "spec/05-risc-primitives.md",
@@ -443,19 +507,19 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## The two-table design",
         "## Seed dispositions the table must ship with",
-        "fe07f1865a552ca283befa55b69b31e0345f6db486448d9f813f66fa5c2e0db9",
+        "e623262cd4cd37b6646c651fd0596435cf28f24423b8d9d755620d009520c09d",
     ),
     "capability seed dispositions": (
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "ebf86739fab54d066c78a2af6a0d71ee510ee747e5484667db7a4cdd8bc4be14",
+        "b236eef3448e4147a85f531b7d8b1a7bfcc8b9d933f96470deff2a305a7c011b",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "9e3f43c16eaa6194e02cb989f6e38fb698214c3cd49dd30af8836622d5f37044",
+        "ba1662900de06295d99f6b5fd00875a8eac6a7b8d9e3fc5d2806929d6cdf9469",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -473,7 +537,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "0a907eb4bb342d38e8643a7008ecf6ec5e6111eab66430ac2088af945ed63c9f",
+        "ec37b8cab3f013cdc17f9c792291922b0bfbdebf5b2fa48a44bb8ba2aad2f516",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -523,6 +587,7 @@ OP_MANIFEST_REGISTRY_FILES = {
     "05-OP-31": "spec/registry/c_scalar_carrier.md",
     "05-OP-32": "spec/registry/c_container_boundary.md",
     "05-OP-33": "spec/registry/c_tensor_runtime.md",
+    "05-OP-44": "spec/registry/c_heap_lifetime.md",
     "05-OP-34": "spec/registry/stdlib_adt_identities.md",
     "05-OP-35": "spec/registry/stdlib_numeric_manifest.md",
 }
@@ -647,24 +712,278 @@ def frozen_region(text: str, start: str, end: str, label: str) -> str:
     return text[start_index:end_index]
 
 
+# --------------------------------------------------------------------------
+# Frozen-contract acknowledgement gate (the additive-contradiction leg)
+# --------------------------------------------------------------------------
+
+ACKNOWLEDGEMENT_KEY = "Frozen-contract-change:"
+DEFAULT_BASE_REF = "origin/main"
+
+# The exact accepted line. No leading whitespace, exactly one space after the
+# colon, and nothing after the path.
+ACKNOWLEDGEMENT_LINE = re.compile(
+    r"^Frozen-contract-change: (?P<path>[^\s]+)$"
+)
+# A line that is trying to be an acknowledgement and failing. Leading
+# whitespace, a Markdown list bullet, a blockquote marker, or any casing of the
+# key all land here so the author is told the canonical spelling instead of
+# silently losing the acknowledgement.
+ACKNOWLEDGEMENT_NEAR_MISS = re.compile(
+    r"^[\s>]*(?:[-*+]\s+)?frozen[-_ ]?contract[-_ ]?change\s*:",
+    re.IGNORECASE,
+)
+# CommonMark fence tracking. The opening run's character and length are both
+# part of the contract: a `~~~` run never closes a ``` block, and a closing run
+# must be at least as long as the one that opened it. One boolean would let a
+# line that renders as code still acknowledge a change.
+FENCE_LINE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})")
+# A repo-relative POSIX path. The character class excludes every glob
+# metacharacter, the backslash, and whitespace; the segment rule excludes an
+# absolute path, an empty segment, and `.`/`..`.
+ACKNOWLEDGEMENT_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
+
+def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
+    """Return ``(paths, errors)`` parsed from an acknowledgement document.
+
+    ``body`` is normally a pull request body. Lines inside fenced code blocks
+    are ignored so a body can quote the grammar without acknowledging anything.
+    A fence that is never closed is an error rather than a silent swallow of
+    every line after it.
+    """
+
+    paths: list[str] = []
+    errors: list[str] = []
+    open_fence: str | None = None
+    for raw in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.rstrip()
+        fence = FENCE_LINE.match(line)
+        if fence is not None:
+            run = fence.group("fence")
+            if open_fence is None:
+                open_fence = run
+                continue
+            if run[0] == open_fence[0] and len(run) >= len(open_fence):
+                open_fence = None
+            continue
+        if open_fence is not None:
+            continue
+        match = ACKNOWLEDGEMENT_LINE.match(line)
+        if match is None:
+            if ACKNOWLEDGEMENT_NEAR_MISS.match(line):
+                errors.append(
+                    f"malformed frozen contract acknowledgement {line!r}: the "
+                    f"only accepted form is '{ACKNOWLEDGEMENT_KEY} <repo-relative "
+                    "path>' at the start of a line, outside a code fence"
+                )
+            continue
+        candidate = match.group("path")
+        if not ACKNOWLEDGEMENT_PATH.match(candidate) or any(
+            segment in {".", ".."} for segment in candidate.split("/")
+        ):
+            errors.append(
+                f"malformed frozen contract acknowledgement path {candidate!r}: "
+                "expected a repo-relative POSIX path with no glob, no absolute "
+                "root, and no '.' or '..' segment"
+            )
+            continue
+        paths.append(candidate)
+    if open_fence is not None:
+        errors.append(
+            f"unclosed {open_fence!r} code fence in the acknowledgement "
+            "document: every line after it was ignored, so an acknowledgement "
+            "there would be lost"
+        )
+    return paths, errors
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ("git", "-C", str(root), *args),
+        capture_output=True,
+        check=False,
+    )
+
+
+def resolve_merge_base(root: Path, base: str) -> str:
+    """Return the merge-base commit of ``base`` and ``HEAD``.
+
+    Raises ``OracleError`` when it cannot be determined. There is no "assume
+    unchanged" path: a base this function cannot resolve is a check that did
+    not run.
+    """
+
+    inside = _git(root, "rev-parse", "--is-inside-work-tree")
+    if inside.returncode != 0 or inside.stdout.strip() != b"true":
+        raise OracleError(
+            f"cannot determine the frozen contract merge base: {root} is not a "
+            "git work tree"
+        )
+    merge_base = _git(root, "merge-base", base, "HEAD")
+    if merge_base.returncode != 0:
+        detail = merge_base.stderr.decode("utf-8", "replace").strip()
+        raise OracleError(
+            f"cannot determine the frozen contract merge base with {base!r}"
+            + (f": {detail}" if detail else "")
+            + "; fetch the base branch or pass --base <ref>"
+        )
+    return merge_base.stdout.decode("utf-8").strip()
+
+
+def contract_files_at(
+    root: Path, merge_base: str, contract_files: tuple[str, ...]
+) -> set[str]:
+    """Return the subset of ``contract_files`` present at ``merge_base``.
+
+    Absence and an unreadable object store are different failures, and reading
+    the second as the first would report a changed file as unchanged. This
+    enumerates the tree once so a later `git show` failure is an error.
+    """
+
+    listing = _git(
+        root, "ls-tree", "-r", "-z", "--name-only", merge_base, "--", *contract_files
+    )
+    if listing.returncode != 0:
+        detail = listing.stderr.decode("utf-8", "replace").strip()
+        raise OracleError(
+            f"cannot list frozen contract files at {merge_base}"
+            + (f": {detail}" if detail else "")
+        )
+    present = {
+        name
+        for name in listing.stdout.decode("utf-8", "surrogateescape").split("\0")
+        if name
+    }
+    return present & set(contract_files)
+
+
+def changed_contract_files(
+    root: Path, merge_base: str, contract_files: tuple[str, ...] = CONTRACT_FILES
+) -> list[str]:
+    """Return the contract files whose bytes differ from ``merge_base``."""
+
+    present = contract_files_at(root, merge_base, contract_files)
+    changed: list[str] = []
+    for relative in contract_files:
+        baseline: bytes | None = None
+        if relative in present:
+            blob = _git(root, "show", f"{merge_base}:{relative}")
+            if blob.returncode != 0:
+                detail = blob.stderr.decode("utf-8", "replace").strip()
+                raise OracleError(
+                    f"cannot read {relative} at {merge_base}"
+                    + (f": {detail}" if detail else "")
+                )
+            baseline = blob.stdout
+        path = root / relative
+        try:
+            current: bytes | None = path.read_bytes()
+        except OSError:
+            current = None
+        if baseline != current:
+            changed.append(relative)
+    return changed
+
+
+def validate_frozen_contract_changes(
+    root: Path = REPO_ROOT,
+    base: str = DEFAULT_BASE_REF,
+    acknowledgements: tuple[str, ...] = (),
+    body: str | None = None,
+    require_acknowledgement: bool = False,
+    contract_files: tuple[str, ...] = CONTRACT_FILES,
+) -> list[str]:
+    """Check that every changed contract file is acknowledged by name.
+
+    Returns the report lines. In ``require_acknowledgement`` mode any violation
+    raises ``OracleError``; otherwise the report is advisory and the caller
+    continues.
+    """
+
+    violations: list[str] = []
+    acknowledged: list[str] = list(acknowledgements)
+    if body is not None:
+        parsed, errors = parse_acknowledgements(body)
+        acknowledged.extend(parsed)
+        violations.extend(errors)
+
+    duplicates = sorted(
+        {path for path, count in Counter(acknowledged).items() if count > 1}
+    )
+    for path in duplicates:
+        violations.append(
+            f"duplicate frozen contract acknowledgement for {path}: acknowledge "
+            "each changed contract file exactly once"
+        )
+
+    try:
+        merge_base = resolve_merge_base(root, base)
+        changed = changed_contract_files(root, merge_base, contract_files)
+    except OracleError as error:
+        # Advisory mode reports and continues so the atom and region digests
+        # still run on a checkout whose git state this leg cannot read. The
+        # enforcing mode re-raises: a check that did not run is never a pass.
+        if require_acknowledgement:
+            raise
+        return [
+            f"frozen contract acknowledgement: {error}",
+            "frozen contract acknowledgement: change detection skipped "
+            "(advisory mode); CI runs --require-acknowledgement and will fail "
+            "on an unreadable base",
+        ]
+
+    changed_set = set(changed)
+    known = set(contract_files)
+
+    for path in sorted(set(acknowledged)):
+        if path not in known:
+            violations.append(
+                f"frozen contract acknowledgement names {path}, which is not a "
+                "frozen contract file"
+            )
+        elif path not in changed_set:
+            violations.append(
+                f"stale frozen contract acknowledgement for {path}: it is "
+                f"unchanged against {base} ({merge_base[:12]}); remove the "
+                f"'{ACKNOWLEDGEMENT_KEY} {path}' line"
+            )
+
+    acknowledged_set = set(acknowledged)
+    for path in changed:
+        if path not in acknowledged_set:
+            violations.append(
+                f"unacknowledged frozen contract change: {path} differs from "
+                f"{base} ({merge_base[:12]}); add the line "
+                f"'{ACKNOWLEDGEMENT_KEY} {path}' to the pull request body, and "
+                "with it the owning spec/design update, every consuming "
+                "contract, and an adversarial mutation"
+            )
+
+    if violations and require_acknowledgement:
+        raise OracleError("; ".join(violations))
+
+    report = [
+        f"frozen contract acknowledgement: base {base} ({merge_base[:12]}), "
+        f"{len(changed)} of {len(contract_files)} contract files changed"
+    ]
+    for path in changed:
+        marker = "ok " if path in acknowledged_set else "NEEDS"
+        report.append(f"  {marker} {ACKNOWLEDGEMENT_KEY} {path}")
+    report.extend(f"  ISSUE {violation}" for violation in violations)
+    return report
+
+
 def validate_frozen_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
-    # A region digest cannot defend its own boundaries: contradictory prose can
-    # otherwise be inserted immediately before its start or after its end. The
-    # file snapshot is therefore the additive-contradiction gate. Narrower
-    # atom and region digests remain below to identify the owning contract when
-    # an existing clause changes. Moving a file digest is a semantic freeze
-    # change and owes the same spec, consumer, and adversarial-test review as a
-    # region-digest change.
-    for relative, expected in FROZEN_FILE_DIGESTS.items():
-        actual = frozen_digest(docs[relative])
-        if actual != expected:
-            violations.append(
-                f"frozen contract file {relative} digest mismatch: "
-                f"expected {expected}, got {actual}"
-            )
-
+    # These digests identify the owning contract when an existing clause
+    # changes. They cannot defend their own boundaries: contradictory prose
+    # inserted immediately before a region's start or after its end leaves
+    # every digest here intact. The additive-contradiction gate is the
+    # per-file acknowledgement in `validate_frozen_contract_changes`, which
+    # sees any byte that moved in any CONTRACT_FILES path. Moving a digest
+    # below is a semantic freeze change and owes the owning spec/design
+    # update, every consuming contract, and an adversarial mutation.
     for atom, expected in FROZEN_ATOM_DIGESTS.items():
         relative = (
             "spec/04-type-system.md" if atom.startswith("04-") else "spec/05-risc-primitives.md"
@@ -732,6 +1051,9 @@ def validate_normative_contract(
     spec05 = docs["spec/05-risc-primitives.md"]
     spec06 = docs["spec/06-transformations.md"]
     spec10 = docs["spec/10-serialization.md"]
+    spec11 = docs["spec/11-ffi.md"]
+    ownership_design = docs["spec/design/compiled_value_ownership.md"]
+    implicit_linearity = docs["spec/design/implicit_linearity.md"]
     captured_risc = docs["openspec/specs/risc-primitives/spec.md"]
     captured_transformations = docs["openspec/specs/transformations/spec.md"]
 
@@ -762,6 +1084,18 @@ def validate_normative_contract(
                 "`count`\nlowers once with its complete named-axis vector",
                 "Surf count multi-axis lowering",
             ),
+            (
+                "DtypeFamily   <- 'Float' / 'Int' / 'Numeric'",
+                "Surf dtype-family bound production",
+            ),
+            (
+                "A bound belongs to one binder\nlist per declaration",
+                "Surf single bound binder list",
+            ),
+            (
+                "A listed name **that declares a\nbound** must occur in the declared type.",
+                "Surf occurrence rule is bounded-binder only",
+            ),
         ),
         violations,
     )
@@ -773,6 +1107,19 @@ def validate_normative_contract(
                 "Deep literal exclusion",
             ),
             ("**Reduce:** `sum`, `count`, `max_reduce`", "Deep count builtin"),
+            (
+                "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
+                "`defsig`'s binders; see §2.2 |",
+                "Deep dtype-family bound metadata key",
+            ),
+            (
+                "MetaKey     \u2190 [A-Za-z_] [A-Za-z0-9_]*",
+                "Deep grammar derives the declared metadata key charset",
+            ),
+            (
+                "MetaValue   \u2190 Meta / Node / Literal / Identifier / TypeName",
+                "Deep grammar derives a map-valued metadata key",
+            ),
         ),
         violations,
     )
@@ -785,14 +1132,66 @@ def validate_normative_contract(
                 "backend-neutral active primitive set",
             ),
             ("nine active tensor element dtypes", "nine tensor element dtypes"),
+            (
+                "For an unconsumed local owner, the compiler inserts `Drop` at the "
+                "earliest\npost-dominating point after its last use",
+                "linearity last-use Drop placement",
+            ),
+            (
+                "Lexical scope\nexit is the fallback only when no earlier valid "
+                "terminal point can be proved",
+                "linearity scope-exit fallback",
+            ),
+            (
+                "Unifying two bounded variables SHALL\n> yield the intersection "
+                "of their families.",
+                "dtype-family bound intersection",
+            ),
+            (
+                "an empty intersection SHALL be a `PrecisionMismatch` naming both\n"
+                "> families.",
+                "empty intersection names both families",
+            ),
+            (
+                "A binder that declares no bound\n> remains an unconstrained type "
+                "variable admitting every type, not only a\n> dtype.",
+                "unbounded binder stays a general type variable",
+            ),
+            (
+                "| `Numeric` | the union of `Float` and `Int` |",
+                "dtype-family membership table",
+            ),
+            (
+                "A public stdlib signature whose `[05-OP-35]` registry domain "
+                "is exactly one of\nthese families declares that family as a bound.",
+                "stdlib bound obligation cites the registry domain",
+            ),
+        ),
+        violations,
+    )
+    require_all(
+        spec05,
+        (
+            (
+                "Source borrow syntax and primitive-DAG borrow markers\n"
+                "are erased before backend emission",
+                "primitive source-marker erasure",
+            ),
+            (
+                "The resolved disposition of every use is not erased; ownership\n"
+                "lowering first records explicit borrow, move, clone, and terminal "
+                "`Drop` obligations\nin the verified ownership representation "
+                "consumed by every backend",
+                "primitive verified ownership preservation",
+            ),
         ),
         violations,
     )
     require_all(
         spec10,
         (
-            ("Schema version 6 is explicitly\npresent", "wire v6 presence"),
-            ("the only accepted version", "wire v6 exactness"),
+            ("Schema version 7 is explicitly\npresent", "wire v7 presence"),
+            ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
             ("WireRiscOp::Count { axes }", "wire count variant"),
@@ -820,6 +1219,240 @@ def validate_normative_contract(
         violations,
     )
     require_all(
+        spec11,
+        (
+            ("compiled entry borrows every input runtime value", "FFI entry borrow"),
+            ("one owned runtime value for every owned result", "FFI owned result"),
+            (
+                "never\nreleases or mutates an input's storage",
+                "FFI input preservation",
+            ),
+            ("independently owned and may\nbe released in either order", "FFI root owners"),
+            ("governed by [05-OP-31..33]", "FFI complete C authority range"),
+        ),
+        violations,
+    )
+    require_all(
+        ownership_design,
+        (
+            (
+                "No arrow after verification may accept the pre-verification form",
+                "verified backend boundary",
+            ),
+            (
+                "only `verify_ownership` constructs\n`VerifiedOwnershipProgram`",
+                "private verification constructor",
+            ),
+            (
+                "MappedFile` is included even though no current [#1286] child "
+                "names it",
+                "closed mapped-file kind",
+            ),
+            (
+                "one total, wildcard-free ownership classification",
+                "closed host/carrier/heap classification",
+            ),
+            (
+                "Every target-representable `Option<T>`, including `Option` of a "
+                "scalar, mapped\nresource, or another `Option`",
+                "recursive Option heap classification",
+            ),
+            ("    Option,\n    MappedFile,", "Option heap kind"),
+            (
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target and `CHELIS_VALUE_STRING` |",
+                "string carrier mapping",
+            ),
+            (
+                "| tensor value or internal tensor view | `Tensor` | opaque "
+                "`chelis_tensor *` handle and `CHELIS_VALUE_TENSOR` |",
+                "tensor carrier mapping",
+            ),
+            (
+                "| `Option<T>` where `T` has a target recursive-value representation "
+                "| `Option` | opaque `chelis_option *` handle and "
+                "`CHELIS_VALUE_OPTION` |",
+                "Option carrier mapping",
+            ),
+            (
+                "| `MappedFile` resource | `MappedFile` | opaque "
+                "`chelis_mapped_file *` handle and `CHELIS_VALUE_MAPPED_FILE` |",
+                "mapped-file carrier mapping",
+            ),
+            (
+                "`CHELIS_VALUE_MAPPED_FILE` is the exact tagged representation "
+                "when that handle\nis stored in `Option`, `List`, tuple, "
+                "dictionary, or ADT",
+                "recursive mapped-file representation",
+            ),
+            (
+                "tensor storage is the sole private heap allocation with no public "
+                "tag. Every\ndirectly carried public heap kind also has the table's "
+                "exact tagged\nrepresentation for recursive aggregates",
+                "public heap tag totality",
+            ),
+            (
+                "Each identity has\nexactly one disposition: structurally nonheap, "
+                "target-rejected with an owning\ncapability issue, direct heap "
+                "carrier, tagged heap payload, or private heap\nallocation",
+                "closed target-rejection disposition",
+            ),
+            (
+                "A function\nstored in `Option`, `List`, tuple, dictionary, or ADT "
+                "is a `FirstClassValue`,\nnot a contextual callback",
+                "recursive function placement",
+            ),
+            (
+                "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
+                "`Unimplemented { issue: #879 }` after the sealed ownership "
+                "boundary certifies\nthe exact selected payload and before backend "
+                "emission",
+                "recursive function target rejection",
+            ),
+            (
+                "It is a target capability result, not a language type error, "
+                "scalar\nsubstitution, empty value, or permission to omit the type "
+                "from the registry",
+                "function rejection semantics",
+            ),
+            (
+                "`chelis_option_scalar` / `chelis_option_value` split",
+                "Option legacy-carrier deletion target",
+            ),
+            (
+                "The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries",
+                "complete C ABI authority chain",
+            ),
+            (
+                "A successful begin invalidates every previously returned read view; "
+                "dereferencing\n  such a stale view violates the caller precondition",
+                "write-begin read-view invalidation",
+            ),
+            (
+                "This phase promotes exactly twenty-three oracle rows: the five [#543]\n"
+                "aggregate-tensor rows (including the function-internal tensor-literal\n"
+                "temporary), the eight [#544] size/nesting rows, the five direct/nested\n"
+                "`Option` and mapped-file rows, and the five [#879] Metal rejection rows",
+                "Phase 1 exact ownership row map",
+            ),
+            (
+                "This phase promotes exactly six oracle rows: the [#1346] fold row, "
+                "the two\n[#1352] mixed fresh-arm rows, the two [#1356] "
+                "fresh-argument rows, and\n`recursive-depth-1-control`",
+                "Phase 2 exact ownership row map",
+            ),
+            (
+                "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
+                "ownership,\n   including `Option[MappedFile]`, nested resource "
+                "aggregates",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION`",
+                "Option omission mutation",
+            ),
+            (
+                "omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` "
+                "fixture",
+                "mapped-file omission mutation",
+            ),
+            (
+                "admit `Option[function]` or another recursive function container "
+                "without the\n  exact [#879] target rejection",
+                "function-container omission mutation",
+            ),
+            (
+                "Only the planner constructs `ReusableOwnedStorage`",
+                "private reuse proof",
+            ),
+            (
+                "C and HIP consume\nthe same proof-bearing plan",
+                "shared C and HIP reuse proof",
+            ),
+            (
+                "typed `MetalNeverReuse` plan whose input cannot carry "
+                "`ReusableOwnedStorage`",
+                "Metal typed no-reuse plan",
+            ),
+            (
+                "Metal emission with distinct storage for every produced node and "
+                "no input",
+                "Metal no-alias fixture",
+            ),
+            (
+                "let the Metal plan accept `ReusableOwnedStorage`",
+                "Metal no-reuse mutation",
+            ),
+            (
+                "scripts/compiled_value_ownership_oracle.py --phase launch",
+                "launch ownership oracle command",
+            ),
+            (
+                "COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS",
+                "launch ownership oracle success line",
+            ),
+            (
+                "The `complete --require-hip` invocation is the eventual [#1286] "
+                "class-closure\noracle. It is deliberately stronger than the "
+                "launch invocation",
+                "launch and class-closure distinction",
+            ),
+            (
+                "A support, syntax, diagnostic, or reachability observation outside\n"
+                "   this class must have an explicit external owner before phase "
+                "exit",
+                "external observation ownership",
+            ),
+            (
+                "The top-level tuple missing-`main` observation is [#545], not an "
+                "ownership-oracle row",
+                "top-level tuple external owner",
+            ),
+            (
+                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
+                "recursive-host operation support remains [#729]/[#730] capability "
+                "work",
+                "recursive support external owners",
+            ),
+            (
+                "[#1172] owns the span-key cause that can over-broaden hints; Surf "
+                "reachability is exposure evidence",
+                "reachability external owner",
+            ),
+            (
+                "Phase 1 must\n  explicitly supersede its numbered-spec citations, "
+                "`runtime_representation.md`\n  target, guards, and public-layout "
+                "promise in the same atomic change",
+                "runtime representation supersession",
+            ),
+            (
+                "[#909]/[#879]:** own shared first-class function representation "
+                "and the\n  general C-host closure ABI",
+                "function-value external owners",
+            ),
+            ("final manifest contains zero expected failures", "zero expected failures"),
+            ("`Part of #1286`", "honest issue linkage"),
+        ),
+        violations,
+    )
+    require_all(
+        implicit_linearity,
+        (
+            (
+                "The verified `OwnershipProgram` makes `RiscOp::Copy` and "
+                "`RiscOp::Drop` real\nownership operations",
+                "current Drop implementation status",
+            ),
+            (
+                "C and HIP emit the exact\ndescriptor release selected by the "
+                "verified directive; Metal consumes the same\ndirective as a typed "
+                "no-device-owner disposition",
+                "successor Drop release",
+            ),
+        ),
+        violations,
+    )
+    require_all(
         agents,
         (
             (
@@ -833,6 +1466,73 @@ def validate_normative_contract(
     spec04_blocks = atom_blocks(spec04)
     require_atom(
         spec04_blocks,
+        "04-LIN-3",
+        (
+            "exactly one logical owner",
+            "exactly one terminal consuming use or `Drop`",
+            "a borrow neither creates nor terminates an owner",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-4",
+        (
+            "owned function parameter is a consuming call edge",
+            "every return path",
+            "result owner may be the owner transferred through an owned parameter",
+            "borrowed argument or still-live capture",
+            "ordinary copy operation creates an independent owner",
+            "pointer equality, a source name, or a selected return arm",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-5",
+        (
+            "exactly one owned incoming value from every predecessor path",
+            "Fold and loop-carried owners are block parameters",
+            "Alias provenance SHALL NOT be overwritten",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-6",
+        (
+            "in manifest order",
+            "implicit terminal consuming use",
+            "participates in the same copy insertion",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-7",
+        (
+            "externally supplied entry arguments are borrowed",
+            "neither mutate nor release their storage",
+            "Before an entry value crosses an internal owned-parameter edge",
+            "compiler SHALL create an ordinary copy",
+            "independent owner for the caller",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-8",
+        (
+            "move may transfer the value to one explicit successor owner",
+            "consuming use with no successor owner",
+            "reclaimable before a following tail call or loop back-edge",
+            "proved unique",
+            "recursion depth alone is not such a reason",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
         "04-NUM-2",
         (
             "IEEE-754 round-to-nearest, ties-to-even, at the dtype's own STORAGE "
@@ -843,6 +1543,46 @@ def validate_normative_contract(
             "A pure bit-moving or selection operation preserves NaN payload bits "
             "only when its governing operation atom explicitly says it is "
             "bit-preserving",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-NUM-8",
+        (
+            "Every dtype declares a STORED REPRESENTATION and an ARITHMETIC WIDTH",
+            "Equal storage widths do not make two representations interchangeable",
+            "Every boundary and lane SHALL match the exact representation identity",
+            "No implementation may infer arithmetic width from storage width or "
+            "storage width from arithmetic width",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-NUM-11",
+        (
+            "A language binding or device descriptor SHALL preserve rank as int32 "
+            "and each extent, stride, element count, and byte capacity as int64",
+            "It SHALL carry the exact dtype tag and dynamic rank",
+            "a fixed-rank carrier, a narrower metadata field, or an element pointer "
+            "not coupled to the exact tag in the same validated descriptor is not a "
+            "conforming substitute",
+            "it SHALL NOT narrow, clamp, wrap, or fabricate metadata to make it fit",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-SHAPE-1",
+        (
+            "sound over the exact mathematical values of the complete typed extent "
+            "expressions",
+            "SHALL NOT wrap, saturate, truncate, or substitute an overflow sentinel "
+            "that can make unequal mathematical counts equal",
+            "Projection from the exact count into `int64`, `usize`, or a target "
+            "allocation-size domain SHALL be checked",
+            "a reuse decision is not exempt because no bytes have yet been touched",
         ),
         violations,
     )
@@ -865,6 +1605,14 @@ def validate_normative_contract(
     require_all(
         spec06,
         (
+            (
+                "over these) is not batched",
+                "vmap runtime extent non-batching rule",
+            ),
+            (
+                "### 8.6 `batch_varying_extent` (vmap)",
+                "vmap batch-varying extent rejection",
+            ),
             (
                 "If `A = List[T]` and `dT` is defined, then `dA = List[dT]`; the "
                 "cotangent\n  list has exactly the primal list's runtime length and "
@@ -982,6 +1730,36 @@ def validate_normative_contract(
                 "A statically known normalized value outside `0..rank` is a type\n"
                 "error (`DimensionMismatch`)",
                 "shape post-normalization rejection",
+            ),
+            (
+                "access whose shape depends on the guarded extent",
+                "runtime extent guard placement",
+            ),
+            (
+                "places guards by this rule",
+                "runtime extent guard placement in every execution mode",
+            ),
+            (
+                "and the dtype of the quantity that guard\n> finalizes",
+                "precondition guard finalized-quantity dtype",
+            ),
+            (
+                "`numeric trap: domain in <op> at int64`",
+                "runtime extent guard trap line",
+            ),
+            (
+                "Each operation has exactly one result shape. `expand` sets "
+                "the extent at\n`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`\nat `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer\nselects between shapes, and no context supplies a default.",
+                "expand and insert each have one result shape",
+            ),
+            (
+                "`insert` admits `axis` in `0..=rank(x)`, so\n`axis == rank(x)` appends a trailing axis. An axis outside its operation's\nrange is a type error.",
+                "insert axis range",
+            ),
+            (
+                "**Named-axis insert (`R+1`).** The inverse arithmetic "
+                "direction: `insert`\nadds a *named* axis",
+                "named-axis form belongs to insert",
             ),
             (
                 "| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any "
@@ -1170,7 +1948,7 @@ def validate_normative_contract(
             "zero-length axis is a type error when statically known",
             "execution-time extent is zero",
             "traps `Domain` as operation\n> `mean` at the result dtype",
-            "`expand(g / divisor, original_shape, axis)`",
+            "`insert(g / divisor, axis, original_extent)`",
             "no accumulator parameter of its own",
         ),
         "05-OP-12": (
@@ -1343,16 +2121,36 @@ def validate_normative_contract(
         ),
         "05-OP-31": (
             "exactly the ten final public C callables",
-            "typedef struct { void *data; const int64_t *shape; const int64_t "
-            "*strides; int64_t size; int64_t byte_capacity; int32_t rank; "
-            "chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } "
-            "chelis_tensor;",
+            "CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, "
+            "CHELIS_VALUE_MAPPED_FILE = 9 };",
+            "typedef struct { const void *data; int64_t count; chelis_dtype "
+            "dtype; uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { void *data; int64_t count; chelis_dtype dtype; "
+            "uint8_t reserved[7]; } chelis_write_view;",
+            "there is no by-value option carrier",
+            "exactly one of the ten constants above",
+            "that handle is exactly one [05-OP-44] owner",
+            "`chelis_tensor` is [05-OP-44]'s opaque descriptor handle and has "
+            "no public field",
             "typedef struct { chelis_value key; chelis_value value; } "
             "chelis_dict_entry;",
             "rank in `0..=INT32_MAX`",
-            "rank zero has null `shape` and `strides` pointers",
-            "positive rank has non-null pointers to exactly `rank` int64 entries",
+            "a rank-zero descriptor has no extents",
+            "exactly `rank` nonnegative int64 extents",
+            "with the rank-zero empty product equal to one",
             "There is no rank-eight limit",
+            "byte size is the checked product `count * chelis_dtype_size(dtype)`",
+            "A view with zero `count` has null `data`",
+            "A read view is valid only while an owner of its descriptor is live "
+            "and until that descriptor is passed to "
+            "`chelis_tensor_begin_write`, whichever comes first",
+            "A successful begin invalidates every read view previously returned "
+            "for that descriptor",
+            "dereferencing such a stale view violates the caller precondition",
+            "A write view is valid only while its exclusive guard is live",
+            "nothing is retained, released, or freed through a view pointer",
+            "Foreign storage enters only through [05-OP-44]'s entry borrow",
+            "through [05-OP-44]'s exclusive write guard",
             "F32=0`, `F64=1`, `I32=2`, `Bool=3`, `I64=4",
             "unused high bits are zero",
             "bool payload is exactly `0` or `1`",
@@ -1394,6 +2192,12 @@ def validate_normative_contract(
             "Equality includes the key kind and integer dtype",
             "Float keys are rejected",
             "later duplicate replaces the value",
+            "`dict_get` returns one owned [05-OP-44] option node that is `None` "
+            "only for absence",
+            "An option node renders as `None` when it owns no child and otherwise "
+            "as `Some(` followed by `R` of its child and `)`",
+            "A mapped file renders as `<mapped-file:` followed by its exact int64 "
+            "byte length in decimal digits and then `>`",
             "Recursive dictionary observation is canonical rather than "
             "insertion-ordered",
             "Recursive observation uses one byte grammar `R(value)` over every "
@@ -1416,8 +2220,15 @@ def validate_normative_contract(
             "outside AD and have no accumulator",
         ),
         "05-OP-33": (
-            "exactly the twenty-three final public C callable identities",
+            "exactly the twenty-two final public C callable identities",
             "axes and rank are `int32_t`",
+            "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
+            "handles, and every tensor result is a new owner",
+            "alignment, live-owner state, and write-guard state, before reading "
+            "data",
+            "Foreign storage enters only through [05-OP-44]'s entry borrow; no "
+            "callable in this family constructs a non-owning view, adopts caller "
+            "bytes, or frees storage",
             "extents, sizes, offsets, counts, and element counts are `int64_t`",
             "rank is nonnegative",
             "before allocation or element access",
@@ -1765,6 +2576,84 @@ def validate_normative_contract(
             "remains intact through AD and every other",
             "The operation has no accumulator",
         ),
+        "05-OP-44": (
+            "exactly the heap-handle, strong-owner, tagged-value conversion, "
+            "option-node, entry-borrow, and guarded-access callable identities",
+            "typedef struct { void *handle; } chelis_string;",
+            "typedef struct chelis_tensor chelis_tensor;",
+            "typedef struct chelis_tensor_write chelis_tensor_write;",
+            "typedef struct chelis_option chelis_option;",
+            "typedef struct chelis_mapped_file chelis_mapped_file;",
+            "The heap-kind universe is closed and exact: `String`, `Tensor`, "
+            "`TensorStorage`, `List`, `Tuple`, `Dict`, `Adt`, `Option`, and "
+            "`MappedFile`",
+            "exactly one strong-owner count, and every kind has exactly one "
+            "finalizer",
+            "`TensorStorage` is private",
+            "one retain callable, one release callable, one take conversion into a "
+            "value, one take conversion out of a value, and one borrow conversion "
+            "out of a value",
+            "no kind-generic handle, untagged payload, owner flag, or second "
+            "representation of any kind",
+            "Tensor, List, tuple, dictionary, ADT, option, and mapped-file "
+            "carriers are\n> pointers to incomplete C types",
+            "`chelis_string` is the one fixed by-value\n> wrapper",
+            "A live handle is one logical owner under [04-LIN-3]",
+            "Retain creates one additional owner by a checked relaxed increment",
+            "exceed the representable owner range traps `Overflow`",
+            "the final release synchronizes with release/acquire ordering before "
+            "running the kind's finalizer exactly once",
+            "live handle whose kind disagrees with the callable or with\n> the "
+            "value tag, traps `Domain`",
+            "Reusing its stale pointer afterward violates the live-handle\n> "
+            "precondition",
+            "does not\n> promise a diagnostic or retain a tombstone",
+            "there is no non-owning value",
+            "`chelis_value_clone` creates one additional owner for a heap tag",
+            "A take conversion out of a value moves the value's owner to the "
+            "returned handle and ends the value",
+            "A borrow conversion out of a value returns the handle without "
+            "creating or consuming an owner",
+            "A constructor clones each borrowed child exactly once",
+            "a finalizer releases each stored child exactly once",
+            "no value contains itself and no heap graph has a cycle",
+            "`chelis_option_none` owns no child and `chelis_option_some` owns "
+            "exactly one tagged child",
+            "`chelis_option_unwrap` of a `None` node traps `Domain`",
+            "There is no by-value, discriminant-plus-payload, or scalar-special "
+            "option carrier",
+            "`CHELIS_VALUE_MAPPED_FILE` is its only tagged representation",
+            "A tensor handle is a descriptor that retains exactly one storage "
+            "allocation for its whole lifetime",
+            "`chelis_tensor_retain` and `chelis_tensor_release` are the only "
+            "public tensor lifetime operations",
+            "`chelis_tensor_begin_write` succeeds only when the descriptor has "
+            "exactly one live owner, its storage has exactly one live descriptor, "
+            "the storage is runtime-owned, and no guard is active on it",
+            "non-owning guard embedded in that descriptor",
+            "A successful begin invalidates\n> every read view previously returned "
+            "for that descriptor before it activates\n> the guard",
+            "Dereferencing one afterward violates the caller precondition; the\n> "
+            "runtime does not promise to diagnose that stale pointer",
+            "The guard borrows,\n> but neither consumes nor clones, the descriptor's "
+            "existing owner for the\n> guard lifetime; it allocates no guard object",
+            "Every other begin,\n> read view, retain, clone, or release of that "
+            "descriptor traps `Domain` until\n> `chelis_tensor_end_write` consumes "
+            "and deactivates the guard without freeing\n> an allocation or consuming "
+            "the descriptor owner",
+            "`chelis_tensor_write_view` borrows its `const` guard",
+            "a compiler's reuse proof never replaces them",
+            "An entry borrow, following [04-LIN-7], is a descriptor over storage "
+            "the caller owns",
+            "produces storage that is never runtime-owned",
+            "`chelis_tensor_begin_write` on it traps `Domain`",
+            "no address comparison, retain count, or later invocation makes that "
+            "storage runtime-owned",
+            "cannot prove a foreign allocation's lifetime or physical size",
+            "no alias, wrapper, deprecated spelling, field-level access, owner "
+            "flag, or free-style path",
+            "no accumulator and is outside AD",
+        ),
         "05-RNG-1": (
             "Every conforming evaluation of a `with seed(N)` program produces "
             "byte-identical random results",
@@ -1849,6 +2738,56 @@ def validate_normative_contract(
     require_all(
         spec05,
         (
+            ("`InputAxis(t, a)`", "folded tensor-axis extent carrier"),
+            (
+                "`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`",
+                "runtime extent owner admission",
+            ),
+            (
+                "well formed only when the start\n  paired with it is `Lit(0)`",
+                "ToEnd shrink end requires a zero start",
+            ),
+            (
+                "`expand` sets the extent at `axis` and is well formed only "
+                "when the operand's\nextent at `axis` is 1",
+                "expand requires a unit source extent",
+            ),
+            (
+                "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
+                "\n> new-axis position SHALL be",
+                "axis atom names both movement primitives",
+            ),
+            (
+                "names the\n> dimension it creates, which is by construction not a dimension of the\n> operand; that name SHALL be statically resolvable in the same sense",
+                "insert names a dimension absent from the operand",
+            ),
+            (
+                "> `insert(g / divisor, axis, original_extent)` at the "
+                "operand dtype.",
+                "mean adjoint reinserts the reduced axis",
+            ),
+            (
+                "[05-AXIS-1] governs the reduction, `expand`, and `insert`\n> family",
+                "C axis family names both movement primitives",
+            ),
+            (
+                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "tensor[D_plus,p]` | Insert a new dimension of width `size` "
+                "at position `axis`, producing rank `rank(x) + 1`.",
+                "insert movement row",
+            ),
+            (
+                "A literal operand extent at\n`axis` other than 1 is a type error. A symbolic or runtime operand extent at\n`axis` other than 1 fails that claim's runtime extent guard and traps\n`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and\n[04-NUM-9].",
+                "expand non-unit source extent is rejected or traps",
+            ),
+            (
+                "| `expand` | `insert(sum(g, axis), axis, 1i64)`",
+                "expand adjoint restores the unit axis",
+            ),
+            (
+                "| `insert` | `sum(g, axis)`",
+                "insert adjoint collapses the inserted axis",
+            ),
             (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "
                 "`and(not(nan), cmplt(a, b))` |",
@@ -2012,6 +2951,8 @@ def validate_schema_and_consumers(
     loud = docs["spec/design/loud_unsupported.md"]
     provenance = docs["spec/design/spec_provenance.md"]
     roadmap = docs["spec/design/remediation_roadmap.md"]
+    runtime_extents = docs["spec/design/runtime_extents.md"]
+    runtime = docs["spec/design/runtime_representation.md"]
     surface = docs["docs/CHELIS_SURFACE.md"]
     status = docs["docs/investigations/remediation_status_2026_08_04.md"]
 
@@ -2020,6 +2961,85 @@ def validate_schema_and_consumers(
         (
             ("introduces `IO`", "surface IO spelling"),
             ("| `IO` | file ops", "surface IO spelling"),
+            (
+                "dedicated `RiscOp::Relu`; forward equals stored-bit "
+                "`max_elem(x, 0)`",
+                "surface dedicated ReLU identity",
+            ),
+            (
+                "`g` only where `0 < x`; exact +0 at both zeros and NaN",
+                "surface ReLU adjoint",
+            ),
+        ),
+        violations,
+    )
+
+    require_all(
+        runtime,
+        (
+            (
+                "Division is a partial exact-integer operation, not rational arithmetic",
+                "runtime capacity validity domain",
+            ),
+            (
+                "`n / n` and `1`, and `0 / n` and `0` have\n"
+                "distinct keys absent such a proof",
+                "runtime capacity division red controls",
+            ),
+            (
+                "`0 * (1 / n)` retains the partial quotient and remains distinct "
+                "from zero\nunless `n != 0` and `n` divides 1 have both been proved",
+                "runtime zero-product validity domain",
+            ),
+            (
+                "`CapacityKey` is deliberately carrier-independent",
+                "runtime capacity carrier independence",
+            ),
+            (
+                "The set is deliberately closed against equality learned only by "
+                "passing a\n[#1277] runtime guard",
+                "runtime guard capacity boundary",
+            ),
+            (
+                "exact shrink-only transition-debt\nmanifest",
+                "runtime Phase 0 shrink-only debt",
+            ),
+            (
+                "A foreign carrier never constructs `TensorRef<T>`, `TensorMut<T>`, "
+                "`&[T]`, or\n`&mut [T]`",
+                "runtime foreign slice prohibition",
+            ),
+            (
+                "[#899] closes in this phase, not Phase 1",
+                "runtime representation consumer-complete exit",
+            ),
+            (
+                "consumers complete C1's consumer-exclusivity condition in Phase "
+                "4; their exact\nfrozen debt cannot grow before then",
+                "runtime C1 phase boundary",
+            ),
+            (
+                "--receipt-dir runtime-representation-receipts",
+                "runtime distributed exact-head receipts",
+            ),
+            (
+                "section-B blocker exit uses the Phase 1\nhost-capacity evidence, "
+                "the Phase 3 `--host` field-seal evidence, and the landed\n"
+                "[#1289]/[#1347] receipts",
+                "runtime launch-gate boundary",
+            ),
+        ),
+        violations,
+    )
+
+    require_all(
+        runtime_extents,
+        (
+            (
+                "capacity and reuse equality\nover typed extent expressions\n"
+                "([`runtime_representation.md`](runtime_representation.md), [#888])",
+                "runtime extent capacity boundary",
+            ),
         ),
         violations,
     )
@@ -2047,6 +3067,20 @@ def validate_schema_and_consumers(
             (
                 "`eval | c-host | c-dag | hip | metal`",
                 "exact backend product",
+            ),
+            (
+                "HIP code generation implements all four widths (raw stored-bit "
+                "predicates for f16/bf16)",
+                "ReLU HIP completion receipt",
+            ),
+            (
+                "Metal f64 remains the deliberate target rejection, not an "
+                "unimplemented ReLU cell",
+                "ReLU Metal target boundary",
+            ),
+            (
+                "No backend cell cites [#1313] after it closes",
+                "ReLU closed-issue receipt removal",
             ),
             (
                 "(`BuiltinId`, `SiblingDomain`, `SiblingCaseId`, `SemanticParams`)",
@@ -2202,6 +3236,22 @@ def validate_schema_and_consumers(
             ),
             (PASS_LINE, "Phase 4B oracle success line"),
             (
+                "The additive-contradiction leg is an acknowledgement, not a "
+                "whole-file digest.",
+                "Phase 4B acknowledgement gate replaces whole-file digests",
+            ),
+            (
+                "requires each changed file to be named in the pull request "
+                "body",
+                "Phase 4B acknowledgement is per changed file",
+            ),
+            (
+                "An unacknowledged\nchange and an acknowledgement naming an "
+                "unchanged file both fail\n`--require-acknowledgement`, which "
+                "is the mode CI runs on a pull request.",
+                "Phase 4B acknowledgement enforcing mode",
+            ),
+            (
                 ".venv/bin/python scripts/dtype_count_oracle.py",
                 "Count child oracle command",
             ),
@@ -2209,6 +3259,15 @@ def validate_schema_and_consumers(
             (
                 "checker grammar, dedicated non-alias\n`Count` IR",
                 "Count child oracle ownership",
+            ),
+            (
+                ".venv/bin/python\nscripts/dtype_relu_oracle.py",
+                "ReLU child oracle command",
+            ),
+            ("DTYPE RELU ORACLE:\nPASS", "ReLU child oracle success line"),
+            (
+                "f16/bf16/f32/f64 raw-bit inputs and outputs",
+                "ReLU HIP execution width matrix",
             ),
             (
                 "(ExternalCallableFamily, CanonicalCallableId, "
@@ -2439,6 +3498,20 @@ def validate_schema_and_consumers(
     require_all(
         roadmap,
         (
+            (
+                "[`runtime_representation.md`](runtime_representation.md) ([#893])",
+                "runtime representation owner",
+            ),
+            (
+                "Its current children are [#899], [#889], [#1289], [#1345], "
+                "[#1360], and [#1364]",
+                "runtime representation child graph",
+            ),
+            (
+                "[#888] is an explicitly linked Phase 1 interlock and [#1347] a "
+                "landed zero-extent receipt",
+                "runtime representation interlocks",
+            ),
             ("[#1290] replaces noncanonical product/sum trees", "roadmap product owner"),
             ("[#1281] owns the remaining reduction rows", "roadmap reduction owner"),
             ("Phase 4B froze semantics", "roadmap Phase 4B boundary"),
@@ -2466,6 +3539,16 @@ def validate_schema_and_consumers(
             ),
             ("first-class `count` [05-OP-29]", "roadmap count contract"),
             ("zero-exception census ([#1288])", "roadmap census prerequisite"),
+            (
+                "[#1286]'s verified compiled ownership and opaque unified-heap ABI "
+                "through [#1362]'s C-lane `--phase launch` oracle",
+                "roadmap launch ownership gate",
+            ),
+            (
+                "full [#1286] class closure, including HIP and non-launch children, "
+                "remains tracker work and does not gate v0.19",
+                "roadmap full ownership boundary",
+            ),
             ("WireDag v6 exact-only break", "roadmap wire v6 break"),
             (
                 "[#1295] owns all-active-float rounding/random parameter contracts "
@@ -2603,6 +3686,12 @@ def validate_contract(root: Path = REPO_ROOT) -> None:
 
 
 def run_oracle(python: str = sys.executable, root: Path = REPO_ROOT) -> None:
+    """Run the content leg: the normative, schema, and digest contracts.
+
+    `main` runs the acknowledgement leg before this one, so the success line is
+    never reached with an unacknowledged frozen contract change.
+    """
+
     try:
         validate_contract(root)
         subprocess.run(
@@ -2620,5 +3709,112 @@ def run_oracle(python: str = sys.executable, root: Path = REPO_ROOT) -> None:
     print(PASS_LINE)
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "chelis#729 Phase 4B freeze oracle. Validates the normative "
+            "contract and checks that every changed frozen contract file is "
+            "acknowledged by name."
+        )
+    )
+    parser.add_argument(
+        "--base",
+        default=DEFAULT_BASE_REF,
+        help=(
+            "base ref for the frozen contract diff (default: "
+            f"{DEFAULT_BASE_REF}). The comparison point is the merge base of "
+            "this ref and HEAD, so a change already on the base branch is "
+            "never reported as this branch's."
+        ),
+    )
+    parser.add_argument(
+        "--acknowledge",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "acknowledge one changed contract file by repo-relative path; "
+            "repeatable. The local equivalent of a pull request body line."
+        ),
+    )
+    parser.add_argument(
+        "--acknowledgements-file",
+        metavar="FILE",
+        help=(
+            "read acknowledgement lines from FILE (a saved pull request body). "
+            f"'-' reads stdin. Each line is '{ACKNOWLEDGEMENT_KEY} <path>'."
+        ),
+    )
+    parser.add_argument(
+        "--acknowledgements-env",
+        metavar="NAME",
+        help=(
+            "read acknowledgement lines from the environment variable NAME. "
+            "CI uses this so an untrusted pull request body never reaches a "
+            "shell command line."
+        ),
+    )
+    parser.add_argument(
+        "--require-acknowledgement",
+        action="store_true",
+        help=(
+            "fail on an unacknowledged contract change, a stale or malformed "
+            "acknowledgement, or an unresolvable merge base. CI passes this on "
+            "pull request events; without it the acknowledgement leg reports "
+            "and exits 0."
+        ),
+    )
+    return parser
+
+
+def acknowledgement_body(args: argparse.Namespace) -> str | None:
+    """Return the acknowledgement document named by the parsed arguments."""
+
+    sources = [args.acknowledgements_file, args.acknowledgements_env]
+    if all(source is None for source in sources):
+        return None
+    if all(source is not None for source in sources):
+        raise SystemExit(
+            "DTYPE PHASE 4B ORACLE: FAIL: pass at most one of "
+            "--acknowledgements-file and --acknowledgements-env"
+        )
+    if args.acknowledgements_env is not None:
+        name = args.acknowledgements_env
+        if name not in os.environ:
+            raise SystemExit(
+                "DTYPE PHASE 4B ORACLE: FAIL: acknowledgement environment "
+                f"variable {name} is not set"
+            )
+        return os.environ[name]
+    if args.acknowledgements_file == "-":
+        return sys.stdin.read()
+    try:
+        return Path(args.acknowledgements_file).read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(
+            "DTYPE PHASE 4B ORACLE: FAIL: cannot read acknowledgements file "
+            f"{args.acknowledgements_file}: {error}"
+        ) from error
+
+
+def main(argv: list[str] | None = None, root: Path = REPO_ROOT) -> None:
+    args = build_parser().parse_args(argv)
+    body = acknowledgement_body(args)
+    try:
+        report = validate_frozen_contract_changes(
+            root=root,
+            base=args.base,
+            acknowledgements=tuple(args.acknowledge),
+            body=body,
+            require_acknowledgement=args.require_acknowledgement,
+        )
+    except OracleError as error:
+        raise SystemExit(f"DTYPE PHASE 4B ORACLE: FAIL: {error}") from error
+    for line in report:
+        print(line)
+    sys.stdout.flush()
+    run_oracle(sys.executable, root)
+
+
 if __name__ == "__main__":
-    run_oracle()
+    main()

@@ -8,7 +8,8 @@
 //!
 //! This module does NOT modify `enum Effect` or the mechanized `EffectRow`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use chelis_unord::UnordSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::{
     DeepTag,
@@ -38,10 +39,10 @@ pub fn infer_realizability(program: &CheckedProgram, target_prims: &[Prim]) -> R
     let type_env = program.type_env();
 
     // Collect top-level def names and their bodies.
-    let mut def_bodies: HashMap<String, &Expr> = HashMap::new();
-    let mut declared_types: HashMap<String, &Expr> = HashMap::new();
+    let mut def_bodies: BTreeMap<String, &Expr> = BTreeMap::new();
+    let mut declared_types: BTreeMap<String, &Expr> = BTreeMap::new();
     let mut def_order: Vec<String> = Vec::new();
-    let mut function_defs = HashSet::new();
+    let mut function_defs = BTreeSet::new();
     for expr in exprs {
         collect_top_level_defs(
             expr,
@@ -54,9 +55,9 @@ pub fn infer_realizability(program: &CheckedProgram, target_prims: &[Prim]) -> R
     }
 
     // Fixed-point: iterate until stable.
-    let mut lane_by_def: HashMap<String, Lane> = HashMap::new();
-    let mut reasons_by_def: HashMap<String, Vec<HostReason>> = HashMap::new();
-    let mut required_inputs_by_def: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+    let mut reasons_by_def: BTreeMap<String, Vec<HostReason>> = BTreeMap::new();
+    let mut required_inputs_by_def: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     // Initialize all defs as Tensor.
     for name in &def_order {
@@ -70,7 +71,7 @@ pub fn infer_realizability(program: &CheckedProgram, target_prims: &[Prim]) -> R
     // input; another root which references `x` inherits that input. Function
     // parameters are absent from this top-level set and therefore never leak
     // into a caller under their declaration-local names.
-    let top_level_names = def_order.iter().cloned().collect::<HashSet<_>>();
+    let top_level_names = def_order.iter().cloned().collect::<BTreeSet<_>>();
     let parameter_names_by_def = program
         .signature_inference()
         .functions
@@ -82,18 +83,18 @@ pub fn infer_realizability(program: &CheckedProgram, target_prims: &[Prim]) -> R
                     .params
                     .iter()
                     .map(|param| param.name.clone())
-                    .collect::<HashSet<_>>(),
+                    .collect::<BTreeSet<_>>(),
             )
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     let nullary_function_defs = program
         .signature_inference()
         .functions
         .iter()
         .filter(|(_, function)| function.params.is_empty())
         .map(|(name, _)| name.clone())
-        .collect::<HashSet<_>>();
-    let mut dependencies_by_def = HashMap::<String, BTreeSet<String>>::new();
+        .collect::<BTreeSet<_>>();
+    let mut dependencies_by_def = BTreeMap::<String, BTreeSet<String>>::new();
     for name in &def_order {
         let mut dependencies = BTreeSet::new();
         let mut references_self = false;
@@ -128,7 +129,7 @@ pub fn infer_realizability(program: &CheckedProgram, target_prims: &[Prim]) -> R
 
     // Def-level precision check: if the def's declared type has a prim
     // NOT in target_prims, it must route Host.
-    let target_set: HashSet<Prim> = target_prims.iter().copied().collect();
+    let target_set: UnordSet<Prim> = target_prims.iter().copied().collect();
     for name in &def_order {
         // Nullary arrow-form defs are observation thunks, not DAG value
         // bindings. Their applied value is produced by the host evaluator;
@@ -260,11 +261,11 @@ pub fn infer_realizability(program: &CheckedProgram, target_prims: &[Prim]) -> R
 /// realizability maps disagree.
 fn collect_top_level_defs<'a>(
     expr: &'a Expr,
-    type_env: &'a HashMap<String, Expr>,
-    def_bodies: &mut HashMap<String, &'a Expr>,
-    declared_types: &mut HashMap<String, &'a Expr>,
+    type_env: &'a BTreeMap<String, Expr>,
+    def_bodies: &mut BTreeMap<String, &'a Expr>,
+    declared_types: &mut BTreeMap<String, &'a Expr>,
     def_order: &mut Vec<String>,
-    function_defs: &mut HashSet<String>,
+    function_defs: &mut BTreeSet<String>,
 ) {
     let Some((tag, children)) = tagged_children(expr) else {
         return;
@@ -309,9 +310,9 @@ fn collect_top_level_defs<'a>(
 
 fn expr_needs_host(
     expr: &Expr,
-    lane_by_def: &HashMap<String, Lane>,
-    target_prims: &HashSet<Prim>,
-    type_env: &HashMap<String, Expr>,
+    lane_by_def: &BTreeMap<String, Lane>,
+    target_prims: &UnordSet<Prim>,
+    type_env: &BTreeMap<String, Expr>,
     reasons: &mut Vec<HostReason>,
     inputs: &mut BTreeSet<String>,
 ) -> bool {
@@ -373,9 +374,9 @@ fn expr_needs_host(
 
 fn list_needs_host(
     list: &List,
-    lane_by_def: &HashMap<String, Lane>,
-    target_prims: &HashSet<Prim>,
-    type_env: &HashMap<String, Expr>,
+    lane_by_def: &BTreeMap<String, Lane>,
+    target_prims: &UnordSet<Prim>,
+    type_env: &BTreeMap<String, Expr>,
     reasons: &mut Vec<HostReason>,
     inputs: &mut BTreeSet<String>,
 ) -> bool {
@@ -408,9 +409,9 @@ fn list_needs_host(
 }
 
 struct LaneWalkContext<'a> {
-    lane_by_def: &'a HashMap<String, Lane>,
-    target_prims: &'a HashSet<Prim>,
-    type_env: &'a HashMap<String, Expr>,
+    lane_by_def: &'a BTreeMap<String, Lane>,
+    target_prims: &'a UnordSet<Prim>,
+    type_env: &'a BTreeMap<String, Expr>,
 }
 
 fn tagged_needs_host(
@@ -567,8 +568,8 @@ fn tagged_meta(expr: &Expr) -> Option<&MetaMap> {
 fn collect_top_level_dependencies(
     expr: &Expr,
     current_def: &str,
-    top_level_names: &HashSet<String>,
-    initial_bound: &HashSet<String>,
+    top_level_names: &BTreeSet<String>,
+    initial_bound: &BTreeSet<String>,
     dependencies: &mut BTreeSet<String>,
     references_self: &mut bool,
 ) {
@@ -588,14 +589,14 @@ fn collect_top_level_dependencies(
 /// abstract manifest excludes declaration-local parameters, while a concrete
 /// selected call must recover exactly the live tensor parameters before it can
 /// become an owed root.
-pub fn referenced_runtime_inputs(body: &Expr, candidates: &HashSet<String>) -> BTreeSet<String> {
+pub fn referenced_runtime_inputs(body: &Expr, candidates: &BTreeSet<String>) -> BTreeSet<String> {
     let mut inputs = BTreeSet::new();
     let mut references_self = false;
     collect_top_level_dependencies(
         body,
         "",
         candidates,
-        &HashSet::new(),
+        &BTreeSet::new(),
         &mut inputs,
         &mut references_self,
     );
@@ -605,8 +606,8 @@ pub fn referenced_runtime_inputs(body: &Expr, candidates: &HashSet<String>) -> B
 fn collect_top_level_dependencies_scoped(
     expr: &Expr,
     current_def: &str,
-    top_level_names: &HashSet<String>,
-    bound: &mut Vec<HashSet<String>>,
+    top_level_names: &BTreeSet<String>,
+    bound: &mut Vec<BTreeSet<String>>,
     dependencies: &mut BTreeSet<String>,
     references_self: &mut bool,
 ) {
@@ -642,7 +643,7 @@ fn collect_top_level_dependencies_scoped(
                 if children.len() < 2 {
                     return;
                 }
-                let mut let_scope = HashSet::new();
+                let mut let_scope = BTreeSet::new();
                 if let Some((DeepTag::Bind, bindings)) = tagged_children(&children[0]) {
                     let mut index = 0;
                     while index + 1 < bindings.len() {
@@ -688,7 +689,7 @@ fn collect_top_level_dependencies_scoped(
                     let Some((pattern, scoped_children)) = arm_children.split_first() else {
                         continue;
                     };
-                    let mut arm_scope = HashSet::new();
+                    let mut arm_scope = BTreeSet::new();
                     dependency_binding_names(pattern, &mut arm_scope);
                     bound.push(arm_scope);
                     for child in scoped_children {
@@ -757,9 +758,9 @@ fn collect_top_level_dependencies_scoped(
     }
 }
 
-fn dependency_param_names(params_expr: &Expr) -> HashSet<String> {
+fn dependency_param_names(params_expr: &Expr) -> BTreeSet<String> {
     let Some((DeepTag::Params, params)) = tagged_children(params_expr) else {
-        return HashSet::new();
+        return BTreeSet::new();
     };
     params.iter().filter_map(dependency_param_name).collect()
 }
@@ -784,7 +785,7 @@ fn dependency_param_name(param: &Expr) -> Option<String> {
     }
 }
 
-fn dependency_binding_names(expr: &Expr, names: &mut HashSet<String>) {
+fn dependency_binding_names(expr: &Expr, names: &mut BTreeSet<String>) {
     if let Some(name) = symbol_name(expr) {
         names.insert(name.to_string());
         return;
@@ -962,7 +963,7 @@ pub fn compute_root_manifest(
 
 fn collect_manifest_entries(
     expr: &Expr,
-    type_env: &HashMap<String, Expr>,
+    type_env: &BTreeMap<String, Expr>,
     adt_registry: &chelis_types::adt::AdtRegistry,
     effects_by_def: &BTreeMap<String, chelis_types::types::EffectSet>,
     realizability: &RealizabilityResult,
@@ -1394,7 +1395,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            &HashSet::new(),
+            &BTreeSet::new(),
             &mut dependencies,
             &mut references_self,
         );
@@ -1447,7 +1448,7 @@ mod tests {
             .params
             .iter()
             .map(|param| param.name.clone())
-            .collect::<HashSet<_>>();
+            .collect::<BTreeSet<_>>();
         assert_eq!(
             square_params,
             ["value".to_string()].into_iter().collect(),
@@ -1563,9 +1564,9 @@ mod tests {
             ],
             span,
         );
-        let lane_by_def = HashMap::new();
+        let lane_by_def = BTreeMap::new();
         let target = EVAL_PRIMS.iter().copied().collect();
-        let type_env = HashMap::from([("library_add".to_string(), external_type)]);
+        let type_env = BTreeMap::from([("library_add".to_string(), external_type)]);
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
 
@@ -1657,7 +1658,7 @@ mod tests {
             vec![Expr::Atom(Atom::Name("int32".to_string()), span)],
             span,
         );
-        let type_env = HashMap::from([("answer".to_string(), ty)]);
+        let type_env = BTreeMap::from([("answer".to_string(), ty)]);
         let realizability = RealizabilityResult {
             lane_by_def: BTreeMap::from([("answer".to_string(), Lane::Tensor)]),
             required_inputs_by_def: BTreeMap::new(),
@@ -1857,9 +1858,9 @@ mod tests {
     #[test]
     fn bare_list_routes_host_fail_closed() {
         let expr = Expr::BareList(vec![], chelis_deep::Span::new(0, 0));
-        let lane_by_def: HashMap<String, Lane> = HashMap::new();
-        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: HashMap<String, Expr> = HashMap::new();
+        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
         let needs_host = expr_needs_host(
@@ -1889,9 +1890,9 @@ mod tests {
             children: vec![],
             span: chelis_deep::Span::new(0, 0),
         }));
-        let lane_by_def: HashMap<String, Lane> = HashMap::new();
-        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: HashMap<String, Expr> = HashMap::new();
+        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
         let needs_host = expr_needs_host(
@@ -1918,9 +1919,9 @@ mod tests {
             elements: vec![Expr::Atom(Atom::Int(0), chelis_deep::Span::new(0, 0))],
         };
         let expr = Expr::List(list, chelis_deep::Span::new(0, 0));
-        let lane_by_def: HashMap<String, Lane> = HashMap::new();
-        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: HashMap<String, Expr> = HashMap::new();
+        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
         let needs_host = expr_needs_host(
@@ -1941,9 +1942,9 @@ mod tests {
     #[test]
     fn empty_legacy_list_routes_host_fail_closed() {
         let expr = Expr::List(List { elements: vec![] }, chelis_deep::Span::new(0, 0));
-        let lane_by_def: HashMap<String, Lane> = HashMap::new();
-        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: HashMap<String, Expr> = HashMap::new();
+        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
 
@@ -1972,9 +1973,9 @@ mod tests {
             },
             span,
         );
-        let lane_by_def: HashMap<String, Lane> = HashMap::new();
-        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: HashMap<String, Expr> = HashMap::new();
+        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
 
@@ -2008,9 +2009,9 @@ mod tests {
             span,
         );
         let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![record], span);
-        let lane_by_def: HashMap<String, Lane> = HashMap::new();
-        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: HashMap<String, Expr> = HashMap::new();
+        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
 
@@ -2043,9 +2044,9 @@ mod tests {
             span,
         );
         let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![literal], span);
-        let lane_by_def: HashMap<String, Lane> = HashMap::new();
-        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: HashMap<String, Expr> = HashMap::new();
+        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
+        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
         let mut reasons = Vec::new();
         let mut inputs = BTreeSet::new();
 
@@ -2068,7 +2069,7 @@ mod tests {
     #[test]
     fn compute_root_manifest_records_tensor_lane_not_just_host_default() {
         let checked =
-            check_program_from_source("x = expand(scalar_to_tensor(cast(1.0, f32)), 0, 1i64)\n");
+            check_program_from_source("x = insert(scalar_to_tensor(cast(1.0, f32)), 0, 1i64)\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         let x = manifest

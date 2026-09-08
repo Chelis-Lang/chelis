@@ -36,6 +36,7 @@ portable across Surf and Reef boundaries.
 | `type` | type-expr node | Type annotation (checked, not trusted) |
 | `loc` | `(loc file line col)` | Source location for error reporting |
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
+| `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig`'s binders; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
 | `span` | string | External-source span identifier (see §1.1.1) |
@@ -287,6 +288,27 @@ records whose bodies remain in the supplying artifact. Those records are not
 an authored check unit, use the linker's reserved-name/provenance channel, and
 cannot be produced by source-level `defsig` syntax.
 
+A `defsig` may carry `dtype_bounds` metadata restricting its implicitly
+bound type variables to a dtype family (`spec/04-type-system.md` §5.9
+[04-DTYPE-2]):
+
+```lisp
+(defsig {dtype_bounds: {p: int}} arange
+  (t-fn {} (t-var {} p) (t-var {} p)
+    (t-tensor {} (d-var {} n) (t-var {} p))))
+```
+
+The value is a metadata map whose keys are binder names and whose values
+are the family names `float`, `int`, and `numeric`, spelled lowercase as
+effect names are. A key naming a variable the declaration does not bind, a
+key naming a `d-var` or `d-rank`, an unknown family name, and a value that
+is not a family name are each type-resolution errors. Bounds ride in
+metadata for the same reason an opaque invariant does: a `defsig` *child*
+node would change its fixed two-child shape and grow the closed tag
+vocabulary. A `def` does not carry this key: the declaration's signature
+owns its binders, so `dtype_bounds` on a `def` is a declaration error
+whose diagnostic names the signature.
+
 `deftype` may carry `opaque: true` metadata:
 
 ```lisp
@@ -375,7 +397,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
-| `t-adt` | `(t-adt {} Name type-arg...)` | ADT type application |
+| `t-adt` | `(t-adt {} Name nominal-arg...)` | ADT/type-alias application; each argument is a type expression or a non-rank dimension expression according to the target header |
 | `t-var` | `(t-var {} name)` | Type variable |
 | `t-unit` | `(t-unit {})` | Unit type |
 | `t-tuple` | `(t-tuple {} type₁ type₂ ...)` | Tuple type |
@@ -389,9 +411,15 @@ environment or a cached compiler context. Resolution is fail-closed:
   explicitly-reserved primitive vocabulary owned by `spec/04-type-system.md`
   §1.1. An unknown primitive name is a type error, not an inference hole.
 - `t-adt` has a symbol head naming a precollected `deftype` or `typealias`
-  header and exactly that header's declared number of type arguments. Headers
-  are collected before bodies are resolved, so self-recursive and forward
-  nominal references are legal; unknown names and wrong arities are errors.
+  header and exactly that header's declared number of nominal arguments.
+  A type-kinded slot contains a type expression. A dimension-kinded slot
+  contains `d-name`, `d-var`, or `d-lit`; `d-rank` is not a nominal argument.
+  A `t-var` emitted for a symbolic Surf argument is resolved as a dimension
+  variable only when the target header gives that slot dimension kind. Header
+  kinds are collected before bodies are resolved under [04-ADT-3], so
+  self-recursive, mutually recursive, alias-mediated, and forward nominal
+  references are legal; unknown names, wrong arities, and wrong argument kinds
+  are errors.
   The precollected header environment remains in scope for the entire check unit,
   including annotations in declaration bodies. A rejected declaration body is
   not installed in the reusable ADT/alias registry, but its already-declared
@@ -405,12 +433,18 @@ environment or a cached compiler context. Resolution is fail-closed:
   explicitly admits holes; it is not a way to leave a declaration field or
   alias body unresolved.
 - A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
-  first occurrence and reuses that binding throughout the signature. A
-  `deftype` or `typealias` binds only names in its explicit parameter list;
-  an undeclared variable name is an error. Surf declaration desugaring is
-  scope-aware: a declared parameter becomes the corresponding variable form
-  at a type/dimension/rank use site, while an unlisted symbolic tensor axis is
-  emitted as `d-name` rather than inventing an implicit declaration binder.
+  first occurrence and reuses that binding throughout the signature. Its
+  `dtype_bounds` metadata attaches a dtype family to a named `t-var` binder;
+  the bound restricts every occurrence of that name, and a bounded name used
+  in a dimension or rank position is an error. A
+  `deftype` or `typealias` binds only names in its explicit parameter list and
+  assigns each one exactly one header kind, `Type` or single `Dimension`, under
+  [04-ADT-3]; a declaration parameter cannot bind a `d-rank` spread. An
+  undeclared variable name, a rank use, or conflicting type/dimension uses are
+  errors. Surf declaration desugaring is scope-aware: a declared parameter
+  becomes the variable form selected by that fixed header kind, while an
+  unlisted symbolic tensor axis is emitted as `d-name` rather than inventing
+  an implicit declaration binder.
 - `t-fn` has at least one child (the last is its return type), `t-ref` has
   exactly one child, `t-tensor` has at least one child (the last is a
   primitive or bound type-variable precision), `t-unit` has no children, and
@@ -513,7 +547,7 @@ The irreducible computational basis. All tensor computation decomposes to these 
 **Elementwise:** `add`, `mul`, `exp`, `log`, `sin`, `sqrt`, `cmplt`, `max_elem`
 **Reduce:** `sum`, `count`, `max_reduce` (over one-or-more positional or
 one-or-more named axes, never a mixture)
-**Movement:** `reshape`, `permute`, `expand`, `pad`, `shrink`, `stride`
+**Movement:** `reshape`, `permute`, `expand`, `insert`, `pad`, `shrink`, `stride`
 **Memory:** `const`, `load`
 
 ### 3.2 Derived Functions
@@ -570,7 +604,7 @@ All operators desugar to `(app {} (var {} op) ...)`. No infix operators in Deep.
 ;; a + b
 (app {} (var {} add) (var {} a) (var {} b))
 
-;; a - b (sub is a derived built-in, lowered to add(a, neg(b)) at IR level)
+;; a - b (sub remains a direct Tier-1 RISC identity after lowering)
 (app {} (var {} sub) (var {} a) (var {} b))
 ```
 
@@ -851,8 +885,8 @@ Node        ← '(' Spacing Tag Spacing Meta Spacing Children ')' Spacing
 Tag         ← [a-z] [a-z0-9-]*                    # lowercase, hyphens allowed (pat-var, t-fn, etc.)
 Meta        ← '{' Spacing (MetaPair (',' Spacing MetaPair)*)? '}'
 MetaPair    ← MetaKey ':' Spacing MetaValue
-MetaKey     ← [a-z]+
-MetaValue   ← Node / Literal / Identifier / TypeName
+MetaKey     ← [A-Za-z_] [A-Za-z0-9_]*              # §1.1's declared charset
+MetaValue   ← Meta / Node / Literal / Identifier / TypeName
 Children    ← (Child Spacing)*
 Child       ← Node / BareList / Meta / BareName / Literal
 BareList    ← '(' Spacing (Child Spacing)* ')' Spacing

@@ -32,7 +32,7 @@
 //! #897 lands, the status below changes in the same change set as its
 //! arithmetic-width oracle.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -155,27 +155,19 @@ fn c_test_extra_flags() -> Vec<String> {
 
 fn c_render_result(prim: Prim) -> &'static str {
     match prim {
-        Prim::F32 => {
-            "chelis_format_shortest((double)((float*)outputs[0]->data)[0], \
-             CHELIS_F32, fmt_buf, sizeof fmt_buf); printf(\"%s\", fmt_buf);"
+        Prim::F32
+        | Prim::F64
+        | Prim::F16
+        | Prim::Bf16
+        | Prim::Int8
+        | Prim::Int16
+        | Prim::Int32
+        | Prim::Int64
+        | Prim::Bool => {
+            "chelis_scalar scalar = chelis_tensor_to_scalar(outputs[0]); \
+             chelis_string text = chelis_string_from_scalar(scalar); \
+             printf(\"%s\", chelis_string_data(text)); chelis_string_release(text);"
         }
-        Prim::F64 => {
-            "chelis_format_shortest(((double*)outputs[0]->data)[0], \
-             CHELIS_F64, fmt_buf, sizeof fmt_buf); printf(\"%s\", fmt_buf);"
-        }
-        Prim::F16 => {
-            "chelis_format_shortest((double)chelis_f16_to_f32(((uint16_t*)outputs[0]->data)[0]), \
-             CHELIS_F16, fmt_buf, sizeof fmt_buf); printf(\"%s\", fmt_buf);"
-        }
-        Prim::Bf16 => {
-            "chelis_format_shortest((double)chelis_bf16_to_f32(((uint16_t*)outputs[0]->data)[0]), \
-             CHELIS_BF16, fmt_buf, sizeof fmt_buf); printf(\"%s\", fmt_buf);"
-        }
-        Prim::Int8 => "printf(\"%d\", (int)((int8_t*)outputs[0]->data)[0]);",
-        Prim::Int16 => "printf(\"%d\", (int)((int16_t*)outputs[0]->data)[0]);",
-        Prim::Int32 => "printf(\"%d\", ((int32_t*)outputs[0]->data)[0]);",
-        Prim::Int64 => "printf(\"%lld\", (long long)((int64_t*)outputs[0]->data)[0]);",
-        Prim::Bool => "printf(\"%s\", ((uint8_t*)outputs[0]->data)[0] ? \"true\" : \"false\");",
         Prim::F8e4m3 | Prim::String => {
             panic!("eval agreement has no C renderer for {}", prim.name())
         }
@@ -183,11 +175,19 @@ fn c_render_result(prim: Prim) -> &'static str {
 }
 
 /// Build a DAG, generate C, compile, run, and return the canonical rendered
-/// result element. The exhaustive Rust match above emits dtype-correct reads;
-/// every float then goes through Phase 2's frozen `chelis_format_shortest`
-/// routine instead of an ad-hoc decimal `printf`.
+/// result element. The exhaustive Rust match above admits every active scalar
+/// dtype, then the exact tagged runtime carrier owns dtype-correct extraction
+/// and canonical rendering instead of an ad-hoc decimal `printf`.
 fn compile_and_run(dag: &Dag, func_name: &str) -> String {
-    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(verified, func_name).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
@@ -222,10 +222,9 @@ void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int 
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];
     {render_result}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -267,7 +266,7 @@ int main(void) {{
 }
 
 fn eval_last_rendered(dag: &Dag) -> (Prim, String) {
-    let inputs = HashMap::new();
+    let inputs = UnordMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
     let declared = dag
@@ -315,12 +314,17 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         RiscOp::Sqrt => AgreementOp::Sqrt,
         RiscOp::Tan => AgreementOp::Tan,
         RiscOp::Add
+        | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::CmpLt
         | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::ReluAdjoint
         | RiscOp::Neg
         | RiscOp::Abs
         | RiscOp::Floor
@@ -620,7 +624,7 @@ fn agreement_relu() {
         return;
     }
 
-    // relu(x) = max(x, 0) -- test with negative input
+    // Dedicated ReLU identity with negative input.
     {
         let mut dag = Dag::new();
         let x = dag.add_node(
@@ -629,13 +633,7 @@ fn agreement_relu() {
             scalar_f32(),
             None,
         );
-        let zero = dag.add_node(
-            RiscOp::synth_const(scalar_f32().precision, 0.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_neg", "relu(-2)");
         assert_expected("relu(-2) expected", &result, "0.0");
@@ -650,13 +648,7 @@ fn agreement_relu() {
             scalar_f32(),
             None,
         );
-        let zero = dag.add_node(
-            RiscOp::synth_const(scalar_f32().precision, 0.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_pos", "relu(3)");
         assert_expected("relu(3) expected", &result, "3.0");

@@ -18,7 +18,7 @@ contract for binaries named by oracle `--test` arguments. Selector-based
 oracle legs still overlap the workspace lane, including `-E` expressions with
 whole-binary arms, so the dtype oracle is not a third disjoint profile.
 
-Two tiers of check:
+Three tiers of check:
 
   - `FilterTextTests` is a fast, no-compile lock on the *text* of the
     three filter blocks: `ci` may add only binaries named by oracle `--test`
@@ -29,6 +29,18 @@ Two tiers of check:
     full unfiltered list and asserts the partition. It is skipped when
     `cargo`/`cargo nextest` is unavailable, and is `slow`-tolerant
     (listing compiles test binaries on a cold tree).
+  - `GeneralizationPartitionTests` lists the explicit generalization lane,
+    `--features chelis-types/generalize-sweep-oracle`, and asserts that the
+    two nightly-owned contention cases stay out of it.
+
+The last two classes list different compiled configurations, and that is
+why CI runs them in different jobs. `ProfilePartitionTests` runs on workspace
+shard 1, whose default-feature build is warm; `GeneralizationPartitionTests`
+runs on generalization shard 1, whose feature-enabled build is warm. Listing
+the generalization lane on the workspace shard recompiled the workspace under
+a second feature set and cost 4.4 hosted minutes per run. Both classes also
+run wherever the whole module is invoked, so a developer machine still sees
+the complete oracle.
 """
 
 import json
@@ -46,11 +58,7 @@ NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-import dtype_phase0_oracle  # noqa: E402
-import dtype_phase1_oracle  # noqa: E402
-import dtype_phase2_oracle  # noqa: E402
-import dtype_phase3_oracle  # noqa: E402
-import faithful_observation_phase3_oracle  # noqa: E402
+import dtype_oracle_manifest  # noqa: E402
 
 
 def _filter_blocks() -> list[str]:
@@ -73,31 +81,10 @@ def _negative_filter_inner(block: str) -> str:
 
 
 def _required_phase3_commands() -> tuple[tuple[str, ...], ...]:
-    """Resolve every command inherited by the required Phase 3 oracle."""
-    python = sys.executable
-    phase3 = dtype_phase3_oracle.oracle_legs(python)
-    if phase3[0].argv != (python, "scripts/dtype_phase2_oracle.py"):
-        raise AssertionError("Phase 3 no longer inherits dtype_phase2_oracle.py")
-    if phase3[1].argv != (
-        python,
-        "scripts/faithful_observation_phase3_oracle.py",
-    ):
-        raise AssertionError(
-            "Phase 3 no longer inherits faithful_observation_phase3_oracle.py"
-        )
-    phase2 = dtype_phase2_oracle.oracle_legs(python)
-    if phase2[0].argv != (python, "scripts/dtype_phase1_oracle.py"):
-        raise AssertionError("Phase 2 no longer inherits dtype_phase1_oracle.py")
-    phase1 = dtype_phase1_oracle.oracle_legs(python)
-    if phase1[0].argv != (python, "scripts/dtype_phase0_oracle.py"):
-        raise AssertionError("Phase 1 no longer inherits dtype_phase0_oracle.py")
-
-    return (
-        *(leg.argv for leg in phase3),
-        *(leg.argv for leg in phase2),
-        *(leg.argv for leg in phase1),
-        *(leg.argv for leg in dtype_phase0_oracle.oracle_legs()),
-        *(argv for _name, argv in faithful_observation_phase3_oracle.SUITE_COMMANDS),
+    """Resolve every selection flattened into the required Phase 3 union."""
+    return tuple(
+        leg.argv
+        for leg in dtype_oracle_manifest.owned_nextest_legs(sys.executable)
     )
 
 
@@ -118,6 +105,29 @@ ORACLE_OWNED_BINARY_IDS = frozenset(_oracle_selected_test_binaries())
 ORACLE_OWNED_FILTERS = tuple(
     f"binary_id(/^{binary_id}$/)"
     for binary_id in sorted(ORACLE_OWNED_BINARY_IDS)
+)
+NIGHTLY_RECURSIVE_TEST = (
+    "chelis-cli::issue_1293_redteam_round4::"
+    "recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c"
+)
+NIGHTLY_CACHE_CONCURRENCY_TEST = (
+    "chelis-cli::stdlib_typecheck_cache_concurrency::"
+    "parallel_cold_cache_invocations_all_succeed_identically"
+)
+NIGHTLY_RECURSIVE_SELECTOR = (
+    "binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & "
+    "test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)"
+)
+NIGHTLY_CACHE_CONCURRENCY_SELECTOR = (
+    "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)"
+)
+GENERALIZATION_PR_FILTER = (
+    f"not ({NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
+    f"({NIGHTLY_RECURSIVE_SELECTOR}))"
+)
+CONTENDED_DEADLINE_RETRY_SELECTOR = (
+    "binary_id(/^chelis-cli::test_suite_timeout$/) & "
+    "test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)"
 )
 
 
@@ -148,13 +158,48 @@ class FilterTextTests(unittest.TestCase):
 
     def test_every_profile_runs_to_completion_after_failures(self):
         config = tomllib.loads(NEXTEST_TOML.read_text())
-        for profile in ("default", "ci", "nightly"):
+        for profile in ("default", "ci", "ci-full", "nightly"):
             with self.subTest(profile=profile):
                 self.assertIs(
                     config["profile"][profile].get("fail-fast"),
                     False,
                     f"nextest profile {profile!r} hides later failures",
                 )
+
+    def test_full_ci_telemetry_profile_inherits_local_scope_and_writes_junit(self):
+        config = tomllib.loads(NEXTEST_TOML.read_text())
+        profile = config["profile"]["ci-full"]
+        self.assertEqual(profile.get("inherits"), "default")
+        self.assertEqual(profile.get("junit", {}).get("path"), "junit.xml")
+        self.assertNotIn(
+            "default-filter",
+            profile,
+            "ci-full must inherit the ordinary profile unless a command "
+            "explicitly passes --ignore-default-filter",
+        )
+
+    def test_deadline_probe_has_no_retry_cost(self):
+        config = tomllib.loads(NEXTEST_TOML.read_text())
+        overrides = config["profile"]["default"].get("overrides", [])
+        matching = [
+            override
+            for override in overrides
+            if override.get("filter") == CONTENDED_DEADLINE_RETRY_SELECTOR
+        ]
+        self.assertEqual(
+            matching,
+            [],
+            "the deadline test accepts both fail-closed timeout diagnostics; "
+            "retrying it only repeats a deterministic contract probe",
+        )
+
+    def test_contention_sensitive_recursive_parity_case_is_nightly_owned(self):
+        default_block, _ci, nightly_block = _filter_blocks()
+        self.assertIn(
+            NIGHTLY_RECURSIVE_SELECTOR,
+            _norm(_negative_filter_inner(default_block)),
+        )
+        self.assertIn(NIGHTLY_RECURSIVE_SELECTOR, _norm(nightly_block))
 
     def test_ci_adds_only_oracle_owned_binaries_to_default_exclusion(self):
         default_block, ci_block, _nightly = _filter_blocks()
@@ -301,6 +346,82 @@ def _list_profile(profile: str | None) -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _list_filterset(filterset: str) -> dict[str, tuple[str, bool]]:
+    """List one unfiltered dtype-owner selection through nextest itself."""
+    cmd = [
+        "cargo",
+        "nextest",
+        "list",
+        "--workspace",
+        "--ignore-default-filter",
+        "--message-format",
+        "json",
+        "-E",
+        filterset,
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"dtype filterset list failed (exit {result.returncode}): "
+            f"{result.stderr[-2000:]}"
+        )
+    data = json.loads(result.stdout)
+    out: dict[str, tuple[str, bool]] = {}
+    for binary_id, suite in data.get("rust-suites", {}).items():
+        for test_name, info in suite.get("testcases", {}).items():
+            key = f"{binary_id}::{test_name}"
+            status = info.get("filter-match", {}).get("status")
+            out[key] = (status, bool(info.get("ignored")))
+    return out
+
+
+def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
+    """List the exact explicit-filter scope used by the PR generalization lane."""
+    cmd = [
+        "cargo",
+        "nextest",
+        "list",
+        "--workspace",
+        "--profile",
+        "ci-full",
+        "--ignore-default-filter",
+        "--features",
+        "chelis-types/generalize-sweep-oracle",
+        "--message-format",
+        "json",
+        "-E",
+        GENERALIZATION_PR_FILTER,
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"generalization PR list failed (exit {result.returncode}): "
+            f"{result.stderr[-2000:]}"
+        )
+    data = json.loads(result.stdout)
+    out: dict[str, tuple[str, bool]] = {}
+    for binary_id, suite in data.get("rust-suites", {}).items():
+        for test_name, info in suite.get("testcases", {}).items():
+            key = f"{binary_id}::{test_name}"
+            status = info.get("filter-match", {}).get("status")
+            out[key] = (status, bool(info.get("ignored")))
+    return out
+
+
 @unittest.skipUnless(
     not _profile_set_math_disabled() and _have_nextest(),
     "profile set-math oracle disabled here or cargo nextest unavailable",
@@ -318,6 +439,15 @@ class ProfilePartitionTests(unittest.TestCase):
         cls.ci = _list_profile("ci")
         cls.nightly = _list_profile("nightly")
         cls.full = _list_profile(None)
+        cls.dtype_flat = _list_filterset(
+            dtype_oracle_manifest.flattened_filter(sys.executable)
+        )
+        cls.dtype_owners = {
+            owner: _list_filterset(
+                dtype_oracle_manifest.owner_filter(owner, sys.executable)
+            )
+            for owner in dtype_oracle_manifest.OWNERS
+        }
 
     def _sets(self):
         ci_matches = {k for k, (s, _) in self.ci.items() if s == "matches"}
@@ -403,6 +533,81 @@ class ProfilePartitionTests(unittest.TestCase):
             set(),
             f"{len(nightly_ignored)} `nightly`-selected test(s) are also "
             f"`#[ignore]`-d, so they never run: {sorted(nightly_ignored)}",
+        )
+
+    def test_nightly_contention_cases_are_nightly_owned(self):
+        # The generalization-lane half of this contract lives in
+        # `GeneralizationPartitionTests`, which lists the feature-enabled
+        # configuration where it is already built.
+        for test_id in (NIGHTLY_RECURSIVE_TEST, NIGHTLY_CACHE_CONCURRENCY_TEST):
+            with self.subTest(test_id=test_id):
+                self.assertIn(test_id, self.nightly)
+                nightly_status, ignored = self.nightly[test_id]
+                self.assertEqual(nightly_status, "matches")
+                self.assertFalse(ignored)
+
+    def test_flattened_dtype_filter_is_the_exact_union_of_phase_owners(self):
+        flattened = {
+            key
+            for key, (status, ignored) in self.dtype_flat.items()
+            if status == "matches" and not ignored
+        }
+        owner_sets = {
+            owner: {
+                key
+                for key, (status, ignored) in listing.items()
+                if status == "matches" and not ignored
+            }
+            for owner, listing in self.dtype_owners.items()
+        }
+        inherited_union = set().union(*owner_sets.values())
+        self.assertEqual(flattened, inherited_union)
+        self.assertGreater(len(flattened), 0, "flattened dtype oracle is empty")
+        ownership_count = sum(len(selected) for selected in owner_sets.values())
+        self.assertGreater(
+            ownership_count,
+            len(flattened),
+            "the control corpus no longer contains any inherited duplicate "
+            "selection, so flattening has no executable duplication to remove",
+        )
+
+
+@unittest.skipUnless(
+    _have_nextest(), "cargo nextest unavailable; skipping generalization census"
+)
+class GeneralizationPartitionTests(unittest.TestCase):
+    """Set math for the explicit generalization lane's selection.
+
+    This class lists `--features chelis-types/generalize-sweep-oracle`, a
+    different compiled configuration from every `ProfilePartitionTests`
+    listing, so CI runs it on generalization shard 1 where that build is
+    warm. The nightly-side half of the contention contract stays in
+    `ProfilePartitionTests.test_nightly_contention_cases_are_nightly_owned`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.generalization_pr = _list_generalization_pr()
+
+    def test_generalization_lane_selects_a_nonempty_corpus(self):
+        selected = {
+            key
+            for key, (status, ignored) in self.generalization_pr.items()
+            if status == "matches" and not ignored
+        }
+        self.assertGreater(len(selected), 0, "generalization lane is empty")
+
+    def test_nightly_contention_cases_are_excluded_from_generalization_pr(self):
+        recursive_status, recursive_ignored = self.generalization_pr[
+            NIGHTLY_RECURSIVE_TEST
+        ]
+        self.assertEqual(recursive_status, "mismatch")
+        self.assertFalse(recursive_ignored)
+        self.assertNotIn(
+            NIGHTLY_CACHE_CONCURRENCY_TEST,
+            self.generalization_pr,
+            "the generalization PR selector must exclude the entire "
+            "nightly-owned cache-concurrency binary",
         )
 
 

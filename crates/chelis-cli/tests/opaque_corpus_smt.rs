@@ -17,18 +17,15 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
+#[path = "../../../tests/support/managed_python.rs"]
+mod managed_python;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
         .expect("crate is two levels below the repo root")
         .to_path_buf()
-}
-
-fn venv_python() -> PathBuf {
-    std::env::var_os("PYO3_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root().join(".venv/bin/python"))
 }
 
 fn corpus_dir() -> PathBuf {
@@ -40,19 +37,12 @@ fn smt_bin() -> PathBuf {
     assert_cmd::cargo_bin!("chelis").to_path_buf()
 }
 
-fn require_venv() -> PathBuf {
-    let py = venv_python();
-    assert!(
-        py.exists(),
-        "the configured managed Python is a documented build prerequisite (AGENTS.md); \
-         set valid `PYO3_PYTHON` or create `.venv` with `uv venv --python 3.11`. Missing: {}",
-        py.display()
-    );
-    py
+fn require_managed_python() -> PathBuf {
+    managed_python::managed_python(&repo_root()).unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn run_runner(script: &str, args: &[&str]) -> (bool, String, String) {
-    let py = require_venv();
+    let py = require_managed_python();
     let out = Command::new(py)
         .arg(corpus_dir().join(script))
         .args(args)

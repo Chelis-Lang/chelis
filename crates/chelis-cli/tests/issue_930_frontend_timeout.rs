@@ -17,8 +17,10 @@
 //!
 //! Positive: `timeout_trips_cooperatively_during_the_front_end` — the flag
 //! fires with the documented message and, decisively, does so *before* the
-//! hard-exit grace could have elapsed. Elapsed time is the only thing that
-//! distinguishes the two stages, since they print the same text by design.
+//! hard-exit grace could have elapsed. The two stages share a message prefix,
+//! and since chelis#1607 the hard-exit stage appends a suffix naming itself, so
+//! stderr distinguishes them; this row still separates them by elapsed time,
+//! which carries the same load-sensitivity its `issue_914` siblings do.
 //!
 //! Negative parity: `front_end_polling_does_not_disturb_an_untimed_compile`
 //! and `generous_timeout_does_not_disturb_a_front_end_heavy_program` — the

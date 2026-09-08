@@ -248,6 +248,30 @@ fn assert_reef_sixth_rejection(json: &Value) {
     );
 }
 
+fn assert_unimported_value_rejection(json: &Value, identifier: &str) {
+    let errors = errors_of(json);
+    assert_eq!(errors.len(), 1, "expected one name error, got: {errors:?}");
+    assert_eq!(
+        errors[0].get("kind").and_then(Value::as_str),
+        Some("UnboundVariable")
+    );
+    let expected_message = format!("unbound variable: {identifier}");
+    assert_eq!(
+        errors[0].get("message").and_then(Value::as_str),
+        Some(expected_message.as_str())
+    );
+    assert_eq!(
+        json.get("unresolved_names"),
+        Some(&serde_json::json!([identifier]))
+    );
+    assert!(
+        json["components"]["names"]
+            .as_f64()
+            .is_some_and(|score| score < 1.0),
+        "unimported value must lower name fitness: {json}"
+    );
+}
+
 // ── `.dp` lexical encoding through `chelis check` ────────────────
 
 #[test]
@@ -462,13 +486,11 @@ def sneak(x: f32) -> f32 = {
 // ── Sixth rejection on the reef package surface (RT-1 F1) ────────
 
 #[test]
-fn check_reef_rejects_unexported_producer_reference_bare_call() {
-    // RT-1 F1 primary probe: `attack.ch` imports only the exported
-    // reader and calls the UNEXPORTED `raw_make` by its bare name
-    // (un-imported cross-module reference). The sixth rejection must
-    // fire -- W1 fail-opened here because reef leaves un-imported
-    // references at their bare terminal name while the opacity
-    // metadata is keyed by the internal (mangled) name.
+fn check_reef_rejects_unimported_producer_reference_as_unbound() {
+    // PP4 / RT-1 F1 boundary: `attack.ch` imports only the exported reader and
+    // calls the unexported `raw_make` by its bare name. Exact module scope now
+    // rejects that unimported reference before the opacity-specific sixth
+    // rejection. The explicit-import variant below still pins that later gate.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_SIXTH_TYPES_CH),
         (
@@ -487,7 +509,7 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
         .get_output()
         .stdout
         .clone();
-    assert_reef_sixth_rejection(&check_json(&output));
+    assert_unimported_value_rejection(&check_json(&output), "raw_make");
 }
 
 #[test]
@@ -519,18 +541,11 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
 }
 
 #[test]
-fn build_reef_rejects_unexported_producer_reference() {
-    // RT-1 F1: the same bare-call attack must also be rejected by
-    // `chelis build` (RT-1 confirmed it emitted C in W1).
-    //
-    // chelis#1176 REGRESSION ANCHOR: since #1176, `cmd_build`'s layered
-    // typecheck cache subsumes the monolithic `checked_program_with_effects`
-    // full-program check whenever it returns `Some`, so the cross-module
-    // opaque-encapsulation guard now runs ONLY on the layered path for a
-    // reef package under pruning. This fixture prunes the unexported producer
-    // and confirms the layered path still returns `Ok(None)` (→ monolithic
-    // fallback → the `OpaqueTypeViolation` still surfaces). If it ever passes
-    // silently, the cache is masking a whole-program rejection. Keep it green.
+fn build_reef_rejects_unimported_producer_reference_as_unbound() {
+    // PP4 parity: build rejects the same bare, unimported reference at exact
+    // name resolution. `check_reef_rejects_unexported_producer_reference_imported`
+    // separately keeps the opacity-specific rejection executable once the
+    // ordinary import rule has actually brought `raw_make` into scope.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_SIXTH_TYPES_CH),
         (
@@ -554,8 +569,8 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
         .failure();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf8 stderr");
     assert!(
-        stderr.contains("OpaqueTypeViolation"),
-        "build must fail on the unexported-producer reference, stderr: {stderr}"
+        stderr.contains("UnboundVariable") && stderr.contains("raw_make"),
+        "build must fail on the unimported producer reference, stderr: {stderr}"
     );
 }
 

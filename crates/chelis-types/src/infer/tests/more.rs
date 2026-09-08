@@ -253,6 +253,22 @@ fn fix7_fitness_unresolved_names() {
     assert!(report.errors.iter().all(|e| e.severity > 0.0));
 }
 
+#[test]
+fn fitness_uses_the_structured_identifier_instead_of_rendered_prose() {
+    let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
+    let mut result = crate::infer::infer_program(&exprs);
+    let error = result
+        .errors
+        .iter_mut()
+        .find(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. }))
+        .expect("unbound diagnostic");
+    error.message = "localized name-resolution rendering".to_string();
+
+    let report = crate::fitness::FitnessReport::from_infer_result(&result);
+    assert_eq!(report.unresolved_names, vec!["unknown"]);
+    assert!(report.components.names < 1.0);
+}
+
 // Fix 7b: suggestions populated for UnboundVariable
 #[test]
 fn fix7b_suggestions_for_unbound() {
@@ -260,7 +276,7 @@ fn fix7b_suggestions_for_unbound() {
     let unbound_err = result
         .errors
         .iter()
-        .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
+        .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }))
         .expect("expected UnboundVariable error");
     assert!(
         !unbound_err.suggestions.is_empty(),
@@ -339,7 +355,7 @@ fn ir_preserves_unresolved_name_errors() {
         result
             .errors
             .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
+            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. })),
         "expected ir inference to preserve unresolved-name errors, got {:?}",
         result.errors
     );
@@ -381,7 +397,7 @@ fn ir_resolves_consistently_mangled_constructor_names() {
     assert!(
         !result.errors.iter().any(|error| matches!(
             error.kind,
-            CheckErrorKind::UnboundVariable | CheckErrorKind::UnknownConstructor
+            CheckErrorKind::UnboundVariable { .. } | CheckErrorKind::UnknownConstructor { .. }
         )),
         "expected the consistently mangled constructor to resolve clean, got {:?}",
         result.errors
@@ -407,13 +423,23 @@ fn ir_rejects_out_of_scope_terminal_constructor_name() {
 
     let result = infer_ir_program(&exprs);
     assert!(
-        result.errors.iter().any(
-            |error| matches!(error.kind, CheckErrorKind::UnknownConstructor)
-                && error.message.contains("KVCache")
-        ),
+        result.errors.iter().any(|error| matches!(
+            error.kind,
+            CheckErrorKind::UnknownConstructor { .. }
+        ) && error.message.contains("KVCache")),
         "expected an UnknownConstructor for the out-of-scope bare `KVCache`, got {:?}",
         result.errors
     );
+
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|error| matches!(error.kind, CheckErrorKind::UnknownConstructor { .. }))
+        .expect("unknown constructor diagnostic");
+    assert_eq!(diagnostic.kind.unresolved_identifier(), Some("KVCache"));
+    let report = crate::fitness::FitnessReport::from_infer_result(&result);
+    assert_eq!(report.unresolved_names, vec!["KVCache"]);
+    assert!(report.components.names < 1.0);
 }
 
 // Fix 8: typed params in Deep
@@ -592,7 +618,7 @@ def predict(
   w: tensor[64, 1, f32],
   b: tensor[1, f32]
 ) -> tensor[batch, 1, f32] =
-  add(matmul(x, w), expand(b, 0, batch))
+  add(matmul(x, w), insert(b, 0, batch))
 "#,
     );
     let missing = checked
@@ -1271,7 +1297,7 @@ out = einsum("ij,jk->ik", a, b)
 }
 
 #[test]
-fn surf_scatter_replace_rejects_static_duplicate_indices() {
+fn surf_scatter_replace_accepts_static_duplicate_indices() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
@@ -1284,14 +1310,7 @@ out = scatter(base, idx, updates, 0, "replace")
         )
         .expect("surf parse"),
     ));
-    let err = result.expect_err("static scatter duplicate indices should be rejected");
-    assert!(
-        err.errors.iter().any(|error| {
-            error.message.contains("scatter") && error.message.contains("duplicate target index")
-        }),
-        "expected scatter duplicate-index rejection, got {:?}",
-        err.errors
-    );
+    result.expect("static scatter duplicate indices follow deterministic last-write-wins");
 }
 
 #[test]
@@ -1984,7 +2003,7 @@ fn narrow_keeps_wildcard_for_return_only_dim_var() {
 /// self-contained (the original #39 behavior).
 #[test]
 fn narrow_substitutes_literal_for_wildcard_unconditionally() {
-    let empty = HashSet::new();
+    let empty = UnordSet::new();
     let body = Type::Tensor(
         vec![Dim::Wildcard, Dim::Wildcard],
         TensorPrec::Concrete(Prim::F32),

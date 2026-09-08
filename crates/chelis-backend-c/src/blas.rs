@@ -3,7 +3,8 @@
 //! Phase 0: detect matmul pattern (Sum whose input is Mul whose inputs are Expand).
 //! Actual BLAS emission deferred to when OpenBLAS is available.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp};
+use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp};
+use chelis_ir::ownership::VerifiedDagView;
 use chelis_types::types::Prim;
 
 /// Information about a detected matmul pattern.
@@ -37,7 +38,7 @@ pub struct MatmulInfo {
 ///
 /// The pattern is: Sum { axis } of Mul(Expand(A), Expand(B)).
 /// Returns `Some(MatmulInfo)` if the pattern matches, `None` otherwise.
-pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
+pub fn detect_matmul_pattern(dag: VerifiedDagView<'_>, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
 
     // Must be a Sum node. Bind both `axis` and `accumulator` explicitly
@@ -154,6 +155,12 @@ mod tests {
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_types::types::Prim;
 
+    fn detect(dag: &Dag, sum: NodeId) -> Option<MatmulInfo> {
+        let verified = crate::testing::verified_dag(dag, crate::CodegenOptions::default())
+            .expect("BLAS detector unit-test DAG must verify ownership");
+        super::detect_matmul_pattern(verified.emission(), sum)
+    }
+
     fn mat_f32(r: usize, c: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
@@ -192,7 +199,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -201,7 +208,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 3, 4),
@@ -218,7 +225,7 @@ mod tests {
             None,
         );
 
-        let info = detect_matmul_pattern(&dag, sum).unwrap();
+        let info = detect(&dag, sum).unwrap();
         assert_eq!(info.a, a);
         assert_eq!(info.b, b);
         assert_eq!(info.m, 2);
@@ -235,7 +242,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        assert!(detect_matmul_pattern(&dag, a).is_none());
+        assert!(detect(&dag, a).is_none());
     }
 
     #[test]
@@ -266,7 +273,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        assert!(detect_matmul_pattern(&dag, sum).is_none());
+        assert!(detect(&dag, sum).is_none());
     }
 
     #[test]
@@ -288,7 +295,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             tensor3_f32(2, 3, 4),
@@ -297,7 +304,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             tensor3_f32(2, 5, 4),
@@ -313,12 +320,17 @@ mod tests {
             mat_f32(2, 4),
             None,
         );
-        assert!(detect_matmul_pattern(&dag, sum).is_none());
+        let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+            Err(error) => error,
+            Ok(_) => panic!("a dimension-mismatched matmul graph must not be verified"),
+        };
+        assert!(error.to_string().contains("mismatched dimension"));
+        let _ = sum;
     }
 
     #[test]
     fn rejects_nonexistent_node() {
         let dag = Dag::new();
-        assert!(detect_matmul_pattern(&dag, NodeId(99)).is_none());
+        assert!(detect(&dag, NodeId(99)).is_none());
     }
 }

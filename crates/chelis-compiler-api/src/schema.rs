@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_types::unsupported::Unsupported;
 use chelis_types::{
@@ -185,7 +185,7 @@ pub struct Diagnostic {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub span: Option<Span>,
+    pub span: Option<DiagnosticSpan>,
     /// Forward-compatible Deep-address slot for the L2 authoring loop. The
     /// fragment body-replacement check (`chelis_replace_function_body`) will
     /// populate this with the Deep path of the offending node so a caller can
@@ -195,6 +195,16 @@ pub struct Diagnostic {
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep_path: Option<WireDeepErrorPath>,
+    /// Opaque producer-supplied identity for the reported location, when the
+    /// producer has one (chelis#886). Carried beside `span` rather than
+    /// inside it because a producer may hold an identity without a resolved
+    /// range, and [04-FIT-17] forbids inventing the range to fit.
+    ///
+    /// A `String`, so it adds no row to the §C6 wire numeric census.
+    /// `skip_serializing_if` keeps every existing producer's bytes
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
 }
 
 impl Diagnostic {
@@ -223,7 +233,144 @@ impl Diagnostic {
             suggestions: Vec::new(),
             span: None,
             deep_path: None,
+            span_id: None,
         }
+    }
+}
+
+/// Projections of the checker's own diagnostic types onto this wire carrier
+/// (chelis#886).
+///
+/// The `chelis check` report used to serialize `chelis_types::CheckError`
+/// directly. That made a checker-internal type a numeric wire root -- its
+/// public `severity: f64` sat outside the §C6 census, which is rooted here
+/// -- and it spelled the kind from a Rust variant name, re-coupling the wire
+/// to an identifier the sealed vocabulary exists to decouple it from.
+///
+/// Projecting instead of deriving fixes both at once. The carrier is this
+/// already-enumerated type, so the census gains no numeric row; the kind is
+/// `DiagnosticKind`'s governed spelling, so renaming a checker variant
+/// cannot move the wire.
+impl Diagnostic {
+    /// Project a check diagnostic onto the wire carrier.
+    pub fn from_check_error(error: &chelis_types::errors::CheckError) -> Self {
+        Self {
+            kind: check_error_kind(&error.kind).as_str().to_owned(),
+            message: error.message.clone(),
+            severity: error.severity,
+            expected: error.expected.clone(),
+            got: error.got.clone(),
+            // [04-FIT-15]: the field set does not vary by producing stage.
+            // The embedding API's projection has always carried these; the
+            // CLI report dropping them was the divergence, not this.
+            suggestions: error.suggestions.clone(),
+            span: check_error_span(error),
+            deep_path: None,
+            span_id: error.span_id.clone(),
+        }
+    }
+
+    /// Project an effect diagnostic onto the wire carrier.
+    ///
+    /// `EffectError` carries no severity of its own; the constant was
+    /// inlined in the template this replaces.
+    ///
+    /// `suggestions` is carried across because [04-FIT-15] requires the field
+    /// set not to vary by producing stage: the effect checker populates
+    /// repair hints at six sites, and the template this replaces had no slot
+    /// for them, so dropping them here would keep the very stage-dependence
+    /// the atom forbids.
+    pub fn from_effect_error(error: &chelis_effects::EffectError, severity: f64) -> Self {
+        Self {
+            kind: effect_error_kind(&error.kind).as_str().to_owned(),
+            message: error.message.clone(),
+            severity,
+            expected: None,
+            got: None,
+            suggestions: error.suggestions.clone(),
+            span: None,
+            deep_path: None,
+            span_id: None,
+        }
+    }
+}
+
+/// The reported range, ONLY when the producer genuinely has one.
+///
+/// spec/04 [04-FIT-17]: where a producer holds a point or an opaque identity,
+/// the serializer does not invent a length or a `0..0` range. `CheckError`
+/// carries a byte offset and an opaque `span_id`; the id's canonical
+/// `<source>:<start>..<end>` rendering is the only place a real end offset
+/// exists, so the range is DERIVED from it and omitted when it cannot be.
+///
+/// The coordinate travels as `DiagnosticSpan::Point` whether or not an
+/// identity accompanies it (chelis#1395). The carrier's variant tag records
+/// whether an extent was measured, so [04-FIT-16]'s requirement that a
+/// coordinate travel without an identity is met without weakening
+/// [04-FIT-17]'s prohibition on inventing one: `Point` has no `len` field.
+fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<DiagnosticSpan> {
+    // Always a point. `CheckError` carries `span_offset` and an opaque
+    // `span_id`, and no measured extent -- so there is nothing here to build a
+    // `Range` from.
+    //
+    // This previously recovered a length by parsing `N..M` out of `span_id`.
+    // That is not provenance: `spec/03-deep-syntax.md` §1.1.1 makes external
+    // span IDs opaque and their interpretation none of Chelis's concern, so a
+    // foreign `octant:30..34` is a valid opaque identity that the parse turned
+    // into a measured `Range { offset: 30, len: 4 }` nobody measured. A
+    // numeric-looking identity is still an identity; spelling is not
+    // provenance, and [04-FIT-17] forbids inventing an extent.
+    //
+    // A `Range` from this producer therefore waits on a typed field that
+    // carries an extent Chelis itself measured. The stamp ingress path in
+    // `compiler.rs` already has one and still reports `Range`.
+    Some(DiagnosticSpan::Point {
+        offset: error.span_offset?,
+    })
+}
+
+/// Total map from the checker's kind to its governed vocabulary identity.
+///
+/// Exhaustive by construction: adding a `CheckErrorKind` variant does not
+/// compile until its wire identity is chosen here.
+fn check_error_kind(kind: &chelis_types::errors::CheckErrorKind) -> DiagnosticKind {
+    use chelis_types::errors::CheckErrorKind as K;
+    match kind {
+        K::TypeMismatch => DiagnosticKind::TypeMismatch,
+        K::PrecisionMismatch => DiagnosticKind::PrecisionMismatch,
+        K::DimensionMismatch => DiagnosticKind::DimensionMismatch,
+        K::ArityMismatch => DiagnosticKind::ArityMismatch,
+        K::UnboundVariable { .. } => DiagnosticKind::UnboundVariable,
+        K::UnknownConstructor { .. } => DiagnosticKind::UnknownConstructor,
+        K::NotAFunction => DiagnosticKind::NotAFunction,
+        K::NonExhaustiveMatch => DiagnosticKind::NonExhaustiveMatch,
+        K::OccursCheck => DiagnosticKind::OccursCheck,
+        K::CastNonTensor => DiagnosticKind::CastNonTensor,
+        K::TupleIndexOutOfBounds => DiagnosticKind::TupleIndexOutOfBounds,
+        K::UseAfterConsume => DiagnosticKind::UseAfterConsume,
+        K::UnconsumedLinear => DiagnosticKind::UnconsumedLinear,
+        K::InvalidBorrow => DiagnosticKind::InvalidBorrow,
+        K::CycleDetected => DiagnosticKind::CycleDetected,
+        K::UnsupportedTensorPrecision => DiagnosticKind::UnsupportedTensorPrecision,
+        K::DuplicateDefinition => DiagnosticKind::DuplicateDefinition,
+        K::DuplicateModule => DiagnosticKind::DuplicateModule,
+        K::OpaqueTypeViolation => DiagnosticKind::OpaqueTypeViolation,
+        K::ReservedLinkerName => DiagnosticKind::ReservedLinkerName,
+        K::BuiltinShadowing => DiagnosticKind::BuiltinShadowing,
+        K::UnknownForm => DiagnosticKind::UnknownForm,
+        K::MalformedForm => DiagnosticKind::MalformedForm,
+        K::Other => DiagnosticKind::CheckOther,
+    }
+}
+
+/// Total map from the effect checker's kind to its governed identity.
+fn effect_error_kind(kind: &chelis_effects::EffectErrorKind) -> DiagnosticKind {
+    use chelis_effects::EffectErrorKind as K;
+    match kind {
+        K::UnhandledEffect => DiagnosticKind::UnhandledEffect,
+        K::InvalidHandler => DiagnosticKind::InvalidHandler,
+        K::BuildTargetMismatch => DiagnosticKind::BuildTargetMismatch,
+        K::TypeTotality => DiagnosticKind::TypeTotality,
     }
 }
 
@@ -241,8 +388,10 @@ pub struct WireDiagnostic {
     pub got: Option<String>,
     #[serde(default)]
     pub suggestions: Vec<String>,
-    pub span: Option<Span>,
+    pub span: Option<DiagnosticSpan>,
     pub deep_path: Option<WireDeepErrorPath>,
+    #[serde(default)]
+    pub span_id: Option<String>,
 }
 
 /// The producer projection of [`DiagnosticKind`]. It intentionally has no
@@ -303,6 +452,15 @@ impl GeneralKind {
     const fn project(kind: DiagnosticKind) -> Option<Self> {
         match kind {
             DiagnosticKind::UnsupportedFeature => None,
+            // chelis#886: the effect checker's kinds are not general-producer
+            // kinds. They reach the wire only through
+            // `Diagnostic::from_effect_error`, for the same reason
+            // `UnsupportedFeature` is excluded above: a general producer
+            // cannot spell a rejection it has no standing to make.
+            DiagnosticKind::UnhandledEffect
+            | DiagnosticKind::InvalidHandler
+            | DiagnosticKind::BuildTargetMismatch
+            | DiagnosticKind::TypeTotality => None,
             DiagnosticKind::SurfParseError => Some(Self::SurfParseError),
             DiagnosticKind::DeepParseError => Some(Self::DeepParseError),
             DiagnosticKind::MacroError => Some(Self::MacroError),
@@ -418,7 +576,7 @@ pub(crate) fn stage_error_with_span(
     stage: &str,
     message: impl Into<String>,
     kind: GeneralKind,
-    span: Option<Span>,
+    span: Option<DiagnosticSpan>,
 ) -> crate::compiler::CompilerError {
     let mut diagnostic = Diagnostic::general(kind, message, 1.0);
     diagnostic.span = span;
@@ -454,6 +612,50 @@ pub struct WireDeepErrorPath {
 pub struct Span {
     pub offset: usize,
     pub len: usize,
+}
+
+/// A diagnostic's reported source location (chelis#1395).
+///
+/// Deliberately NOT `Span`. An AST node's span is structurally a range --
+/// `WireParam`, `WireVariant`, `WireMatchArm` and `WireTypeInvariant` all
+/// require one -- whereas a diagnostic's producer may hold only a coordinate.
+/// Reusing `Span` there forces a choice between fabricating an extent, which
+/// [04-FIT-17] forbids, and dropping the coordinate, which [04-FIT-16]
+/// forbids.
+///
+/// The variant tag carries which of the two the producer measured, so the
+/// prohibition is structural rather than a rule to remember: `Point` has no
+/// `len` field to invent. This is the same carrier shape as `WireRtDim`,
+/// whose `InputAxis.tensor` slot index is the wire census's registered
+/// tagged transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "span", rename_all = "snake_case")]
+pub enum DiagnosticSpan {
+    /// The producer measured a range.
+    Range { offset: usize, len: usize },
+    /// The producer held a coordinate and no extent.
+    Point { offset: usize },
+}
+
+impl DiagnosticSpan {
+    /// The byte offset, which both variants carry.
+    pub fn offset(self) -> usize {
+        match self {
+            Self::Range { offset, .. } | Self::Point { offset } => offset,
+        }
+    }
+
+    /// The measured extent, absent when the producer held only a coordinate.
+    ///
+    /// Named for [04-FIT-17]'s word rather than `len`: this is not a
+    /// collection length, and calling it one invites `is_empty`, which would
+    /// be meaningless for a source coordinate.
+    pub fn extent(self) -> Option<usize> {
+        match self {
+            Self::Range { len, .. } => Some(len),
+            Self::Point { .. } => None,
+        }
+    }
 }
 
 /// Execution-payload wire version (chelis#729 Phase 1, the section C3
@@ -957,7 +1159,7 @@ pub enum WireInferredType {
     /// arguments (empty `args` for a nullary ADT).
     Adt {
         name: String,
-        args: Vec<WireInferredType>,
+        args: Vec<WireInferredAdtArg>,
     },
     /// `Type::Var` — an unresolved inference type variable. `id` is the
     /// raw `TypeVar` index, matching the `?N` display rendering.
@@ -970,6 +1172,24 @@ pub enum WireInferredType {
     /// the structured tree never silently drops a node; a consumer
     /// should treat this as "type unknown due to an upstream error".
     Error,
+}
+
+/// One nominal argument in structured inferred JSON. The enum is untagged so
+/// ordinary type arguments retain their established `WireInferredType` object
+/// shape; only dimension arguments add a new wrapper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum WireInferredAdtArg {
+    Type(WireInferredType),
+    Dimension(WireInferredDimensionArg),
+}
+
+/// Closed wrapper that distinguishes a nominal dimension from an ordinary
+/// inferred type without changing the existing type-argument encoding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireInferredDimensionArg {
+    Dimension { dim: WireInferredDim },
 }
 
 /// Structured tensor dimension, mirroring `chelis_types::types::Dim`.
@@ -1347,7 +1567,7 @@ pub enum WireSurfDecl {
     },
     FunDef {
         name: String,
-        dim_params: Vec<String>,
+        type_binders: Vec<WireTypeBinder>,
         params: Vec<WireParam>,
         ret_ty: Option<WireSurfTypeExpr>,
         body: WireSurfExpr,
@@ -1371,6 +1591,15 @@ pub enum WireSurfDecl {
         names: Vec<String>,
         span: Span,
     },
+}
+
+/// One entry of a declaration's `[..]` binder list. `bound` carries the
+/// `spec/04-type-system.md` §5.9 dtype family when the binder declares one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireTypeBinder {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1694,6 +1923,10 @@ pub enum WireSurfTypeExpr {
         name: String,
         span: Span,
     },
+    DimensionLiteral {
+        digits: String,
+        span: Span,
+    },
     Tensor {
         dims: Vec<WireSurfTypeExpr>,
         precision: String,
@@ -1777,8 +2010,14 @@ pub struct WireRecordPatternField {
 /// - `6`: chelis#1287 — added the dedicated multi-axis
 ///   `WireRiscOp::Count` form and made the complete WireDag encoding exact:
 ///   the version stamp and all fields are explicit, with no legacy migration
-///   or default-on-read spellings.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 6;
+///   or default-on-read spellings. Chelis#1306 added direct `Sub`, `MinElem`,
+///   and `ExtremaAdjoint` identities plus matching fused-step identities to
+///   that exact encoding.
+/// - `7`: chelis#1277 Slice A — `WireRiscOp::Expand::size` changed from a
+///   display string to `WireRtDim`, and `WireRtDim` gained the structural
+///   `InputAxis` metadata read. Chelis#1313 added the dedicated `Relu` and
+///   `ReluAdjoint` identities to this unreleased exact schema.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -1901,7 +2140,8 @@ impl<'de> Deserialize<'de> for WireDag {
             .map_err(<D::Error as serde::de::Error>::custom)?;
 
         // The version gate above intentionally runs while nodes are still
-        // untyped JSON. Only an exact v6 payload may construct WireRiscOp.
+        // untyped JSON. Only an exact current-version payload may construct
+        // WireRiscOp.
         let fields: WireDagFields =
             serde_json::from_value(value).map_err(<D::Error as serde::de::Error>::custom)?;
         let dag = Self {
@@ -1953,6 +2193,121 @@ impl WireDag {
     /// Validate fields whose exact encoding depends on surrounding DAG shape.
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
         for (index, node) in self.nodes.iter().enumerate() {
+            match &node.op {
+                WireRiscOp::Expand { size, .. } => {
+                    validate_wire_rt_dim(&self.nodes, index, node, size, false, true, "Expand")?;
+                    let expected_inputs = match size {
+                        WireRtDim::Lit { .. } => 1,
+                        WireRtDim::Node { input: 1 } | WireRtDim::InputAxis { tensor: 1, .. } => 2,
+                        WireRtDim::Node { input } | WireRtDim::InputAxis { tensor: input, .. } => {
+                            return Err(WireDagContractError::new(format!(
+                                "WireDag Expand node {} size must reference absolute input slot 1, found {input}",
+                                node.id
+                            )));
+                        }
+                        WireRtDim::ToEnd | WireRtDim::Sym { .. } => {
+                            unreachable!("owner validation rejects forbidden Expand carriers")
+                        }
+                    };
+                    if node.inputs.len() != expected_inputs {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Expand node {} has {} inputs; size requires {expected_inputs}",
+                            node.id,
+                            node.inputs.len()
+                        )));
+                    }
+                }
+                WireRiscOp::Reshape { new_shape } => {
+                    for dim in new_shape {
+                        validate_wire_rt_dim(&self.nodes, index, node, dim, true, true, "Reshape")?;
+                    }
+                    validate_exact_wire_rt_dim_inputs(node, new_shape, "Reshape")?;
+                }
+                WireRiscOp::Pad { padding, .. } => {
+                    for (start, end) in padding {
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            start,
+                            false,
+                            false,
+                            "Pad start",
+                        )?;
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            end,
+                            false,
+                            false,
+                            "Pad end",
+                        )?;
+                    }
+                    validate_exact_wire_rt_dim_inputs(
+                        node,
+                        padding.iter().flat_map(|(start, end)| [start, end]),
+                        "Pad",
+                    )?;
+                }
+                WireRiscOp::Shrink { bounds } => {
+                    for (start, end) in bounds {
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            start,
+                            false,
+                            false,
+                            "Shrink start",
+                        )?;
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            end,
+                            false,
+                            false,
+                            "Shrink end",
+                        )?;
+                        // chelis#1480, `spec/05` section 2.4.1: a `ToEnd` end
+                        // is well formed only beside a `Lit(0)` start. The
+                        // per-carrier validation above sees one bound at a
+                        // time and cannot see the pairing, so the decoder
+                        // checks it here, where both halves are in hand.
+                        if matches!(end, WireRtDim::ToEnd)
+                            && !matches!(start, WireRtDim::Lit { value: 0 })
+                        {
+                            return Err(WireDagContractError::new(format!(
+                                "WireDag Shrink node {} pairs the to_end carrier with a start \
+                                 that is not literal 0, which is a malformed bound",
+                                node.id
+                            )));
+                        }
+                    }
+                    validate_exact_wire_rt_dim_inputs(
+                        node,
+                        bounds.iter().flat_map(|(start, end)| [start, end]),
+                        "Shrink",
+                    )?;
+                }
+                WireRiscOp::Stride { strides } => {
+                    for stride in strides {
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            stride,
+                            false,
+                            false,
+                            "Stride",
+                        )?;
+                    }
+                    validate_exact_wire_rt_dim_inputs(node, strides, "Stride")?;
+                }
+                _ => {}
+            }
+
             if let WireRiscOp::Pad { fill, .. } = &node.op {
                 let output_prim =
                     Prim::parse_name(&node.output_type.precision).ok_or_else(|| {
@@ -1967,6 +2322,63 @@ impl WireDag {
                         fill.prim().name(),
                         node.id,
                         output_prim.name()
+                    )));
+                }
+            }
+
+            if matches!(&node.op, WireRiscOp::Relu | WireRiscOp::ReluAdjoint) {
+                let expected_inputs = if matches!(&node.op, WireRiscOp::Relu) {
+                    1
+                } else {
+                    2
+                };
+                if node.inputs.len() != expected_inputs {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} requires exactly {expected_inputs} input(s), found {}",
+                        node.id,
+                        node.inputs.len()
+                    )));
+                }
+                let inputs = node
+                    .inputs
+                    .iter()
+                    .map(|input_id| {
+                        self.nodes[..index]
+                            .iter()
+                            .find(|candidate| candidate.id == *input_id)
+                            .ok_or_else(|| {
+                                WireDagContractError::new(format!(
+                                    "WireDag ReLU node {} input {input_id} does not resolve to an earlier node",
+                                    node.id
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let Some(output_prim) = Prim::parse_name(&node.output_type.precision) else {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} has unknown output dtype {}",
+                        node.id, node.output_type.precision
+                    )));
+                };
+                if !matches!(output_prim, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64) {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} output dtype must be float, found {}",
+                        node.id, node.output_type.precision
+                    )));
+                }
+                if inputs.iter().any(|input| {
+                    input.output_type.precision != node.output_type.precision
+                        || input.output_type.dims.len() != node.output_type.dims.len()
+                        || input
+                            .output_type
+                            .dims
+                            .iter()
+                            .zip(&node.output_type.dims)
+                            .any(|(actual, expected)| !wire_dim_info_equal(actual, expected))
+                }) {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} inputs must match its output shape and float dtype",
+                        node.id
                     )));
                 }
             }
@@ -2084,6 +2496,109 @@ impl WireDag {
     }
 }
 
+fn validate_wire_rt_dim(
+    nodes: &[WireDagNode],
+    owner_index: usize,
+    owner: &WireDagNode,
+    dim: &WireRtDim,
+    allow_sym: bool,
+    allow_input_axis: bool,
+    label: &str,
+) -> Result<(), WireDagContractError> {
+    let resolve_slot = |slot: usize| -> Result<&WireDagNode, WireDagContractError> {
+        if slot == 0 || slot >= owner.inputs.len() {
+            return Err(WireDagContractError::new(format!(
+                "WireDag {label} node {} references invalid input slot {slot} (inputs len {})",
+                owner.id,
+                owner.inputs.len()
+            )));
+        }
+        let source_id = owner.inputs[slot];
+        nodes[..owner_index]
+            .iter()
+            .find(|candidate| candidate.id == source_id)
+            .ok_or_else(|| {
+                WireDagContractError::new(format!(
+                    "WireDag {label} node {} input slot {slot} does not resolve to an earlier node",
+                    owner.id
+                ))
+            })
+    };
+
+    match dim {
+        WireRtDim::Lit { .. } => Ok(()),
+        WireRtDim::ToEnd if label == "Shrink end" => Ok(()),
+        WireRtDim::ToEnd => Err(WireDagContractError::new(format!(
+            "WireDag {label} node {} forbids the to_end carrier",
+            owner.id
+        ))),
+        WireRtDim::Sym { .. } if allow_sym => Ok(()),
+        WireRtDim::Sym { .. } => Err(WireDagContractError::new(format!(
+            "WireDag {label} node {} forbids the sym carrier",
+            owner.id
+        ))),
+        WireRtDim::Node { input } => {
+            let source = resolve_slot(*input)?;
+            if !source.output_type.dims.is_empty() || source.output_type.precision != "int64" {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag {label} node {} input slot {input} must be an exact rank-0 int64 extent scalar",
+                    owner.id
+                )));
+            }
+            Ok(())
+        }
+        WireRtDim::InputAxis { .. } if !allow_input_axis => {
+            Err(WireDagContractError::new(format!(
+                "WireDag {label} node {} forbids the input_axis carrier",
+                owner.id
+            )))
+        }
+        WireRtDim::InputAxis {
+            tensor,
+            axis: WireRtAxis::Lit { value },
+        } => {
+            let source = resolve_slot(*tensor)?;
+            let axis = usize::try_from(*value).map_err(|_| {
+                WireDagContractError::new(format!(
+                    "WireDag {label} node {} InputAxis value {value} is not normalized",
+                    owner.id
+                ))
+            })?;
+            if axis >= source.output_type.dims.len() {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag {label} node {} InputAxis {axis} is out of range for source rank {}",
+                    owner.id,
+                    source.output_type.dims.len()
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_exact_wire_rt_dim_inputs<'a>(
+    owner: &WireDagNode,
+    dims: impl IntoIterator<Item = &'a WireRtDim>,
+    label: &str,
+) -> Result<(), WireDagContractError> {
+    let owned = dims
+        .into_iter()
+        .filter_map(|dim| match dim {
+            WireRtDim::Node { input } | WireRtDim::InputAxis { tensor: input, .. } => Some(*input),
+            WireRtDim::Lit { .. } | WireRtDim::ToEnd | WireRtDim::Sym { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for input in 1..owner.inputs.len() {
+        if !owned.contains(&input) {
+            return Err(WireDagContractError::new(format!(
+                "WireDag {label} node {} has unowned runtime extent input slot {input}",
+                owner.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn wire_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
     match (left, right) {
         (WireDimInfo::Lit { size: left }, WireDimInfo::Lit { size: right }) => left == right,
@@ -2183,11 +2698,13 @@ pub struct WireFusedStep {
 #[serde(rename_all = "snake_case")]
 pub enum WireFusedStepOp {
     Add,
+    Sub,
     Mul,
     Div,
     FloorDiv,
     TruncDiv,
     MaxElem,
+    MinElem,
     CmpLt,
     Neg,
     Recip,
@@ -2211,6 +2728,20 @@ pub enum WireFusedInput {
     PreviousStep { index: usize },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireExtremaKind {
+    Max,
+    Min,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireExtremaOperand {
+    Left,
+    Right,
+}
+
 /// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds
 /// and reshape targets. `Node(i)` indexes the owning op's `inputs` (the
 /// rank-0 integer bound scalars); `to_end` is the full-axis sentinel; `sym`
@@ -2222,18 +2753,33 @@ pub enum WireRtDim {
     ToEnd,
     Node { input: usize },
     Sym { name: String },
+    InputAxis { tensor: usize, axis: WireRtAxis },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "axis", rename_all = "snake_case")]
+pub enum WireRtAxis {
+    Lit { value: i32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireRiscOp {
     Add,
+    Sub,
     Mul,
     Div,
     FloorDiv,
     TruncDiv,
     CmpLt,
     MaxElem,
+    MinElem,
+    ExtremaAdjoint {
+        extrema: WireExtremaKind,
+        operand: WireExtremaOperand,
+    },
+    Relu,
+    ReluAdjoint,
     Neg,
     Recip,
     Exp,
@@ -2311,7 +2857,7 @@ pub enum WireRiscOp {
     },
     Expand {
         axis: usize,
-        size: String,
+        size: WireRtDim,
     },
     OneHot {
         vocab: usize,
@@ -2387,13 +2933,28 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
     use chelis_types::types::Prim;
+    /// The kinds a general producer has no standing to spell.
+    ///
+    /// `UnsupportedFeature` is the original member. chelis#886 adds the
+    /// effect checker's four, which reach the wire only through
+    /// `Diagnostic::from_effect_error`. Stated as a list so that adding a
+    /// governed identity and quietly excluding it from general production
+    /// has to be written down here.
+    const NON_GENERAL_KINDS: [DiagnosticKind; 5] = [
+        DiagnosticKind::UnsupportedFeature,
+        DiagnosticKind::UnhandledEffect,
+        DiagnosticKind::InvalidHandler,
+        DiagnosticKind::BuildTargetMismatch,
+        DiagnosticKind::TypeTotality,
+    ];
+
     #[test]
-    fn general_kind_projection_excludes_exactly_unsupported_feature() {
+    fn general_kind_projection_excludes_exactly_the_non_general_kinds() {
         for kind in DiagnosticKind::ALL {
             let projected = GeneralKind::project(kind);
             assert_eq!(
                 projected.is_none(),
-                kind == DiagnosticKind::UnsupportedFeature,
+                NON_GENERAL_KINDS.contains(&kind),
                 "unexpected projection decision for {kind:?}"
             );
             if let Some(general) = projected {
@@ -2512,9 +3073,9 @@ mod tests {
     }
 
     #[test]
-    fn wire_dag_v6_rejects_raw_pad_fill() {
-        let current_with_legacy_fill = r#"{
-            "schema_version": 6,
+    fn current_wire_dag_rejects_raw_pad_fill() {
+        let current_with_legacy_fill = serde_json::json!({
+            "schema_version": WIRE_DAG_SCHEMA_VERSION,
             "nodes": [{
                 "id": 0,
                 "op": {"kind": "pad", "padding": [], "fill": 1.5},
@@ -2522,13 +3083,14 @@ mod tests {
                 "output_type": {"dims": [], "precision": "f32"}
             }],
             "roots": [0]
-        }"#;
+        })
+        .to_string();
         assert!(
             matches!(
-                WireDag::from_validated_json(current_with_legacy_fill),
+                WireDag::from_validated_json(&current_with_legacy_fill),
                 Err(WireDagDecodeError::Parse(_))
             ),
-            "v6 must not retain a raw-number alternate Pad.fill spelling"
+            "the current schema must not retain a raw-number alternate Pad.fill spelling"
         );
     }
 
@@ -2682,6 +3244,127 @@ mod tests {
     }
 
     #[test]
+    fn direct_arithmetic_wire_identities_round_trip_without_surrogates() {
+        let cases = [
+            (WireRiscOp::Sub, r#"{"kind":"sub"}"#),
+            (WireRiscOp::MinElem, r#"{"kind":"min_elem"}"#),
+            (
+                WireRiscOp::ExtremaAdjoint {
+                    extrema: WireExtremaKind::Max,
+                    operand: WireExtremaOperand::Left,
+                },
+                r#"{"kind":"extrema_adjoint","extrema":"max","operand":"left"}"#,
+            ),
+            (
+                WireRiscOp::ExtremaAdjoint {
+                    extrema: WireExtremaKind::Min,
+                    operand: WireExtremaOperand::Right,
+                },
+                r#"{"kind":"extrema_adjoint","extrema":"min","operand":"right"}"#,
+            ),
+        ];
+
+        for (op, expected) in cases {
+            let encoded = serde_json::to_string(&op).expect("serialize direct arithmetic op");
+            assert_eq!(encoded, expected);
+            let decoded: WireRiscOp =
+                serde_json::from_str(&encoded).expect("deserialize direct arithmetic op");
+            assert_eq!(
+                serde_json::to_string(&decoded).expect("re-serialize direct arithmetic op"),
+                expected
+            );
+        }
+
+        for (op, expected) in [
+            (WireFusedStepOp::Sub, r#""sub""#),
+            (WireFusedStepOp::MinElem, r#""min_elem""#),
+        ] {
+            let encoded = serde_json::to_string(&op).expect("serialize fused direct op");
+            assert_eq!(encoded, expected);
+            let decoded: WireFusedStepOp =
+                serde_json::from_str(&encoded).expect("deserialize fused direct op");
+            assert_eq!(
+                serde_json::to_string(&decoded).expect("re-serialize fused direct op"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn relu_wire_identities_round_trip_as_distinct_exact_variants() {
+        for (op, expected) in [
+            (WireRiscOp::Relu, r#"{"kind":"relu"}"#),
+            (WireRiscOp::ReluAdjoint, r#"{"kind":"relu_adjoint"}"#),
+        ] {
+            let encoded = serde_json::to_string(&op).expect("serialize relu identity");
+            assert_eq!(encoded, expected);
+            let decoded =
+                serde_json::from_str::<WireRiscOp>(&encoded).expect("decode relu identity");
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), expected);
+        }
+
+        assert!(serde_json::from_str::<WireRiscOp>(r#"{"kind":"relu_surrogate"}"#).is_err());
+    }
+
+    #[test]
+    fn relu_wire_contract_rejects_wrong_arity_dtype_and_shape() {
+        let ty = |precision: &str, size: usize| WireTensorType {
+            dims: vec![WireDimInfo::Lit { size }],
+            precision: precision.to_string(),
+        };
+        let load = |id, precision: &str, size| WireDagNode {
+            id,
+            op: WireRiscOp::Load {
+                name: format!("input_{id}"),
+            },
+            inputs: vec![],
+            output_type: ty(precision, size),
+        };
+        let validate = |op, inputs, output_type| {
+            WireDag {
+                schema_version: WIRE_DAG_SCHEMA_VERSION,
+                nodes: vec![
+                    load(0, "f32", 4),
+                    load(1, "f32", 4),
+                    WireDagNode {
+                        id: 2,
+                        op,
+                        inputs,
+                        output_type,
+                    },
+                ],
+                roots: vec![2],
+            }
+            .validate_wire_contract()
+        };
+
+        validate(WireRiscOp::Relu, vec![0], ty("f32", 4)).expect("valid ReLU wire node");
+        validate(WireRiscOp::ReluAdjoint, vec![0, 1], ty("f32", 4))
+            .expect("valid ReLU adjoint wire node");
+        assert!(validate(WireRiscOp::Relu, vec![0, 1], ty("f32", 4)).is_err());
+        assert!(validate(WireRiscOp::Relu, vec![0], ty("int32", 4)).is_err());
+        assert!(validate(WireRiscOp::ReluAdjoint, vec![0, 1], ty("f32", 3)).is_err());
+        assert!(validate(WireRiscOp::ReluAdjoint, vec![0, 99], ty("f32", 4)).is_err());
+    }
+
+    #[test]
+    fn direct_arithmetic_wire_schema_has_no_legacy_aliases() {
+        for legacy in [
+            r#"{"kind":"add_neg"}"#,
+            r#"{"kind":"neg_add"}"#,
+            r#"{"kind":"minimum"}"#,
+            r#"{"kind":"min"}"#,
+            r#"{"kind":"max_grad"}"#,
+            r#"{"kind":"min_grad"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<WireRiscOp>(legacy).is_err(),
+                "legacy arithmetic alias must be rejected: {legacy}"
+            );
+        }
+    }
+
+    #[test]
     fn wire_property_contract_option_round_trips() {
         let option = WirePropertyOption::Contract {
             id: "std.normal_cdf.reflection".to_string(),
@@ -2826,5 +3509,297 @@ mod tests {
                 other => panic!("expected reduce_window_grad wire op, got {other:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_projection_contract {
+    use super::{Diagnostic, DiagnosticSpan, check_error_kind, effect_error_kind};
+    use chelis_effects::EffectErrorKind as E;
+    use chelis_types::errors::{CheckError, CheckErrorKind as K};
+
+    /// Every check kind, so the pin below covers the whole enum rather than
+    /// the three a CLI fixture happens to provoke. Adding a variant does not
+    /// compile until `check_error_kind` gains an arm, which lands the author
+    /// here.
+    const ALL_CHECK_KINDS: [K; 24] = [
+        K::TypeMismatch,
+        K::PrecisionMismatch,
+        K::DimensionMismatch,
+        K::ArityMismatch,
+        K::UnboundVariable {
+            identifier: String::new(),
+        },
+        K::UnknownConstructor {
+            identifier: String::new(),
+        },
+        K::NotAFunction,
+        K::NonExhaustiveMatch,
+        K::OccursCheck,
+        K::CastNonTensor,
+        K::TupleIndexOutOfBounds,
+        K::UseAfterConsume,
+        K::UnconsumedLinear,
+        K::InvalidBorrow,
+        K::CycleDetected,
+        K::UnsupportedTensorPrecision,
+        K::DuplicateDefinition,
+        K::DuplicateModule,
+        K::OpaqueTypeViolation,
+        K::ReservedLinkerName,
+        K::BuiltinShadowing,
+        K::UnknownForm,
+        K::MalformedForm,
+        K::Other,
+    ];
+
+    /// The published spellings, restated independently of the projection.
+    ///
+    /// Reading them back through `check_error_kind` would agree with any
+    /// edit to it, including a wrong one. Two tables disagree exactly when
+    /// one moved without the other, which is what an accidental wire change
+    /// looks like.
+    fn expected_spelling(kind: &K) -> &'static str {
+        match kind {
+            K::TypeMismatch => "TypeMismatch",
+            K::PrecisionMismatch => "PrecisionMismatch",
+            K::DimensionMismatch => "DimensionMismatch",
+            K::ArityMismatch => "ArityMismatch",
+            K::UnboundVariable { .. } => "UnboundVariable",
+            K::UnknownConstructor { .. } => "UnknownConstructor",
+            K::NotAFunction => "NotAFunction",
+            K::NonExhaustiveMatch => "NonExhaustiveMatch",
+            K::OccursCheck => "OccursCheck",
+            K::CastNonTensor => "CastNonTensor",
+            K::TupleIndexOutOfBounds => "TupleIndexOutOfBounds",
+            K::UseAfterConsume => "UseAfterConsume",
+            K::UnconsumedLinear => "UnconsumedLinear",
+            K::InvalidBorrow => "InvalidBorrow",
+            K::CycleDetected => "CycleDetected",
+            K::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
+            K::DuplicateDefinition => "DuplicateDefinition",
+            K::DuplicateModule => "DuplicateModule",
+            K::OpaqueTypeViolation => "OpaqueTypeViolation",
+            K::ReservedLinkerName => "ReservedLinkerName",
+            K::BuiltinShadowing => "BuiltinShadowing",
+            K::UnknownForm => "UnknownForm",
+            K::MalformedForm => "MalformedForm",
+            K::Other => "Other",
+        }
+    }
+
+    fn check_error(kind: K, span_offset: Option<usize>, span_id: Option<&str>) -> CheckError {
+        CheckError {
+            kind,
+            message: "m".to_string(),
+            suggestions: Vec::new(),
+            severity: 0.5,
+            expected: None,
+            got: None,
+            span_offset,
+            span_id: span_id.map(str::to_string),
+        }
+    }
+
+    /// chelis#886: every check kind reaches the wire through its governed
+    /// vocabulary identity, at the spelling the report has always published.
+    #[test]
+    fn every_check_kind_projects_to_its_pinned_governed_spelling() {
+        for kind in &ALL_CHECK_KINDS {
+            assert_eq!(
+                check_error_kind(kind).as_str(),
+                expected_spelling(kind),
+                "published spelling changed for {kind:?}"
+            );
+        }
+    }
+
+    /// `CheckErrorKind::diagnostic_name` (chelis#1399) is a second published
+    /// spelling of the same kind: it is what `chelis-e2e`'s snippet checker
+    /// still emits, and what the CLI report emitted before this change. Two
+    /// spellings of one wire field is the drift chelis#886 exists to remove,
+    /// and until the remaining producer is converted the honest defence is to
+    /// pin them equal. If this fails, one of the two moved alone and a
+    /// consumer reading both surfaces now sees two names for one kind.
+    #[test]
+    fn the_governed_identity_agrees_with_the_checkers_own_spelling() {
+        for kind in &ALL_CHECK_KINDS {
+            assert_eq!(
+                check_error_kind(kind).as_str(),
+                kind.diagnostic_name(),
+                "the governed identity and `diagnostic_name` disagree for {kind:?}"
+            );
+        }
+    }
+
+    /// Two check kinds sharing one identity would silently merge them on the
+    /// wire, which is information loss a consumer cannot detect.
+    #[test]
+    fn the_projection_does_not_collapse_two_kinds_onto_one_identity() {
+        let mut identities: Vec<&str> = ALL_CHECK_KINDS
+            .iter()
+            .map(|kind| check_error_kind(kind).as_str())
+            .collect();
+        let total = identities.len();
+        identities.sort_unstable();
+        identities.dedup();
+        assert_eq!(identities.len(), total, "two check kinds share an identity");
+    }
+
+    #[test]
+    fn every_effect_kind_projects_to_its_pinned_governed_spelling() {
+        for (kind, spelling) in [
+            (E::UnhandledEffect, "UnhandledEffect"),
+            (E::InvalidHandler, "InvalidHandler"),
+            (E::BuildTargetMismatch, "BuildTargetMismatch"),
+            (E::TypeTotality, "TypeTotality"),
+        ] {
+            assert_eq!(effect_error_kind(&kind).as_str(), spelling);
+        }
+    }
+
+    /// chelis#1395: a producer that held a coordinate and no extent reports
+    /// it, rather than losing it for want of a length.
+    ///
+    /// Before the tagged carrier this returned `None`, dropping a coordinate
+    /// the previous hand-assembled document published as `span_offset` --
+    /// 17 of 219 diagnostics, per the corpus measurement recorded on
+    /// chelis#1395 — cited rather than restated so a reader can check it.
+    #[test]
+    fn a_coordinate_without_an_identity_travels_as_a_point() {
+        let derived = Diagnostic::from_check_error(&check_error(K::Other, Some(30), None));
+        assert_eq!(derived.span, Some(DiagnosticSpan::Point { offset: 30 }));
+        assert_eq!(derived.span.map(|span| span.extent()), Some(None));
+    }
+
+    /// [04-FIT-17]: a degenerate `start..start` identity is a coordinate the
+    /// producer never measured an extent for, not a measured empty range.
+    /// The distinction is the whole point of the atom -- a consumer cannot
+    /// tell an invented `len: 0` from a real one.
+    #[test]
+    fn a_degenerate_identity_is_a_point_not_a_zero_width_range() {
+        let derived =
+            Diagnostic::from_check_error(&check_error(K::Other, Some(77), Some("surf:77..77")));
+        assert_eq!(derived.span, Some(DiagnosticSpan::Point { offset: 77 }));
+    }
+
+    /// The carrier makes the prohibition structural: `Point` has no `len`
+    /// field, so a fabricated extent is unrepresentable rather than merely
+    /// forbidden. This pins the property that motivates the shape.
+    #[test]
+    fn a_point_cannot_carry_an_extent() {
+        assert_eq!(DiagnosticSpan::Point { offset: 5 }.extent(), None);
+        assert_eq!(
+            DiagnosticSpan::Range { offset: 5, len: 2 }.extent(),
+            Some(2)
+        );
+        assert_eq!(DiagnosticSpan::Point { offset: 5 }.offset(), 5);
+        assert_eq!(DiagnosticSpan::Range { offset: 5, len: 2 }.offset(), 5);
+    }
+
+    /// The variant tag is what earns the census's tagged-transport class, so
+    /// it is part of the wire contract rather than a serde detail.
+    #[test]
+    fn both_variants_carry_their_tag_on_the_wire() {
+        let point =
+            serde_json::to_string(&DiagnosticSpan::Point { offset: 30 }).expect("point serializes");
+        assert_eq!(point, r#"{"span":"point","offset":30}"#);
+        let range = serde_json::to_string(&DiagnosticSpan::Range { offset: 30, len: 4 })
+            .expect("range serializes");
+        assert_eq!(range, r#"{"span":"range","offset":30,"len":4}"#);
+    }
+
+    /// spec/04 [04-FIT-17] and `spec/03-deep-syntax.md` §1.1.1: a check
+    /// diagnostic reports the coordinate it holds and never derives an extent
+    /// from the identity beside it.
+    ///
+    /// `CheckError` carries `span_offset` and an opaque `span_id`, and no
+    /// measured length. An earlier revision recovered one by parsing `N..M`
+    /// out of the identity, which invents an extent for any identity that
+    /// happens to be spelled that way -- including a foreign one, since §1.1.1
+    /// makes external span IDs opaque and their interpretation none of
+    /// Chelis's concern.
+    #[test]
+    fn a_check_diagnostic_reports_a_coordinate_never_a_derived_range() {
+        // A producer with no location at all still reports nothing. `Point`
+        // exists for a coordinate the producer HELD, never for one it lacked.
+        assert!(
+            Diagnostic::from_check_error(&check_error(K::Other, None, None))
+                .span
+                .is_none(),
+            "no location at all must stay absent"
+        );
+
+        for (label, error) in [
+            ("no identity at all", check_error(K::Other, Some(30), None)),
+            (
+                "an opaque identity carrying no range",
+                check_error(K::Other, Some(30), Some("octant:theorem-7")),
+            ),
+            // The identity is Chelis's own spelling and still yields no
+            // extent: reading one back out of a string is not a typed
+            // producer path, so `surf:` earns no more trust here than
+            // `octant:` does.
+            (
+                "a range-shaped identity with Chelis's own prefix",
+                check_error(
+                    K::UnboundVariable {
+                        identifier: "x".to_string(),
+                    },
+                    Some(30),
+                    Some("surf:30..34"),
+                ),
+            ),
+            // The adversarial case: an EXTERNAL identity that merely looks
+            // like a range. Spelling is not provenance, and a consumer must
+            // not receive `len: 4` that no producer measured.
+            (
+                "a range-shaped identity from a foreign producer",
+                check_error(K::Other, Some(30), Some("octant:30..34")),
+            ),
+            // A degenerate identity is a coordinate, not a measured empty
+            // range; a consumer cannot tell an invented `len: 0` from a real
+            // one.
+            (
+                "a degenerate range-shaped identity",
+                check_error(K::Other, Some(30), Some("surf:30..30")),
+            ),
+            // The identity's range disagrees with the producer's own offset.
+            // `span_offset` is the first-class coordinate; the identity still
+            // travels in `span_id`, so a consumer can see the disagreement
+            // rather than having it hidden.
+            (
+                "an identity whose range contradicts the offset",
+                check_error(K::Other, Some(30), Some("surf:99..104")),
+            ),
+        ] {
+            let span = Diagnostic::from_check_error(&error).span;
+            assert_eq!(
+                span,
+                Some(DiagnosticSpan::Point { offset: 30 }),
+                "{label} must report the coordinate and no range"
+            );
+            assert_eq!(
+                span.map(|span| span.extent()),
+                Some(None),
+                "{label} must carry no extent"
+            );
+        }
+    }
+
+    /// The identity survives even when the range does not, so omitting the
+    /// range loses nothing a consumer previously had.
+    #[test]
+    fn an_opaque_identity_travels_without_a_range() {
+        let projected = Diagnostic::from_check_error(&check_error(
+            K::Other,
+            Some(30),
+            Some("octant:theorem-7"),
+        ));
+        assert_eq!(projected.span_id.as_deref(), Some("octant:theorem-7"));
+        // Both travel: [04-FIT-16] requires the coordinate and the identity
+        // to be independently carryable, so an opaque identity that yields no
+        // range does not suppress the coordinate beside it.
+        assert_eq!(projected.span, Some(DiagnosticSpan::Point { offset: 30 }));
     }
 }

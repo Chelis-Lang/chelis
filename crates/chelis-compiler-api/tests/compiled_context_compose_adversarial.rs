@@ -690,7 +690,7 @@ fn g1_newcode_inheriting_test_effect_from_library_with_strict_signature_rejected
     // calling the helper. check_in_context MUST reject with
     // UnhandledEffect.
     let library = "module Mylib.Math\nexport (lib_check_eq)\n\n\
-                   def lib_check_eq(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, \"lib_check_eq\")\n";
+                   def lib_check_eq(a: int64, b: int64) -> unit = test_assert_eq(a, b, \"lib_check_eq\")\n";
     let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
@@ -1242,7 +1242,7 @@ fn gextra_repeated_calls_against_same_context_are_independent() {
 
     let snippet_a = "module App.Eval\nimport Mylib.Math (add)\n\n\
                      sig my_test: int64 -> unit ! { Test }\n\
-                     def my_test(x: int64) -> unit = test_assert_eq_int(x, x, \"a\")\n";
+                     def my_test(x: int64) -> unit = test_assert_eq(x, x, \"a\")\n";
     let snippet_b = "module App.Eval\nimport Mylib.Math (add)\n\n\
                      def pure_b() -> int32 = add(1, 2)\n";
 

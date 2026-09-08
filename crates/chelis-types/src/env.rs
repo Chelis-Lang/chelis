@@ -1,6 +1,6 @@
 //! Type environment: maps variable names to type schemes.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -82,33 +82,157 @@ pub enum SizeProvenance {
 /// declarations and therefore a different lexical binder scope.
 #[derive(Debug, Clone, Default)]
 struct TypeResolutionScope {
-    binders: Option<HashSet<String>>,
+    binders: Option<UnordSet<String>>,
+}
+
+/// Constructor identity selected by declaration/import scope.
+///
+/// Constructor position is structural in Chelis, so an ordinary lexical
+/// value binding with the same spelling must not replace this entry. Keeping
+/// the owner beside the scheme also avoids rediscovering an arbitrary owner
+/// from the ADT registry when two in-scope ADTs use the same constructor name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConstructorBinding {
+    owner: String,
+    scheme: Scheme,
 }
 
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
-    bindings: HashMap<String, Scheme>,
+    bindings: UnordMap<String, Scheme>,
+    /// Active constructor bindings, separate from ordinary value lookup.
+    ///
+    /// Every exact owner remains available so constructor syntax can select by
+    /// positional versus record shape without consulting out-of-scope registry
+    /// entries. Declaration/import order still chooses the active owner when
+    /// several candidates have the same shape, matching the value environment's
+    /// established constructor binding. A later lexical parameter or block
+    /// binding may replace `bindings[name]` for bare value position without
+    /// changing constructor position.
+    #[serde(default)]
+    constructor_bindings: UnordMap<String, Vec<ConstructorBinding>>,
+    /// Names introduced by the current lexical scope (function parameters,
+    /// block bindings, and pattern bindings). Builtin-specific inference may
+    /// only dispatch on a name from the closed builtin vocabulary when that
+    /// spelling has not been replaced by one of these bindings. This is
+    /// check-time provenance, not part of the reusable or serialized type
+    /// environment.
+    #[serde(skip)]
+    lexical_bindings: UnordSet<String>,
     /// Current declaration's type/dimension/rank binders. Installed only on
     /// the cloned environment used to infer that declaration, inherited by
     /// nested lexical clones, and omitted from cached checker state.
     #[serde(skip)]
     type_resolution_scope: TypeResolutionScope,
+    /// Declared result trusted only while checking a linker-reserved
+    /// [05-OP-35] stdlib wrapper whose runtime-axis shape proof is owned by
+    /// #1298. Never serialized or exposed to entry source.
+    #[serde(skip)]
+    exact_stdlib_expected_result: Option<Type>,
+    /// chelis#260: the source name bound to each declared dimension
+    /// parameter of a signature, keyed by definition name.
+    ///
+    /// Recorded when a `defsig` is resolved, where the names are still in
+    /// scope, and consumed after instantiation so a declared-dim diagnostic
+    /// can say `n` and `m` rather than `d44` and `d45`. The `DimVar` keys are
+    /// PRE-generalization; `instantiate_scheme` supplies the
+    /// original-to-fresh hop that makes them comparable to what a check on an
+    /// instantiated signature actually sees. Checker state only, never
+    /// serialized.
+    #[serde(skip)]
+    declared_dim_names: UnordMap<String, UnordMap<DimVar, String>>,
+    /// chelis#260 Site 2: the same provenance for TYPE parameters. Kept
+    /// separate from `declared_dim_names` because the two are consumed by
+    /// different diagnostics and a signature may declare either alone.
+    ///
+    /// chelis#1486 / [04-INF-6]: the second consumer. Membership is the
+    /// checker's record of which variables in a declaration's scheme are
+    /// AUTHORED binders rather than inference holes, so a hole ([04-INF-5])
+    /// is absent here and is never subject to the rigidity check. Checker
+    /// state only, never serialized.
+    #[serde(skip)]
+    declared_type_names: UnordMap<String, UnordMap<TypeVar, String>>,
+    /// The composed `fresh TypeVar -> source name` map for the definition
+    /// currently being inferred.
+    ///
+    /// The borrow diagnostic that needs it (`validate_deferred_borrow_vars`)
+    /// runs at the per-def drain, after body inference, and never sees the
+    /// instantiation that minted the fresh variables. Composing at the
+    /// instantiation site and parking the result here is what carries a
+    /// source name across that gap.
+    #[serde(skip)]
+    active_declared_type_names: UnordMap<TypeVar, String>,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
     /// `bindings` (so it has correct lexical scoping for free) and dropped
     /// from serialization (it is a check-time-only analysis artifact).
     #[serde(skip)]
-    size_provenance: HashMap<String, SizeProvenance>,
+    size_provenance: UnordMap<String, SizeProvenance>,
+    /// Exact values for the `Static` subset of `size_provenance`.
+    #[serde(skip)]
+    static_size_values: UnordMap<String, i64>,
     /// chelis#631: literal element counts of `let`-bound list expressions,
     /// so `concat(rows, axis)` can size its concat axis through the
     /// binding (a list's length is not part of its type). Same
     /// lexical-scoping-by-`Clone` and add-symmetric mark/clear discipline
     /// as `size_provenance`; check-time-only, dropped from serialization.
     #[serde(skip)]
-    list_literal_lens: HashMap<String, usize>,
+    list_literal_lens: UnordMap<String, usize>,
+    /// chelis#1134 / [04-INF-4]: flattened declaration index of every
+    /// top-level eager (non-function) value in the unit being checked.
+    ///
+    /// Visibility of such a value is a function of its source position, and
+    /// of nothing else. Binding presence cannot express that rule: the body
+    /// inference schedule reorders function declarations, so "is it bound
+    /// yet" and "is it declared yet" are different questions. This map
+    /// answers the second one for [`Self::top_level_value_visibility`], which
+    /// is the only authority on eager-value scope.
+    #[serde(skip)]
+    top_level_value_ordinals: UnordMap<String, usize>,
+    /// The binding an eager top-level value shadows, when its name was
+    /// already bound by an import or a stacked library phase. Before that
+    /// value's own declaration the outer binding is still the one in scope,
+    /// so lookup falls back here rather than reporting the name unbound.
+    #[serde(skip)]
+    shadowed_prior_bindings: UnordMap<String, Scheme>,
+    /// Flattened declaration index currently being inferred. Set by the
+    /// driver loop at each scheduled declaration and inherited by every
+    /// lexical clone, so nested scopes compare against the declaration that
+    /// owns them rather than against the schedule's position.
+    #[serde(skip)]
+    current_declaration_ordinal: Option<usize>,
+    /// Exact names temporarily visible while one cyclic full-reference
+    /// component is co-inferred. This contains the component's provisional
+    /// members and, for [04-INF-8] cycle precedence, any later eager target
+    /// that the scheduler has already inferred for that component. The
+    /// inference driver installs this capability only for the rejected cycle
+    /// and restores the prior set on both completion and cancellation; it is
+    /// never serialized.
+    #[serde(skip)]
+    active_top_level_component: UnordSet<String>,
 }
+
+/// Result of the [04-INF-4] eager-value scope test, including the exact
+/// provisional capability installed for an active rejected cycle. See
+/// [`Env::top_level_value_visibility`].
+pub(crate) enum TopLevelValueVisibility<'a> {
+    /// The name is in scope here, or the rule does not govern it.
+    Visible,
+    /// The name belongs to a top-level eager value declared after the
+    /// declaration being inferred, carrying the outer binding it shadows.
+    NotYetDeclared { shadowed: Option<&'a Scheme> },
+}
+
+/// An instantiated scheme body, paired with the original-to-fresh renaming of
+/// each kind of quantifier that a caller can need to read back.
+///
+/// The type-variable renaming maps to a `Type` because a quantified type
+/// variable may instantiate to any type; a quantified dimension variable
+/// always instantiates to another dimension variable, so that renaming is
+/// `DimVar` to `DimVar`.
+type InstantiatedScheme = (Type, Vec<(TypeVar, Type)>, Vec<(DimVar, DimVar)>);
 
 impl Env {
     pub fn new() -> Self {
@@ -120,23 +244,59 @@ impl Env {
         self.bindings.get(name)
     }
 
+    /// Look up the active constructor owner and scheme for an exact name.
+    pub(crate) fn lookup_constructor(&self, name: &str) -> Option<(&str, &Scheme)> {
+        self.constructor_bindings
+            .get(name)
+            .and_then(|bindings| bindings.last())
+            .map(|binding| (binding.owner.as_str(), &binding.scheme))
+    }
+
+    /// Iterate every in-scope exact constructor candidate in declaration order.
+    pub(crate) fn lookup_constructors(
+        &self,
+        name: &str,
+    ) -> impl DoubleEndedIterator<Item = (&str, &Scheme)> {
+        self.constructor_bindings
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|binding| (binding.owner.as_str(), &binding.scheme))
+    }
+
     /// Install the binder set owned by the declaration whose body is about to
     /// be inferred. Callers use a cloned `Env`, so this scope cannot leak to a
     /// sibling declaration or back into a reusable library snapshot.
-    pub(crate) fn set_type_resolution_binders(&mut self, binders: Option<&HashSet<String>>) {
+    pub(crate) fn set_type_resolution_binders(&mut self, binders: Option<&UnordSet<String>>) {
         self.type_resolution_scope.binders = binders.cloned();
     }
 
     /// Binder names visible to a nested source annotation in this lexical
     /// environment. Absence means closed input: named `t-var`/`d-var`/
     /// `d-rank` nodes do not allocate inference variables.
-    pub(crate) fn type_resolution_binders(&self) -> Option<&HashSet<String>> {
+    pub(crate) fn type_resolution_binders(&self) -> Option<&UnordSet<String>> {
         self.type_resolution_scope.binders.as_ref()
+    }
+
+    pub(crate) fn set_exact_stdlib_expected_result(&mut self, result: Option<Type>) {
+        self.exact_stdlib_expected_result = result;
+    }
+
+    pub(crate) fn exact_stdlib_expected_result(&self) -> Option<&Type> {
+        self.exact_stdlib_expected_result.as_ref()
     }
 
     /// Record the size provenance of a `let`-bound name (chelis#397/#469).
     pub fn mark_size_provenance(&mut self, name: &str, prov: SizeProvenance) {
         self.size_provenance.insert(name.to_string(), prov);
+        self.static_size_values.remove(name);
+    }
+
+    /// Record one checked, fully folded integer extent binding.
+    pub fn mark_static_size_value(&mut self, name: &str, value: i64) {
+        self.size_provenance
+            .insert(name.to_string(), SizeProvenance::Static);
+        self.static_size_values.insert(name.to_string(), value);
     }
 
     /// Clear any recorded size provenance for `name` (chelis#397/#469).
@@ -153,11 +313,17 @@ impl Env {
     /// the checked type (a check↔eval divergence / check-clean-fails-build).
     pub fn clear_size_provenance(&mut self, name: &str) {
         self.size_provenance.remove(name);
+        self.static_size_values.remove(name);
     }
 
     /// The recorded size provenance of a name, if any (chelis#397/#469).
     pub fn size_provenance(&self, name: &str) -> Option<SizeProvenance> {
         self.size_provenance.get(name).copied()
+    }
+
+    /// Exact checked value of a previously folded lexical extent.
+    pub fn static_size_value(&self, name: &str) -> Option<i64> {
+        self.static_size_values.get(name).copied()
     }
 
     /// Record the literal element count of a `let`-bound list (chelis#631).
@@ -187,15 +353,17 @@ impl Env {
     /// `LowerCtx::symbol_has_tensor_source`.
     pub fn tensor_carries_dim(&self, name: &str) -> bool {
         self.bindings
-            .values()
-            .any(|scheme| type_carries_dim_name(&scheme.body, name))
+            .to_sorted()
+            .into_iter()
+            .any(|(_, scheme)| type_carries_dim_name(&scheme.body, name))
     }
 
     /// Look up an imported or qualified name by its unique terminal segment.
     pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme> {
         let mut matches = self
             .bindings
-            .iter()
+            .to_sorted()
+            .into_iter()
             .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
@@ -206,6 +374,114 @@ impl Env {
         self.bindings.insert(name, scheme);
     }
 
+    /// Bind a constructor in both structural constructor position and the
+    /// ordinary value environment used by bare/nullary references.
+    pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
+        self.bindings.insert(name.clone(), scheme.clone());
+        let candidates = self.constructor_bindings.entry(name).or_default();
+        candidates.retain(|candidate| candidate.owner != owner);
+        candidates.push(ConstructorBinding { owner, scheme });
+    }
+
+    /// Extend the environment with a binding introduced by ordinary lexical
+    /// scope. Unlike [`Self::bind`], this also records that builtin callable
+    /// dispatch must not claim the name while this environment lives.
+    pub(crate) fn bind_lexical(&mut self, name: String, scheme: Scheme) {
+        self.lexical_bindings.insert(name.clone());
+        self.bind(name, scheme);
+    }
+
+    /// Whether an ordinary lexical binding owns `name` in this environment.
+    pub(crate) fn is_lexically_bound(&self, name: &str) -> bool {
+        self.lexical_bindings.contains(name)
+    }
+
+    /// Drop the [04-INF-4] scope state of a previous check unit.
+    ///
+    /// Source position is a property of one unit's declaration list. A
+    /// stacked library or context phase reuses the same environment, and its
+    /// values are ordinary imported bindings from the next unit's point of
+    /// view, so their positions must not survive into it.
+    pub(crate) fn reset_top_level_value_scope(&mut self) {
+        self.top_level_value_ordinals.clear();
+        self.shadowed_prior_bindings.clear();
+        self.current_declaration_ordinal = None;
+        self.active_top_level_component.clear();
+    }
+
+    /// Record the source position of one top-level eager value, and the
+    /// binding it shadows if the name was already in scope.
+    pub(crate) fn note_top_level_value_ordinal(
+        &mut self,
+        name: String,
+        ordinal: usize,
+        shadowed: Option<Scheme>,
+    ) {
+        if let Some(prior) = shadowed {
+            self.shadowed_prior_bindings.insert(name.clone(), prior);
+        }
+        self.top_level_value_ordinals.insert(name, ordinal);
+    }
+
+    /// The recorded source position of a top-level eager value, if any.
+    pub(crate) fn top_level_value_ordinal(&self, name: &str) -> Option<usize> {
+        self.top_level_value_ordinals.get(name).copied()
+    }
+
+    /// Point the environment at the declaration whose body is being inferred.
+    pub(crate) fn set_current_declaration_ordinal(&mut self, ordinal: Option<usize>) {
+        self.current_declaration_ordinal = ordinal;
+    }
+
+    /// Replace the exact cyclic-component capability whose provisional member
+    /// bindings and already-inferred [04-INF-8] precedence targets may bypass
+    /// ordinary source-position visibility. The returned capability must be
+    /// restored before the inference level is left.
+    #[must_use = "restore the prior top-level component capability on every exit"]
+    pub(crate) fn replace_active_top_level_component(
+        &mut self,
+        names: UnordSet<String>,
+    ) -> UnordSet<String> {
+        std::mem::replace(&mut self.active_top_level_component, names)
+    }
+
+    /// [04-INF-4]: whether `name` resolves to a top-level eager value that is
+    /// already declared at the current declaration, is a provisional member
+    /// of the exact cyclic component currently being co-inferred, or is one
+    /// of that rejected component's already-inferred [04-INF-8] precedence
+    /// targets.
+    ///
+    /// `Visible` covers every name this rule does not govern: a lexical
+    /// binding that shadows the value, an imported or library name, a
+    /// function, and a value declared earlier. A value's own declaration sees
+    /// itself, which is what makes the explicitly typed external input
+    /// (`x: T = x`) legal without any prebinding. A later value is
+    /// `NotYetDeclared`, carrying the outer binding it shadows when there is
+    /// one so the caller can resolve against the still-current outer scope.
+    /// Active-capability membership is checked after lexical shadowing and
+    /// before source order: this lets only exact graph-owned cycle bindings
+    /// cross that boundary while preserving local-name precedence.
+    pub(crate) fn top_level_value_visibility(&self, name: &str) -> TopLevelValueVisibility<'_> {
+        if self.lexical_bindings.contains(name) {
+            return TopLevelValueVisibility::Visible;
+        }
+        if self.active_top_level_component.contains(name) {
+            return TopLevelValueVisibility::Visible;
+        }
+        let (Some(declared_at), Some(current)) = (
+            self.top_level_value_ordinals.get(name),
+            self.current_declaration_ordinal,
+        ) else {
+            return TopLevelValueVisibility::Visible;
+        };
+        if *declared_at <= current {
+            return TopLevelValueVisibility::Visible;
+        }
+        TopLevelValueVisibility::NotYetDeclared {
+            shadowed: self.shadowed_prior_bindings.get(name),
+        }
+    }
+
     /// Remove a temporary inference binding before generalizing an SCC.
     /// Recursive function components are prebound monomorphically while
     /// their bodies are inferred, then all provisional members are removed
@@ -214,9 +490,107 @@ impl Env {
         self.bindings.remove(name);
     }
 
-    /// Instantiate a polymorphic scheme with fresh variables.
-    pub fn instantiate(&self, scheme: &Scheme, var_gen: &mut VarGen) -> Type {
-        self.instantiate_with_tvar_mapping(scheme, var_gen).0
+    /// chelis#260: record the source names of a signature's declared dim
+    /// parameters, so a later diagnostic on the instantiated signature can
+    /// render them.
+    pub(crate) fn record_declared_dim_names(
+        &mut self,
+        name: &str,
+        names: UnordMap<DimVar, String>,
+    ) {
+        if !names.is_empty() {
+            self.declared_dim_names.insert(name.to_string(), names);
+        }
+    }
+
+    /// Resolve a definition's declared dim-parameter names against the fresh
+    /// variables a given instantiation minted (chelis#260).
+    ///
+    /// `dvar_mapping` is the original-to-fresh pairing returned by
+    /// [`Self::instantiate_scheme`]. The result is keyed by the
+    /// FRESH variables, which is what a post-instantiation check reports on.
+    /// An empty map means the names were never recorded; callers fall back to
+    /// the internal id rather than inventing a name.
+    pub(crate) fn declared_dim_names_for(
+        &self,
+        name: &str,
+        dvar_mapping: &[(DimVar, DimVar)],
+    ) -> UnordMap<DimVar, String> {
+        let Some(original) = self.declared_dim_names.get(name) else {
+            return UnordMap::new();
+        };
+        dvar_mapping
+            .iter()
+            .filter_map(|(from, to)| original.get(from).map(|n| (*to, n.clone())))
+            .collect()
+    }
+
+    /// chelis#260 Site 2: record the source names of a signature's declared
+    /// TYPE parameters, the analogue of [`Self::record_declared_dim_names`].
+    ///
+    /// chelis#1486 / [04-INF-6]: also the record of which variables are
+    /// AUTHORED binders, so the post-body rigidity check can render them and
+    /// an inference hole ([04-INF-5]) is excluded by construction.
+    pub(crate) fn record_declared_type_names(
+        &mut self,
+        name: &str,
+        names: UnordMap<TypeVar, String>,
+    ) {
+        if !names.is_empty() {
+            self.declared_type_names.insert(name.to_string(), names);
+        }
+    }
+
+    /// Resolve a definition's declared type-parameter names against the fresh
+    /// variables a given instantiation minted (chelis#260 Site 2).
+    ///
+    /// `tvar_mapping` is the original-to-fresh pairing from
+    /// [`Self::instantiate_scheme`]. It maps to a `Type` rather than a
+    /// `TypeVar`, so a quantifier instantiated to anything but a bare
+    /// variable simply has no fresh variable to name and is skipped: a
+    /// concrete type renders itself and needs no provenance.
+    ///
+    /// An empty map means the declaration authored no type binder, so under
+    /// [04-INF-6] nothing in it is rigid.
+    pub(crate) fn declared_type_names_for(
+        &self,
+        name: &str,
+        tvar_mapping: &[(TypeVar, Type)],
+    ) -> UnordMap<TypeVar, String> {
+        let Some(original) = self.declared_type_names.get(name) else {
+            return UnordMap::new();
+        };
+        tvar_mapping
+            .iter()
+            .filter_map(|(from, to)| match to {
+                Type::Var(fresh) => original.get(from).map(|n| (*fresh, n.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Park the composed map for the definition now being inferred, so the
+    /// per-def deferred-borrow drain can name what it reports on.
+    pub(crate) fn set_active_declared_type_names(&mut self, names: UnordMap<TypeVar, String>) {
+        self.active_declared_type_names = names;
+    }
+
+    /// The parked map. Empty when the definition declared no type parameters
+    /// or none was recorded; callers fall back to the internal id rather than
+    /// inventing a name (spec/04 [04-FIT-10]).
+    pub(crate) fn active_declared_type_names(&self) -> &UnordMap<TypeVar, String> {
+        &self.active_declared_type_names
+    }
+
+    /// Instantiate a scheme into the caller's inference substitution so
+    /// quantified semantic restrictions follow the fresh variables.
+    pub fn instantiate(
+        &self,
+        scheme: &Scheme,
+        var_gen: &mut VarGen,
+        inference_subst: &Subst,
+    ) -> Type {
+        self.instantiate_scheme(scheme, var_gen, inference_subst).0
     }
 
     /// Instantiate a scheme and return the fresh type minted for each
@@ -228,30 +602,77 @@ impl Env {
         &self,
         scheme: &Scheme,
         var_gen: &mut VarGen,
+        inference_subst: &Subst,
     ) -> (Type, Vec<(TypeVar, Type)>) {
+        let (ty, tvar_mapping, _) = self.instantiate_scheme(scheme, var_gen, inference_subst);
+        (ty, tvar_mapping)
+    }
+
+    /// The one instantiation mechanism (chelis#260 / chelis#1292).
+    ///
+    /// Every quantifier is renamed here and nowhere else, so the two jobs the
+    /// callers above need cannot drift apart: #1292's installation of
+    /// quantified type-variable restrictions onto the fresh variables, and
+    /// #260's original-to-fresh dimension pairing that lets a diagnostic
+    /// recover the source name of a declared dim parameter.
+    ///
+    /// Keeping them in one body is deliberate. Both were separately-authored
+    /// copies of this loop at one point, and a second copy is exactly how a
+    /// scheme gets instantiated with its restrictions dropped: the omission
+    /// compiles, and the only symptom is a program that should have been
+    /// rejected type-checking.
+    ///
+    /// Callable directly by a site that needs more than one of the renamings
+    /// at once, which is why it is crate-visible rather than a further
+    /// projection beside the ones above.
+    pub(crate) fn instantiate_scheme(
+        &self,
+        scheme: &Scheme,
+        var_gen: &mut VarGen,
+        inference_subst: &Subst,
+    ) -> InstantiatedScheme {
         let mut subst = Subst::new();
-        let mut mapping = Vec::with_capacity(scheme.tvars.len());
+        let mut tvar_mapping = Vec::with_capacity(scheme.tvars.len());
         for &tv in &scheme.tvars {
             let fresh = var_gen.fresh_type();
-            subst.insert_type(tv, fresh.clone());
-            mapping.push((tv, fresh));
+            subst
+                .insert_type(tv, fresh.clone())
+                .expect("a fresh quantified type-variable renaming is valid");
+            if let Type::Var(fresh_var) = fresh
+                && let Some((_, restriction)) = scheme
+                    .tvar_restrictions
+                    .iter()
+                    .find(|(restricted, _)| *restricted == tv)
+            {
+                inference_subst
+                    .narrow_tvar_restriction(fresh_var, *restriction)
+                    .expect("a fresh instantiation variable carries no prior dtype bound");
+            }
+            tvar_mapping.push((tv, fresh));
         }
+        let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
         for &dv in &scheme.dvars {
-            subst.insert_dim(dv, var_gen.fresh_dim());
+            // Mint the variable directly rather than destructuring
+            // `fresh_dim()`: that is `Dim::Var(fresh_dvar())` today, but a
+            // pattern match would silently drop the mapping entry (and the
+            // name with it) if it ever returned another shape.
+            let fresh_dv = var_gen.fresh_dvar();
+            dvar_mapping.push((dv, fresh_dv));
+            subst.insert_dim(dv, Dim::Var(fresh_dv));
         }
         for &rv in &scheme.rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
             subst.insert_rank(rv, vec![Dim::Rank(var_gen.fresh_rvar())]);
         }
-        (subst.apply(&scheme.body), mapping)
+        (subst.apply(&scheme.body), tvar_mapping, dvar_mapping)
     }
 
     /// Collect all free type variables across all bindings in the environment.
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_tvars(&self, subst: &Subst) -> HashSet<TypeVar> {
-        let mut result = HashSet::new();
-        for scheme in self.bindings.values() {
+    pub fn free_tvars(&self, subst: &Subst) -> UnordSet<TypeVar> {
+        let mut result = UnordSet::new();
+        for (_, scheme) in self.bindings.to_sorted() {
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -267,9 +688,9 @@ impl Env {
 
     /// Collect all free dimension variables across all bindings in the environment.
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_dvars(&self, subst: &Subst) -> HashSet<DimVar> {
-        let mut result = HashSet::new();
-        for scheme in self.bindings.values() {
+    pub fn free_dvars(&self, subst: &Subst) -> UnordSet<DimVar> {
+        let mut result = UnordSet::new();
+        for (_, scheme) in self.bindings.to_sorted() {
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -285,9 +706,9 @@ impl Env {
 
     /// Free rank variables in the environment (Tier-2 rank polymorphism).
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_rvars(&self, subst: &Subst) -> HashSet<RankVar> {
-        let mut result = HashSet::new();
-        for scheme in self.bindings.values() {
+    pub fn free_rvars(&self, subst: &Subst) -> UnordSet<RankVar> {
+        let mut result = UnordSet::new();
+        for (_, scheme) in self.bindings.to_sorted() {
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -312,6 +733,10 @@ impl Env {
                     "level-based type quantifiers diverged from the reference environment sweep"
                 );
                 assert_eq!(
+                    level_scheme.tvar_restrictions, sweep_scheme.tvar_restrictions,
+                    "level-based type-variable restrictions diverged from the reference environment sweep"
+                );
+                assert_eq!(
                     level_scheme.dvars, sweep_scheme.dvars,
                     "level-based dimension quantifiers diverged from the reference environment sweep"
                 );
@@ -334,19 +759,28 @@ impl Env {
         let ty_dvars = free_dvars(&ty);
         let ty_rvars = free_rvars(&ty);
         let level = subst.current_level();
-        Scheme {
-            tvars: ty_tvars
-                .into_iter()
-                .filter(|v| {
-                    subst.level_of_tvar(*v) > level
-                        && !subst.has_deferred_shape_constraint(*v)
+        let tvars = ty_tvars
+            .into_iter()
+            .filter(|v| {
+                subst.level_of_tvar(*v) > level
                         // spec/04 §3.1.1: a variable minted for an in-group
                         // recursive instantiation stays monomorphic while its
                         // group is inferred, so a let-bound alias of a group
                         // member cannot smuggle in polymorphic recursion.
                         && !crate::infer::recursion::tvar_pinned(*v)
-                })
-                .collect(),
+            })
+            .collect::<Vec<_>>();
+        let tvar_restrictions = tvars
+            .iter()
+            .filter_map(|v| {
+                subst
+                    .tvar_restriction(*v)
+                    .map(|restriction| (*v, restriction))
+            })
+            .collect();
+        Scheme {
+            tvars,
+            tvar_restrictions,
             dvars: ty_dvars
                 .into_iter()
                 .filter(|v| subst.level_of_dvar(*v) > level)
@@ -367,15 +801,21 @@ impl Env {
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
         let env_rvars = self.free_rvars(subst);
+        let tvars = free_tvars(&ty)
+            .into_iter()
+            .filter(|v| !env_tvars.contains(v) && !crate::infer::recursion::tvar_pinned(*v))
+            .collect::<Vec<_>>();
+        let tvar_restrictions = tvars
+            .iter()
+            .filter_map(|v| {
+                subst
+                    .tvar_restriction(*v)
+                    .map(|restriction| (*v, restriction))
+            })
+            .collect();
         Scheme {
-            tvars: free_tvars(&ty)
-                .into_iter()
-                .filter(|v| {
-                    !env_tvars.contains(v)
-                        && !subst.has_deferred_shape_constraint(*v)
-                        && !crate::infer::recursion::tvar_pinned(*v)
-                })
-                .collect(),
+            tvars,
+            tvar_restrictions,
             dvars: free_dvars(&ty)
                 .into_iter()
                 .filter(|v| !env_dvars.contains(v))
@@ -402,6 +842,11 @@ fn type_carries_dim_name(ty: &Type, name: &str) -> bool {
         Type::Adt(_, args) | Type::Tuple(args) => {
             args.iter().any(|a| type_carries_dim_name(a, name))
         }
+        Type::KindedAdt(_, args) => args.iter().any(|argument| match argument {
+            NominalArg::Type(ty) => type_carries_dim_name(ty, name),
+            NominalArg::Dimension(Dim::Name(found)) => found == name,
+            NominalArg::Dimension(_) => false,
+        }),
         _ => false,
     }
 }
@@ -441,6 +886,13 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
                 collect_tvars(a, vars);
             }
         }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                if let NominalArg::Type(ty) = argument {
+                    collect_tvars(ty, vars);
+                }
+            }
+        }
         Type::Tuple(ts) => {
             for t in ts {
                 collect_tvars(t, vars);
@@ -459,6 +911,23 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
             }
         }
         Type::Prim(_) | Type::Unit | Type::Error(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod module_scope_tests {
+    use super::*;
+
+    #[test]
+    fn exact_lookup_does_not_promote_a_unique_terminal_match() {
+        let mut env = Env::new();
+        env.bind(
+            "pkg__demo__Provider__borrowed".to_string(),
+            Scheme::mono(Type::Prim(Prim::Int64)),
+        );
+
+        assert!(env.lookup("borrowed").is_none());
+        assert!(env.lookup_terminal_unique("borrowed").is_some());
     }
 }
 
@@ -492,6 +961,15 @@ fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
                 collect_dvars(a, vars);
             }
         }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                match argument {
+                    NominalArg::Type(ty) => collect_dvars(ty, vars),
+                    NominalArg::Dimension(Dim::Var(var)) => vars.push(*var),
+                    NominalArg::Dimension(_) => {}
+                }
+            }
+        }
         Type::Tuple(ts) => {
             for t in ts {
                 collect_dvars(t, vars);
@@ -521,6 +999,14 @@ pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
         Type::Adt(_, args) => {
             for a in args {
                 collect_dims(a, dims);
+            }
+        }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                match argument {
+                    NominalArg::Type(ty) => collect_dims(ty, dims),
+                    NominalArg::Dimension(dim) => dims.push(dim.clone()),
+                }
             }
         }
         Type::Tuple(ts) => {
@@ -562,6 +1048,15 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
                 collect_rvars(a, vars);
             }
         }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                match argument {
+                    NominalArg::Type(ty) => collect_rvars(ty, vars),
+                    NominalArg::Dimension(Dim::Rank(var)) => vars.push(*var),
+                    NominalArg::Dimension(_) => {}
+                }
+            }
+        }
         Type::Tuple(ts) => {
             for t in ts {
                 collect_rvars(t, vars);
@@ -575,6 +1070,225 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
 mod tests {
     use super::*;
 
+    /// A scheme exercising every quantifier kind, with a restriction on one
+    /// type variable and none on the other, so a route that drops
+    /// restrictions and a route that installs them indiscriminately are both
+    /// distinguishable from the correct one.
+    fn restricted_scheme() -> Scheme {
+        Scheme {
+            tvars: vec![TypeVar(1), TypeVar(2)],
+            tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
+            dvars: vec![DimVar(3), DimVar(4)],
+            rvars: vec![RankVar(5)],
+            body: Type::Tuple(vec![
+                Type::Var(TypeVar(1)),
+                Type::Tensor(
+                    vec![
+                        Dim::Var(DimVar(3)),
+                        Dim::Var(DimVar(4)),
+                        Dim::Rank(RankVar(5)),
+                    ],
+                    TensorPrec::Var(TypeVar(2)),
+                ),
+            ]),
+        }
+    }
+
+    /// chelis#260: `instantiate_scheme` replaced a plain `instantiate` call
+    /// at the annotated-def site — first for the dim mapping (Site 1) and
+    /// then for the type mapping too (Site 2). It must therefore mint the
+    /// SAME variables in the SAME order, or the substitution the checker runs
+    /// on would change and these diagnostic-only fixes would perturb
+    /// inference. Locking the equivalence rather than assuming it.
+    ///
+    /// The scheme carries a chelis#1292 restriction, so this also pins that
+    /// the two jobs compose: naming a dim parameter must not cost the
+    /// instantiation its quantified type-variable restrictions.
+    #[test]
+    fn dvar_mapping_instantiation_matches_plain_instantiation() {
+        let scheme = restricted_scheme();
+        let env = Env::new();
+
+        let plain_subst = Subst::new();
+        let mut plain_gen = VarGen::default();
+        let plain = env.instantiate(&scheme, &mut plain_gen, &plain_subst);
+
+        let mapped_subst = Subst::new();
+        let mut mapped_gen = VarGen::default();
+        let (mapped, _tvar_mapping, mapping) =
+            env.instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
+
+        assert_eq!(
+            plain, mapped,
+            "the mapping variant must produce an identical instantiated type"
+        );
+        assert_eq!(
+            format!("{plain_gen:?}"),
+            format!("{mapped_gen:?}"),
+            "both variants must advance the generator identically"
+        );
+        assert_eq!(
+            mapping.iter().map(|(from, _)| *from).collect::<Vec<_>>(),
+            scheme.dvars,
+            "the mapping must cover every quantified dim in quantifier order"
+        );
+        let fresh: Vec<DimVar> = mapping.iter().map(|(_, to)| *to).collect();
+        assert!(
+            fresh.iter().all(|f| !scheme.dvars.contains(f)),
+            "every mapped-to variable must be fresh, got {fresh:?}"
+        );
+    }
+
+    /// chelis#1292 + chelis#260: quantified type-variable restrictions follow
+    /// the fresh variables through EVERY instantiation route, not just the
+    /// one #1292 happened to touch.
+    ///
+    /// This is the integration the two changes needed. Before they were
+    /// reconciled, the dim-mapping route was a separate copy of the
+    /// substitution loop that predated restriction installation, so a
+    /// signature instantiated through it silently lost its `ActiveFloat`
+    /// domain -- and the only symptom would have been a non-float program
+    /// type-checking. A dropped restriction cannot fail loudly, so it is
+    /// pinned here rather than left to a downstream rejection test.
+    #[test]
+    fn every_instantiation_route_installs_quantified_restrictions() {
+        let scheme = restricted_scheme();
+        let env = Env::new();
+
+        // Every route instantiates the same scheme from the same starting
+        // generator state, so all three mint the same fresh variables and the
+        // observed restriction sets are directly comparable.
+        let restrictions_after = |instantiate: &dyn Fn(&Subst, &mut VarGen)| {
+            let subst = Subst::new();
+            let mut var_gen = VarGen::default();
+            instantiate(&subst, &mut var_gen);
+            (0..64)
+                .map(TypeVar)
+                .filter_map(|v| subst.tvar_restriction(v).map(|r| (v, r)))
+                .collect::<Vec<_>>()
+        };
+
+        let via_instantiate = restrictions_after(&|subst, var_gen| {
+            env.instantiate(&scheme, var_gen, subst);
+        });
+        let via_tvar_mapping = restrictions_after(&|subst, var_gen| {
+            env.instantiate_with_tvar_mapping(&scheme, var_gen, subst);
+        });
+        let via_instantiate_scheme = restrictions_after(&|subst, var_gen| {
+            env.instantiate_scheme(&scheme, var_gen, subst);
+        });
+
+        assert_eq!(
+            via_instantiate.len(),
+            1,
+            "exactly the restricted quantifier installs a restriction, got {via_instantiate:?}"
+        );
+        assert_eq!(
+            via_instantiate[0].1,
+            TypeVarRestriction::ActiveFloat,
+            "the installed restriction must be the one the scheme declared"
+        );
+        assert_eq!(
+            via_instantiate, via_tvar_mapping,
+            "the tvar-mapping route must install the same restrictions as the plain route"
+        );
+        assert_eq!(
+            via_instantiate, via_instantiate_scheme,
+            "the instantiate_scheme route must install the same restrictions as the plain route"
+        );
+    }
+
+    /// chelis#260: a name is only rendered when the mapping vouches for it.
+    /// An unrecorded definition, or one whose recorded variables do not
+    /// appear in this instantiation, must yield nothing rather than a name
+    /// borrowed from another signature.
+    #[test]
+    fn declared_dim_names_resolve_only_through_the_mapping() {
+        let mut env = Env::new();
+        env.record_declared_dim_names(
+            "go",
+            UnordMap::from([(DimVar(3), "n".to_string()), (DimVar(4), "m".to_string())]),
+        );
+
+        let resolved = env.declared_dim_names_for("go", &[(DimVar(3), DimVar(90))]);
+        assert_eq!(resolved.get(&DimVar(90)).map(String::as_str), Some("n"));
+        assert_eq!(resolved.len(), 1, "only mapped variables are named");
+
+        assert!(
+            env.declared_dim_names_for("absent", &[(DimVar(3), DimVar(90))])
+                .is_empty(),
+            "an unrecorded definition names nothing"
+        );
+        assert!(
+            env.declared_dim_names_for("go", &[]).is_empty(),
+            "an empty instantiation mapping names nothing"
+        );
+        assert!(
+            env.declared_dim_names_for("go", &[(DimVar(77), DimVar(91))])
+                .is_empty(),
+            "a variable this signature never declared names nothing"
+        );
+    }
+
+    #[test]
+    fn lexical_value_shadowing_does_not_replace_constructor_authority() {
+        let mut env = Env::new();
+        let constructor = Scheme::mono(Type::Fn(
+            vec![Type::Prim(Prim::F64)],
+            Box::new(Type::Adt("Box".to_string(), Vec::new())),
+        ));
+        env.bind_constructor("N".to_string(), "Box".to_string(), constructor.clone());
+        env.bind_lexical("N".to_string(), Scheme::mono(Type::Prim(Prim::F64)));
+
+        assert_eq!(
+            env.lookup("N").map(|scheme| &scheme.body),
+            Some(&Type::Prim(Prim::F64))
+        );
+        let (owner, active_constructor) = env
+            .lookup_constructor("N")
+            .expect("constructor binding survives lexical shadowing");
+        assert_eq!(owner, "Box");
+        assert_eq!(
+            bincode::serialize(active_constructor).expect("serialize active constructor"),
+            bincode::serialize(&constructor).expect("serialize expected constructor")
+        );
+    }
+
+    #[test]
+    fn active_constructor_identity_is_last_declaration_wins_and_serialized() {
+        let mut env = Env::new();
+        env.bind_constructor(
+            "Some".to_string(),
+            "Option".to_string(),
+            Scheme::mono(Type::Adt("Option".to_string(), Vec::new())),
+        );
+        let wrapper_scheme = Scheme::mono(Type::Adt("Wrapper".to_string(), Vec::new()));
+        env.bind_constructor(
+            "Some".to_string(),
+            "Wrapper".to_string(),
+            wrapper_scheme.clone(),
+        );
+
+        let encoded = bincode::serialize(&env).expect("serialize env");
+        let decoded: Env = bincode::deserialize(&encoded).expect("deserialize env");
+        let (owner, active_constructor) = decoded
+            .lookup_constructor("Some")
+            .expect("serialized constructor authority");
+        assert_eq!(owner, "Wrapper");
+        assert_eq!(
+            bincode::serialize(active_constructor).expect("serialize active constructor"),
+            bincode::serialize(&wrapper_scheme).expect("serialize expected constructor")
+        );
+        assert_eq!(
+            decoded
+                .lookup_constructors("Some")
+                .map(|(owner, _)| owner)
+                .collect::<Vec<_>>(),
+            vec!["Option", "Wrapper"],
+            "shape-aware resolution needs every in-scope owner after serialization"
+        );
+    }
+
     #[test]
     fn free_variables_protect_quantified_ids_from_global_substitutions() {
         let quantified_type = TypeVar(10);
@@ -582,6 +1296,7 @@ mod tests {
         let quantified_rank = RankVar(30);
         let scheme = Scheme {
             tvars: vec![quantified_type],
+            tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
             body: Type::Tuple(vec![
@@ -595,7 +1310,9 @@ mod tests {
         let mut env = Env::new();
         env.bind("generic".to_string(), scheme);
         let mut subst = Subst::new();
-        subst.insert_type(quantified_type, Type::Prim(Prim::F32));
+        subst
+            .insert_type(quantified_type, Type::Prim(Prim::F32))
+            .expect("unrestricted test substitution accepts f32");
         subst.insert_dim(quantified_dim, Dim::Lit(3));
         subst.insert_rank(quantified_rank, vec![Dim::Lit(4)]);
 
@@ -614,6 +1331,7 @@ mod tests {
         let outer_rank = RankVar(32);
         let scheme = Scheme {
             tvars: vec![quantified_type],
+            tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
             body: Type::Tuple(vec![
@@ -627,8 +1345,12 @@ mod tests {
         let mut env = Env::new();
         env.bind("generic".to_string(), scheme);
         let mut subst = Subst::new();
-        subst.insert_type(outer_type, Type::Var(quantified_type));
-        subst.insert_type(quantified_type, Type::Prim(Prim::F64));
+        subst
+            .insert_type(outer_type, Type::Var(quantified_type))
+            .expect("unrestricted test substitution accepts an alias");
+        subst
+            .insert_type(quantified_type, Type::Prim(Prim::F64))
+            .expect("unrestricted test substitution accepts f64");
         subst.insert_dim(outer_dim, Dim::Var(quantified_dim));
         subst.insert_dim(quantified_dim, Dim::Lit(5));
         subst.insert_rank(outer_rank, vec![Dim::Rank(quantified_rank)]);
@@ -649,6 +1371,7 @@ mod tests {
         let target_rank = RankVar(61);
         let scheme = Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Tuple(vec![
@@ -662,12 +1385,14 @@ mod tests {
         let mut env = Env::new();
         env.bind("monomorphic".to_string(), scheme);
         let mut subst = Subst::new();
-        subst.insert_type(source_type, Type::Var(target_type));
+        subst
+            .insert_type(source_type, Type::Var(target_type))
+            .expect("unrestricted test substitution accepts an alias");
         subst.insert_dim(source_dim, Dim::Var(target_dim));
         subst.insert_rank(source_rank, vec![Dim::Rank(target_rank)]);
 
-        assert_eq!(env.free_tvars(&subst), HashSet::from([target_type]));
-        assert_eq!(env.free_dvars(&subst), HashSet::from([target_dim]));
-        assert_eq!(env.free_rvars(&subst), HashSet::from([target_rank]));
+        assert_eq!(env.free_tvars(&subst), UnordSet::from([target_type]));
+        assert_eq!(env.free_dvars(&subst), UnordSet::from([target_dim]));
+        assert_eq!(env.free_rvars(&subst), UnordSet::from([target_rank]));
     }
 }

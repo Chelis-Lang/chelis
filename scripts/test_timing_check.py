@@ -5,8 +5,8 @@ Parses the JUnit XML that `cargo nextest run --profile ci` writes
 (`target/nextest/ci/junit.xml`) and flags integration tests that have
 grown too slow:
 
-  - a test that is NEW relative to the committed baseline AND runs
-    longer than `absolute_ceiling` seconds, or
+  - any ordinary-PR test that runs longer than `absolute_ceiling`
+    seconds, or
   - a test that REGRESSED past `tolerance` x its baseline time AND by
     at least `min_regression_delta` seconds in absolute terms.
 
@@ -19,12 +19,13 @@ baselines need a real jump, not noise, while large baselines are
 unaffected (a 5s -> 12s regression clears both gates easily). This is the
 "several unrelated tests fail at near-identical times = CPU starvation,
 not code" pattern; the floor stops that starvation from gating PRs while
-keeping genuine, sustained regressions blocking.
+keeping genuine, sustained regressions visible.
 
 Thresholds are config, never hardcoded:
 
   - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
-    `absolute_ceiling` (seconds), and `min_regression_delta` (seconds,
+    `absolute_ceiling` (the per-test diagnostic threshold), and
+    `min_regression_delta` (seconds,
     the absolute slowdown floor below which a multiplicative "regression"
     is treated as jitter; optional, defaults to 0.0 for back-compat).
   - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
@@ -35,8 +36,11 @@ regression into the baseline. Regeneration is one command:
 
     python3 scripts/test_timing_check.py --update-baseline
 
-CI runs this as an informational, non-failing step today (the CI step
-uses `continue-on-error: true`); it is promotable to blocking later.
+CI runs this after merging the two disjoint Linux workspace timing shards.
+Both threshold classes remain visible there, but timing findings are
+informational because hosted-runner contention is too variable for a single
+sample to be a reliable required check. Missing, malformed, empty, or invalid
+telemetry remains blocking.
 
 Usage:
     python3 scripts/test_timing_check.py
@@ -44,14 +48,17 @@ Usage:
     python3 scripts/test_timing_check.py --update-baseline
 
 Exit codes:
-    0  no test over budget (or --update-baseline succeeded)
-    1  one or more tests over budget
+    0  no blocking finding (or --update-baseline succeeded)
+    1  one or more blocking findings; with --informational-relative,
+       only absolute-ceiling findings block; with --informational, valid
+       timing findings are reported but do not block
     2  usage / IO error (missing or malformed JUnit XML, bad config)
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -93,6 +100,20 @@ def load_config(path: Path = CONFIG_PATH) -> tuple[float, float, float]:
             f"timing config {path} `min_regression_delta` must be numeric: "
             f"{exc}"
         ) from exc
+    if not math.isfinite(tolerance):
+        raise TimingError(
+            f"timing config `tolerance` must be finite, got {tolerance}"
+        )
+    if not math.isfinite(absolute_ceiling):
+        raise TimingError(
+            "timing config `absolute_ceiling` must be finite, got "
+            f"{absolute_ceiling}"
+        )
+    if not math.isfinite(min_regression_delta):
+        raise TimingError(
+            "timing config `min_regression_delta` must be finite, got "
+            f"{min_regression_delta}"
+        )
     if tolerance < 1.0:
         raise TimingError(
             f"timing config `tolerance` must be >= 1.0, got {tolerance}"
@@ -126,12 +147,18 @@ def load_baseline(path: Path = BASELINE_PATH) -> dict[str, float]:
     out: dict[str, float] = {}
     for key, value in data.items():
         try:
-            out[str(key)] = float(value)
+            seconds = float(value)
         except (TypeError, ValueError) as exc:
             raise TimingError(
                 f"timing baseline {path}: entry {key!r} is not numeric: "
                 f"{exc}"
             ) from exc
+        if not math.isfinite(seconds) or seconds < 0.0:
+            raise TimingError(
+                f"timing baseline {path}: entry {key!r} must be finite and "
+                f"non-negative, got {value!r}"
+            )
+        out[str(key)] = seconds
     return out
 
 
@@ -177,17 +204,24 @@ def parse_junit(path: Path) -> dict[str, float]:
                 f"JUnit XML {path}: <testcase {classname}::{name}> has "
                 f"non-numeric time={time_attr!r}: {exc}"
             ) from exc
+        if not math.isfinite(seconds) or seconds < 0.0:
+            raise TimingError(
+                f"JUnit XML {path}: <testcase {classname}::{name}> must have "
+                f"finite, non-negative time, got {time_attr!r}"
+            )
         key = f"{classname}::{name}"
-        # If a test name collides (parameterized reruns), keep the
-        # slowest observation; the budget cares about worst case.
-        timings[key] = max(timings.get(key, 0.0), seconds)
+        if key in timings:
+            raise TimingError(
+                f"JUnit XML {path} contains duplicate test identity {key}"
+            )
+        timings[key] = seconds
     return timings
 
 
 class Flag:
     """A single over-budget finding."""
 
-    NEW_OVER_CEILING = "new-over-absolute-ceiling"
+    OVER_CEILING = "over-absolute-ceiling"
     REGRESSED = "regressed-past-tolerance"
 
     def __init__(self, key: str, kind: str, observed: float, limit: float):
@@ -197,9 +231,9 @@ class Flag:
         self.limit = limit
 
     def render(self) -> str:
-        if self.kind == Flag.NEW_OVER_CEILING:
+        if self.kind == Flag.OVER_CEILING:
             return (
-                f"  {self.key}: {self.observed:.2f}s -- NEW test over the "
+                f"  {self.key}: {self.observed:.2f}s -- test over the "
                 f"{self.limit:.2f}s absolute ceiling"
             )
         return (
@@ -217,29 +251,30 @@ def evaluate(
 ) -> list[Flag]:
     """Return the list of over-budget findings, sorted slowest first.
 
-    A baselined test is flagged REGRESSED only when it is BOTH over its
-    `tolerance x baseline` budget AND slower than baseline by at least
-    `min_regression_delta` seconds. The absolute-delta floor keeps
+    Every test is first held to `absolute_ceiling`, so refreshing the
+    baseline can never legalize an ordinary test above the hard limit.
+    A baselined test below that ceiling is flagged REGRESSED only when
+    it is BOTH over its `tolerance x baseline` budget AND slower than
+    baseline by at least `min_regression_delta` seconds. The
+    absolute-delta floor keeps
     millisecond scheduler jitter against a near-zero baseline (the bulk of
     the suite) from false-flagging an unchanged test; it does not weaken
     detection of a real, multi-second regression, which clears both gates.
     `min_regression_delta=0.0` reproduces the pre-floor behavior."""
     flags: list[Flag] = []
     for key, observed in timings.items():
-        if key in baseline:
+        if observed > absolute_ceiling:
+            flags.append(
+                Flag(key, Flag.OVER_CEILING, observed, absolute_ceiling)
+            )
+        elif key in baseline:
             budget = baseline[key] * tolerance
             over_multiplier = observed > budget
             over_absolute = (observed - baseline[key]) >= min_regression_delta
             if over_multiplier and over_absolute:
                 flags.append(Flag(key, Flag.REGRESSED, observed, budget))
-        else:
-            # New test (not in baseline): only flag if it is also over
-            # the absolute ceiling. A fast new test is fine and gets
-            # picked up at the next explicit baseline regeneration.
-            if observed > absolute_ceiling:
-                flags.append(
-                    Flag(key, Flag.NEW_OVER_CEILING, observed, absolute_ceiling)
-                )
+        # A new test under the absolute ceiling is fine and gets picked up
+        # at the next explicit baseline regeneration.
     flags.sort(key=lambda f: f.observed, reverse=True)
     return flags
 
@@ -295,6 +330,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Flag integration tests that regressed past their committed "
             "timing budget."
         ),
+        allow_abbrev=False,
     )
     p.add_argument(
         "--junit",
@@ -314,6 +350,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "documented regeneration command."
         ),
     )
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--informational-relative",
+        action="store_true",
+        help=(
+            "Report tolerance-relative regressions without making them "
+            "fail the command. Absolute-ceiling violations remain blocking."
+        ),
+    )
+    mode.add_argument(
+        "--informational",
+        action="store_true",
+        help=(
+            "Report all valid timing findings without making them fail the "
+            "command. Missing, malformed, empty, or invalid telemetry still "
+            "fails with exit 2."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -322,8 +376,10 @@ def main(argv: list[str]) -> int:
     try:
         if args.update_baseline:
             return update_baseline(args.junit)
-        tolerance, absolute_ceiling, min_regression_delta = load_config()
-        baseline = load_baseline()
+        tolerance, absolute_ceiling, min_regression_delta = load_config(
+            CONFIG_PATH
+        )
+        baseline = load_baseline(BASELINE_PATH)
         timings = parse_junit(args.junit)
     except TimingError as exc:
         print(f"test-timing budget: error: {exc}", file=sys.stderr)
@@ -332,6 +388,20 @@ def main(argv: list[str]) -> int:
         timings, baseline, tolerance, absolute_ceiling, min_regression_delta
     )
     print_report(flags, timings, tolerance)
+    if args.informational_relative:
+        relative = [flag for flag in flags if flag.kind == Flag.REGRESSED]
+        if relative:
+            print(
+                "test-timing budget: relative regressions are informational "
+                "on hosted CI; the absolute ceiling remains blocking"
+            )
+        flags = [flag for flag in flags if flag.kind == Flag.OVER_CEILING]
+    elif args.informational and flags:
+        print(
+            "test-timing budget: timing findings are informational on hosted "
+            "CI; invalid telemetry remains blocking"
+        )
+        flags = []
     return 1 if flags else 0
 
 

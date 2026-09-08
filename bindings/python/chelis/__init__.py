@@ -29,7 +29,15 @@ class Diagnostic:
     expected: str | None
     got: str | None
     suggestions: tuple[str, ...]
-    span: tuple[int, int] | None
+    #: ``(offset, extent)`` into the checked source, or ``None`` when the
+    #: producer supplied no location at all.
+    #:
+    #: ``extent`` is ``None`` when the producer held only a coordinate and
+    #: measured no range. spec/04 [04-FIT-17] forbids the serializer inventing
+    #: one, so the wire distinguishes ``{"span": "point", ...}`` from
+    #: ``{"span": "range", ...}`` and this mirrors that: a ``0`` extent means a
+    #: measured empty range, which is not the same thing as an absent one.
+    span: tuple[int, int | None] | None
 
 
 @dataclass(frozen=True)
@@ -402,8 +410,31 @@ def _check_result(payload: dict[str, Any]) -> CheckResult:
     )
 
 
+def _span(payload: dict[str, Any] | None) -> tuple[int, int | None] | None:
+    """Decode the tagged span carrier (chelis#1395).
+
+    The wire distinguishes a measured range from a bare coordinate:
+    ``{"span": "range", "offset": N, "len": M}`` versus
+    ``{"span": "point", "offset": N}``. spec/04 [04-FIT-17] forbids the
+    serializer inventing an extent it did not measure, so ``point`` has no
+    ``len`` member at all.
+
+    The tag is read rather than the ``len`` key probed. Probing would decode a
+    malformed ``range`` that lost its ``len`` as though it were a point --
+    silently turning a transport fault into a plausible value, which is the
+    class of defect the tagged carrier exists to prevent.
+    """
+    if payload is None:
+        return None
+    tag = payload.get("span")
+    if tag == "range":
+        return (payload["offset"], payload["len"])
+    if tag == "point":
+        return (payload["offset"], None)
+    raise ValueError(f"unknown diagnostic span shape {tag!r}; expected 'range' or 'point'")
+
+
 def _diagnostic(payload: dict[str, Any]) -> Diagnostic:
-    span = payload.get("span")
     return Diagnostic(
         kind=payload["kind"],
         message=payload["message"],
@@ -411,7 +442,7 @@ def _diagnostic(payload: dict[str, Any]) -> Diagnostic:
         expected=payload.get("expected"),
         got=payload.get("got"),
         suggestions=tuple(payload.get("suggestions", [])),
-        span=None if span is None else (span["offset"], span["len"]),
+        span=_span(payload.get("span")),
     )
 
 

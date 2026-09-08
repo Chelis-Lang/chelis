@@ -195,11 +195,22 @@ top-level declaration inside the passes that dominate a large compile
 (chelis#930), so both a compile-bound and an evaluation-bound program
 unwind cleanly rather than being killed mid-write.
 
-A backstop still terminates the process a few seconds after the deadline
-if nothing has unwound. It is defence in depth, not the mechanism: the
-polling above is not exhaustive — the style gate, Reef graph resolution,
-and lowering's whole-program walk do not poll, and a compiler pass that
-genuinely wedges would never reach a check point. `--timeout` promises an
+If cooperative unwinding does complete, that is the whole message. If it
+does not, a backstop terminates the process and says so:
+
+```text
+error: evaluation timed out after 30s (--timeout); cancellation did not complete within 5s, forced exit
+```
+
+The suffix is worth reading. It means the process was killed rather than
+unwound, so destructors did not run and buffered output was not flushed.
+The usual cause is a machine under heavy load, where the cooperative
+unwind competes for CPU against a fixed wall-clock grace period.
+
+That backstop is defence in depth, not the mechanism: the polling above is
+not exhaustive — the style gate, Reef graph resolution, and lowering's
+whole-program walk do not poll, and a compiler pass that genuinely wedges
+would never reach a check point. `--timeout` promises an
 unconditional loud failure, so the process-level stop remains.
 
 The same cancellation mechanism is what makes `KeyboardInterrupt` work
@@ -391,7 +402,8 @@ chelis reef verify-artifact \
 
 Verification strictly consumes the complete CHB, requires its bytes and
 metadata ordering to be canonical, validates structural invariants across the
-envelope, and checks the archive bytes against the CHB's embedded SHA-256.
+versioned `CHELCHB` envelope, including canonical quantified type-variable
+restriction metadata, and checks the archive bytes against the CHB's embedded SHA-256.
 Appended bytes, truncation, malformed metadata, and a mismatched archive fail
 before any registry state is written. `reef install` uses this same verifier.
 

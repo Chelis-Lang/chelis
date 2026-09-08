@@ -3,7 +3,7 @@
 //! Produces a 0.0-1.0 fitness score measuring "how close to valid" a program
 //! is. This is the training signal for AI agents (see spec section 6).
 
-use crate::errors::{CheckError, CheckErrorKind};
+use crate::errors::CheckError;
 use crate::infer::{CheckedProgram, InferResult, InferStats};
 
 /// Weights for each fitness component (spec section 6.1).
@@ -93,17 +93,21 @@ impl FitnessReport {
         let parse = 1.0;
         // structure comes from parameter (tag validator score)
 
-        // Names: count UnboundVariable errors relative to total nodes.
-        let unbound_count = result
+        // Names: both unresolved value references and unresolved
+        // constructors are name failures. The kind carries the exact source
+        // identifier, so this one structured extraction drives the score and
+        // the public unresolved-name list without parsing rendered prose.
+        let unresolved_names = result
             .errors
             .iter()
-            .filter(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
-            .count();
+            .filter_map(|error| error.kind.unresolved_identifier().map(str::to_string))
+            .collect::<Vec<_>>();
+        let unresolved_count = unresolved_names.len();
         let total = result.total_nodes.max(1);
-        let names = if unbound_count == 0 {
+        let names = if unresolved_count == 0 {
             1.0
         } else {
-            1.0 - (unbound_count as f64 / total as f64).min(1.0)
+            1.0 - (unresolved_count as f64 / total as f64).min(1.0)
         };
 
         // Types: fraction of nodes that typed successfully. With no runtime
@@ -128,18 +132,6 @@ impl FitnessReport {
         // the coverage components sum to a perfect 1.0 (declaration-only
         // failures have no runtime node to lower `types`).
         let score = weighted_score(&components, !result.errors.is_empty());
-
-        // Collect unresolved names from UnboundVariable errors
-        let unresolved_names: Vec<String> = result
-            .errors
-            .iter()
-            .filter(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
-            .filter_map(|e| {
-                e.message
-                    .strip_prefix("unbound variable: ")
-                    .map(|s| s.to_string())
-            })
-            .collect();
 
         FitnessReport {
             score,
@@ -288,7 +280,7 @@ pub fn structural_stats(exprs: &[chelis_deep::Expr]) -> StructuralStats {
     let invalid_nodes = warnings
         .iter()
         .map(|warning| warning.offset)
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<chelis_unord::UnordSet<_>>()
         .len();
     StructuralStats {
         total_nodes: count_nodes(exprs),
@@ -383,6 +375,41 @@ mod tests {
         let r = score("(def {} x (var {} unknown))");
         assert!(r.score < 1.0, "expected score < 1.0, got {}", r.score);
         assert!(r.components.names < 1.0);
+    }
+
+    #[test]
+    fn both_name_diagnostic_kinds_share_structured_fitness_accounting() {
+        let result = InferResult {
+            errors: vec![
+                CheckError::new(
+                    crate::errors::CheckErrorKind::UnboundVariable {
+                        identifier: "missing_value".to_string(),
+                    },
+                    "rendered value message may change".to_string(),
+                    vec![],
+                ),
+                CheckError::new(
+                    crate::errors::CheckErrorKind::UnknownConstructor {
+                        identifier: "MissingCtor".to_string(),
+                    },
+                    "rendered constructor message may change".to_string(),
+                    vec![],
+                ),
+            ],
+            typed_nodes: 8,
+            total_nodes: 10,
+        };
+
+        let report = FitnessReport::from_infer_result(&result);
+
+        assert_eq!(report.components.names, 0.8);
+        assert_eq!(
+            report.unresolved_names,
+            ["missing_value", "MissingCtor"],
+            "diagnostic order and identifiers come from structured kinds, not messages"
+        );
+        assert_eq!(report.errors.len(), 2);
+        assert!(report.score < 1.0);
     }
 
     #[test]

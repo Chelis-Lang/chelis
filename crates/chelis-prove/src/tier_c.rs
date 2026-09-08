@@ -137,7 +137,8 @@ pub fn fuzz_smt_property(property: &SmtProperty, samples: usize, seed: u64) -> T
         accepted += 1;
         if !eval_bool(&property.postcondition, &env) {
             let cx: serde_json::Map<String, Value> = env
-                .iter()
+                .to_sorted()
+                .into_iter()
                 .map(|(k, v)| (k.clone(), scalar_json(*v)))
                 .collect();
             return TierCResult::Failed(Value::Object(cx));

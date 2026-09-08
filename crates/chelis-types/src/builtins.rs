@@ -78,6 +78,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "reshape",
     "permute",
     "expand",
+    "insert",
     "pad",
     "shrink",
     "stride",
@@ -85,12 +86,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "fail",
     "debug",
     "test_assert",
-    "test_assert_eq_f32",
-    "test_assert_eq_int",
-    "test_assert_eq_bool",
-    "test_assert_eq_string",
+    "test_assert_eq",
     "test_assert_close_tensor",
-    "test_assert_eq_tensor_int64",
+    "test_assert_eq_tensor",
     "string_len",
     "string_concat",
     "string_slice",
@@ -147,28 +145,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
-    // Host-lane JSON I/O (chelis#890): parse/serialize + dot-path
-    // accessors and output constructors over the prelude `Json` ADT,
-    // plus decimal rounding. Eval-only -- the build backends reject
-    // them (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
-    "parse_json",
-    "to_json",
-    "json_f64",
-    "json_int",
-    "json_str",
-    "json_list",
-    "json_f64s",
-    "json_ints",
-    "jnum",
-    "jint",
-    "jstr",
-    "jlist",
-    "jdict",
-    "json_set",
     "round_to",
     // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
-    // column accessors. A Csv document rides the `Json` ADT as the fixed
-    // shape `{"columns": .., "rows": ..}` -- no new prelude type.
+    // column accessors over List[Dict[string,string]].
     // Eval-only (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
     "parse_csv",
     "to_csv",
@@ -259,6 +238,7 @@ const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
     "argmin_reduce",
     "mean",
     "expand",
+    "insert",
     "layer_norm",
     "conv2d",
     "scatter_elements",
@@ -320,6 +300,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "print",
     "fail",
     "debug",
+    "test_assert_close_tensor",
     "string_len",
     "string_concat",
     "string_slice",
@@ -376,20 +357,6 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
-    "parse_json",
-    "to_json",
-    "json_f64",
-    "json_int",
-    "json_str",
-    "json_list",
-    "json_f64s",
-    "json_ints",
-    "jnum",
-    "jint",
-    "jstr",
-    "jlist",
-    "jdict",
-    "json_set",
     "round_to",
     "parse_csv",
     "to_csv",
@@ -423,7 +390,6 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
         BuiltinInferenceRule::Specialized => SPECIALIZED_INFERENCE_BUILTINS.contains(&name),
     }
 }
-
 /// A builtin's complete declaration: name, inference disposition,
 /// realizability, shape class, and axis-argument layout.
 /// All fields are required — adding a builtin without any field is a
@@ -950,6 +916,13 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::Fixed(&[1, 3]),
     },
     BuiltinDecl {
+        name: "insert",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 3]),
+    },
+    BuiltinDecl {
         name: "pad",
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
@@ -1127,105 +1100,6 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "process_run",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    // ─── Host-lane JSON I/O (chelis#890, HostOnly, eval-only) ────────
-    BuiltinDecl {
-        name: "parse_json",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "to_json",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_f64",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_int",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_str",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_list",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_f64s",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_ints",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jnum",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jint",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jstr",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jlist",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jdict",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_set",
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1647,34 +1521,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
-        name: "test_assert_eq_f32",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "test_assert_eq_int",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "test_assert_eq_bool",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "test_assert_eq_string",
+        name: "test_assert_eq",
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -1684,15 +1531,13 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "test_assert_close_tensor",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
-        name: "test_assert_eq_tensor_int64",
+        name: "test_assert_eq_tensor",
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -1785,7 +1630,7 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // symbolic output row, rejecting positional axes at symbolic rank —
         // the same gate structure as the reductions.
         "sum" | "count" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
-        | "argmax_reduce" | "argmin_reduce" | "expand" => ShapeClass::NameTracked,
+        | "argmax_reduce" | "argmin_reduce" | "expand" | "insert" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
@@ -1820,6 +1665,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![dv],
             rvars: vec![],
             body: Type::Fn(
@@ -1836,6 +1682,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -1866,13 +1713,19 @@ pub fn builtin_env() -> (Env, VarGen) {
         // The builtin entry just marks it as a 2-arg function.
         let _ = (dv, input_tv);
         let tv = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
         let scheme = Scheme {
-            tvars: vec![tv],
+            tvars: vec![tv, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
-                Box::new(Type::Var(tv)), // inference engine overrides for cmplt
+                // The application checker replaces this with bool on the
+                // operand's surface. Keeping the placeholder independent
+                // avoids binding an unresolved operand variable to bool
+                // before that procedural result rule runs.
+                Box::new(Type::Var(output)),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -1884,6 +1737,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1899,6 +1753,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -1912,6 +1767,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let t3 = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, t3],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1932,6 +1788,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1947,6 +1804,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1968,6 +1826,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1983,6 +1842,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2003,6 +1863,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2017,6 +1878,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2037,6 +1899,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, kernel, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2056,6 +1919,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2071,6 +1935,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![Type::Var(input)], Box::new(Type::Var(output))),
@@ -2084,6 +1949,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2101,6 +1967,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2118,6 +1985,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2135,6 +2003,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2152,6 +2021,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2173,6 +2043,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2192,6 +2063,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, d, e, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2216,6 +2088,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, d, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2231,6 +2104,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2245,6 +2119,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -2258,6 +2133,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2272,6 +2148,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     // Tier 1: RISC Primitives
     tensor_binop("add", &mut env, &mut vg);
+    tensor_binop("sub", &mut env, &mut vg);
     tensor_binop("mul", &mut env, &mut vg);
     // `div` and `recip` were promoted from a Tier 2
     // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
@@ -2285,6 +2162,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_binop("floor_div", &mut env, &mut vg);
     tensor_binop("trunc_div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
+    tensor_binop("min_elem", &mut env, &mut vg);
 
     tensor_unop("neg", &mut env, &mut vg);
     tensor_unop("recip", &mut env, &mut vg);
@@ -2304,7 +2182,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
-    tensor_binop("sub", &mut env, &mut vg);
     generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
@@ -2337,7 +2214,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);
-    tensor_binop("min_elem", &mut env, &mut vg);
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
     tensor_conv2d("conv2d", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
@@ -2366,6 +2242,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("reshape", &mut env, &mut vg);
     tensor_unop("permute", &mut env, &mut vg);
     tensor_expand_to_out("expand", &mut env, &mut vg);
+    tensor_expand_to_out("insert", &mut env, &mut vg);
     tensor_unop("pad", &mut env, &mut vg);
     tensor_unop("shrink", &mut env, &mut vg);
     tensor_unop("stride", &mut env, &mut vg);
@@ -2381,6 +2258,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "test_assert".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2389,84 +2267,47 @@ pub fn builtin_env() -> (Env, VarGen) {
             ),
         },
     );
-    env.bind(
-        "test_assert_eq_f32".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_int".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::Int64),
-                    Type::Prim(Prim::Int64),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_bool".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::Bool),
-                    Type::Prim(Prim::Bool),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_string".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::String),
-                    Type::Prim(Prim::String),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
     {
-        // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> unit
-        let tensor_tv = vg.fresh_tvar();
+        let value = vg.fresh_tvar();
         env.bind(
-            "test_assert_close_tensor".to_string(),
+            "test_assert_eq".to_string(),
             Scheme {
-                tvars: vec![tensor_tv],
+                tvars: vec![value],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
+                    vec![Type::Var(value), Type::Var(value), Type::Prim(Prim::String)],
+                    Box::new(Type::Unit),
+                ),
+            },
+        );
+    }
+    {
+        // test_assert_close_tensor:
+        //   (&tensor[..r,p_float], &tensor[..r,p_float], p_float, string) -> unit
+        // One quantified type variable occupies both tensor precision slots
+        // and the scalar tolerance position. This makes same-dtype equality a
+        // structural unification constraint. The quantified variable's
+        // ActiveFloat restriction is part of the function value, so aliases,
+        // polymorphic wrappers, and higher-order calls retain admissibility.
+        // The shared rank variable preserves arbitrary rank and exact shape
+        // equality between the tensors.
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let tensor = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
+        env.bind(
+            "test_assert_close_tensor".to_string(),
+            Scheme {
+                tvars: vec![precision],
+                tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
+                dvars: vec![],
+                rvars: vec![rank],
+                body: Type::Fn(
                     vec![
-                        borrowed(Type::Var(tensor_tv)),
-                        borrowed(Type::Var(tensor_tv)),
-                        Type::Prim(Prim::F32),
+                        borrowed(tensor.clone()),
+                        borrowed(tensor),
+                        Type::Var(precision),
                         Type::Prim(Prim::String),
                     ],
                     Box::new(Type::Unit),
@@ -2475,13 +2316,13 @@ pub fn builtin_env() -> (Env, VarGen) {
         );
     }
     {
-        // test_assert_eq_tensor_int64: (tensor a, tensor a, string) -> unit
-        // Bit-exact comparison; the Std.Test wrapper restricts a to int64.
+        // test_assert_eq_tensor: (tensor a, tensor a, string) -> unit
         let tensor_tv = vg.fresh_tvar();
         env.bind(
-            "test_assert_eq_tensor_int64".to_string(),
+            "test_assert_eq_tensor".to_string(),
             Scheme {
                 tvars: vec![tensor_tv],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -2503,6 +2344,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_contains".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2515,6 +2357,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_starts_with".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2527,6 +2370,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_ends_with".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2560,6 +2404,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "fold".to_string(),
         Scheme {
             tvars: vec![fold_acc, fold_item, fold_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2579,6 +2424,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "scan".to_string(),
         Scheme {
             tvars: vec![scan_acc, scan_item, scan_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2606,6 +2452,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "tensor_scan".to_string(),
         Scheme {
             tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2649,30 +2496,8 @@ pub fn builtin_env() -> (Env, VarGen) {
     // `infer.rs` and the IO effect is assigned in `chelis-effects`, mirroring
     // how `read_file` acquires IO. Rejected by the C/HIP build backends.
     generic_binop("process_run", &mut env, &mut vg);
-    // Host-lane JSON I/O (chelis#890). The schemes here are the loose
-    // arity-declaring entry points (the same pattern as the string/dict
-    // families); the concrete argument/return contracts -- including
-    // accepting any float/integer precision where a bare literal would
-    // otherwise default to f32/int32 (spec/04-type-system.md §5.3) -- are
-    // enforced by `check_json_builtin_signature` (infer/app_hostio.rs).
-    // Eval-only: `chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`.
-    generic_unop("parse_json", &mut env, &mut vg);
-    generic_unop("to_json", &mut env, &mut vg);
-    generic_binop("json_f64", &mut env, &mut vg);
-    generic_binop("json_int", &mut env, &mut vg);
-    generic_binop("json_str", &mut env, &mut vg);
-    generic_binop("json_list", &mut env, &mut vg);
-    generic_binop("json_f64s", &mut env, &mut vg);
-    generic_binop("json_ints", &mut env, &mut vg);
-    generic_unop("jnum", &mut env, &mut vg);
-    generic_unop("jint", &mut env, &mut vg);
-    generic_unop("jstr", &mut env, &mut vg);
-    generic_unop("jlist", &mut env, &mut vg);
-    generic_unop("jdict", &mut env, &mut vg);
-    generic_triop("json_set", &mut env, &mut vg);
     generic_binop("round_to", &mut env, &mut vg);
-    // Host-lane CSV I/O (chelis#903); same loose-arity pattern as the JSON
-    // family above -- the concrete contracts live in
+    // Host-lane CSV I/O (chelis#903); the concrete contracts live in
     // `check_csv_builtin_signature` (infer/app_hostio.rs).
     generic_unop("parse_csv", &mut env, &mut vg);
     generic_unop("to_csv", &mut env, &mut vg);
@@ -2714,19 +2539,23 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let option_tvar = vg.fresh_tvar();
     let option_type = Type::Adt("Option".to_string(), vec![Type::Var(option_tvar)]);
 
-    env.bind(
+    env.bind_constructor(
         "Some".to_string(),
+        "Option".to_string(),
         Scheme {
             tvars: vec![option_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![Type::Var(option_tvar)], Box::new(option_type.clone())),
         },
     );
-    env.bind(
+    env.bind_constructor(
         "None".to_string(),
+        "Option".to_string(),
         Scheme {
             tvars: vec![option_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: option_type.clone(),
@@ -2739,7 +2568,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "Option".to_string(),
             type_params: vec!["a".to_string()],
+            param_kinds: vec![NominalParamKind::Type],
             param_vars: vec![option_tvar],
+            param_args: vec![NominalArg::Type(Type::Var(option_tvar))],
             opaque: false,
             defining_module: None,
             variants: vec![
@@ -2757,10 +2588,12 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let list_tvar = vg.fresh_tvar();
     let list_type = Type::Adt("List".to_string(), vec![Type::Var(list_tvar)]);
 
-    env.bind(
+    env.bind_constructor(
         "Cons".to_string(),
+        "List".to_string(),
         Scheme {
             tvars: vec![list_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2769,10 +2602,12 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
             ),
         },
     );
-    env.bind(
+    env.bind_constructor(
         "Nil".to_string(),
+        "List".to_string(),
         Scheme {
             tvars: vec![list_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: list_type.clone(),
@@ -2785,7 +2620,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "List".to_string(),
             type_params: vec!["a".to_string()],
+            param_kinds: vec![NominalParamKind::Type],
             param_vars: vec![list_tvar],
+            param_args: vec![NominalArg::Type(Type::Var(list_tvar))],
             opaque: false,
             defining_module: None,
             variants: vec![
@@ -2806,92 +2643,13 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "MappedFile".to_string(),
             type_params: Vec::new(),
+            param_kinds: Vec::new(),
             param_vars: Vec::new(),
+            param_args: Vec::new(),
             opaque: false,
             defining_module: None,
             variants: Vec::new(),
         });
-
-    // Prelude `Json` ADT (chelis#890): the value type behind the host-lane
-    // JSON builtins (`parse_json`/`to_json`/accessors) and the chelis#903
-    // CSV document. Non-parameterized and recursive through `List`/`Dict`:
-    //
-    //   Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string
-    //        | JList List[Json] | JDict Dict[string, Json]
-    //
-    // `JInt` carries exact int64 beside the f64 `JNum` ([04-NUM-11]; the
-    // chelis#729 capacity class). JSON has one number production, so
-    // int-vs-float is a parse-time decision -- [05-OP-2] in
-    // spec/05-risc-primitives.md is the normative rule (a token containing
-    // `.`/`e`/`E` becomes `JNum`, anything else `JInt`; the same split
-    // `Std.Io.Json` and Python's `json` use). Without the variant,
-    // `9007199254740993` read back as `9007199254740992.0` silently.
-    //
-    // The dot-path accessors are the primary agent surface; matching on
-    // these constructors stays available, so the variants are registered
-    // openly (not opaque). The capacity census enumerates this registry
-    // through `prelude_adt_defs()` below -- a numeric variant added here is
-    // census-visible, not a blind spot.
-    let json_type = Type::Adt("Json".to_string(), Vec::new());
-    for (ctor, fields) in json_variants() {
-        let body = if fields.is_empty() {
-            json_type.clone()
-        } else {
-            Type::Fn(fields.clone(), Box::new(json_type.clone()))
-        };
-        env.bind(
-            ctor.to_string(),
-            Scheme {
-                tvars: vec![],
-                dvars: vec![],
-                rvars: vec![],
-                body,
-            },
-        );
-    }
-    adt_reg
-        .defs
-        .entry("Json".to_string())
-        .or_insert_with(|| AdtDef {
-            name: "Json".to_string(),
-            type_params: Vec::new(),
-            param_vars: Vec::new(),
-            opaque: false,
-            defining_module: None,
-            variants: json_variants()
-                .into_iter()
-                .map(|(ctor, fields)| VariantInfo {
-                    name: ctor.to_string(),
-                    fields: fields.into_iter().map(|ty| (None, ty)).collect(),
-                })
-                .collect(),
-        });
-}
-
-/// The prelude `Json` variant shapes, in declaration order. Shared by
-/// [`register_prelude_adts`] (env constructor bindings + ADT registry) and
-/// [`prelude_adt_defs`] (the capacity-census enumeration source) so the
-/// registered type and the censused identity cannot drift.
-fn json_variants() -> Vec<(&'static str, Vec<Type>)> {
-    let json_type = Type::Adt("Json".to_string(), Vec::new());
-    vec![
-        ("JNull", vec![]),
-        ("JBool", vec![Type::Prim(Prim::Bool)]),
-        ("JInt", vec![Type::Prim(Prim::Int64)]),
-        ("JNum", vec![Type::Prim(Prim::F64)]),
-        ("JStr", vec![Type::Prim(Prim::String)]),
-        (
-            "JList",
-            vec![Type::Adt("List".to_string(), vec![json_type.clone()])],
-        ),
-        (
-            "JDict",
-            vec![Type::Adt(
-                "Dict".to_string(),
-                vec![Type::Prim(Prim::String), json_type],
-            )],
-        ),
-    ]
 }
 
 /// Capacity-census enumeration source for Rust-registered prelude value
@@ -3003,6 +2761,7 @@ mod tests {
             "argmax_reduce",
             "argmin_reduce",
             "expand",
+            "insert",
         ];
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
@@ -3035,6 +2794,7 @@ mod tests {
         assert_eq!(shape_class("count"), ShapeClass::NameTracked);
         assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
         assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("insert"), ShapeClass::NameTracked);
         // chelis#340: the rest of the reduction family is name-tracked too.
         assert_eq!(shape_class("max_reduce"), ShapeClass::NameTracked);
         assert_eq!(shape_class("min_reduce"), ShapeClass::NameTracked);
@@ -3205,55 +2965,10 @@ mod tests {
     }
 
     #[test]
-    fn builtin_env_has_json_io_builtins() {
-        // chelis#890 host-lane JSON I/O: every builtin is registered with
-        // the declared arity (the concrete contracts live in
-        // `check_json_builtin_signature`, infer/app_hostio.rs).
-        let (env, _) = builtin_env();
-        for (name, arity) in [
-            ("parse_json", 1),
-            ("to_json", 1),
-            ("json_f64", 2),
-            ("json_int", 2),
-            ("json_str", 2),
-            ("json_list", 2),
-            ("json_f64s", 2),
-            ("json_ints", 2),
-            ("jnum", 1),
-            ("jint", 1),
-            ("jstr", 1),
-            ("jlist", 1),
-            ("jdict", 1),
-            ("json_set", 3),
-            ("round_to", 2),
-        ] {
-            let scheme = env
-                .lookup(name)
-                .unwrap_or_else(|| panic!("`{name}` must be registered"));
-            match &scheme.body {
-                Type::Fn(params, _) => assert_eq!(
-                    params.len(),
-                    arity,
-                    "`{name}` should take {arity} args, got {}",
-                    params.len()
-                ),
-                other => panic!("`{name}` should be a function type, got {other:?}"),
-            }
-            assert!(
-                BUILTIN_NAMES.contains(&name),
-                "`{name}` must be in the closed BUILTIN_NAMES vocabulary"
-            );
-        }
-    }
-
-    #[test]
     fn builtin_env_has_csv_io_builtins() {
         // chelis#903 host-lane CSV I/O: every builtin is registered with
-        // the declared arity (the concrete contracts live in
-        // `check_csv_builtin_signature`, infer/app_hostio.rs). The value
-        // type is the #890 `Json` ADT -- a Csv document is a fixed-shape
-        // Json value -- so there is deliberately no `Csv` prelude ADT to
-        // assert on.
+        // the declared arity; infer/app_hostio.rs pins the canonical
+        // List[Dict[string,string]] table carrier.
         let (env, _) = builtin_env();
         for (name, arity) in [
             ("parse_csv", 1),
@@ -3287,86 +3002,6 @@ mod tests {
     }
 
     #[test]
-    fn register_prelude_adts_adds_json_adt() {
-        let (mut env, mut vg) = builtin_env();
-        let mut adt_reg = AdtRegistry::new();
-        register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-
-        assert_eq!(
-            adt_reg.variant_names("Json").expect("Json variants"),
-            vec![
-                "JNull".to_string(),
-                "JBool".to_string(),
-                "JInt".to_string(),
-                "JNum".to_string(),
-                "JStr".to_string(),
-                "JList".to_string(),
-                "JDict".to_string(),
-            ]
-        );
-        // Constructor value bindings: nullary JNull is a bare Json value;
-        // the payload-carrying constructors are functions into Json.
-        let json_ty = Type::Adt("Json".to_string(), Vec::new());
-        assert_eq!(env.lookup("JNull").expect("JNull").body, json_ty);
-        match &env.lookup("JNum").expect("JNum").body {
-            Type::Fn(params, ret) => {
-                assert_eq!(params.as_slice(), &[Type::Prim(Prim::F64)]);
-                assert_eq!(**ret, json_ty);
-            }
-            other => panic!("JNum should be a function type, got {other:?}"),
-        }
-        // [04-NUM-11] / chelis#729: `JInt` carries exact int64 alongside
-        // the f64 `JNum`.
-        match &env.lookup("JInt").expect("JInt").body {
-            Type::Fn(params, ret) => {
-                assert_eq!(params.as_slice(), &[Type::Prim(Prim::Int64)]);
-                assert_eq!(**ret, json_ty);
-            }
-            other => panic!("JInt should be a function type, got {other:?}"),
-        }
-        // The recursive payloads point back at Json through List/Dict.
-        // Looked up by name rather than index: a positional assertion
-        // silently retargets when a variant is inserted.
-        let def = adt_reg.lookup("Json").expect("Json def");
-        let jdict = def
-            .variants
-            .iter()
-            .find(|variant| variant.name == "JDict")
-            .expect("JDict variant");
-        assert_eq!(
-            jdict.fields[0].1,
-            Type::Adt(
-                "Dict".to_string(),
-                vec![Type::Prim(Prim::String), json_ty.clone()]
-            )
-        );
-    }
-
-    #[test]
-    fn prelude_adt_defs_enumerates_json_for_the_census() {
-        // The capacity census's prelude-ADT leg reads this enumeration
-        // (spec/design/dtype_semantics.md §C6): the Json ADT with its
-        // numeric variants must be visible, exactly as registered.
-        let defs = prelude_adt_defs();
-        let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
-        assert!(names.contains(&"Json"), "Json enumerated, got {names:?}");
-        assert!(names.contains(&"Option"), "all prelude ADTs enumerated");
-        let json = defs.iter().find(|def| def.name == "Json").expect("Json");
-        let jnum = json
-            .variants
-            .iter()
-            .find(|variant| variant.name == "JNum")
-            .expect("JNum variant visible to the census");
-        assert_eq!(jnum.fields[0].1, Type::Prim(Prim::F64));
-        let jint = json
-            .variants
-            .iter()
-            .find(|variant| variant.name == "JInt")
-            .expect("JInt variant visible to the census");
-        assert_eq!(jint.fields[0].1, Type::Prim(Prim::Int64));
-    }
-
-    #[test]
     fn builtin_env_missing_name_returns_none() {
         let (env, _) = builtin_env();
         assert!(env.lookup("nonexistent").is_none());
@@ -3376,7 +3011,8 @@ mod tests {
     fn instantiate_add_produces_fn_type() {
         let (env, mut vg) = builtin_env();
         let scheme = env.lookup("add").unwrap();
-        let ty = env.instantiate(scheme, &mut vg);
+        let subst = crate::unify::Subst::new();
+        let ty = env.instantiate(scheme, &mut vg, &subst);
         match ty {
             Type::Fn(args, _ret) => assert_eq!(args.len(), 2),
             other => panic!("expected Fn, got {other:?}"),
@@ -3389,7 +3025,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add should accept two tensors of the same type
         let tensor_f32 = Type::Tensor(
@@ -3404,7 +3041,6 @@ mod tests {
             Box::new(tensor_f32),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &expected_fn, &mut subst).is_ok());
     }
 
@@ -3414,7 +3050,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
         let t1 = Type::Tensor(
@@ -3430,7 +3067,6 @@ mod tests {
             Box::new(Type::Var(vg.fresh_tvar())),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
     }
 
@@ -3440,7 +3076,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], int32) should fail
         let t1 = Type::Tensor(
@@ -3453,7 +3090,6 @@ mod tests {
             Box::new(Type::Var(vg.fresh_tvar())),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
     }
 

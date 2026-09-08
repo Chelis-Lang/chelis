@@ -1,16 +1,17 @@
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
-    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue,
-    TensorReduceOp, arg_reduce_tensor_groups, compare_scalar_tensor, compare_scalars,
-    compare_tensor_scalar, compare_tensors, float_binop, float_scalar_tensor_binop,
-    float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
-    int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
-    reduce_tensor_groups, scalar_from_i64, tensor_from_scalars, types::Prim, uniform_sample,
+    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericTrap,
+    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalar_tensor,
+    compare_scalars, compare_tensor_scalar, compare_tensors, float_binop,
+    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
+    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
+    int_tensor_unop, int_unop, reduce_tensor_groups, scalar_from_f64, scalar_from_i64,
+    tensor_from_scalars, types::Prim, uniform_sample,
 };
 
 use super::transforms::*;
@@ -19,8 +20,8 @@ use super::*;
 pub(super) fn pattern_matches(
     value: &RuntimeValue,
     pattern: &Expr,
-    bindings: &mut HashMap<String, RuntimeValue>,
-    adt_fields: &HashMap<String, Vec<String>>,
+    bindings: &mut UnordMap<String, RuntimeValue>,
+    adt_fields: &UnordMap<String, Vec<String>>,
 ) -> Result<bool, String> {
     let Some(list) = as_list(pattern) else {
         return Ok(false);
@@ -142,160 +143,8 @@ pub(super) fn pattern_matches(
     }
 }
 
-/// chelis#520 D2: is a declared field type inside the field-wise
-/// gradient slice? Float tensors and float scalars are; everything
-/// else (ints, bools, strings, nested ADTs, generic type vars) is not.
-/// Zero-argument `typealias` references resolve through `aliases`
-/// (matching the checker's alias resolution; `seen` guards cycles);
-/// a `t-adt` name that is not a known alias is a real nested ADT and
-/// stays non-float.
-fn field_type_is_float(ty: &Expr, aliases: &HashMap<String, Expr>, seen: &mut Vec<String>) -> bool {
-    let Some(list) = as_list(ty) else {
-        return false;
-    };
-    match tag(list) {
-        Some(DeepTag::TPrim) => matches!(
-            children(list).first().and_then(symbol_name),
-            Some("f16" | "bf16" | "f32" | "f64")
-        ),
-        Some(DeepTag::TTensor) => children(list)
-            .last()
-            .is_some_and(|elem| field_type_is_float(elem, aliases, seen)),
-        Some(DeepTag::TAdt) => {
-            let kids = children(list);
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                return false;
-            };
-            // Parameterized references would need argument substitution;
-            // stay conservative (the checker skips those as well).
-            if kids.len() > 1 || seen.iter().any(|s| s == name) {
-                return false;
-            }
-            let Some(target) = aliases.get(name) else {
-                return false;
-            };
-            seen.push(name.to_string());
-            let result = field_type_is_float(target, aliases, seen);
-            seen.pop();
-            result
-        }
-        _ => false,
-    }
-}
-
-/// Collect zero-parameter `typealias` targets so field types declared
-/// through an alias resolve the way the checker resolves them.
-fn collect_type_aliases(expr_sets: &[&[Expr]]) -> HashMap<String, Expr> {
-    let mut aliases = HashMap::new();
-    for exprs in expr_sets {
-        for expr in top_level_items(exprs) {
-            let Expr::List(list, _) = expr else {
-                continue;
-            };
-            if tag(list) != Some(DeepTag::Typealias) {
-                continue;
-            }
-            let kids = children(list);
-            let (Some(name), Some(params), Some(target)) =
-                (kids.first().and_then(symbol_name), kids.get(1), kids.get(2))
-            else {
-                continue;
-            };
-            let no_params = as_list(params).is_some_and(|p| p.elements.is_empty());
-            if no_params {
-                aliases.insert(name.to_string(), target.clone());
-            }
-        }
-    }
-    aliases
-}
-
-/// chelis#520 D2: map every constructor of a deftype to a rejection
-/// reason when the TYPE is outside the field-wise gradient slice. The
-/// checker types `grad` over such an ADT argument as non-differentiable
-/// (`unit` payload), so the eval lane must reject loudly instead of
-/// fabricating a gradient value the static type does not admit. Two
-/// shapes are rejected: a type with any non-float-tensor field in ANY
-/// variant (the constructed variant may be float-clean, but a mixed
-/// sibling variant already poisons the static gradient type), and a
-/// pure enum whose variants carry no fields at all (no continuous
-/// payload to differentiate). Keyed by constructor name, matching the
-/// global-ctor-namespace convention of [`collect_adt_ctor_fields`].
-/// Takes every expr set at once (library plus program) so an alias
-/// declared in one set resolves inside a deftype from another.
-pub(crate) fn collect_adt_grad_rejections(expr_sets: &[&[Expr]]) -> HashMap<String, String> {
-    let aliases = collect_type_aliases(expr_sets);
-    let mut out = HashMap::new();
-    for expr in expr_sets.iter().flat_map(|exprs| top_level_items(exprs)) {
-        let Expr::List(list, _) = expr else {
-            continue;
-        };
-        if tag(list) != Some(DeepTag::Deftype) {
-            continue;
-        }
-        let kids = children(list);
-        let Some(type_name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let mut ctors: Vec<&str> = Vec::new();
-        let mut offending: Option<(String, String)> = None;
-        let mut has_any_field = false;
-        for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
-                continue;
-            };
-            if tag(variant_list) != Some(DeepTag::Variant) {
-                continue;
-            }
-            let variant_kids = children(variant_list);
-            let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
-                continue;
-            };
-            ctors.push(ctor);
-            for field in variant_kids.iter().skip(1) {
-                let Some(field_list) = as_list(field) else {
-                    continue;
-                };
-                if tag(field_list) != Some(DeepTag::Field) {
-                    continue;
-                }
-                let field_kids = children(field_list);
-                let Some(field_name) = field_kids.first().and_then(symbol_name) else {
-                    continue;
-                };
-                has_any_field = true;
-                let is_float = field_kids
-                    .get(1)
-                    .is_some_and(|ty| field_type_is_float(ty, &aliases, &mut Vec::new()));
-                if !is_float && offending.is_none() {
-                    offending = Some((ctor.to_string(), field_name.to_string()));
-                }
-            }
-        }
-        let reason = match (&offending, has_any_field) {
-            (Some((bad_ctor, bad_field)), _) => Some(format!(
-                "type `{type_name}` is not field-wise differentiable: field \
-                 `{bad_field}` of constructor `{bad_ctor}` is not a float tensor, \
-                 so the checker types this gradient as unit; mixed ADT gradients \
-                 are not supported yet"
-            )),
-            (None, false) => Some(format!(
-                "type `{type_name}` carries no fields in any constructor, so \
-                 there is no float tensor payload to differentiate"
-            )),
-            (None, true) => None,
-        };
-        if let Some(reason) = reason {
-            for ctor in ctors {
-                out.insert(ctor.to_string(), reason.clone());
-            }
-        }
-    }
-    out
-}
-
-pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
-    let mut out = HashMap::new();
+pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> UnordMap<String, Vec<String>> {
+    let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -931,68 +780,6 @@ pub(super) fn dict_lookup<'a>(
         .map(|(_, value)| value)
 }
 
-/// Past this many entries, [`OrderedStringDictBuilder`] switches from a
-/// linear duplicate scan to a key -> slot hash index.
-const ORDERED_DICT_INDEX_THRESHOLD: usize = 32;
-
-/// Insertion-ordered, string-keyed dict builder with duplicate-key upsert
-/// (first occurrence's position, last occurrence's value). Small objects
-/// use a linear scan; past [`ORDERED_DICT_INDEX_THRESHOLD`] a key -> slot
-/// hash index takes over so building an n-key JSON object is O(n) instead
-/// of the O(n²) CPU-DoS a 100k-key document produced (chelis#891 review
-/// findings 11 and 15). Shared by `parse_json`'s object parser and the
-/// `jdict` eval arm.
-pub(super) struct OrderedStringDictBuilder {
-    entries: Vec<(RuntimeValue, RuntimeValue)>,
-    index: Option<std::collections::HashMap<String, usize>>,
-}
-
-impl OrderedStringDictBuilder {
-    pub(super) fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            index: None,
-        }
-    }
-
-    pub(super) fn upsert(&mut self, key: String, value: RuntimeValue) {
-        if self.index.is_none() && self.entries.len() >= ORDERED_DICT_INDEX_THRESHOLD {
-            self.index = Some(
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(slot, (existing, _))| match existing {
-                        RuntimeValue::String(existing) => Some((existing.clone(), slot)),
-                        _ => None,
-                    })
-                    .collect(),
-            );
-        }
-        if let Some(index) = self.index.as_mut() {
-            if let Some(&slot) = index.get(&key) {
-                self.entries[slot].1 = value;
-            } else {
-                index.insert(key.clone(), self.entries.len());
-                self.entries.push((RuntimeValue::String(key), value));
-            }
-            return;
-        }
-        if let Some(slot) = self
-            .entries
-            .iter_mut()
-            .find(|(existing, _)| matches!(existing, RuntimeValue::String(k) if *k == key))
-        {
-            slot.1 = value;
-        } else {
-            self.entries.push((RuntimeValue::String(key), value));
-        }
-    }
-
-    pub(super) fn into_entries(self) -> Vec<(RuntimeValue, RuntimeValue)> {
-        self.entries
-    }
-}
-
 /// V2-F2: element-wise precision conversion for `cast(tensor[..], q)` in
 /// the host runtime. Spec §2.7 lists `cast` as a first-class precision
 /// transform; the IR DAG and C backend already handle the tensor form
@@ -1355,8 +1142,24 @@ fn pad_rows(
     }
 }
 
+/// Element count for a host shape.
+///
+/// A zero extent means zero elements ([05-OP-33]), and the answer does not
+/// depend on where the zero sits, so it short-circuits rather than folding
+/// past it: `[2^32, 2^32, 0]` reaches `2^64` before it reaches the zero.
+/// `chelis-ir`'s `numel` holds the same contract.
+///
+/// The `.max(1)` this replaces read as the rank-zero convention, but
+/// `[].iter().product()` is already one, so the clamp only ever fired on a
+/// zero-containing shape, where it fabricated an element that does not exist.
+/// Callers use the count as a `0..n` bound over an output buffer, so that
+/// phantom element drove `linear_to_indices` into `linear % 0`, or produced a
+/// `picks` vector one longer than the storage its shape declares.
 fn tensor_numel(shape: &[usize]) -> usize {
-    shape.iter().product::<usize>().max(1)
+    if shape.contains(&0) {
+        return 0;
+    }
+    shape.iter().product()
 }
 
 fn linear_to_indices(mut linear: usize, shape: &[usize]) -> Vec<usize> {
@@ -1600,26 +1403,22 @@ pub(super) fn tensor_matmul_host(
     RuntimeTensorValue::from_wide("matmul", lhs.precision, vec![m, n], out)
 }
 
-/// Replicate a tensor along a new axis.
+/// `insert`: replicate a tensor along a NEW axis.
 ///
-/// Per the typer (`chelis-types::infer::check_expand_signature`),
-/// `expand(b, axis, count)` is canonically an INSERT operation: it
-/// produces a tensor of shape `[..., count, ...]` with `count` inserted
-/// at position `axis`, where every "slice" along the new axis is a copy
-/// of `b`. The output rank is always `input_rank + 1`.
+/// `insert(b, axis, count)` produces a tensor of shape `[..., count, ...]`
+/// with `count` inserted at position `axis`, where every slice along the new
+/// axis is a copy of `b`. The output rank is always `input_rank + 1`
+/// (`spec/04-type-system.md` section 4.7.2).
 ///
-/// The typer also accepts a same-rank "replace-singleton" interpretation
-/// when the user explicitly annotates the result as same-rank, but the
-/// host runtime has no access to user annotations, so it always picks
-/// the canonical INSERT branch — which is the typer's first-preference
-/// branch at infer.rs:7188 and the only branch synthesized by IR
-/// lowering in `tier2::lower_softmax`/`lower_layer_norm`/`lower_matmul`.
-/// Closes Bucket 4a: previously this function silently picked the
-/// same-rank REPLICATE-singleton branch whenever `in_shape[axis] == 1`,
-/// producing shape `[count]` for `expand([1], 0, count)` while the typer
-/// accepted the `[count, 1]` annotation, leaving `chelis test`/`chelis
-/// eval` disagreeing with `chelis check` on `examples/linreg.ch`.
-pub(super) fn tensor_expand_host(
+/// This function used to serve both names and always inserted, because the
+/// old positional `expand` had two candidate result shapes and the host
+/// runtime cannot see the user annotation that chose between them. Picking
+/// the same-rank branch whenever `in_shape[axis] == 1` is what made
+/// `chelis eval` disagree with `chelis check` on `examples/linreg.ch`
+/// (Bucket 4a). With one shape per operation there is no choice left to guess
+/// at: `insert` lands here and `expand` lands in `tensor_expand_host`.
+pub(super) fn tensor_insert_host(
+    builtin: &str,
     tensor: &RuntimeTensorValue,
     axis: usize,
     count: usize,
@@ -1628,7 +1427,7 @@ pub(super) fn tensor_expand_host(
     let in_rank = in_shape.len();
     if axis > in_rank {
         return Err(format!(
-            "expand axis {axis} out of bounds for rank-{in_rank} tensor (insert position must be <= rank)"
+            "{builtin} axis {axis} out of bounds for rank-{in_rank} tensor (insert position must be <= rank)"
         ));
     }
 
@@ -1645,6 +1444,72 @@ pub(super) fn tensor_expand_host(
         // Drop the inserted axis to recover the input index.
         let mut in_indices = out_indices;
         in_indices.remove(axis);
+        picks.push(indices_to_linear(&in_indices, &in_shape));
+    }
+    // reuse_* contract: expand is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
+}
+
+/// `expand`: broadcast an existing size-1 axis.
+///
+/// `spec/05-risc-primitives.md` section 2.4.1: "`expand` sets the extent at
+/// `axis` and is well formed only when the operand's extent at `axis` is 1
+/// (the size-1 broadcast of section 2.4's table); the operation is a claim
+/// that the operand's extent at `axis` is 1. [...] A symbolic or runtime
+/// operand extent at `axis` other than 1 fails that claim's runtime extent
+/// guard and traps `Domain`."
+///
+/// The claim is checked here rather than assumed. The host runtime is the
+/// only evaluator a `chelis eval` of a user program reaches, so a claim this
+/// function did not check would execute unguarded on the lane a user is most
+/// likely to run. The guard the compiled and DAG lanes place from the derived
+/// equality classes compares the same values at the same trap kind; this one
+/// fires at the operation because the host interpreter has no entry at which
+/// to hoist it.
+///
+/// The trap renders through [`NumericTrap`], so the line is
+/// `numeric trap: domain in expand at int64` verbatim: the guarded result is
+/// an extent under [05-DIM-1] and not a tensor element, which is why the
+/// dtype slot is `int64` rather than the tensor's precision
+/// (`spec/04-type-system.md` section 4.7).
+pub(super) fn tensor_expand_host(
+    builtin: &str,
+    tensor: &RuntimeTensorValue,
+    axis: usize,
+    count: usize,
+) -> Result<RuntimeTensorValue, String> {
+    let in_shape = tensor.value.shape.clone();
+    let in_rank = in_shape.len();
+    if axis >= in_rank {
+        return Err(format!(
+            "{builtin} axis {axis} out of bounds for rank-{in_rank} tensor (the broadcast \
+             axis must be within the operand's rank)"
+        ));
+    }
+    if in_shape[axis] != 1 {
+        let trap = NumericTrap::Domain {
+            op: "expand",
+            prim: Prim::Int64,
+        };
+        let observed = in_shape[axis];
+        return Err(format!(
+            "{trap}\n  {builtin} claims the operand's extent at axis {axis} is 1, observed \
+             {observed}"
+        ));
+    }
+
+    // BROADCAST: set the size-1 axis to `count`, reading index 0 there.
+    let mut out_shape = in_shape.clone();
+    out_shape[axis] = count;
+
+    let out_numel = tensor_numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_numel);
+    for out_linear in 0..out_numel {
+        let mut in_indices = linear_to_indices(out_linear, &out_shape);
+        in_indices[axis] = 0;
         picks.push(indices_to_linear(&in_indices, &in_shape));
     }
     // reuse_* contract: expand is element-preserving (section C3).
@@ -2118,7 +1983,7 @@ fn add_load(dag: &mut Dag, name: String, ty: TensorType) -> NodeId {
 
 fn extract_root(
     dag: &Dag,
-    inputs: &HashMap<String, IrTensorValue>,
+    inputs: &UnordMap<String, IrTensorValue>,
     root: NodeId,
     op_label: &str,
 ) -> Result<RuntimeTensorValue, String> {
@@ -2162,7 +2027,7 @@ where
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let x_id = add_load(&mut dag, x_name.clone(), ty.clone());
     let root = build(&mut dag, x_id, &ty);
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     extract_root(&dag, &inputs, root, "composed unary tier2")
 }
@@ -2190,7 +2055,7 @@ where
     let g_id = add_load(&mut dag, g_name.clone(), g_ty.clone());
     let b_id = add_load(&mut dag, b_name.clone(), b_ty.clone());
     let root = build(&mut dag, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     inputs.insert(g_name, gamma.value.clone());
     inputs.insert(b_name, beta.value.clone());
@@ -2266,7 +2131,7 @@ pub(super) fn conv2d_host(
     let root = tier2::lower_conv2d(
         &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, stride, padding, None,
     );
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());
     inputs.insert(k_name, kernel.value.clone());
     extract_root(&dag, &inputs, root, "conv2d")
@@ -2464,7 +2329,6 @@ pub(super) fn tensor_scatter_value(
         .to_i64_exact_vec()
         .expect("integer tensor storage reads exactly");
     let mut writes = Vec::with_capacity(updates.value.len());
-    let mut seen = std::collections::HashSet::new();
     for linear in 0..updates.value.len() {
         let update_index = linear_to_indices(linear, &updates.value.shape);
         let mut out_index = Vec::with_capacity(base.value.shape.len());
@@ -2480,12 +2344,6 @@ pub(super) fn tensor_scatter_value(
         out_index.push(value as usize);
         out_index.extend_from_slice(&update_index[axis + indices.value.shape.len()..]);
         let out_linear = indices_to_linear(&out_index, &base.value.shape);
-        if mode == "replace" && !seen.insert(out_linear) {
-            return Err(format!(
-                "scatter replace mode rejects duplicate target index {}",
-                out_linear
-            ));
-        }
         writes.push((out_linear, linear));
     }
     match mode {
@@ -2612,6 +2470,20 @@ pub(super) fn tensor_cumsum_value(
 ) -> Result<RuntimeTensorValue, String> {
     let axis = normalize_axis(tensor.value.shape.len(), axis, "cumsum")?;
     let mut data = tensor.value.to_f64_lossy_vec();
+    // An empty operand has nothing to scan, and its axis decomposition is
+    // never read. `outer` is the product of the extents BEFORE the axis, which
+    // for an empty tensor are unconstrained: the zero elsewhere is what makes
+    // the element count representable. Computing it anyway overflows `usize`
+    // or spins an empty loop, matching the C runtime's guard in
+    // `chelis_tensor_cumsum` / `chelis_tensor_sort`.
+    if tensor.value.is_empty() {
+        return RuntimeTensorValue::from_wide(
+            "cumsum",
+            tensor.precision,
+            tensor.value.shape.clone(),
+            data,
+        );
+    }
     let axis_size = tensor.value.shape[axis];
     let inner: usize = tensor.value.shape[axis + 1..]
         .iter()
@@ -2641,6 +2513,26 @@ pub(super) fn tensor_sort_value(
     axis: i64,
 ) -> Result<RuntimeValue, String> {
     let axis = normalize_axis(tensor.value.shape.len(), axis, "sort")?;
+    // An empty operand has nothing to scan, and its axis decomposition is
+    // never read. `outer` is the product of the extents BEFORE the axis, which
+    // for an empty tensor are unconstrained: the zero elsewhere is what makes
+    // the element count representable. Computing it anyway overflows `usize`
+    // or spins an empty loop, matching the C runtime's guard in
+    // `chelis_tensor_cumsum` / `chelis_tensor_sort`.
+    if tensor.value.is_empty() {
+        return Ok(RuntimeValue::Tuple(vec![
+            RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                tensor.value.shape.clone(),
+                tensor.value.storage().reuse_gather(&[]),
+            ))),
+            RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                "sort",
+                Prim::Int64,
+                tensor.value.shape.clone(),
+                Vec::new(),
+            )?),
+        ]));
+    }
     let axis_size = tensor.value.shape[axis];
     let inner: usize = tensor.value.shape[axis + 1..]
         .iter()
@@ -2706,15 +2598,31 @@ pub(super) fn tensor_diagonal_value(
             out_shape.push(*size);
         }
     }
+    // chelis#1349: `out_index` holds one coordinate per retained OUTPUT
+    // axis, so the diagonal's own coordinate lives at `axis1`'s position
+    // after `axis2` is removed, which is one slot earlier whenever
+    // `axis2 < axis1`. Indexing by the source axis number read past the
+    // end for `axis1 == rank - 1` and, together with a reconstruction
+    // walk that never consumed the diagonal's slot, handed later source
+    // axes a coordinate belonging to a different axis (an out-of-bounds
+    // storage pick whenever that coordinate's range exceeds the diagonal
+    // extent).
+    let diag_out_axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
     let out_numel = tensor_numel(&out_shape);
     let mut picks = Vec::with_capacity(out_numel);
     for linear in 0..out_numel {
         let out_index = linear_to_indices(linear, &out_shape);
         let mut src_index = Vec::with_capacity(tensor.value.shape.len());
         let mut out_pos = 0usize;
-        let diag_idx = out_index[axis1];
+        let diag_idx = out_index[diag_out_axis];
         for index in 0..tensor.value.shape.len() {
-            if index == axis1 || index == axis2 {
+            if index == axis1 {
+                // `axis1` keeps an output slot (the diagonal's own), so
+                // the walk must consume it.
+                src_index.push(diag_idx);
+                out_pos += 1;
+            } else if index == axis2 {
+                // `axis2` was removed from the output; nothing to consume.
                 src_index.push(diag_idx);
             } else {
                 src_index.push(out_index[out_pos]);
@@ -2730,22 +2638,103 @@ pub(super) fn tensor_diagonal_value(
     )))
 }
 
+fn trace_balanced_sum(
+    tensor: &RuntimeTensorValue,
+    group: &[usize],
+    accumulator: Prim,
+    result: Prim,
+) -> Result<ScalarValue, String> {
+    let mut level = group
+        .iter()
+        .map(|&index| {
+            cast_scalar(
+                "trace",
+                tensor.value.storage().scalar_at(index),
+                accumulator,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if level.is_empty() {
+        let zero = if accumulator.is_integer() {
+            scalar_from_i64("trace", accumulator, 0)
+        } else {
+            scalar_from_f64("trace", accumulator, 0.0)
+        }
+        .map_err(|error| error.to_string())?;
+        return cast_scalar("trace", zero, result).map_err(|error| error.to_string());
+    }
+    while level.len() > 1 {
+        let mut source = level.into_iter();
+        let mut next = Vec::with_capacity(source.len().div_ceil(2));
+        while let Some(left) = source.next() {
+            let combined = match source.next() {
+                Some(right) if accumulator.is_integer() => {
+                    int_binop(IntBinOp::Add, left, right).map_err(|error| error.to_string())?
+                }
+                Some(right) => {
+                    float_binop(FloatBinOp::Add, left, right).map_err(|error| error.to_string())?
+                }
+                None => left,
+            };
+            next.push(combined);
+        }
+        level = next;
+    }
+    cast_scalar("trace", level[0], result).map_err(|error| error.to_string())
+}
+
 pub(super) fn tensor_trace_value(
     tensor: &RuntimeTensorValue,
     axis1: i64,
     axis2: i64,
 ) -> Result<RuntimeTensorValue, String> {
-    let diagonal = tensor_diagonal_value(tensor, axis1, axis2)?;
+    // chelis#1349: the diagonal occupies output slot `axis1 - 1` when
+    // `axis2 < axis1`, else `axis1` (see `tensor_diagonal_value`), and that
+    // slot is the axis trace must reduce so both source axes are removed,
+    // matching `infer_trace_result_type`. `min(axis1, axis2)` named it only
+    // for `axis1 < axis2` and for adjacent reversed pairs; elsewhere it
+    // reduced a retained axis and produced a shape the checker never
+    // declared. Normalizing against the SOURCE rank with `?` also replaces
+    // the prior `unwrap_or` silent fallback to the last axis.
+    let source_rank = tensor.value.shape.len();
+    let axis1 = normalize_axis(source_rank, axis1, "trace")?;
+    let axis2 = normalize_axis(source_rank, axis2, "trace")?;
+    let diagonal = tensor_diagonal_value(tensor, axis1 as i64, axis2 as i64)?;
     let rank = diagonal.value.shape.len();
-    let axis = normalize_axis(rank, axis1.min(axis2), "trace").unwrap_or(rank.saturating_sub(1));
-    // #170: trace = sum over the diagonal. Route the diagonal reduction
-    // through `tensor_reduce_host`'s `Sum` path so it uses the SAME
-    // stride-4 ILP f32 cascade as `RiscOp::Sum` (issue #163, torch
-    // `row_sum` parity). The prior hand-rolled `sum += ...` left-fold in
-    // f64 diverged from `torch.trace` (== `torch.sum(diagonal)`) by ~1 ULP
-    // for diagonals longer than 16 f32 elements. Reusing the one verified
-    // cascade also prevents the two summation orders from drifting apart.
-    tensor_reduce_host(&diagonal, axis as i64, ReduceOp::Sum)
+    let axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
+    let mut out_shape = diagonal.value.shape.clone();
+    let axis_len = out_shape.remove(axis);
+    let out_numel = tensor_numel(&out_shape);
+    let mut groups = Vec::with_capacity(out_numel);
+    for out_linear in 0..out_numel {
+        let out_indices = linear_to_indices(out_linear, &out_shape);
+        let mut group = Vec::with_capacity(axis_len);
+        for axis_index in 0..axis_len {
+            let mut input_indices = Vec::with_capacity(rank);
+            let mut output_position = 0;
+            for dimension in 0..rank {
+                if dimension == axis {
+                    input_indices.push(axis_index);
+                } else {
+                    input_indices.push(out_indices[output_position]);
+                    output_position += 1;
+                }
+            }
+            group.push(indices_to_linear(&input_indices, &diagonal.value.shape));
+        }
+        groups.push(group);
+    }
+    let accumulator = diagonal.precision.default_reduce_sum_accumulator()?;
+    let result = diagonal.precision.default_reduce_sum_result_precision()?;
+    let values = groups
+        .iter()
+        .map(|group| trace_balanced_sum(&diagonal, group, accumulator, result))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor_from_scalars(result, &values),
+    )))
 }
 
 pub(super) fn tensor_clamp_value(
@@ -2789,21 +2778,41 @@ pub(super) fn tensor_einsum_value(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
 ) -> Result<RuntimeTensorValue, String> {
-    if equation.contains("...") {
-        return Err("einsum ellipsis support is deferred in 3h".to_string());
-    }
     let (inputs, output) = equation
         .split_once("->")
-        .ok_or_else(|| "einsum equation must contain explicit output".to_string())?;
-    let operands = inputs.split(',').collect::<Vec<_>>();
-    if operands.len() != 2 {
-        return Err("einsum 3h currently supports exactly two operands".to_string());
+        .ok_or_else(|| "einsum equation must match [a-z]*,[a-z]*->[a-z]*".to_string())?;
+    if output.contains("->") {
+        return Err("einsum equation must contain exactly one `->`".to_string());
     }
-    let lhs_labels = operands[0].chars().collect::<Vec<_>>();
-    let rhs_labels = operands[1].chars().collect::<Vec<_>>();
+    let (lhs_input, rhs_input) = inputs
+        .split_once(',')
+        .ok_or_else(|| "einsum equation must contain exactly two operands".to_string())?;
+    if rhs_input.contains(',') {
+        return Err("einsum equation must contain exactly two operands".to_string());
+    }
+    if !lhs_input
+        .bytes()
+        .chain(rhs_input.bytes())
+        .chain(output.bytes())
+        .all(|label| label.is_ascii_lowercase())
+    {
+        return Err("einsum labels must be lowercase ASCII `a` through `z`".to_string());
+    }
+    let lhs_labels = lhs_input.chars().collect::<Vec<_>>();
+    let rhs_labels = rhs_input.chars().collect::<Vec<_>>();
     let out_labels = output.chars().collect::<Vec<_>>();
     if lhs_labels.len() != lhs.value.shape.len() || rhs_labels.len() != rhs.value.shape.len() {
         return Err("einsum label count must match operand rank".to_string());
+    }
+    let mut output_seen = [false; 26];
+    for &label in &out_labels {
+        let index = (label as u8 - b'a') as usize;
+        if output_seen[index] {
+            return Err(format!(
+                "einsum output label `{label}` must occur exactly once"
+            ));
+        }
+        output_seen[index] = true;
     }
     let mut dims = std::collections::BTreeMap::<char, usize>::new();
     for (label, size) in lhs_labels.iter().zip(&lhs.value.shape) {
@@ -2838,6 +2847,36 @@ pub(super) fn tensor_einsum_value(
         .iter()
         .map(|label| dims.get(label).copied().unwrap_or(1))
         .collect::<Vec<_>>();
+    // The host lane carries shapes as `usize`, but the language's extent
+    // domain is int64 ([05-DIM-2]) and [05-OP-33] wants an unrepresentable
+    // count to trap `Overflow`. Fold in int64 so this lane agrees with the C
+    // runtime about where the ceiling is instead of inheriting the host's, and
+    // short-circuit a zero extent so the answer does not depend on axis order:
+    // a zero anywhere means zero elements, whatever the other extents are.
+    let checked_product = |shape: &[usize], context: &str| {
+        if shape.contains(&0) {
+            return Ok(0_usize);
+        }
+        shape
+            .iter()
+            .try_fold(1_i64, |product, &extent| {
+                let extent = i64::try_from(extent).map_err(|_| {
+                    format!("Overflow: einsum {context} extent {extent} exceeds int64")
+                })?;
+                product
+                    .checked_mul(extent)
+                    .ok_or_else(|| format!("Overflow: einsum {context} extent product exceeds int64"))
+            })
+            .and_then(|product| {
+                usize::try_from(product).map_err(|_| {
+                    format!(
+                        "Overflow: einsum {context} extent product {product} is not representable on this host"
+                    )
+                })
+            })
+    };
+    let output_total = checked_product(&out_shape, "output")?;
+    let reduction_total = checked_product(&reduction_shape, "reduction")?;
     // #170 (DO NOT "fix" into the cascade): einsum is a contraction sum,
     // same shape as matmul, and shares matmul's disposition. torch's f32
     // einsum follows its GEMM order (strict-f32 left-fold), NOT the #163
@@ -2848,14 +2887,13 @@ pub(super) fn tensor_einsum_value(
     // in `tensor_matmul_host`.
     let lhs_wide = lhs.value.to_f64_lossy_vec();
     let rhs_wide = rhs.value.to_f64_lossy_vec();
-    let mut out = vec![0.0; tensor_numel(&out_shape)];
+    let mut out = vec![0.0; output_total];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_index = linear_to_indices(out_linear, &out_shape);
-        let mut label_values = std::collections::HashMap::<char, usize>::new();
+        let mut label_values = chelis_unord::UnordMap::<char, usize>::new();
         for (label, value) in out_labels.iter().zip(out_index.iter()) {
             label_values.insert(*label, *value);
         }
-        let reduction_total = tensor_numel(&reduction_shape);
         let mut acc = 0.0_f64;
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);
@@ -3089,6 +3127,7 @@ pub(crate) fn describe_argument(slot: Option<&RuntimeValue>) -> String {
 /// Render an ADT constructor's field list for a malformed-shape diagnostic.
 /// Fields ARE tagged individually: `malformed JNum fields [int32 5]` names
 /// the reason the shape was rejected, which an untagged `[5]` does not.
+#[cfg(test)]
 pub(crate) fn describe_fields(fields: &[RuntimeValue]) -> String {
     truncate_for_diagnostic(format!(
         "[{}]",

@@ -23,28 +23,46 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 6 is explicitly
+WireDag JSON is an exact-version contract. Schema version 7 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 5, and every future version are decode errors before any IR
+versions 1 through 6, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
-Version 6 includes `WireRiscOp::Count { axes }`; `axes` is the complete
+Version 7 preserves version 6's `WireRiscOp::Count { axes }`; `axes` is the complete
 non-empty vector of unique normalized original-axis positions in strictly
 descending order under [05-OP-29]. An encoder rejects any empty, duplicate,
 increasing, source-order, or out-of-range vector rather than rewriting it,
 and the decoder rejects an empty,
 duplicate, increasing, or out-of-range vector before IR construction.
 
-Version 6 also represents padding only as
+Version 7 also preserves version 6's padding representation:
 `WireRiscOp::Pad { fill: ScalarValue, ... }`. The scalar tag and payload must
 be the exact active tensor element dtype required by the padded tensor and
 preserve its stored bits; a raw JSON number, an untagged payload, a string-mode
 fill, or a mismatched dtype is a decode error before IR construction. No v5
 numeric-fill migration or inferred fill dtype exists.
 
-Every tagged variant
-must be known to the v6 decoder. `OneHot` remains only a transient
+Version 7 includes the distinct `WireRiscOp::Relu` and
+`WireRiscOp::ReluAdjoint` identities required by [05-OP-43]. `Relu` has
+exactly one input; `ReluAdjoint` has exactly two, ordered as the forward input
+and incoming cotangent. Every input has the output's exact float dtype and
+dimensions. An unknown identity, a non-float dtype, wrong cardinality,
+unresolved input, or shape/dtype mismatch is a decode error before IR
+construction; the decoder does not replace either identity with an extrema
+operation.
+
+Version 7 represents every runtime movement bound and reshape target with the
+tagged `WireRtDim` carrier defined by [05-MOV-1]. In particular,
+`WireRiscOp::Expand.size` is a `WireRtDim`, never a display string.
+`InputAxis { tensor, axis }` names an absolute nonzero input slot of the owning
+node and a normalized literal int32 axis of that input tensor. `Node { input }`
+names an absolute nonzero input slot whose source is an earlier rank-zero exact
+int64 node. The decoder enforces the owner matrix from
+`spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
+axis range, and the exact input cardinality before IR construction.
+
+Every tagged variant must be known to the version 7 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 ## 4. Invariant Revalidation At Decode Boundaries

@@ -24,6 +24,8 @@ MANAGED_ACTION_PREFIXES = (
     "Swatinem/rust-cache@",
     "actions/checkout@",
     "actions/create-github-app-token@",
+    "actions/cache/restore@",
+    "actions/cache/save@",
     "actions/download-artifact@",
     "actions/upload-artifact@",
 )
@@ -55,15 +57,29 @@ JOB_DISPOSITIONS: dict[str, dict[str, JobDisposition]] = {
         "changes": JobDisposition.PRE_SETUP_ORCHESTRATION,
         "rejection-authority-liveness": JobDisposition.PROJECT_DEVENV,
         "diagnostic-kind-oracle": JobDisposition.PROJECT_DEVENV,
-        "lint-and-unit": JobDisposition.PROJECT_DEVENV,
+        # The Rust-policy worker runs the gate through Devenv; its Python
+        # sibling and the branch-protection aggregate stay on the hosted
+        # runner.
+        "lint-rust": JobDisposition.PROJECT_DEVENV,
+        "script-unit": JobDisposition.OFF_NIX_VALIDATION,
+        "lint-and-unit": JobDisposition.OFF_NIX_VALIDATION,
         "smt-build": JobDisposition.PROJECT_DEVENV,
         "smt-build-darwin-arm64": JobDisposition.PROJECT_WITH_PRE_SETUP_PROBE,
-        "workspace-tests": JobDisposition.PROJECT_DEVENV,
+        "workspace-tests-shard": JobDisposition.PROJECT_DEVENV,
+        "workspace-tests": JobDisposition.OFF_NIX_VALIDATION,
         "dtype-phase3-oracle": JobDisposition.PROJECT_DEVENV,
         "faithful-observation-phase2-oracle": JobDisposition.PROJECT_DEVENV,
-        "generalize-sweep-oracle": JobDisposition.PROJECT_DEVENV,
-        "integration": JobDisposition.PORTABLE_DEVENV,
-        "macos-smoke": JobDisposition.PROJECT_DEVENV,
+        # The two Phase 0 ownership oracles and the macOS workspace shards
+        # keep the hosted toolchain: the macOS shards are the authoritative
+        # workspace oracle and feed test-telemetry's JUnit artifacts.
+        "compiled-value-ownership-phase0-oracle": JobDisposition.OFF_NIX_VALIDATION,
+        "runtime-representation-phase0-oracle": JobDisposition.OFF_NIX_VALIDATION,
+        "generalize-sweep-oracle-shard": JobDisposition.PROJECT_DEVENV,
+        "generalize-sweep-oracle": JobDisposition.OFF_NIX_VALIDATION,
+        "integration": JobDisposition.OFF_NIX_VALIDATION,
+        "macos-workspace-shard": JobDisposition.OFF_NIX_VALIDATION,
+        "macos-smoke": JobDisposition.OFF_NIX_VALIDATION,
+        "test-telemetry": JobDisposition.OFF_NIX_VALIDATION,
         "backend-sanitizers": JobDisposition.PROJECT_DEVENV,
         "no-ai-authorship": JobDisposition.PORTABLE_DEVENV,
         "docs": JobDisposition.PROJECT_DEVENV,
@@ -87,7 +103,8 @@ JOB_DISPOSITIONS: dict[str, dict[str, JobDisposition]] = {
     },
     "loc-report.yml": {"loc-report": JobDisposition.PROJECT_DEVENV},
     "nix-packages.yml": {
-        "changes": JobDisposition.PRE_SETUP_ORCHESTRATION,
+        # The workflow runs only on manual dispatch and published releases, so
+        # it carries no docs-only detector job.
         "nix-linux-x86-64": JobDisposition.PROJECT_DEVENV,
         "nix-darwin-arm64": JobDisposition.PROJECT_DEVENV,
     },
@@ -250,9 +267,20 @@ PROJECT_RUN_EXCEPTION_SHA256 = {
 }
 
 
+# Workflows authored as JSON rather than block YAML. `job_blocks` reads the
+# block-YAML shape only, and these declare no Devenv or project execution
+# surface for this inventory to own. Naming them here keeps the inventory
+# closed instead of silently skipping an unparsed file.
+NON_BLOCK_YAML_WORKFLOWS = frozenset({"ownership-hip.yml"})
+
+
 def workflow_texts() -> dict[str, str]:
     paths = [*WORKFLOWS_DIR.glob("*.yml"), *WORKFLOWS_DIR.glob("*.yaml")]
-    return {path.name: path.read_text(encoding="utf-8") for path in sorted(paths)}
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted(paths)
+        if path.name not in NON_BLOCK_YAML_WORKFLOWS
+    }
 
 
 def action_texts() -> dict[str, str]:
@@ -334,6 +362,38 @@ def _executes_devenv_retry(step: str) -> bool:
     )
 
 
+def _fold_run_scalar(step: str) -> str:
+    """Join a folded (`>`/`>-`) `run:` scalar into the one command it denotes.
+
+    YAML folds those continuation lines with spaces, so scanning them as
+    separate lines reports the wrapped tail of a `devenv-retry` command as a
+    bare project command. A literal (`|`/`|-`) block really is several
+    commands, so it is left alone.
+    """
+    lines = step.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("run:"):
+            continue
+        if stripped.split("run:", 1)[1].strip() not in {">", ">-"}:
+            return step
+        floor = len(line) - len(line.lstrip(" "))
+        end = index + 1
+        parts: list[str] = []
+        while end < len(lines):
+            candidate = lines[end]
+            if candidate.strip() and (
+                len(candidate) - len(candidate.lstrip(" ")) <= floor
+            ):
+                break
+            if candidate.strip():
+                parts.append(candidate.strip())
+            end += 1
+        folded = " " * floor + "run: " + " ".join(parts)
+        return "\n".join([*lines[:index], folded, *lines[end:]])
+    return step
+
+
 def _contains_bare_project_command(step: str) -> bool:
     project_command = re.compile(
         r"(?:^|(?:&&|\|\||;)\s*)(?:if\s+!?\s*)?(?:exec\s+)?"
@@ -369,7 +429,10 @@ def _require_project_run_ownership(
     seen_steps: set[str] = set()
     for step_name, step in _run_step_blocks(block):
         seen_steps.add(step_name)
-        if _executes_devenv_retry(step) and not _contains_bare_project_command(step):
+        folded = _fold_run_scalar(step)
+        if _executes_devenv_retry(folded) and not _contains_bare_project_command(
+            folded
+        ):
             continue
         expected_markers = exceptions.get(step_name)
         exception_key = (workflow_name, job_name, step_name)
@@ -596,13 +659,13 @@ class CiExecutionOwnershipTests(unittest.TestCase):
     def test_a_project_host_shell_fails(self) -> None:
         workflows = self.workflows.copy()
         workflows["ci.yml"] = workflows["ci.yml"].replace(
-            "      - name: Script unit tests (scripts/test_*.py)",
+            "      - name: Gate (lint-and-unit subset)",
             "      - name: Host bypass\n        shell: bash\n        run: python3 -V\n\n"
-            "      - name: Script unit tests (scripts/test_*.py)",
+            "      - name: Gate (lint-and-unit subset)",
             1,
         )
         errors = execution_ownership_errors(workflows, self.actions)
-        self.assertIn("ci.yml/lint-and-unit: an unowned host shell remains", errors)
+        self.assertIn("ci.yml/lint-rust: an unowned host shell remains", errors)
 
     def test_a_bare_project_command_fails(self) -> None:
         workflows = self.workflows.copy()
@@ -747,7 +810,7 @@ class CiExecutionOwnershipTests(unittest.TestCase):
 
     def test_a_host_tool_action_fails(self) -> None:
         workflows = self.workflows.copy()
-        block = job_blocks(workflows["ci.yml"])["integration"]
+        block = job_blocks(workflows["ci.yml"])["lint-rust"]
         mutated_block = block.replace(
             "      - uses: actions/checkout@v6\n",
             "      - uses: actions/checkout@v6\n"
@@ -757,7 +820,7 @@ class CiExecutionOwnershipTests(unittest.TestCase):
         workflows["ci.yml"] = workflows["ci.yml"].replace(block, mutated_block, 1)
         errors = execution_ownership_errors(workflows, self.actions)
         self.assertIn(
-            "ci.yml/integration: unclassified action actions/setup-python@v6",
+            "ci.yml/lint-rust: unclassified action actions/setup-python@v6",
             errors,
         )
 
@@ -777,7 +840,7 @@ class CiExecutionOwnershipTests(unittest.TestCase):
 
     def test_a_run_before_setup_fails(self) -> None:
         workflows = self.workflows.copy()
-        block = job_blocks(workflows["ci.yml"])["integration"]
+        block = job_blocks(workflows["ci.yml"])["lint-rust"]
         mutated_block = block.replace(
             "      - uses: actions/checkout@v6\n",
             "      - uses: actions/checkout@v6\n"

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use chelis_unord::UnordMap;
+use chelis_unord::UnordSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -193,7 +193,7 @@ impl Backend {
 struct TrainingPrograms {
     train_c: CCodegenResult,
     train_hip: HipCodegenResult,
-    train_labels: HashMap<String, usize>,
+    train_labels: UnordMap<String, usize>,
 }
 
 struct ForwardPrograms {
@@ -899,10 +899,23 @@ fn build_training_programs_from_compiled(
     }
     let train_dag = dag_without_roots(&train_dag);
 
+    let c_selected = chelis_backend_c::prepare_dag_for_codegen(
+        train_dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let c_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(c_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let hip_selected = chelis_backend_hip::prepare_dag_for_codegen(train_dag);
+    let hip_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(hip_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let train_c =
-        chelis_backend_c::codegen(&train_dag, "chelis_train").map_err(|e| e.to_string())?;
+        chelis_backend_c::codegen(c_verified, "chelis_train").map_err(|e| e.to_string())?;
     let train_hip =
-        chelis_backend_hip::codegen_hip(&train_dag, "chelis_train").map_err(|e| e.to_string())?;
+        chelis_backend_hip::codegen_hip(hip_verified, "chelis_train").map_err(|e| e.to_string())?;
 
     let train_labels = output_index_map(&train_c.output_labels);
     if !train_labels.contains_key("eval_output") {
@@ -924,9 +937,22 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
     add_named_store(&mut dag, "out", out);
     let fused = fuse::fuse(&dag);
     let fused = dag_without_roots(&fused);
-    let cpu = chelis_backend_c::codegen(&fused, "chelis_forward").map_err(|e| e.to_string())?;
-    let hip =
-        chelis_backend_hip::codegen_hip(&fused, "chelis_forward").map_err(|e| e.to_string())?;
+    let c_selected = chelis_backend_c::prepare_dag_for_codegen(
+        fused.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let c_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(c_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let hip_selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
+    let hip_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(hip_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let cpu = chelis_backend_c::codegen(c_verified, "chelis_forward").map_err(|e| e.to_string())?;
+    let hip = chelis_backend_hip::codegen_hip(hip_verified, "chelis_forward")
+        .map_err(|e| e.to_string())?;
     let output_index = *output_index_map(&cpu.output_labels)
         .get("out")
         .ok_or("missing `out` output label".to_string())?;
@@ -939,8 +965,8 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
 
 /// Set of nodes reachable from `root` by walking input edges (the
 /// dependency cone of `root`).
-fn dependency_cone(dag: &Dag, root: NodeId) -> HashSet<NodeId> {
-    let mut seen = HashSet::new();
+fn dependency_cone(dag: &Dag, root: NodeId) -> UnordSet<NodeId> {
+    let mut seen = UnordSet::new();
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
@@ -987,7 +1013,7 @@ fn dag_without_roots(dag: &Dag) -> Dag {
     out
 }
 
-fn output_index_map(labels: &[String]) -> HashMap<String, usize> {
+fn output_index_map(labels: &[String]) -> UnordMap<String, usize> {
     labels
         .iter()
         .cloned()
@@ -997,7 +1023,7 @@ fn output_index_map(labels: &[String]) -> HashMap<String, usize> {
 }
 
 fn require_named_root<'a>(
-    roots: &'a HashMap<String, NodeId>,
+    roots: &'a UnordMap<String, NodeId>,
     candidates: &[&str],
 ) -> Result<&'a NodeId, String> {
     for candidate in candidates {
@@ -1509,7 +1535,7 @@ fn build_training_main_c(
     _prefix: &str,
     data_path: &Path,
     train: &CCodegenResult,
-    train_labels: &HashMap<String, usize>,
+    train_labels: &UnordMap<String, usize>,
     uses_accuracy: bool,
 ) -> String {
     let train_input_slots = slot_assignments(
@@ -1539,23 +1565,23 @@ fn build_training_main_c(
     let (param_allocs, param_fills, update_code, free_params) = if uses_accuracy {
         (
             r#"
-    chelis_tensor *w1_tensor = chelis_alloc(2, w1_shape, CHELIS_F32);
-    chelis_tensor *b1_tensor = chelis_alloc(1, b1_shape, CHELIS_F32);
-    chelis_tensor *w2_tensor = chelis_alloc(2, w2_shape, CHELIS_F32);
-    chelis_tensor *b2_tensor = chelis_alloc(1, b2_shape, CHELIS_F32);
+    chelis_tensor *w1_tensor = chelis_alloc(2, w1_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *b1_tensor = chelis_alloc(1, b1_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *w2_tensor = chelis_alloc(2, w2_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *b2_tensor = chelis_alloc(1, b2_shape, CHELIS_DTYPE_F32);
 "#,
             r#"
-    memcpy(w1_tensor->data, w1_init, sizeof(float) * 784 * 128);
-    memcpy(b1_tensor->data, b1_init, sizeof(float) * 128);
-    memcpy(w2_tensor->data, w2_init, sizeof(float) * 128 * 10);
-    memcpy(b2_tensor->data, b2_init, sizeof(float) * 10);
+    tensor_copy_in(w1_tensor, w1_init, sizeof(float) * 784 * 128);
+    tensor_copy_in(b1_tensor, b1_init, sizeof(float) * 128);
+    tensor_copy_in(w2_tensor, w2_init, sizeof(float) * 128 * 10);
+    tensor_copy_in(b2_tensor, b2_init, sizeof(float) * 10);
 "#,
             format!(
                 r#"
-            for (int i = 0; i < 784 * 128; i++) w1_tensor->data[i] -= lr * train_outputs[{gw1}]->data[i];
-            for (int i = 0; i < 128; i++) b1_tensor->data[i] -= lr * train_outputs[{gb1}]->data[i];
-            for (int i = 0; i < 128 * 10; i++) w2_tensor->data[i] -= lr * train_outputs[{gw2}]->data[i];
-            for (int i = 0; i < 10; i++) b2_tensor->data[i] -= lr * train_outputs[{gb2}]->data[i];
+            tensor_sgd_update(w1_tensor, train_outputs[{gw1}], 784 * 128, lr);
+            tensor_sgd_update(b1_tensor, train_outputs[{gb1}], 128, lr);
+            tensor_sgd_update(w2_tensor, train_outputs[{gw2}], 128 * 10, lr);
+            tensor_sgd_update(b2_tensor, train_outputs[{gb2}], 10, lr);
 "#,
                 gw1 = grad_w1_idx.unwrap(),
                 gb1 = grad_b1_idx.unwrap(),
@@ -1563,33 +1589,33 @@ fn build_training_main_c(
                 gb2 = grad_b2_idx.unwrap(),
             ),
             r#"
-    chelis_free(w1_tensor);
-    chelis_free(b1_tensor);
-    chelis_free(w2_tensor);
-    chelis_free(b2_tensor);
+    chelis_tensor_release(w1_tensor);
+    chelis_tensor_release(b1_tensor);
+    chelis_tensor_release(w2_tensor);
+    chelis_tensor_release(b2_tensor);
 "#,
         )
     } else {
         (
             r#"
-    chelis_tensor *w_tensor = chelis_alloc(2, w_shape, CHELIS_F32);
-    chelis_tensor *b_tensor = chelis_alloc(1, b_shape, CHELIS_F32);
+    chelis_tensor *w_tensor = chelis_alloc(2, w_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *b_tensor = chelis_alloc(1, b_shape, CHELIS_DTYPE_F32);
 "#,
             r#"
-    memcpy(w_tensor->data, w_init, sizeof(float) * features);
-    memcpy(b_tensor->data, b_init, sizeof(float) * 1);
+    tensor_copy_in(w_tensor, w_init, sizeof(float) * features);
+    tensor_copy_in(b_tensor, b_init, sizeof(float) * 1);
 "#,
             format!(
                 r#"
-            for (int i = 0; i < features; i++) w_tensor->data[i] -= lr * train_outputs[{gw}]->data[i];
-            b_tensor->data[0] -= lr * train_outputs[{gb}]->data[0];
+            tensor_sgd_update(w_tensor, train_outputs[{gw}], features, lr);
+            tensor_sgd_update(b_tensor, train_outputs[{gb}], 1, lr);
 "#,
                 gw = grad_w_idx.unwrap(),
                 gb = grad_b_idx.unwrap(),
             ),
             r#"
-    chelis_free(w_tensor);
-    chelis_free(b_tensor);
+    chelis_tensor_release(w_tensor);
+    chelis_tensor_release(b_tensor);
 "#,
         )
     };
@@ -1598,41 +1624,41 @@ fn build_training_main_c(
         r#"
     int correct = 0;
     for (uint64_t batch = 0; batch < test_batches; batch++) {
-        memcpy(x_tensor->data, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
-        memcpy(y_tensor->data, y_test + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
+        tensor_copy_in(x_tensor, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
+        tensor_copy_in(y_tensor, y_test + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
         chelis_tensor *infer_outputs[TRAIN_OUTPUT_COUNT] = {0};
         chelis_tensor *infer_inputs[TRAIN_INPUT_COUNT] = {0};
 TRAIN_INPUT_ASSIGNMENTS
         chelis_train(infer_inputs, TRAIN_INPUT_COUNT, infer_outputs, TRAIN_OUTPUT_COUNT);
-        memcpy(eval_output + batch * batch_size * y_dim, infer_outputs[EVAL_OUTPUT_INDEX]->data, sizeof(float) * batch_size * y_dim);
+        memcpy(eval_output + batch * batch_size * y_dim, tensor_f32_data(infer_outputs[EVAL_OUTPUT_INDEX]), sizeof(float) * batch_size * y_dim);
         for (int b = 0; b < batch_size; b++) {
             int pred = 0;
             int truth = 0;
-            float pred_best = infer_outputs[EVAL_OUTPUT_INDEX]->data[b * y_dim];
-            float truth_best = y_tensor->data[b * y_dim];
+            float pred_best = tensor_f32_data(infer_outputs[EVAL_OUTPUT_INDEX])[b * y_dim];
+            float truth_best = tensor_f32_data(y_tensor)[b * y_dim];
             for (int cls = 1; cls < y_dim; cls++) {
-                float pred_val = infer_outputs[EVAL_OUTPUT_INDEX]->data[b * y_dim + cls];
+                float pred_val = tensor_f32_data(infer_outputs[EVAL_OUTPUT_INDEX])[b * y_dim + cls];
                 if (pred_val > pred_best) { pred_best = pred_val; pred = cls; }
-                float truth_val = y_tensor->data[b * y_dim + cls];
+                float truth_val = tensor_f32_data(y_tensor)[b * y_dim + cls];
                 if (truth_val > truth_best) { truth_best = truth_val; truth = cls; }
             }
             if (pred == truth) correct++;
         }
-        for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_free(infer_outputs[i]);
+        for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_tensor_release(infer_outputs[i]);
     }
     final_accuracy = (float)correct / (float)(test_batches * batch_size);
 "#
     } else {
         r#"
     for (uint64_t batch = 0; batch < test_batches; batch++) {
-        memcpy(x_tensor->data, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
-        memcpy(y_tensor->data, y_test + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
+        tensor_copy_in(x_tensor, x_test + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
+        tensor_copy_in(y_tensor, y_test + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
         chelis_tensor *infer_outputs[TRAIN_OUTPUT_COUNT] = {0};
         chelis_tensor *infer_inputs[TRAIN_INPUT_COUNT] = {0};
 TRAIN_INPUT_ASSIGNMENTS
         chelis_train(infer_inputs, TRAIN_INPUT_COUNT, infer_outputs, TRAIN_OUTPUT_COUNT);
-        memcpy(eval_output + batch * batch_size, infer_outputs[EVAL_OUTPUT_INDEX]->data, sizeof(float) * batch_size);
-        for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_free(infer_outputs[i]);
+        memcpy(eval_output + batch * batch_size, tensor_f32_data(infer_outputs[EVAL_OUTPUT_INDEX]), sizeof(float) * batch_size);
+        for (int i = 0; i < TRAIN_OUTPUT_COUNT; i++) if (infer_outputs[i]) chelis_tensor_release(infer_outputs[i]);
     }
 "#
     };
@@ -1703,6 +1729,30 @@ static void read_f32s(FILE *f, float *out, size_t n) {{
     }}
 }}
 
+static const float *tensor_f32_data(const chelis_tensor *tensor) {{
+    return (const float *)chelis_tensor_read_view(tensor).data;
+}}
+
+static void tensor_copy_in(chelis_tensor *tensor, const void *source, size_t bytes) {{
+    chelis_tensor_write *guard = chelis_tensor_begin_write(tensor);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    memcpy(view.data, source, bytes);
+    chelis_tensor_end_write(guard);
+}}
+
+static void tensor_sgd_update(
+    chelis_tensor *parameter, const chelis_tensor *gradient, int64_t count, float rate
+) {{
+    const float *gradient_data = tensor_f32_data(gradient);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(parameter);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    float *parameter_data = (float *)view.data;
+    for (int64_t index = 0; index < count; ++index) {{
+        parameter_data[index] -= rate * gradient_data[index];
+    }}
+    chelis_tensor_end_write(guard);
+}}
+
 static double elapsed_ms(struct timespec start, struct timespec end) {{
     return (double)(end.tv_sec - start.tv_sec) * 1000.0 +
            (double)(end.tv_nsec - start.tv_nsec) / 1000000.0;
@@ -1743,8 +1793,8 @@ int main(void) {{
 {init_allocs}
     fclose(f);
 
-    chelis_tensor *x_tensor = chelis_alloc(2, x_shape, CHELIS_F32);
-    chelis_tensor *y_tensor = chelis_alloc(2, y_shape, CHELIS_F32);
+    chelis_tensor *x_tensor = chelis_alloc(2, x_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *y_tensor = chelis_alloc(2, y_shape, CHELIS_DTYPE_F32);
 {param_allocs}
 {param_fills}
 
@@ -1758,16 +1808,16 @@ int main(void) {{
     for (uint64_t epoch = 0; epoch < epochs; epoch++) {{
         double epoch_loss = 0.0;
         for (uint64_t batch = 0; batch < train_batches; batch++) {{
-            memcpy(x_tensor->data, x_train + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
-            memcpy(y_tensor->data, y_train + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
+            tensor_copy_in(x_tensor, x_train + batch * batch_size * x_dim, sizeof(float) * batch_size * x_dim);
+            tensor_copy_in(y_tensor, y_train + batch * batch_size * y_dim, sizeof(float) * batch_size * y_dim);
 
             chelis_tensor *train_outputs[{train_outs}] = {{0}};
             chelis_tensor *train_inputs[{train_ins}] = {{0}};
 {train_input_slots}
             chelis_train(train_inputs, {train_ins}, train_outputs, {train_outs});
-            epoch_loss += train_outputs[{loss_idx}]->data[0];
+            epoch_loss += tensor_f32_data(train_outputs[{loss_idx}])[0];
 {update_code}
-            for (int i = 0; i < {train_outs}; i++) chelis_free(train_outputs[i]);
+            for (int i = 0; i < {train_outs}; i++) chelis_tensor_release(train_outputs[i]);
         }}
         loss_history[epoch] = (float)(epoch_loss / (double)train_batches);
     }}
@@ -1782,8 +1832,8 @@ int main(void) {{
     free(x_test);
     free(y_test);
 {free_inits}
-    chelis_free(x_tensor);
-    chelis_free(y_tensor);
+    chelis_tensor_release(x_tensor);
+    chelis_tensor_release(y_tensor);
 {free_params}
     free(loss_history);
     free(eval_output);
@@ -1934,9 +1984,12 @@ static double elapsed_ms(struct timespec start, struct timespec end) {{
            (double)(end.tv_nsec - start.tv_nsec) / 1000000.0;
 }}
 
-static chelis_tensor *alloc_and_fill(FILE *f, int ndim, int *shape, size_t count) {{
-    chelis_tensor *tensor = chelis_alloc(ndim, shape, CHELIS_F32);
-    read_f32s(f, tensor->data, count);
+static chelis_tensor *alloc_and_fill(FILE *f, int32_t rank, const int64_t *shape, size_t count) {{
+    chelis_tensor *tensor = chelis_alloc(rank, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(tensor);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    read_f32s(f, (float *)view.data, count);
+    chelis_tensor_end_write(guard);
     return tensor;
 }}
 
@@ -1953,12 +2006,12 @@ int main(void) {{
     uint64_t head_dim = read_u64(f);
     uint64_t d_ff = read_u64(f);
     uint64_t iters = read_u64(f);
-    int64_t x_shape[2] = {{ (int)seq_len, (int)d_model }};
-    int head_shape[2] = {{ (int)d_model, (int)head_dim }};
-    int proj_shape[2] = {{ (int)head_dim, (int)d_model }};
-    int ff1_shape[2] = {{ (int)d_model, (int)d_ff }};
-    int ff2_shape[2] = {{ (int)d_ff, (int)d_model }};
-    int norm_shape[1] = {{ (int)d_model }};
+    int64_t x_shape[2] = {{ (int64_t)seq_len, (int64_t)d_model }};
+    int64_t head_shape[2] = {{ (int64_t)d_model, (int64_t)head_dim }};
+    int64_t proj_shape[2] = {{ (int64_t)head_dim, (int64_t)d_model }};
+    int64_t ff1_shape[2] = {{ (int64_t)d_model, (int64_t)d_ff }};
+    int64_t ff2_shape[2] = {{ (int64_t)d_ff, (int64_t)d_model }};
+    int64_t norm_shape[1] = {{ (int64_t)d_model }};
 
     chelis_tensor *x_tensor = alloc_and_fill(f, 2, x_shape, seq_len * d_model);
     chelis_tensor *wq_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
@@ -1982,7 +2035,7 @@ int main(void) {{
     for (uint64_t iter = 0; iter < iters; iter++) {{
         for (int i = 0; i < {n_outputs}; i++) {{
             if (outputs[i]) {{
-                chelis_free(outputs[i]);
+                chelis_tensor_release(outputs[i]);
                 outputs[i] = NULL;
             }}
         }}
@@ -1991,28 +2044,29 @@ int main(void) {{
     clock_gettime(CLOCK_MONOTONIC, &end);
 
     chelis_tensor *out = outputs[{output_index}];
-    int out_size = out->size;
+    chelis_read_view out_view = chelis_tensor_read_view(out);
+    int out_size = (int)out_view.count;
     printf("{{\"run_ms\":%.6f,\"loss_history\":[],\"final_loss\":null,\"final_accuracy\":null,\"output\":[", elapsed_ms(start, end));
     for (int i = 0; i < out_size; i++) {{
         if (i) printf(",");
-        printf("%.8f", out->data[i]);
+        printf("%.8f", ((const float *)out_view.data)[i]);
     }}
     printf("]}}");
 
     for (int i = 0; i < {n_outputs}; i++) {{
-        if (outputs[i]) chelis_free(outputs[i]);
+        if (outputs[i]) chelis_tensor_release(outputs[i]);
     }}
-    chelis_free(x_tensor);
-    chelis_free(wq_tensor);
-    chelis_free(wk_tensor);
-    chelis_free(wv_tensor);
-    chelis_free(wo_tensor);
-    chelis_free(ff1_tensor);
-    chelis_free(ff2_tensor);
-    chelis_free(gamma1_tensor);
-    chelis_free(beta1_tensor);
-    chelis_free(gamma2_tensor);
-    chelis_free(beta2_tensor);
+    chelis_tensor_release(x_tensor);
+    chelis_tensor_release(wq_tensor);
+    chelis_tensor_release(wk_tensor);
+    chelis_tensor_release(wv_tensor);
+    chelis_tensor_release(wo_tensor);
+    chelis_tensor_release(ff1_tensor);
+    chelis_tensor_release(ff2_tensor);
+    chelis_tensor_release(gamma1_tensor);
+    chelis_tensor_release(beta1_tensor);
+    chelis_tensor_release(gamma2_tensor);
+    chelis_tensor_release(beta2_tensor);
     return 0;
 }}
 "#,
@@ -2026,7 +2080,7 @@ int main(void) {{
 }
 
 fn slot_assignments(array_name: &str, labels: &[String], mapping: &[(&str, &str)]) -> String {
-    let map: HashMap<&str, &str> = mapping.iter().copied().collect();
+    let map: UnordMap<&str, &str> = mapping.iter().copied().collect();
     let mut lines = Vec::new();
     for (idx, label) in labels.iter().enumerate() {
         let value = map

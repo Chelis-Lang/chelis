@@ -10,11 +10,12 @@
 //! `clang++` accepting it. The real `clang++` compile gate is the
 //! `gpu_correctness.rs` manual oracle.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_backend_metal::dtype as metal_dtype;
 use chelis_backend_metal::kernels;
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::{codegen_metal, try_codegen_metal};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -86,7 +87,7 @@ fn build_matmul_dag(p: Prim) -> Dag {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(n),
+            size: chelis_ir::dag::RtDim::Lit(n),
         },
         vec![a],
         cube_prec(m, k, n, p),
@@ -95,7 +96,7 @@ fn build_matmul_dag(p: Prim) -> Dag {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(m),
+            size: chelis_ir::dag::RtDim::Lit(m),
         },
         vec![b],
         cube_prec(m, k, n, p),
@@ -109,10 +110,20 @@ fn build_matmul_dag(p: Prim) -> Dag {
             accumulator: acc,
         },
         vec![mul],
-        mat_prec(m, n, p),
+        mat_prec(m, n, acc),
         None,
     );
-    dag.add_root(sum);
+    let root = if acc == p {
+        sum
+    } else {
+        dag.add_node(
+            RiscOp::Cast { new_precision: p },
+            vec![sum],
+            mat_prec(m, n, p),
+            None,
+        )
+    };
+    dag.add_root(root);
     dag
 }
 
@@ -537,27 +548,13 @@ fn mps_f16_wrapper_uses_uint16_t_for_row_bytes_not_msl_half() {
 // ===========================================================================
 
 #[test]
-fn integer_matmul_stub_carries_meaningful_abort_message() {
+fn integer_matmul_returns_a_typed_codegen_error() {
     let dag = build_matmul_dag(Prim::Int32);
-    let result = codegen_metal(&dag, "mm_i32");
-    let src = &result.mm_source;
-    // Either the stub is reached AND it carries the func name, OR the
-    // emit_dag is expected to surface a structured F1 error to the
-    // caller (which the CLI translates to a diagnostic). Today only the
-    // first lands. Without a meaningful error string in the stub, the
-    // user sees the bare "stub: codegen for `mm_i32` not yet implemented"
-    // and has to dig through spec/04-type-system.md to find why an int
-    // matmul didn't compile.
-    let in_stub = src.contains("M1 fallback stub");
-    let mentions_int_or_f1 = src.contains("int") || src.contains("§5.7.2") || src.contains("F1");
+    let error = try_codegen_metal(&dag, "mm_i32").unwrap_err();
+    let rendered = error.to_string();
     assert!(
-        in_stub,
-        "integer matmul must fall through to stub (defense in depth):\n{src}"
-    );
-    assert!(
-        mentions_int_or_f1,
-        "integer matmul stub gives no hint why; should reference spec \
-         §5.7.2 or the F1 guard so users see why the build is empty:\n{src}"
+        rendered.starts_with("unsupported:") && rendered.contains("codegen:metal"),
+        "integer matmul must fail through the typed Metal channel:\n{rendered}"
     );
 }
 
@@ -567,7 +564,7 @@ fn integer_matmul_stub_carries_meaningful_abort_message() {
 // `sizeof(long) != 8` if the Metal backend ever ran cross-platform.
 //
 // Today Metal only runs on Apple Silicon so `sizeof(long) == 8`
-// matches CHELIS_I64. Pin the assumption in a test so a future
+// matches CHELIS_DTYPE_I64. Pin the assumption in a test so a future
 // cross-platform attempt surfaces the divergence.
 // ===========================================================================
 

@@ -150,7 +150,7 @@ fn issue259_expand_nonliteral_axis_reports_axis_cause_not_borrow() {
     let src = r#"
 def consumer[m, n](x: &tensor[m, n, f32]) -> tensor[m, n, f32] = copy(x)
 def go[n](x: tensor[n, f32], ax: int32) -> tensor[4, n, f32] = {
-  y = expand(&x, ax, 4i64)
+  y = insert(&x, ax, 4i64)
   consumer(&y)
 }
 "#;
@@ -159,10 +159,10 @@ def go[n](x: tensor[n, f32], ax: int32) -> tensor[4, n, f32] = {
         check_ir_program(&deep).expect_err("non-literal expand axis must be rejected at infer");
     let msgs = messages(&rep);
     assert!(
-        msgs.iter().any(|m| m.contains("expand")
+        msgs.iter().any(|m| m.contains("insert")
             && m.contains("axis")
             && m.contains("compile-time constant")),
-        "expected an `expand` compile-time-constant-axis diagnostic, got {msgs:?}"
+        "expected an `insert` compile-time-constant-axis diagnostic, got {msgs:?}"
     );
     assert!(
         !msgs
@@ -231,7 +231,7 @@ def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
 #[test]
 fn issue259_expand_literal_axis_symbolic_size_still_typechecks() {
     let src = r#"
-def go[n](x: tensor[n, f32]) -> tensor[4, n, f32] = expand(&x, 0, 4i64)
+def go[n](x: tensor[n, f32]) -> tensor[4, n, f32] = insert(&x, 0, 4i64)
 "#;
     let deep = surf_to_deep(src);
     if let Err(rep) = check_ir_program(&deep) {

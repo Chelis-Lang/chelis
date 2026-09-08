@@ -464,11 +464,67 @@ const COUNT_WIRE_SURFACE: StaticSurfaceDescriptor = StaticSurfaceDescriptor::new
     "chelis_compiler_api::schema::WireRiscOp::Count.axes: Vec<usize>",
     &["numeric-field"],
 );
-const REGISTERED_WIRE_ROWS: &[NumericOperationRegistration] = &[NumericOperationRegistration {
-    surface: COUNT_WIRE_SURFACE,
-    atom: "[05-OP-29]",
-    authority_anchor: "count(x, axes...)",
-}];
+const INPUT_AXIS_VALUE_WIRE_SURFACE: StaticSurfaceDescriptor = StaticSurfaceDescriptor::new(
+    WIRE_CENSUS_FAMILY,
+    "wire-schema-numeric-field",
+    "chelis_compiler_api::schema::WireRtAxis::Lit.value: i32",
+    &["numeric-field"],
+);
+const INPUT_AXIS_SLOT_WIRE_SURFACE: StaticSurfaceDescriptor = StaticSurfaceDescriptor::new(
+    WIRE_CENSUS_FAMILY,
+    "wire-schema-numeric-field",
+    "chelis_compiler_api::schema::WireRtDim::InputAxis.tensor: usize",
+    &["numeric-field"],
+);
+// chelis#1395: `DiagnosticSpan` is a `#[serde(tag = "span")]` carrier whose
+// variant tag declares what its integers mean -- `Range` measured an extent,
+// `Point` did not. That is the same structural recognition that admits
+// `WireRtDim::InputAxis.tensor` above: a plain `usize` carrying no dtype and
+// participating in no numeric operation, whose role is declared by the tag
+// rather than inferred by a reader.
+//
+// This class runs no automatic validation, so the claim is stated here to be
+// checked rather than assumed: these three rows are source-text coordinates,
+// not numeric data. If that reading is wrong, the registration is wrong.
+const DIAGNOSTIC_SPAN_RANGE_OFFSET_WIRE_SURFACE: StaticSurfaceDescriptor =
+    StaticSurfaceDescriptor::new(
+        WIRE_CENSUS_FAMILY,
+        "wire-schema-numeric-field",
+        "chelis_compiler_api::schema::DiagnosticSpan::Range.offset: usize",
+        &["numeric-field"],
+    );
+const DIAGNOSTIC_SPAN_RANGE_LEN_WIRE_SURFACE: StaticSurfaceDescriptor =
+    StaticSurfaceDescriptor::new(
+        WIRE_CENSUS_FAMILY,
+        "wire-schema-numeric-field",
+        "chelis_compiler_api::schema::DiagnosticSpan::Range.len: usize",
+        &["numeric-field"],
+    );
+const DIAGNOSTIC_SPAN_POINT_OFFSET_WIRE_SURFACE: StaticSurfaceDescriptor =
+    StaticSurfaceDescriptor::new(
+        WIRE_CENSUS_FAMILY,
+        "wire-schema-numeric-field",
+        "chelis_compiler_api::schema::DiagnosticSpan::Point.offset: usize",
+        &["numeric-field"],
+    );
+const REGISTERED_WIRE_TRANSPORTS: &[StaticSurfaceDescriptor] = &[
+    INPUT_AXIS_SLOT_WIRE_SURFACE,
+    DIAGNOSTIC_SPAN_RANGE_OFFSET_WIRE_SURFACE,
+    DIAGNOSTIC_SPAN_RANGE_LEN_WIRE_SURFACE,
+    DIAGNOSTIC_SPAN_POINT_OFFSET_WIRE_SURFACE,
+];
+const REGISTERED_WIRE_ROWS: &[NumericOperationRegistration] = &[
+    NumericOperationRegistration {
+        surface: COUNT_WIRE_SURFACE,
+        atom: "[05-OP-29]",
+        authority_anchor: "count(x, axes...)",
+    },
+    NumericOperationRegistration {
+        surface: INPUT_AXIS_VALUE_WIRE_SURFACE,
+        atom: "[05-OP-7]",
+        authority_anchor: "axis-domain `int32`",
+    },
+];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct SurfaceRow {
@@ -525,7 +581,7 @@ fn frozen_surface_rows() -> Vec<SurfaceRow> {
 }
 
 fn registered_surface_rows() -> Vec<SurfaceRow> {
-    REGISTERED_WIRE_ROWS
+    let mut rows = REGISTERED_WIRE_ROWS
         .iter()
         .map(|registration| SurfaceRow {
             kind: registration.surface.kind.to_string(),
@@ -537,7 +593,19 @@ fn registered_surface_rows() -> Vec<SurfaceRow> {
                 .map(|flag| (*flag).to_string())
                 .collect(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+    rows.extend(REGISTERED_WIRE_TRANSPORTS.iter().map(|surface| {
+        SurfaceRow {
+            kind: surface.kind.to_string(),
+            id: surface.id.to_string(),
+            flags: surface
+                .flags
+                .iter()
+                .map(|flag| (*flag).to_string())
+                .collect(),
+        }
+    }));
+    rows
 }
 
 fn expected_current_surface_rows() -> Vec<SurfaceRow> {
@@ -551,23 +619,25 @@ fn registered_wire_problem(
     registrations: &[NumericOperationRegistration],
     spec: &str,
 ) -> Option<String> {
-    let surface = SurfaceDescriptor::new(
-        COUNT_WIRE_SURFACE.family,
-        COUNT_WIRE_SURFACE.kind,
-        COUNT_WIRE_SURFACE.id,
-        COUNT_WIRE_SURFACE.flags,
-    );
-    capacity_census_authority::classify_final_authority(
-        &surface,
-        AuthorityRegistries {
-            nonnumeric: &[],
-            tagged_transports: &[],
-            numeric_operations: registrations,
-        },
-        spec,
-    )
-    .map(|_| ())
-    .err()
+    registrations.iter().find_map(|registration| {
+        let surface = SurfaceDescriptor::new(
+            registration.surface.family,
+            registration.surface.kind,
+            registration.surface.id,
+            registration.surface.flags,
+        );
+        capacity_census_authority::classify_final_authority(
+            &surface,
+            AuthorityRegistries {
+                nonnumeric: &[],
+                tagged_transports: REGISTERED_WIRE_TRANSPORTS,
+                numeric_operations: registrations,
+            },
+            spec,
+        )
+        .map(|_| ())
+        .err()
+    })
 }
 
 fn current_authority_problem(current: &[SurfaceRow], spec: &str) -> Option<String> {
@@ -586,7 +656,7 @@ fn current_authority_problem(current: &[SurfaceRow], spec: &str) -> Option<Strin
             &surface,
             AuthorityRegistries {
                 nonnumeric: &[],
-                tagged_transports: &[],
+                tagged_transports: REGISTERED_WIRE_TRANSPORTS,
                 numeric_operations: REGISTERED_WIRE_ROWS,
             },
             spec,

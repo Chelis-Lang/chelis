@@ -23,6 +23,12 @@ pub const EVAL_TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
 ];
 
 pub mod analysis;
+pub mod axis_sources;
+#[expect(
+    dead_code,
+    reason = "the #893 CapacityKey prerequisite lands before PR #1565 consumes it"
+)]
+pub mod capacity_key;
 pub mod dag;
 pub mod eval;
 pub mod fuse;
@@ -32,6 +38,7 @@ pub mod host_type_state;
 pub mod load_store_name;
 pub mod lower;
 pub mod optimize;
+pub mod ownership;
 pub mod pipeline;
 pub mod span_merge;
 pub mod span_sanitize;
@@ -43,6 +50,7 @@ pub mod vmap;
 pub use analysis::{
     CopyCostSummary, FunctionCopyCost, analyze_copy_costs, analyze_copy_costs_for_roots,
 };
+pub use axis_sources::{AxisSource, check_axis_sources, output_axis_sources};
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use grad::{AdError, AdRejectionReason};
 pub use host::{
@@ -60,5 +68,7 @@ pub use lower::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
     lower_subexpr_program, tensor_type_from_deep, try_lower_program, try_lower_program_to_library,
     try_lower_program_with_context, try_lower_subexpr_program,
+    try_lower_subexpr_program_with_random_state,
+    try_lower_subexpr_program_with_random_state_progress,
 };
 pub use pipeline::{grad_then_fuse, grad_then_fuse_checked};

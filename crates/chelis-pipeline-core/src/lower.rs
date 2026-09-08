@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::Dag;
 use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary};
@@ -27,7 +27,7 @@ impl LoweredLibrary {
     }
 
     /// Return the immutable map of lowering decisions.
-    pub fn lowered_names(&self) -> &std::collections::HashMap<String, bool> {
+    pub fn lowered_names(&self) -> &BTreeMap<String, bool> {
         self.inner.lowered_names()
     }
 

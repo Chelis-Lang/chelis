@@ -208,16 +208,37 @@ def identity[n, a](column: Column[n, a]) -> Column[n, a] = column
         .adt_registry()
         .lookup("Column")
         .expect("checked registry must retain dimensional Column");
-    let Type::Tensor(_, TensorPrec::Var(stored_precision)) = &column.variants[0].fields[0].1 else {
+    let Type::Tensor(stored_dims, TensorPrec::Var(stored_precision)) =
+        &column.variants[0].fields[0].1
+    else {
         panic!("Column must retain its checker-owned polymorphic tensor field");
     };
     assert_eq!(
-        *stored_precision, column.param_vars[1],
+        column.param_kinds,
+        vec![NominalParamKind::Dimension, NominalParamKind::Type],
+        "the registry must preserve each source parameter's checker-owned kind"
+    );
+    let NominalArg::Dimension(Dim::Var(parameter_dimension)) = &column.param_args[0] else {
+        panic!("Column's first parameter must retain its dimension variable");
+    };
+    let NominalArg::Type(Type::Var(parameter_precision)) = &column.param_args[1] else {
+        panic!("Column's second parameter must retain its type variable");
+    };
+    let Some(Dim::Var(field_dimension)) = stored_dims.first() else {
+        panic!("Column's field must retain its parameterized dimension");
+    };
+    assert_eq!(
+        stored_precision, parameter_precision,
         "dtype parameter is the tensor's stored precision"
     );
-    assert_ne!(
-        *stored_precision, column.param_vars[0],
-        "dimension parameter must not be reconstructed as a stored dtype"
+    assert_eq!(
+        field_dimension, parameter_dimension,
+        "dimension parameter is the tensor's stored extent"
+    );
+    assert_eq!(
+        column.param_vars,
+        vec![*parameter_precision],
+        "dimension parameters must not be reconstructed as stored dtypes"
     );
 }
 
@@ -703,7 +724,9 @@ fn lit_default_float() {
 fn unbound_variable() {
     check_err(
         "(def {} x (var {} unknown))",
-        CheckErrorKind::UnboundVariable,
+        CheckErrorKind::UnboundVariable {
+            identifier: "unknown".to_string(),
+        },
     );
 }
 
@@ -1150,10 +1173,12 @@ fn grad_over_all_float_field_adt_types_as_same_adt() {
 }
 
 #[test]
-fn grad_over_mixed_field_adt_stays_non_differentiable() {
-    // chelis#520 D2 negative parity: a mixed struct (int field) is not
-    // differentiable, so the default (no `wrt`) gradient payload is
-    // unit, exactly as before the slice.
+fn grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape() {
+    // spec/06 section 2.1: a mixed struct is differentiable when any
+    // reachable field contains a float leaf. The checker preserves the
+    // nominal constructor type; execution replaces the discrete field's
+    // cotangent with unit in its original position. The adjacent pure-enum
+    // and explicit-bool-wrt tests retain negative parity for all-unit targets.
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Mixed ()
             (variant {} Mixed
@@ -1169,7 +1194,7 @@ fn grad_over_mixed_field_adt_stays_non_differentiable() {
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
         .to_string();
-    assert_eq!(printed, "(t-fn {} (t-adt {} Mixed) (t-unit {}))");
+    assert_eq!(printed, "(t-fn {} (t-adt {} Mixed) (t-adt {} Mixed))");
 }
 
 #[test]
@@ -1538,7 +1563,7 @@ fn distinct_deftypes_with_overlapping_variant_names_are_accepted() {
 fn deftype_colliding_with_prelude_option_is_rejected() {
     // `Option[a]` is registered by `register_prelude_adts` before
     // `collect_declarations` runs. User code re-declaring it would
-    // overwrite the prelude entry under `HashMap::insert`.
+    // overwrite the prelude entry under `UnordMap::insert`.
     check_err(
         "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))",
         CheckErrorKind::DuplicateDefinition,
@@ -2039,3 +2064,4 @@ fn builtin_conv2d_rejects_kernel_precision_mismatch() {
 mod issue_1316;
 mod more;
 mod recursion_uniformity;
+mod schedule_invariants;

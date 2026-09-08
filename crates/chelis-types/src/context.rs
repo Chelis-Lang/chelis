@@ -63,7 +63,8 @@
 //! It requires one opaque identity on both type products.
 //! It reruns effect and linearity checks before it creates a library proof.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::UnordSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chelis_deep::ast as deep;
@@ -130,11 +131,11 @@ pub(crate) struct TypeEnvInner {
     /// IR declared-type lookup: library def name → declared type
     /// expression. Used by the validate pass (which checks shape
     /// invariants against declared types).
-    pub(crate) ir_types: HashMap<String, deep::Expr>,
+    pub(crate) ir_types: BTreeMap<String, deep::Expr>,
     /// Set of names declared by the library — used by the new-code
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
-    pub(crate) library_def_names: HashSet<String>,
+    pub(crate) library_def_names: UnordSet<String>,
     /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
     /// export sets, binding -> module attribution, and producer text,
     /// accumulated across the library and new-code phases. Defaults
@@ -161,8 +162,8 @@ impl TypeEnv {
                 var_gen,
                 subst: Subst::new(),
                 adt_reg,
-                ir_types: HashMap::new(),
-                library_def_names: HashSet::new(),
+                ir_types: BTreeMap::new(),
+                library_def_names: UnordSet::new(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
             library_proof_id: None,
@@ -210,6 +211,16 @@ impl TypeEnv {
         self.inner.library_def_names.contains(name)
     }
 
+    /// Return the generalized checker scheme for a binding in this accepted
+    /// library context.
+    ///
+    /// Public package metadata uses this immutable view so quantified-domain
+    /// restrictions remain attached to function values at serialization
+    /// boundaries instead of being reconstructed from a printed type.
+    pub fn scheme(&self, name: &str) -> Option<&crate::types::Scheme> {
+        self.inner.env.lookup(name)
+    }
+
     /// Confirm that this context and a checked program are one library product pair.
     ///
     /// The library builders derive one opaque identity from accepted checked source.
@@ -224,7 +235,7 @@ impl TypeEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Dim, Scheme, TensorPrec, Type};
+    use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
     use crate::unify::unify;
 
     #[test]
@@ -289,5 +300,64 @@ mod tests {
             let imported = resumed.env.generalize(&Type::Var(fresh), &resumed.subst);
             assert!(imported.tvars.is_empty());
         }
+    }
+
+    #[test]
+    fn type_variable_restrictions_survive_context_round_trips() {
+        let empty = TypeEnv::empty();
+        let mut inner = empty.inner().clone();
+        let live = inner.var_gen.fresh_tvar();
+        inner
+            .subst
+            .narrow_tvar_restriction(live, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+
+        let context = TypeEnv::from_inner(inner);
+        let encoded = bincode::serialize(&context).expect("restricted TypeEnv serializes");
+        let decoded: TypeEnv =
+            bincode::deserialize(&encoded).expect("restricted TypeEnv deserializes");
+        assert_eq!(
+            decoded.inner().subst.tvar_restriction(live),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        let mut resumed = decoded.resume_for_new_check();
+        let scheme = resumed
+            .env
+            .lookup("test_assert_close_tensor")
+            .expect("builtin scheme survives round trip")
+            .clone();
+        assert_eq!(
+            scheme.tvar_restrictions,
+            vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
+        );
+        let instantiated = resumed
+            .env
+            .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst);
+        let Type::Fn(params, _) = instantiated else {
+            panic!("assert-close scheme must remain callable");
+        };
+        let Type::Var(precision) = params[2] else {
+            panic!("tolerance must use the quantified precision variable");
+        };
+        let mut integer_trial = resumed.subst.clone();
+        let error = unify(
+            &Type::Var(precision),
+            &Type::Prim(Prim::Int32),
+            &mut integer_trial,
+        )
+        .expect_err("round-tripped restriction must reject int32");
+        assert!(matches!(
+            error.kind,
+            crate::unify::TypeErrorKind::PrecisionMismatch
+        ));
+
+        let mut float_trial = resumed.subst.clone();
+        unify(
+            &Type::Var(precision),
+            &Type::Prim(Prim::F32),
+            &mut float_trial,
+        )
+        .expect("round-tripped restriction must accept f32");
     }
 }

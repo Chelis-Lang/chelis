@@ -2,11 +2,17 @@
 //!
 //! Walks the Deep AST and produces a flat DAG of RISC primitive nodes.
 
+use chelis_unord::{UnordMap, UnordSet};
 use std::any::Any;
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
+
+/// Path-sensitive helpers emitted outside the dynamic handler cannot bake its
+/// seed. The active helper path obtains the real seed from the host handler;
+/// the inactive path's value is discarded by the enclosing blend.
+const COMPILED_HANDLER_OWNED_SEED: u64 = 0;
 
 thread_local! {
     /// When set, `lower_unrepresentable` panics with a quiet empty payload
@@ -543,7 +549,9 @@ pub fn install_chelis_panic_hook() {
 }
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_deep::{DeepTag, Span, decode_effect_kind};
+use chelis_deep::{
+    DeepTag, Span, decode_dtype_bounds, decode_effect_kind, exact_type_variable_name,
+};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{
     BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
@@ -552,7 +560,7 @@ use chelis_types::{
 };
 use chelis_vocab::EffectKind;
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 use crate::grad::grad_dag_checked;
 use crate::tier2;
 use crate::vmap;
@@ -581,15 +589,15 @@ pub struct LoweredLibrary {
     /// `lib_double.0`) to the NodeId in `dag` that holds its value. New
     /// code that references the name resolves through this table rather
     /// than emitting a fresh `Load`.
-    symbol_table: HashMap<String, NodeId>,
+    symbol_table: UnordMap<String, NodeId>,
     /// Library top-level def bodies, keyed by name. New-code lowering needs
     /// these to inline calls to library functions (matching the monolithic
     /// behaviour of `lower_program(library + new)`).
-    program_defs: HashMap<String, Expr>,
+    program_defs: BTreeMap<String, Expr>,
     /// Library declared types, keyed by name. Used to resolve unbound
     /// `(var libname)` Load types when the new-code expression's metadata
     /// is `default_type`.
-    program_types: HashMap<String, TensorType>,
+    program_types: BTreeMap<String, TensorType>,
     /// Library linearity metadata. Forwarded so cross-DAG reuse hints can
     /// be re-applied if needed.
     linearity: LinearityInfo,
@@ -599,7 +607,7 @@ pub struct LoweredLibrary {
     /// calls a library function gets the same lowered/host classification
     /// as it would in monolithic mode (where the same library def lives
     /// in `top_level_defs` and is consulted directly).
-    lowered_names: HashMap<String, bool>,
+    lowered_names: BTreeMap<String, bool>,
     /// chelis#1095: def names whose lowered value held no tensor node, so
     /// they contributed no DAG root. Consumers subtract these from the
     /// declared root names before aligning against [`Self::dag`]'s roots.
@@ -618,17 +626,17 @@ impl LoweredLibrary {
     }
 
     /// Return the immutable symbol table.
-    pub fn symbol_table(&self) -> &HashMap<String, NodeId> {
+    pub fn symbol_table(&self) -> &UnordMap<String, NodeId> {
         &self.symbol_table
     }
 
     /// Return the immutable program definitions.
-    pub fn program_defs(&self) -> &HashMap<String, Expr> {
+    pub fn program_defs(&self) -> &BTreeMap<String, Expr> {
         &self.program_defs
     }
 
     /// Return the immutable program types.
-    pub fn program_types(&self) -> &HashMap<String, TensorType> {
+    pub fn program_types(&self) -> &BTreeMap<String, TensorType> {
         &self.program_types
     }
 
@@ -638,7 +646,7 @@ impl LoweredLibrary {
     }
 
     /// Return the immutable map of lowering decisions.
-    pub fn lowered_names(&self) -> &HashMap<String, bool> {
+    pub fn lowered_names(&self) -> &BTreeMap<String, bool> {
         &self.lowered_names
     }
 
@@ -707,7 +715,7 @@ fn assert_decode_once_at_boundary(site: &str, exprs: &[Expr]) {
 
 /// [`assert_decode_once_at_boundary`] over the values of a name-keyed Deep
 /// map (type envs, program defs). Borrows each value rather than collecting.
-fn assert_decode_once_in_env(site: &str, env: &HashMap<String, Expr>) {
+fn assert_decode_once_in_env(site: &str, env: &BTreeMap<String, Expr>) {
     if !cfg!(debug_assertions) {
         return;
     }
@@ -754,7 +762,7 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
         }
     });
     log_sub("assertions_loop", &mut sub_t);
-    let program_types: HashMap<String, TensorType> = program
+    let program_types: BTreeMap<String, TensorType> = program
         .type_env()
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
@@ -812,8 +820,8 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
     // names mirroring the `Store { name: "foo.0" }` convention used
     // elsewhere; that lets new code reference both `foo` (as a tuple
     // identity) and `foo.N` (as the specific element).
-    let mut pre_dce_table: HashMap<String, NodeId> = HashMap::new();
-    for (name, value) in ctx.bindings.iter() {
+    let mut pre_dce_table: UnordMap<String, NodeId> = UnordMap::new();
+    for (name, value) in ctx.bindings.to_sorted() {
         flatten_binding_into(name, value, &mut pre_dce_table);
     }
     log_sub("flatten_bindings", &mut sub_t);
@@ -827,7 +835,8 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
 
     // Renumber the symbol table through DCE's remap. Names whose nodes
     // were eliminated drop out of the table.
-    let symbol_table: HashMap<String, NodeId> = pre_dce_table
+    let symbol_table: UnordMap<String, NodeId> = pre_dce_table
+        .into_sorted()
         .into_iter()
         .filter_map(|(name, old)| {
             remap
@@ -851,8 +860,8 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
     }
 }
 
-fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
-    let mut consuming_uses = HashMap::<NodeId, usize>::new();
+fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
+    let mut consuming_uses = UnordMap::<NodeId, usize>::new();
     for node in dag.nodes() {
         if !op_consumes_inputs(&node.op) {
             continue;
@@ -862,9 +871,9 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, HashMap<NodeId, No
         }
     }
 
-    let mut seen_consuming_uses = HashMap::<NodeId, usize>::new();
+    let mut seen_consuming_uses = UnordMap::<NodeId, usize>::new();
     let mut out = Dag::new();
-    let mut id_map = HashMap::<NodeId, NodeId>::new();
+    let mut id_map = UnordMap::<NodeId, NodeId>::new();
 
     for node in dag.nodes() {
         let mut inputs = Vec::with_capacity(node.inputs.len());
@@ -901,8 +910,8 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, HashMap<NodeId, No
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
             new_node.merged_spans = node.merged_spans.clone();
-            // chelis#384/#397: preserve (remapped) shape-only deps so a
-            // Form-3 `expand` extent source survives this rebuild. Deps are
+            // chelis#384/#397: preserve (remapped) shape-only deps so an
+            // `expand` shape-derived extent source survives this rebuild. Deps are
             // earlier in topo order, so already remapped in `id_map`.
             new_node.shape_deps = node
                 .shape_deps
@@ -927,14 +936,14 @@ fn op_consumes_inputs(op: &RiscOp) -> bool {
 }
 
 fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
-    let mut consumed = HashSet::<NodeId>::new();
+    let mut consumed = UnordSet::<NodeId>::new();
     for node in dag.nodes() {
         if !op_consumes_inputs(&node.op) {
             continue;
         }
         consumed.extend(node.inputs.iter().copied());
     }
-    let roots = dag.roots().iter().copied().collect::<HashSet<_>>();
+    let roots = dag.roots().iter().copied().collect::<UnordSet<_>>();
     let values_to_drop = dag
         .nodes()
         .iter()
@@ -966,9 +975,9 @@ fn insert_drop_nodes_for_unconsumed_values(mut dag: Dag) -> Dag {
     dag
 }
 
-fn strip_drop_nodes(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
+fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
     let mut out = Dag::new();
-    let mut id_map = HashMap::<NodeId, NodeId>::new();
+    let mut id_map = UnordMap::<NodeId, NodeId>::new();
 
     for node in dag.nodes() {
         if matches!(node.op, RiscOp::Drop) {
@@ -990,8 +999,8 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
             new_node.merged_spans = node.merged_spans.clone();
-            // chelis#384/#397: preserve (remapped) shape-only deps so a
-            // Form-3 `expand` extent source survives this rebuild. Deps are
+            // chelis#384/#397: preserve (remapped) shape-only deps so an
+            // `expand` shape-derived extent source survives this rebuild. Deps are
             // earlier in topo order, so already remapped in `id_map`.
             new_node.shape_deps = node
                 .shape_deps
@@ -1098,7 +1107,7 @@ fn lower_program_with_context_inner(
     // the combined DAG below.
     let (library_dag, library_remap) = strip_drop_nodes(&library.dag);
     ctx.dag = library_dag;
-    for (name, node_id) in &library.symbol_table {
+    for (name, node_id) in library.symbol_table.to_sorted() {
         if let Some(mapped) = library_remap.get(node_id).copied() {
             ctx.bindings
                 .insert(name.clone(), LoweredValue::Node(mapped));
@@ -1127,7 +1136,7 @@ fn lower_program_with_context_inner(
     }
 }
 
-fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut HashMap<String, NodeId>) {
+fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut UnordMap<String, NodeId>) {
     match value {
         LoweredValue::Node(id) => {
             out.insert(prefix.to_string(), *id);
@@ -1161,9 +1170,9 @@ pub fn tensor_type_from_deep(expr: &Expr) -> TensorType {
 
 pub fn lower_subexpr_program(
     expr: &Expr,
-    scoped_tensor_types: HashMap<String, TensorType>,
-    full_type_env: HashMap<String, Expr>,
-    program_defs: HashMap<String, Expr>,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    full_type_env: UnordMap<String, Expr>,
+    program_defs: UnordMap<String, Expr>,
 ) -> Dag {
     try_lower_subexpr_program(expr, scoped_tensor_types, full_type_env, program_defs)
         .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
@@ -1171,24 +1180,78 @@ pub fn lower_subexpr_program(
 
 pub fn try_lower_subexpr_program(
     expr: &Expr,
-    scoped_tensor_types: HashMap<String, TensorType>,
-    full_type_env: HashMap<String, Expr>,
-    program_defs: HashMap<String, Expr>,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    full_type_env: UnordMap<String, Expr>,
+    program_defs: UnordMap<String, Expr>,
 ) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_random_state(
+        expr,
+        scoped_tensor_types,
+        full_type_env,
+        program_defs,
+        None,
+        0,
+    )
+}
+
+pub fn try_lower_subexpr_program_with_random_state(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    full_type_env: UnordMap<String, Expr>,
+    program_defs: UnordMap<String, Expr>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_random_state_progress(
+        expr,
+        scoped_tensor_types,
+        full_type_env,
+        program_defs,
+        random_seed,
+        random_counter,
+    )
+    .map(|(dag, _)| dag)
+}
+
+/// Lower a subexpression while also returning the next unused Random stream
+/// ordinal. Host evaluators use this form when lowering a handled transform so
+/// random draws inside the transform advance the enclosing handler's stream.
+pub fn try_lower_subexpr_program_with_random_state_progress(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    full_type_env: UnordMap<String, Expr>,
+    program_defs: UnordMap<String, Expr>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    let full_type_env = full_type_env
+        .into_sorted()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let program_defs = program_defs
+        .into_sorted()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     let context = prepare_subexpr_lowering_context(&full_type_env, Arc::new(program_defs));
-    try_lower_subexpr_program_with_context(expr, scoped_tensor_types, &context)
+    try_lower_subexpr_program_with_context_and_random_state(
+        expr,
+        scoped_tensor_types,
+        &context,
+        random_seed,
+        random_counter,
+    )
 }
 
 #[derive(Clone)]
 pub(crate) struct SubexprLoweringContext {
-    program_types: Arc<HashMap<String, TensorType>>,
-    program_defs: Arc<HashMap<String, Expr>>,
+    program_types: Arc<BTreeMap<String, TensorType>>,
+    program_defs: Arc<BTreeMap<String, Expr>>,
 }
 
 pub(crate) fn prepare_subexpr_lowering_context(
-    full_type_env: &HashMap<String, Expr>,
-    program_defs: Arc<HashMap<String, Expr>>,
+    full_type_env: &BTreeMap<String, Expr>,
+    program_defs: Arc<BTreeMap<String, Expr>>,
 ) -> SubexprLoweringContext {
     assert_decode_once_in_env("lower_subexpr_program: type_env", full_type_env);
     assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
@@ -1204,29 +1267,94 @@ pub(crate) fn prepare_subexpr_lowering_context(
 
 pub(crate) fn try_lower_subexpr_program_with_context(
     expr: &Expr,
-    scoped_tensor_types: HashMap<String, TensorType>,
+    scoped_tensor_types: UnordMap<String, TensorType>,
     context: &SubexprLoweringContext,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| lower_subexpr_program_inner(expr, scoped_tensor_types, context))
+    try_lower_subexpr_program_with_context_and_random_state(
+        expr,
+        scoped_tensor_types,
+        context,
+        None,
+        0,
+    )
+    .map(|(dag, _)| dag)
+}
+
+pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    catch_lowering(|| {
+        let (dag, _, value_root_count, list_checks) =
+            lower_subexpr_program_inner_impl(expr, scoped_tensor_types, context, None, 0, true);
+        LoweredSubexprWithControls {
+            dag,
+            value_root_count,
+            list_checks,
+        }
+    })
+}
+
+pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<(Dag, u64), LowerDiagnostic> {
+    catch_lowering(|| {
+        lower_subexpr_program_inner(
+            expr,
+            scoped_tensor_types,
+            context,
+            random_seed,
+            random_counter,
+        )
+    })
 }
 
 fn lower_subexpr_program_inner(
     expr: &Expr,
-    scoped_tensor_types: HashMap<String, TensorType>,
+    scoped_tensor_types: UnordMap<String, TensorType>,
     context: &SubexprLoweringContext,
-) -> Dag {
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> (Dag, u64) {
+    let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
+        expr,
+        scoped_tensor_types,
+        context,
+        random_seed,
+        random_counter,
+        false,
+    );
+    (dag, random_counter)
+}
+
+fn lower_subexpr_program_inner_impl(
+    expr: &Expr,
+    scoped_tensor_types: UnordMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
+    include_list_controls: bool,
+) -> (Dag, u64, usize, Vec<RuntimeListCheckDescriptor>) {
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
         context.program_defs.clone(),
         LinearityInfo::default(),
     );
+    ctx.random_seed = random_seed;
+    ctx.random_counter = random_counter;
     // Pre-create a `Load` for every scoped tensor param in a DETERMINISTIC
-    // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `HashMap`,
+    // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `UnordMap`,
     // whose iteration order is randomized per process; using it directly made
     // the pre-created `Load` node order — and therefore the tensor-helper
     // kernel's input-slot order (`input_labels` follows `dag.nodes()`) —
-    // non-deterministic across builds. For a Form-3 `expand` whose extent is
+    // non-deterministic across builds. For an `expand` whose extent is
     // read from a shape-source operand referenced ONLY via `shape(x, …)` (the
     // §4.7.2 `bias_broadcast` example), both that operand and the data operand
     // survive DCE, so their relative slot order flipped build-to-build and the
@@ -1234,8 +1362,7 @@ fn lower_subexpr_program_inner(
     // invariant and chelis#469's positive oracle). Sorting by name makes the
     // kernel ABI stable; the host caller maps arguments by `input_label`, so
     // the slot order is internal and any stable order is correct.
-    let mut scoped_bindings: Vec<(String, TensorType)> = scoped_tensor_types.into_iter().collect();
-    scoped_bindings.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let scoped_bindings = scoped_tensor_types.into_sorted();
     for (name, tensor_ty) in scoped_bindings {
         let load = ctx.dag.add_node(
             RiscOp::Load {
@@ -1258,7 +1385,7 @@ fn lower_subexpr_program_inner(
     // for any repeat so every leaf keeps its own root; the value is
     // unchanged (eval and the copy/drop linearity passes treat `Copy` as a
     // pass-through) but the root count now matches the pytree arity.
-    let mut seen_roots: HashSet<NodeId> = HashSet::new();
+    let mut seen_roots: UnordSet<NodeId> = UnordSet::new();
     for id in value.flatten_nodes() {
         let root_id = if seen_roots.insert(id) {
             id
@@ -1277,9 +1404,53 @@ fn lower_subexpr_program_inner(
         };
         ctx.dag.add_root(root_id);
     }
+    let value_root_count = ctx.dag.roots().len();
+    let mut list_checks = Vec::new();
+    if include_list_controls {
+        let checks = std::mem::take(&mut ctx.runtime_list_checks);
+        for check in checks {
+            let (descriptor, values): (RuntimeListCheckDescriptor, Vec<NodeId>) = match check {
+                RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value,
+                } => (
+                    RuntimeListCheckDescriptor::NonNegative {
+                        operation,
+                        argument,
+                    },
+                    vec![value],
+                ),
+                RuntimeListCheck::IndexBounds { index, len } => {
+                    (RuntimeListCheckDescriptor::IndexBounds, vec![index, len])
+                }
+            };
+            for value in values {
+                let output_type = ctx
+                    .dag
+                    .get(value)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(LowerCtx::default_type);
+                let distinct = ctx.dag.add_node(
+                    RiscOp::Copy,
+                    vec![value],
+                    output_type,
+                    ctx.current_span_id.clone(),
+                );
+                ctx.dag.add_root(distinct);
+            }
+            list_checks.push(descriptor);
+        }
+    }
+    let next_random_counter = ctx.random_counter;
     let dce_dag = crate::optimize::dead_code_eliminate(&ctx.dag);
     let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
-    insert_drop_nodes_for_unconsumed_values(copy_dag)
+    (
+        insert_drop_nodes_for_unconsumed_values(copy_dag),
+        next_random_counter,
+        value_root_count,
+        list_checks,
+    )
 }
 
 pub fn remap_tensor_dim_symbols(
@@ -1296,15 +1467,15 @@ pub fn remap_tensor_dim_symbols(
 
 /// Rewrite every symbolic-dim reference in `dag` through
 /// `substitutions`: node OUTPUT types and the op-internal fields that
-/// carry dims (`Expand::size`, `Reshape::new_shape`,
+/// carry dims (`Reshape::new_shape`,
 /// `BlasMatmul::{batch_dims, m, n, k}`). Rewriting only output types
 /// while op fields keep the stale names produces the chelis#345 mixed
 /// state (`Load: n` next to `Expand { size: Sym("dN") }`) that the
 /// Bucket 4d sweep in `dag::symbolic_occurrences` panics on. Shared by
 /// [`remap_tensor_dim_symbols`] (call-site formal/actual remapping) and
 /// `host::actualize_tensor_helper_types` (synthetic `dN` actualization).
-pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String, DimInfo>) -> Dag {
-    fn rewrite_dim_info(dim: &DimInfo, substitutions: &HashMap<String, DimInfo>) -> DimInfo {
+pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &UnordMap<String, DimInfo>) -> Dag {
+    fn rewrite_dim_info(dim: &DimInfo, substitutions: &UnordMap<String, DimInfo>) -> DimInfo {
         match dim {
             DimInfo::Named(name, None) => substitutions
                 .get(name)
@@ -1314,7 +1485,7 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String,
         }
     }
 
-    fn rewrite_dim_expr(expr: &DimExpr, substitutions: &HashMap<String, DimInfo>) -> DimExpr {
+    fn rewrite_dim_expr(expr: &DimExpr, substitutions: &UnordMap<String, DimInfo>) -> DimExpr {
         match expr {
             DimExpr::Concrete(value) => DimExpr::Concrete(*value),
             DimExpr::Sym(name) => substitutions
@@ -1349,10 +1520,7 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &HashMap<String,
             .map(|dim| rewrite_dim_info(dim, substitutions))
             .collect();
         let op = match node.op {
-            RiscOp::Expand { axis, size } => RiscOp::Expand {
-                axis,
-                size: rewrite_dim_expr(&size, substitutions),
-            },
+            RiscOp::Expand { axis, size } => RiscOp::Expand { axis, size },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
                     .iter()
@@ -1456,7 +1624,7 @@ fn tensor_formal_dim_slots(expr: &Expr) -> Option<Vec<DimSlot>> {
 fn tensor_dim_substitutions(
     formal_params: &[TensorType],
     actual_args: &[TensorType],
-) -> HashMap<String, DimInfo> {
+) -> UnordMap<String, DimInfo> {
     formal_params
         .iter()
         .zip(actual_args.iter())
@@ -1520,9 +1688,9 @@ fn tensor_dim_substitutions(
 fn tensor_dim_axis_positions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
-) -> HashMap<String, (usize, DimInfo)> {
-    let mut positions: HashMap<String, (usize, DimInfo)> = HashMap::new();
-    let mut ambiguous: HashSet<String> = HashSet::new();
+) -> UnordMap<String, (usize, DimInfo)> {
+    let mut positions: UnordMap<String, (usize, DimInfo)> = UnordMap::new();
+    let mut ambiguous: UnordSet<String> = UnordSet::new();
     for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
         let Some(formal_expr) = formal_expr else {
             continue;
@@ -1579,7 +1747,7 @@ fn tensor_dim_axis_positions(
             }
         }
     }
-    for name in ambiguous {
+    for name in ambiguous.into_sorted() {
         positions.remove(&name);
     }
     positions
@@ -1643,7 +1811,7 @@ fn recover_anchor_axis(
     lo: usize,
     hi: usize,
     anchor: &str,
-    dim_axis_positions: &HashMap<String, (usize, DimInfo)>,
+    dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
 ) -> AnchorRecovery {
     // The recorded position is intentionally unused for the decision (it is the
     // stale formal-param offset chelis#549 is about); only the recorded extent
@@ -1684,8 +1852,8 @@ fn recover_anchor_axis(
 fn tensor_prec_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
-) -> HashMap<String, Prim> {
-    let mut subst = HashMap::new();
+) -> UnordMap<String, Prim> {
+    let mut subst = UnordMap::new();
     for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
         let Some(formal_expr) = formal_expr else {
             continue;
@@ -1723,6 +1891,16 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Binder name from a bare scalar `(t-var {} p)` type (#1544).
+fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
+    let stripped = if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr) {
+        kids.first()?
+    } else {
+        expr
+    };
+    exact_type_variable_name(stripped).map(str::to_string)
 }
 
 /// issue #319: the renamed type-variable name carried by a formal-
@@ -1894,13 +2072,14 @@ fn formal_precision_var_bindings(
     fn_expr: &Expr,
     body: &Expr,
     actual_types: &[TensorType],
-) -> HashMap<String, Prim> {
+) -> UnordMap<String, Prim> {
     let Some(prim) = fully_monomorphic_call_precision(fn_expr, actual_types) else {
-        return HashMap::new();
+        return UnordMap::new();
     };
-    let mut body_prec_vars = HashSet::new();
+    let mut body_prec_vars = UnordSet::new();
     collect_body_precision_var_names(body, &mut body_prec_vars);
     body_prec_vars
+        .into_sorted()
         .into_iter()
         .map(|var_name| (var_name, prim))
         .collect()
@@ -1911,7 +2090,7 @@ fn formal_precision_var_bindings(
 /// parameter annotations, nested type expressions). Used by
 /// [`formal_precision_var_bindings`] to enumerate the renamed body
 /// precision variables a fully-monomorphic call must concretize.
-fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
+fn collect_body_precision_var_names(expr: &Expr, out: &mut UnordSet<String>) {
     if let Some(name) = extract_precision_var_name(expr) {
         out.insert(name);
     }
@@ -1993,9 +2172,9 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut HashSet<String>) {
 fn tensor_rank_substitutions(
     formal_param_exprs: &[Option<Expr>],
     actual_args: &[TensorType],
-    dim_axis_positions: &HashMap<String, (usize, DimInfo)>,
-) -> HashMap<String, Vec<DimInfo>> {
-    let mut subst = HashMap::new();
+    dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
+) -> UnordMap<String, Vec<DimInfo>> {
+    let mut subst = UnordMap::new();
     for (formal_expr, actual) in formal_param_exprs.iter().zip(actual_args.iter()) {
         let Some(formal_expr) = formal_expr else {
             continue;
@@ -2011,7 +2190,7 @@ fn tensor_rank_substitutions(
             extract_rank_var_bindings(formal_expr, &actual.dims, dim_axis_positions)
         {
             match subst.entry(var_name) {
-                std::collections::hash_map::Entry::Occupied(existing) => {
+                chelis_unord::Entry::Occupied(existing) => {
                     debug_assert_eq!(
                         existing.get(),
                         &run,
@@ -2019,7 +2198,7 @@ fn tensor_rank_substitutions(
                          call site: the type checker should have rejected this",
                     );
                 }
-                std::collections::hash_map::Entry::Vacant(slot) => {
+                chelis_unord::Entry::Vacant(slot) => {
                     slot.insert(run);
                 }
             }
@@ -2050,7 +2229,7 @@ fn tensor_rank_substitutions(
 fn extract_rank_var_bindings(
     expr: &Expr,
     actual_dims: &[DimInfo],
-    dim_axis_positions: &HashMap<String, (usize, DimInfo)>,
+    dim_axis_positions: &UnordMap<String, (usize, DimInfo)>,
 ) -> Vec<(String, Vec<DimInfo>)> {
     let Some(slots) = tensor_formal_dim_slots(expr) else {
         return Vec::new();
@@ -2178,7 +2357,7 @@ fn extract_rank_var_bindings(
 pub fn top_level_expr_is_lowered(
     expr: &Expr,
     program_exprs: &[Expr],
-    type_env: &HashMap<String, Expr>,
+    type_env: &BTreeMap<String, Expr>,
 ) -> bool {
     let lowered_names = top_level_lowering_map(program_exprs, type_env);
     top_level_expr_is_lowered_with_names(expr, type_env, &lowered_names)
@@ -2189,7 +2368,7 @@ pub fn top_level_expr_is_lowered(
 pub fn top_level_lowering_map_from_realizability(
     program: &chelis_types::CheckedProgram,
     target_prims: &[chelis_types::types::Prim],
-) -> HashMap<String, bool> {
+) -> BTreeMap<String, bool> {
     let result = chelis_effects::realizability::infer_realizability(program, target_prims);
     result
         .lane_by_def
@@ -2200,17 +2379,22 @@ pub fn top_level_lowering_map_from_realizability(
 
 pub fn top_level_lowering_map(
     exprs: &[Expr],
-    type_env: &HashMap<String, Expr>,
-) -> HashMap<String, bool> {
+    type_env: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, bool> {
     let top_level_defs = collect_top_level_defs(exprs);
     let top_level_sigs = collect_top_level_sigs(exprs);
-    let mut cache = HashMap::new();
-    let mut visiting = HashSet::new();
+    let dtype_bound_names = collect_top_level_dtype_bound_names(exprs);
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
+    let mut cache = BTreeMap::new();
+    let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
         let lowered = def_is_lowered(
             name,
             &top_level_defs,
-            &top_level_sigs,
+            &types,
             type_env,
             &mut cache,
             &mut visiting,
@@ -2231,13 +2415,14 @@ pub fn top_level_lowering_map(
 pub fn top_level_lowering_map_with_context(
     library: &LoweredLibrary,
     new_exprs: &[Expr],
-    new_type_env: &HashMap<String, Expr>,
-) -> HashMap<String, bool> {
+    new_type_env: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, bool> {
     let mut top_level_defs = library.program_defs.clone();
     for (name, body) in collect_top_level_defs(new_exprs) {
         top_level_defs.insert(name, body);
     }
     let mut top_level_sigs = collect_top_level_sigs(new_exprs);
+    let dtype_bound_names = collect_top_level_dtype_bound_names(new_exprs);
     // Library declared types feed `lookup_declared_type_expr`; merge
     // them in so a library def's signature is reachable when the new
     // code's body references it.
@@ -2246,8 +2431,12 @@ pub fn top_level_lowering_map_with_context(
             .entry(name.clone())
             .or_insert_with(|| ty_expr_to_deep(ty_expr));
     }
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
     let mut cache = library.lowered_names.clone();
-    let mut visiting = HashSet::new();
+    let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
         if cache.contains_key(name) {
             continue;
@@ -2255,7 +2444,7 @@ pub fn top_level_lowering_map_with_context(
         let lowered = def_is_lowered(
             name,
             &top_level_defs,
-            &top_level_sigs,
+            &types,
             new_type_env,
             &mut cache,
             &mut visiting,
@@ -2342,25 +2531,30 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
 
     let top_level_defs = collect_top_level_defs(program.exprs());
     let top_level_sigs = collect_top_level_sigs(program.exprs());
-    let mut cache = HashMap::new();
-    let mut visiting = HashSet::new();
+    let dtype_bound_names = collect_top_level_dtype_bound_names(program.exprs());
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
+    let mut cache = BTreeMap::new();
+    let mut visiting = UnordSet::new();
     !expr_depends_on_nonlowerable_name(
         expr,
         &top_level_defs,
-        &top_level_sigs,
+        &types,
         program.type_env(),
         &mut cache,
         &mut visiting,
-        &HashSet::new(),
+        &UnordSet::new(),
     )
 }
 
 fn top_level_expr_is_lowered_with_names(
     expr: &Expr,
-    type_env: &HashMap<String, Expr>,
-    lowered_names: &HashMap<String, bool>,
+    type_env: &BTreeMap<String, Expr>,
+    lowered_names: &BTreeMap<String, bool>,
 ) -> bool {
-    let top_level_sigs = HashMap::new();
+    let top_level_sigs = BTreeMap::new();
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return true;
     };
@@ -2378,11 +2572,11 @@ fn top_level_expr_is_lowered_with_names(
     };
     lowered_names.get(name).copied().unwrap_or_else(|| {
         !lookup_declared_type_expr(&top_level_sigs, type_env, name)
-            .is_some_and(type_is_never_lowerable)
+            .is_some_and(|ty| type_is_never_lowerable(ty, None))
     })
 }
 
-fn type_is_never_lowerable(expr: &Expr) -> bool {
+fn type_is_never_lowerable(expr: &Expr, bounded_dtype_names: Option<&UnordSet<String>>) -> bool {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return true;
     };
@@ -2397,7 +2591,14 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
         // precision per spec/04-type-system.md §5.8.1); we just must
         // skip the standalone top-level emission.
         DeepTag::TFn => {
-            type_expr_has_precision_var(expr)
+            // Bounded bare scalar binders, like tensor precision binders,
+            // monomorphize only through their call sites.
+            kids.iter().any(|kid| {
+                extract_scalar_precision_var_name(kid).is_some_and(|name| {
+                    bounded_dtype_names.is_some_and(|bounded| bounded.contains(&name))
+                })
+            })
+                || type_expr_has_precision_var(expr)
                 // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
                 // a t-fn carrying a `(d-rank ...)` rank variable is
                 // rank-polymorphic and has no standalone monomorphization — its
@@ -2405,9 +2606,13 @@ fn type_is_never_lowerable(expr: &Expr) -> bool {
                 // precision-var case above. Skip the standalone emission so the
                 // `(d-rank ...)` never reaches the lowering assertion.
                 || type_expr_has_rank_var(expr)
-                || kids.last().is_some_and(type_is_never_lowerable)
+                || kids
+                    .last()
+                    .is_some_and(|ty| type_is_never_lowerable(ty, bounded_dtype_names))
         }
-        DeepTag::TTuple => kids.iter().any(type_is_never_lowerable),
+        DeepTag::TTuple => kids
+            .iter()
+            .any(|ty| type_is_never_lowerable(ty, bounded_dtype_names)),
         DeepTag::TAdt | DeepTag::TUnit => true,
         DeepTag::TPrim => false,
         _ => false,
@@ -2618,20 +2823,6 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mmap_read"
                         | "mmap_len"
                         | "process_run"
-                        | "parse_json"
-                        | "to_json"
-                        | "json_f64"
-                        | "json_int"
-                        | "json_str"
-                        | "json_list"
-                        | "json_f64s"
-                        | "json_ints"
-                        | "jnum"
-                        | "jint"
-                        | "jstr"
-                        | "jlist"
-                        | "jdict"
-                        | "json_set"
                         | "round_to"
                         | "parse_csv"
                         | "to_csv"
@@ -2806,20 +2997,44 @@ fn expr_is_multi_root_construct(expr: &Expr) -> bool {
     )
 }
 
-fn collect_top_level_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
-    let mut defs = HashMap::new();
+fn collect_top_level_defs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
+    let mut defs = BTreeMap::new();
     for expr in exprs {
         collect_top_level_defs_from_expr(expr, &mut defs);
     }
     defs
 }
 
-fn collect_top_level_sigs(exprs: &[Expr]) -> HashMap<String, Expr> {
-    let mut sigs = HashMap::new();
+fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
+    let mut sigs = BTreeMap::new();
     for expr in exprs {
         collect_top_level_sigs_from_expr(expr, &mut sigs);
     }
     sigs
+}
+
+/// Exact dtype-family-bounded binder names on each `defsig`.
+fn collect_top_level_dtype_bound_names(exprs: &[Expr]) -> BTreeMap<String, UnordSet<String>> {
+    let mut bounds = BTreeMap::new();
+    for_each_top_level_item(exprs, &mut |expr| {
+        if let Some((DeepTag::Defsig, meta, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
+        {
+            let names = decode_dtype_bounds(meta)
+                .unwrap_or_else(|error| {
+                    raise_lowering_error(
+                        format!("malformed dtype_bounds reached IR lowering: {error}"),
+                        Some(expr.span()),
+                        expr.span_id().map(ToOwned::to_owned),
+                    )
+                })
+                .into_iter()
+                .map(|(binder, _)| binder)
+                .collect();
+            bounds.insert(name.to_string(), names);
+        }
+    });
+    bounds
 }
 
 fn for_each_top_level_item(exprs: &[Expr], f: &mut impl FnMut(&Expr)) {
@@ -2842,7 +3057,7 @@ fn for_each_top_level_item_from_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
     }
 }
 
-fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut HashMap<String, Expr>) {
+fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut BTreeMap<String, Expr>) {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
@@ -2863,7 +3078,7 @@ fn collect_top_level_defs_from_expr(expr: &Expr, defs: &mut HashMap<String, Expr
     }
 }
 
-fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut HashMap<String, Expr>) {
+fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Expr>) {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
@@ -2884,20 +3099,25 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut HashMap<String, Expr
     }
 }
 
+struct LowerabilityTypes<'a> {
+    signatures: &'a BTreeMap<String, Expr>,
+    dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+}
+
 fn def_is_lowered(
     name: &str,
-    top_level_defs: &HashMap<String, Expr>,
-    top_level_sigs: &HashMap<String, Expr>,
-    type_env: &HashMap<String, Expr>,
-    cache: &mut HashMap<String, bool>,
-    visiting: &mut HashSet<String>,
+    top_level_defs: &BTreeMap<String, Expr>,
+    types: &LowerabilityTypes<'_>,
+    type_env: &BTreeMap<String, Expr>,
+    cache: &mut BTreeMap<String, bool>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
     if let Some(lowered) = cache.get(name) {
         return *lowered;
     }
     if !visiting.insert(name.to_string()) {
-        return !lookup_declared_type_expr(top_level_sigs, type_env, name)
-            .is_some_and(type_is_never_lowerable);
+        return !lookup_declared_type_expr(types.signatures, type_env, name)
+            .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)));
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
@@ -2911,14 +3131,14 @@ fn def_is_lowered(
             && !expr_depends_on_nonlowerable_name(
                 body,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
-                &HashSet::new(),
+                &UnordSet::new(),
             )
-            && !lookup_declared_type_expr(top_level_sigs, type_env, name)
-                .is_some_and(type_is_never_lowerable)
+            && !lookup_declared_type_expr(types.signatures, type_env, name)
+                .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
     });
 
     visiting.remove(name);
@@ -2927,8 +3147,8 @@ fn def_is_lowered(
 }
 
 fn lookup_declared_type_expr<'a>(
-    top_level_sigs: &'a HashMap<String, Expr>,
-    type_env: &'a HashMap<String, Expr>,
+    top_level_sigs: &'a BTreeMap<String, Expr>,
+    type_env: &'a BTreeMap<String, Expr>,
     name: &str,
 ) -> Option<&'a Expr> {
     top_level_sigs
@@ -2954,7 +3174,7 @@ fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
             .is_some_and(|(_, tail)| tail == short_name)
 }
 
-fn unique_terminal_match<'a>(map: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+fn unique_terminal_match<'a>(map: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
     let mut matches = map
         .iter()
         .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
@@ -2964,12 +3184,12 @@ fn unique_terminal_match<'a>(map: &'a HashMap<String, Expr>, name: &str) -> Opti
 
 fn expr_depends_on_nonlowerable_name(
     expr: &Expr,
-    top_level_defs: &HashMap<String, Expr>,
-    top_level_sigs: &HashMap<String, Expr>,
-    type_env: &HashMap<String, Expr>,
-    cache: &mut HashMap<String, bool>,
-    visiting: &mut HashSet<String>,
-    bound_names: &HashSet<String>,
+    top_level_defs: &BTreeMap<String, Expr>,
+    types: &LowerabilityTypes<'_>,
+    type_env: &BTreeMap<String, Expr>,
+    cache: &mut BTreeMap<String, bool>,
+    visiting: &mut UnordSet<String>,
+    bound_names: &UnordSet<String>,
 ) -> bool {
     if let Some((tag, meta, kids)) = stamped_parts(expr) {
         if tag == DeepTag::Var
@@ -2977,14 +3197,7 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.contains(name)
             && top_level_defs.contains_key(name)
         {
-            return !def_is_lowered(
-                name,
-                top_level_defs,
-                top_level_sigs,
-                type_env,
-                cache,
-                visiting,
-            );
+            return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
@@ -2999,7 +3212,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3017,7 +3230,7 @@ fn expr_depends_on_nonlowerable_name(
                     if expr_depends_on_nonlowerable_name(
                         &binding_kids[index + 1],
                         top_level_defs,
-                        top_level_sigs,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3035,7 +3248,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3048,7 +3261,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     scrutinee,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3069,7 +3282,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         guard,
                         top_level_defs,
-                        top_level_sigs,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3079,7 +3292,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         body,
                         top_level_defs,
-                        top_level_sigs,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3095,7 +3308,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3105,7 +3318,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3120,7 +3333,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3131,7 +3344,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 &meta.expr,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3140,7 +3353,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3156,7 +3369,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3168,7 +3381,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3178,7 +3391,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     child,
                     top_level_defs,
-                    top_level_sigs,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3190,7 +3403,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3201,7 +3414,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3211,7 +3424,7 @@ fn expr_depends_on_nonlowerable_name(
     }
 }
 
-fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
+fn collect_param_bound_names(param: &Expr, out: &mut UnordSet<String>) {
     match param {
         Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
@@ -3251,7 +3464,7 @@ fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_pattern_bound_names(pattern: &Expr, out: &mut HashSet<String>) {
+fn collect_pattern_bound_names(pattern: &Expr, out: &mut UnordSet<String>) {
     match pattern {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
         Expr::MetaExpr(meta, _) => collect_pattern_bound_names(&meta.expr, out),
@@ -3470,6 +3683,7 @@ fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
                 | "reshape"
                 | "permute"
                 | "expand"
+                | "insert"
                 | "pad"
                 | "shrink"
                 | "stride"
@@ -3523,6 +3737,21 @@ fn to_list_source_expr(expr: &Expr) -> Option<&Expr> {
         return None;
     };
     Some(source)
+}
+
+fn zip_to_list_source_exprs(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let ("zip", [lhs, rhs]) = app_var_name_and_args(expr)? else {
+        return None;
+    };
+    Some((to_list_source_expr(lhs)?, to_list_source_expr(rhs)?))
+}
+
+fn tensor_shape_template_expr(expr: &Expr) -> Option<&Expr> {
+    let (name, args) = app_var_name_and_args(expr)?;
+    if name != "tensor_shape" && !name.ends_with("__tensor_shape") {
+        return None;
+    }
+    args.first()
 }
 
 fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
@@ -3636,7 +3865,7 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
 /// `(var {} Nil)` or contains a non-Cons app. Used by
 /// [`LowerCtx::extract_dim_list`] to recognize Surf-desugared list
 /// literals (issue Chelis-Lang/chelis#220).
-fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
+pub(crate) fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
     let mut out = Vec::new();
     let mut cursor = expr;
     loop {
@@ -3691,6 +3920,105 @@ fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
     }
 }
 
+fn runtime_list_view_parts(value: &LoweredValue) -> Option<(NodeId, NodeId, Vec<LoweredValue>)> {
+    let LoweredValue::Adt { ctor, fields, .. } = value else {
+        return None;
+    };
+    if ctor != RUNTIME_LIST_VIEW_CTOR || fields.len() != 3 {
+        return None;
+    }
+    let offset = fields[0].as_single_node()?;
+    let len = fields[1].as_single_node()?;
+    let LoweredValue::Tuple(items) = &fields[2] else {
+        return None;
+    };
+    Some((offset, len, items.clone()))
+}
+
+fn rebuild_runtime_list_view(
+    offset: NodeId,
+    len: NodeId,
+    items: Vec<LoweredValue>,
+) -> LoweredValue {
+    LoweredValue::Adt {
+        ctor: RUNTIME_LIST_VIEW_CTOR.to_string(),
+        field_names: None,
+        fields: vec![
+            LoweredValue::Node(offset),
+            LoweredValue::Node(len),
+            LoweredValue::Tuple(items),
+        ],
+    }
+}
+
+/// Flatten every scalar/tensor leaf of a recursive List/tuple/ADT value.
+/// Empty structures contribute no leaves while retaining their position in
+/// the separate reconstruction template.
+fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
+    fn walk(value: &LoweredValue, out: &mut Vec<NodeId>) {
+        match value {
+            LoweredValue::Node(node) => out.push(*node),
+            LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
+                for item in adt_cons_chain_values(value).expect("guarded above") {
+                    walk(&item, out);
+                }
+            }
+            LoweredValue::Tuple(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            LoweredValue::Adt { fields, .. } => {
+                for field in fields {
+                    walk(field, out);
+                }
+            }
+        }
+    }
+
+    let mut leaves = Vec::new();
+    walk(value, &mut leaves);
+    leaves
+}
+
+/// Rebuild a recursive List/tuple/ADT value from its primal structure and a
+/// flat sequence of replacement leaves. This is used symmetrically for staged
+/// parameter Loads and for the returned recursive cotangent.
+fn rebuild_recursive_list_like(
+    template: &LoweredValue,
+    leaves: &mut impl Iterator<Item = LoweredValue>,
+) -> LoweredValue {
+    match template {
+        LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
+        LoweredValue::Adt { .. } if adt_cons_chain_values(template).is_some() => {
+            let items = adt_cons_chain_values(template)
+                .expect("guarded above")
+                .into_iter()
+                .map(|item| rebuild_recursive_list_like(&item, leaves))
+                .collect();
+            rebuild_cons_chain(items)
+        }
+        LoweredValue::Tuple(items) => LoweredValue::Tuple(
+            items
+                .iter()
+                .map(|item| rebuild_recursive_list_like(item, leaves))
+                .collect(),
+        ),
+        LoweredValue::Adt {
+            ctor,
+            field_names,
+            fields,
+        } => LoweredValue::Adt {
+            ctor: ctor.clone(),
+            field_names: field_names.clone(),
+            fields: fields
+                .iter()
+                .map(|field| rebuild_recursive_list_like(field, leaves))
+                .collect(),
+        },
+    }
+}
+
 /// Rebuild a `Cons`/`Nil` spine from element values (chelis#620): the
 /// inverse of [`adt_cons_chain_values`], used to materialize a static
 /// list-append result.
@@ -3722,7 +4050,7 @@ fn rebuild_cons_chain(items: Vec<LoweredValue>) -> LoweredValue {
 /// Returns the numeric value as `i64` when extractable. Used by
 /// [`LowerCtx::extract_dim_list`] to interpret reshape shape-list
 /// entries (issue Chelis-Lang/chelis#220).
-fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
+pub(crate) fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(n), _) => Some(*n),
         Expr::List(_, _) | Expr::Node(_, _) => match stamped_parts(expr)?.0 {
@@ -4104,6 +4432,201 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     }
 }
 
+/// Read an optional scalar type stamp without treating malformed type
+/// metadata as absence. The outer `Option` is recognition success; the inner
+/// one distinguishes an unstamped expression from a stamped scalar.
+fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
+    match unique_metadata_value(expr, "type")? {
+        Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty)?)),
+        None => Some(None),
+    }
+}
+
+/// Read a metadata key only when it occurs at most once.
+///
+/// `None` rejects an untagged carrier or duplicate key; `Some(None)` is a
+/// canonical absence. Static folding must not reproduce the parser's
+/// first-entry behavior because duplicate contract metadata is malformed,
+/// not an alternate spelling.
+fn unique_metadata_value<'a>(expr: &'a Expr, key: &str) -> Option<Option<&'a Expr>> {
+    let meta = match expr {
+        Expr::Node(_, _) | Expr::List(_, _) => {
+            let (_, meta, _) = stamped_parts(expr)?;
+            meta
+        }
+        Expr::Atom(_, _)
+        | Expr::Map(_, _)
+        | Expr::MetaExpr(_, _)
+        | Expr::BareList(_, _)
+        | Expr::UnknownForm(_) => return Some(None),
+    };
+    let mut values = meta
+        .entries
+        .iter()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let first = values.next();
+    if values.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+/// A binder-adopted decimal specialized to an integer keeps its f32 source
+/// default; all other polarities finalize at the substituted target.
+fn binder_float_literal_source_default(
+    meta: &[(String, Expr)],
+    raw: chelis_types::RawScalar,
+    substitutions: &UnordMap<String, Prim>,
+) -> Option<Prim> {
+    let single = |key: &str| {
+        let mut values = meta
+            .iter()
+            .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+        let value = values.next()?;
+        values.next().is_none().then_some(value)
+    };
+    // Round 5 P1: the DAG lane's twin of the host predicate reads the FIRST
+    // `type` entry for the same reason its sibling does. See the note on
+    // `binder_float_literal_keeps_f32_source` in `host.rs`: the checker and the
+    // interpreter both take the first entry, so a lowering reader that demands
+    // exactly one is stricter than the readers that decide acceptance and
+    // silently changes the answer when they disagree. `surf_literal_style`
+    // keeps `single`, because the checker rejects a duplicate of that key.
+    let binder = meta
+        .iter()
+        .find_map(|(candidate, value)| (candidate == "type").then_some(value))
+        .and_then(extract_scalar_precision_var_name)?;
+    let exact_unsuffixed = matches!(
+        single("surf_literal_style"),
+        Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"
+    );
+    if !exact_unsuffixed {
+        return None;
+    }
+    matches!(raw, chelis_types::RawScalar::Float(_))
+        .then(|| substitutions.get(&binder).copied())
+        .flatten()
+        .filter(Prim::is_integer)
+        .map(|_| Prim::F32)
+}
+
+/// Decode one canonical numeric `lit` under [04-LIT-1].
+///
+/// This is the fold's only literal ingress. It jointly validates the value
+/// atom, declared primitive, and the optional provenance marker. The sole
+/// cross-family form is an exact integer atom with one
+/// `literal_source: integer` marker at a float dtype; `scalar_from_i64`
+/// performs its one required target-width finalization without an f64 hop.
+fn extract_type_checked_literal(expr: &Expr) -> Option<chelis_types::ScalarValue> {
+    use chelis_types::{scalar_from_f64, scalar_from_i64};
+
+    let (DeepTag::Lit, _, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    let [Expr::Atom(atom, _)] = kids else {
+        return None;
+    };
+    let declared = optional_scalar_prim(expr)??;
+    let literal_source = unique_metadata_value(expr, "literal_source")?;
+    let integer_source = matches!(
+        literal_source,
+        Some(Expr::Atom(Atom::Name(source), _)) if source == "integer"
+    );
+
+    match (atom, declared, literal_source) {
+        (Atom::Int(value), prim, None) if prim.is_integer() => {
+            scalar_from_i64("lit", prim, *value).ok()
+        }
+        (Atom::Int(value), prim, Some(_)) if prim.is_float() && integer_source => {
+            scalar_from_i64("lit", prim, *value).ok()
+        }
+        (Atom::Float(value), prim, None) if prim.is_float() => {
+            scalar_from_f64("lit", prim, *value).ok()
+        }
+        (Atom::Bool(value), Prim::Bool, None) => {
+            scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
+        }
+        (Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _, _)
+        | (Atom::Int(_) | Atom::Float(_) | Atom::Bool(_), _, _) => None,
+    }
+}
+
+/// Evaluate the closed static scalar grammar while preserving a checked dtype
+/// at every edge.
+///
+/// This is stricter than `extract_numeric_leaf`, whose `RawScalar` form is
+/// intentionally useful for general literal folding but cannot distinguish
+/// `true` from integer `1`. A seed needs that distinction: literal payload and
+/// type metadata must agree before a wrapper can consume the value, while a
+/// successful explicit cast establishes its target dtype per [04-NUM-14].
+fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue> {
+    match expr {
+        // A BARE atom carries no type metadata, so there is nothing for the
+        // payload to agree with and this fold declines it. Stamping one here
+        // would invent a dtype the source never wrote, in two ways that both
+        // matter. It would widen the fold's accept set past the checker's,
+        // which classifies a bare integer atom as an UNSUFFIXED seed literal
+        // and rejects it (`chelis_types::infer::expr::seed_literal_form`); and
+        // any stamp it picked would contradict spec/04-type-system.md §5.3,
+        // where an integer literal defaults to `int32` and a float literal to
+        // `f32` rather than to the int64/f64 a seed wants. So
+        // `extract_type_checked_literal` stays the fold's ONLY literal
+        // ingress, as its doc says, and a bare atom reaches the caller's loud
+        // rejection instead of a guessed value (chelis#794).
+        Expr::Atom(_, _) => None,
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let (tag, _, kids) = stamped_parts(expr)?;
+            match tag {
+                DeepTag::Lit => extract_type_checked_literal(expr),
+                DeepTag::Cast => {
+                    let inner = extract_type_checked_scalar(kids.first()?)?;
+                    let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
+                    if optional_scalar_prim(expr)?.is_some_and(|declared| declared != target) {
+                        return None;
+                    }
+                    match chelis_deep::cast_mode_of(kids).ok()? {
+                        chelis_deep::CastMode::Checked => {
+                            chelis_types::CheckedCastPlan::new(inner.prim(), target)
+                                .ok()?
+                                .cast_scalar("cast", inner)
+                                .ok()
+                        }
+                        chelis_deep::CastMode::Trunc => {
+                            if !inner.prim().is_float() || !target.is_integer() {
+                                return None;
+                            }
+                            chelis_types::cast_trunc_scalar("cast_trunc", inner, target).ok()
+                        }
+                    }
+                }
+                DeepTag::App => {
+                    if kids.len() != 2 || !expr_is_var_named(&kids[0], "neg") {
+                        return None;
+                    }
+                    let inner = extract_type_checked_scalar(&kids[1])?;
+                    let negated = if inner.prim().is_float() {
+                        chelis_types::float_unop(chelis_types::FloatUnOp::Neg, inner).ok()?
+                    } else if inner.prim().is_integer() {
+                        chelis_types::int_unop(chelis_types::IntUnOp::Neg, inner).ok()?
+                    } else {
+                        return None;
+                    };
+                    if optional_scalar_prim(expr)?
+                        .is_some_and(|declared| declared != negated.prim())
+                    {
+                        return None;
+                    }
+                    Some(negated)
+                }
+                _ => None,
+            }
+        }
+        Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            None
+        }
+    }
+}
+
 /// Return true iff any element of `dims` is a wildcard placeholder
 /// dim (a `Named("*", _)` or `Named("", _)` entry that
 /// `crates/chelis-backend-c/src/emit.rs`'s `rename_anonymous_dims`
@@ -4237,6 +4760,36 @@ enum LoweredValue {
     },
 }
 
+const RUNTIME_LIST_VIEW_CTOR: &str = "__chelis_runtime_list_view";
+
+#[derive(Clone)]
+enum RuntimeListCheck {
+    NonNegative {
+        operation: &'static str,
+        argument: &'static str,
+        value: NodeId,
+    },
+    IndexBounds {
+        index: NodeId,
+        len: NodeId,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeListCheckDescriptor {
+    NonNegative {
+        operation: &'static str,
+        argument: &'static str,
+    },
+    IndexBounds,
+}
+
+pub(crate) struct LoweredSubexprWithControls {
+    pub(crate) dag: Dag,
+    pub(crate) value_root_count: usize,
+    pub(crate) list_checks: Vec<RuntimeListCheckDescriptor>,
+}
+
 impl LoweredValue {
     /// Whether `add_named_roots` would contribute zero roots for this
     /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
@@ -4334,7 +4887,7 @@ impl LoweredValue {
 /// marker because the concrete callable is inlined (chelis#1095/#1102).
 #[derive(Clone, Debug, Default)]
 struct CallableDependencyState {
-    unresolved_results: HashSet<NodeId>,
+    unresolved_results: UnordSet<NodeId>,
 }
 
 impl CallableDependencyState {
@@ -4344,7 +4897,7 @@ impl CallableDependencyState {
 
     fn output_depends_on_unresolved(&self, dag: &Dag, output: NodeId) -> bool {
         let mut pending = vec![output];
-        let mut visited = HashSet::new();
+        let mut visited = UnordSet::new();
         while let Some(node_id) = pending.pop() {
             if !visited.insert(node_id) {
                 continue;
@@ -4487,8 +5040,8 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
 
 struct LowerCtx {
     dag: Dag,
-    bindings: HashMap<String, LoweredValue>,
-    list_bindings: HashMap<String, Expr>,
+    bindings: UnordMap<String, LoweredValue>,
+    list_bindings: UnordMap<String, Expr>,
     /// chelis#369: `let`-bound names whose value is a `shape(operand,
     /// axis)` application, keyed by the bound name and holding the raw
     /// `shape(...)` Deep `Expr`. The canonical `tensor_full_like` idiom
@@ -4499,7 +5052,7 @@ struct LowerCtx {
     /// `let` indirection and the extent silently defaults to `Lit(1)`,
     /// producing the `Lit(n) vs Lit(1)` backward-DAG verification failure.
     /// Saved/restored across binding scopes exactly like `list_bindings`.
-    shape_bindings: HashMap<String, Expr>,
+    shape_bindings: UnordMap<String, Expr>,
     /// chelis#469/#528: `let`-bound names whose value const-folds to a
     /// compile-time integer (a literal, `cast(N, _)`, or integer arithmetic
     /// over such values — the §4.7.2 `SizeClass::Static` provenance the
@@ -4510,11 +5063,17 @@ struct LowerCtx {
     /// `let`-bound static size reaches the backend. Re-binding a name to a
     /// non-static value drops its stale entry (shadowing symmetry, mirroring
     /// `shape_bindings`). Saved/restored across binding scopes.
-    static_size_bindings: HashMap<String, i64>,
-    local_callables: HashMap<String, Expr>,
-    program_types: Arc<HashMap<String, TensorType>>,
-    program_defs: Arc<HashMap<String, Expr>>,
+    static_size_bindings: UnordMap<String, i64>,
+    local_callables: UnordMap<String, Expr>,
+    program_types: Arc<BTreeMap<String, TensorType>>,
+    program_defs: Arc<BTreeMap<String, Expr>>,
     random_seed: Option<u64>,
+    random_counter: u64,
+    /// Scalar Bool activation for path-sensitive Random nodes inside an AD
+    /// transform. `None` is the ordinary static-ordinal lane; `Some` makes
+    /// each draw consume the handled stream only when its executed path is
+    /// active at runtime.
+    random_path_condition: Option<NodeId>,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
     /// Recursion lowers by unrolling, so a self- or mutually-recursive call
@@ -4525,7 +5084,7 @@ struct LowerCtx {
     /// through the [`Self::reject_lowering_slice`] ladder; leak-on-panic is
     /// acceptable because every lowering error unwinds through the per-entry
     /// `catch_lowering` and the ctx is abandoned.
-    inlining_depths: HashMap<String, usize>,
+    inlining_depths: UnordMap<String, usize>,
     /// Total active inlined bodies across all names. Bounds the Rust stack
     /// (each level is roughly ten lowering frames) for deep or mutually
     /// recursive chains that stay under every per-name cap.
@@ -4537,7 +5096,7 @@ struct LowerCtx {
     /// param is registered; saved/restored across nested `fn` scopes
     /// alongside `bindings` and `local_callables`. See
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
-    fn_typed_params: HashSet<String>,
+    fn_typed_params: UnordSet<String>,
     /// Dataflow-local completeness evidence for unresolved callable
     /// applications. Grad subcontexts record a fresh result marker for each
     /// unresolved application, then reject only when one is reverse-reachable
@@ -4548,7 +5107,7 @@ struct LowerCtx {
     /// subtracts these from the declared root names before aligning them
     /// against `dag.roots()`.
     rootless_defs: BTreeSet<String>,
-    dim_substitutions: HashMap<String, DimInfo>,
+    dim_substitutions: UnordMap<String, DimInfo>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
     /// of the polymorphic def's signature. Populated at call sites of
@@ -4558,7 +5117,7 @@ struct LowerCtx {
     /// slot into a concrete `Prim` before backends see the type. After
     /// monomorphization every reachable tensor type carries
     /// `TensorPrec::Concrete(_)` per spec/04-type-system.md §5.8.1.
-    prec_substitutions: HashMap<String, Prim>,
+    prec_substitutions: UnordMap<String, Prim>,
     /// Tier-2 rank polymorphism (spec/design/rank_polymorphism.md): rank-var
     /// substitutions, keyed by the `..r` rank-var name as it appears in a sole
     /// `(d-rank {} r)` dim slot of a rank-polymorphic def's signature. The
@@ -4573,7 +5132,7 @@ struct LowerCtx {
     /// monomorphization every reachable tensor type is `Dim::Rank`-free per
     /// the spec's monomorphization invariant; a surviving rank var is a
     /// monomorphization bug, not a backend input.
-    rank_substitutions: HashMap<String, Vec<DimInfo>>,
+    rank_substitutions: UnordMap<String, Vec<DimInfo>>,
     /// Issue #388 / chelis#549: for each named axis, the positional index it
     /// occupied in a formal parameter shape at the current inlined call site,
     /// paired with the concrete extent (`DimInfo`) the anchor was recorded with.
@@ -4597,11 +5156,15 @@ struct LowerCtx {
     /// (one at different positions/extents across formals) is excluded at
     /// recording time so the loud by-name failure path still fires for genuinely
     /// unresolvable axes.
-    dim_axis_positions: HashMap<String, (usize, DimInfo)>,
+    dim_axis_positions: UnordMap<String, (usize, DimInfo)>,
     /// True only while lowering the body of an AD transform. Host-list
     /// combinator rewrites are an AD bridge, not the general C/backend
     /// lowering for ordinary list programs.
     allow_host_list_ad_rewrites: bool,
+    /// Runtime checks owned by staged List views. The tensor DAG carries the
+    /// checked scalar values as private helper roots; the host lane turns the
+    /// descriptors into the same traps as ordinary List evaluation.
+    runtime_list_checks: Vec<RuntimeListCheck>,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
     /// helper that calls `self.dag.add_node(...)` can pass the
@@ -4613,31 +5176,34 @@ struct LowerCtx {
 
 impl LowerCtx {
     fn new(
-        program_types: impl Into<Arc<HashMap<String, TensorType>>>,
-        program_defs: impl Into<Arc<HashMap<String, Expr>>>,
+        program_types: impl Into<Arc<BTreeMap<String, TensorType>>>,
+        program_defs: impl Into<Arc<BTreeMap<String, Expr>>>,
         linearity: LinearityInfo,
     ) -> Self {
         Self {
             dag: Dag::new(),
-            bindings: HashMap::new(),
-            list_bindings: HashMap::new(),
-            shape_bindings: HashMap::new(),
-            static_size_bindings: HashMap::new(),
-            local_callables: HashMap::new(),
+            bindings: UnordMap::new(),
+            list_bindings: UnordMap::new(),
+            shape_bindings: UnordMap::new(),
+            static_size_bindings: UnordMap::new(),
+            local_callables: UnordMap::new(),
             program_types: program_types.into(),
             program_defs: program_defs.into(),
             random_seed: None,
+            random_counter: 0,
+            random_path_condition: None,
             linearity,
-            inlining_depths: HashMap::new(),
+            inlining_depths: UnordMap::new(),
             inlining_active: 0,
-            fn_typed_params: HashSet::new(),
+            fn_typed_params: UnordSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
-            dim_substitutions: HashMap::new(),
-            prec_substitutions: HashMap::new(),
-            rank_substitutions: HashMap::new(),
-            dim_axis_positions: HashMap::new(),
+            dim_substitutions: UnordMap::new(),
+            prec_substitutions: UnordMap::new(),
+            rank_substitutions: UnordMap::new(),
+            dim_axis_positions: UnordMap::new(),
             allow_host_list_ad_rewrites: false,
+            runtime_list_checks: Vec::new(),
             current_span_id: None,
         }
     }
@@ -4799,12 +5365,13 @@ impl LowerCtx {
         &self,
         subctx: &mut LowerCtx,
         shadowed: &[String],
-    ) -> HashMap<String, NodeId> {
-        let shadowed = shadowed.iter().cloned().collect::<HashSet<_>>();
-        let mut captures = HashMap::new();
+    ) -> UnordMap<String, NodeId> {
+        let shadowed = shadowed.iter().cloned().collect::<UnordSet<_>>();
+        let mut captures = UnordMap::new();
         for (name, value) in self
             .bindings
-            .iter()
+            .to_sorted()
+            .into_iter()
             .filter(|(name, _)| !shadowed.contains(*name))
         {
             let LoweredValue::Node(node_id) = value else {
@@ -4830,13 +5397,15 @@ impl LowerCtx {
         }
         subctx.local_callables.extend(
             self.local_callables
-                .iter()
+                .to_sorted()
+                .into_iter()
                 .filter(|(name, _)| !shadowed.contains(*name))
                 .map(|(name, value)| (name.clone(), value.clone())),
         );
         subctx.fn_typed_params.extend(
             self.fn_typed_params
-                .iter()
+                .to_sorted()
+                .into_iter()
                 .filter(|name| !shadowed.contains(*name))
                 .cloned(),
         );
@@ -4844,7 +5413,7 @@ impl LowerCtx {
     }
 
     fn type_from_type_expr(expr: &Expr) -> TensorType {
-        Self::type_from_type_expr_with_subst(expr, &HashMap::new(), &HashMap::new())
+        Self::type_from_type_expr_with_subst(expr, &UnordMap::new(), &UnordMap::new())
     }
 
     /// WS-A8: precision-aware variant of [`Self::type_from_type_expr`].
@@ -4858,8 +5427,8 @@ impl LowerCtx {
     /// boundary without a concrete instantiation site).
     fn type_from_type_expr_with_subst(
         expr: &Expr,
-        prec_subst: &HashMap<String, Prim>,
-        rank_subst: &HashMap<String, Vec<DimInfo>>,
+        prec_subst: &UnordMap<String, Prim>,
+        rank_subst: &UnordMap<String, Vec<DimInfo>>,
     ) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
@@ -4870,10 +5439,25 @@ impl LowerCtx {
         if let Some(inner) = Self::try_extract_ref_type(expr) {
             return Self::type_from_type_expr_with_subst(inner, prec_subst, rank_subst);
         }
+        // [02-SURF-P10b]: resolve a bare scalar binder stamp at the call site.
+        // Internal callees can remain unbound until inlining, so preserve the
+        // existing default when this substitution map has no entry.
+        if let Some(var_name) = Self::scalar_precision_var_name(expr)
+            && let Some(prim) = prec_subst.get(&var_name).copied()
+        {
+            return TensorType {
+                dims: vec![],
+                precision: prim,
+            };
+        }
         if let Some(tt) = Self::try_extract_tensor_type_with_subst(expr, prec_subst, rank_subst) {
             return tt;
         }
         Self::default_type()
+    }
+
+    fn scalar_precision_var_name(expr: &Expr) -> Option<String> {
+        extract_scalar_precision_var_name(expr)
     }
 
     /// issue #289: call-site variant of [`Self::type_from_type_expr_with_subst`]
@@ -4903,8 +5487,8 @@ impl LowerCtx {
     /// `prec_subst` lacks the var).
     fn formal_param_type_for_call(
         expr: &Expr,
-        prec_subst: &HashMap<String, Prim>,
-        rank_subst: &HashMap<String, Vec<DimInfo>>,
+        prec_subst: &UnordMap<String, Prim>,
+        rank_subst: &UnordMap<String, Vec<DimInfo>>,
     ) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
@@ -4971,8 +5555,8 @@ impl LowerCtx {
     /// fires per the F2 backend tripwire contract.
     fn try_extract_tensor_type_with_subst(
         expr: &Expr,
-        prec_subst: &HashMap<String, Prim>,
-        rank_subst: &HashMap<String, Vec<DimInfo>>,
+        prec_subst: &UnordMap<String, Prim>,
+        rank_subst: &UnordMap<String, Vec<DimInfo>>,
     ) -> Option<TensorType> {
         // Flat format: (t-tensor {} dim1 dim2 ... (t-prim {} p))
         // Children after tag+meta: dimension nodes followed by a t-prim node as the last child.
@@ -5099,27 +5683,76 @@ impl LowerCtx {
         }
     }
 
-    fn dim_info_from_dim_expr(size: &DimExpr) -> Option<DimInfo> {
+    fn dim_info_from_rt_dim(&self, size: &RtDim, inputs: &[NodeId]) -> Option<DimInfo> {
         match size {
-            DimExpr::Concrete(value) => Some(DimInfo::Lit(*value)),
-            DimExpr::Sym(name) => Some(DimInfo::Named(name.clone(), None)),
-            DimExpr::Mul(_, _) | DimExpr::Div(_, _) => None,
+            RtDim::Lit(value) => Some(DimInfo::Lit(*value)),
+            RtDim::InputAxis {
+                tensor,
+                axis: RtAxis::Lit(axis),
+            } => self
+                .dag
+                .get(*inputs.get(*tensor)?)?
+                .output_type
+                .dims
+                .get(usize::try_from(*axis).ok()?)
+                .cloned(),
+            RtDim::Node(_) | RtDim::ToEnd | RtDim::Sym(_) => None,
         }
     }
 
-    fn fallback_expand_type(
+    /// `insert`'s result type: the operand's dims with one axis added.
+    fn inserted_axis_type(
         &self,
         input: NodeId,
         axis: usize,
-        size: &DimExpr,
+        size: &RtDim,
+        inputs: &[NodeId],
     ) -> Option<TensorType> {
         let input_ty = self.dag.get(input)?.output_type.clone();
-        let inserted_dim = Self::dim_info_from_dim_expr(size)?;
+        let inserted_dim = self.dim_info_from_rt_dim(size, inputs)?;
         let mut dims = input_ty.dims;
         if axis > dims.len() {
             return None;
         }
         dims.insert(axis, inserted_dim);
+        Some(TensorType {
+            dims,
+            precision: input_ty.precision,
+        })
+    }
+
+    /// `expand`'s result type: the operand's dims with one extent replaced.
+    ///
+    /// The replaced dim is taken from the CHECKER's stamped type whenever that
+    /// type has the operand's rank, not from the size's own `DimInfo`. The
+    /// stamped dim is the claim the program makes about that axis; deriving it
+    /// from the size instead would make the claim and its source the same
+    /// value, and the derived equality class would then owe no runtime guard
+    /// (`spec/design/runtime_extents.md` C2.4, C2.7). Only when the stamp is
+    /// unusable does the size supply the dim.
+    ///
+    /// Precision comes from the operand chain rather than from the stamp, for
+    /// the reason the `permute` arm records: a monomorphization rename can
+    /// leave the stamped type carrying a renamed `(t-var ...)` precision that
+    /// is absent from the callsite substitutions.
+    fn broadcast_axis_type(
+        &self,
+        input: NodeId,
+        axis: usize,
+        size: &RtDim,
+        inputs: &[NodeId],
+        stamped: &TensorType,
+    ) -> Option<TensorType> {
+        let input_ty = self.dag.get(input)?.output_type.clone();
+        let mut dims = input_ty.dims;
+        if axis >= dims.len() {
+            return None;
+        }
+        dims[axis] = if stamped.dims.len() == dims.len() {
+            stamped.dims[axis].clone()
+        } else {
+            self.dim_info_from_rt_dim(size, inputs)?
+        };
         Some(TensorType {
             dims,
             precision: input_ty.precision,
@@ -5697,7 +6330,32 @@ impl LowerCtx {
         // atoms travel their exact i64 (no `as f64` laundering, which
         // collapsed int64 above 2^53); an out-of-domain literal at its
         // ascribed dtype is a loud lowering diagnostic, not a wrap.
-        let prim = ty.precision;
+        let raw = if let Some(val_expr) = elems.get(2) {
+            match val_expr {
+                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
+                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
+                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
+                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
+                _ => chelis_types::RawScalar::Int(0),
+            }
+        } else {
+            chelis_types::RawScalar::Int(0)
+        };
+        // §5.6: a decimal actualized across families keeps the §5.3 f32
+        // source default; the surrounding Cast applies [04-NUM-14]. Integer
+        // atoms and same-family literals still finalize at the call-site
+        // width. The exact metadata carrier makes this value-independent.
+        let prim = elems
+            .get(1)
+            .and_then(|meta| match meta {
+                Expr::Map(meta, _) => binder_float_literal_source_default(
+                    &meta.entries,
+                    raw,
+                    &self.prec_substitutions,
+                ),
+                _ => None,
+            })
+            .unwrap_or(ty.precision);
         // A string literal is not a numeric constant and has no sealed
         // payload to finalize: `finalize_scalar`'s `Prim::String` arm is
         // an unreachable-by-construction PANIC, so reaching it here would
@@ -5714,17 +6372,6 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             )
         }
-        let raw = if let Some(val_expr) = elems.get(2) {
-            match val_expr {
-                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
-                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
-                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
-                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
-                _ => chelis_types::RawScalar::Int(0),
-            }
-        } else {
-            chelis_types::RawScalar::Int(0)
-        };
         let value = match chelis_types::finalize_scalar("const", prim, raw) {
             Ok(value) => value,
             Err(trap) => raise_lowering_error(
@@ -5738,10 +6385,14 @@ impl LowerCtx {
             ),
         };
 
+        let literal_ty = TensorType {
+            dims: ty.dims,
+            precision: prim,
+        };
         LoweredValue::Node(self.dag.add_node(
             RiscOp::Const { value },
             vec![],
-            ty,
+            literal_ty,
             self.current_span_id.clone(),
         ))
     }
@@ -5768,6 +6419,13 @@ impl LowerCtx {
                 // honors the rule via `current_span_id` on add_node).
                 self.append_current_span_to_lowered_value(&cached);
                 return cached;
+            }
+            if self.allow_host_list_ad_rewrites && name == "Nil" {
+                return LoweredValue::Adt {
+                    ctor: "Nil".to_string(),
+                    field_names: None,
+                    fields: Vec::new(),
+                };
             }
             // Reject `(var X)` where X is a known builtin name. The DAG
             // emits a Load when it encounters a free var, but a builtin
@@ -5858,6 +6516,35 @@ impl LowerCtx {
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
+            if self.allow_host_list_ad_rewrites && func_name == "Cons" && elems.len() == 5 {
+                return LoweredValue::Adt {
+                    ctor: "Cons".to_string(),
+                    field_names: None,
+                    fields: vec![self.lower_expr(&elems[3]), self.lower_expr(&elems[4])],
+                };
+            }
+            // [05-OP-35] A statically staged List keeps its exact spine, so
+            // `len` is discrete compile-time data inside a differentiated
+            // body. Materialize that exact int64 constant before `lower_if`
+            // sees it; leaving `len` as a synthetic tensor Load would make a
+            // static empty/non-empty guard look runtime-dependent and mix an
+            // int64 mask into the floating adjoint branches.
+            if self.allow_host_list_ad_rewrites && func_name == "len" && elems.len() == 4 {
+                let list = self.lower_expr(&elems[3]);
+                if let Some((_, len, _)) = runtime_list_view_parts(&list) {
+                    return LoweredValue::Node(len);
+                }
+                if let Some(items) = adt_cons_chain_values(&list) {
+                    let value = i64::try_from(items.len()).unwrap_or_else(|_| {
+                        raise_fatal_lowering_error(
+                            "statically staged List length does not fit int64",
+                            Some(elems[3].span()),
+                            elems[3].span_id().map(ToOwned::to_owned),
+                        )
+                    });
+                    return LoweredValue::Node(self.int64_constant(value));
+                }
+            }
             // chelis#520: a positional ADT constructor application
             // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
             // as `lower_var`'s nullary-constructor branch; a constructor
@@ -5886,6 +6573,19 @@ impl LowerCtx {
             if func_name == "concat"
                 && elems.len() == 5
                 && let Some(value) = self.try_lower_static_list_concat(&elems[3], &elems[4])
+            {
+                return value;
+            }
+            // [05-OP-35] List adjoints: inside `grad`, runtime List
+            // arguments are staged as a closed Cons/Nil spine of tensor
+            // leaves. Preserve that structure through the three exported
+            // index wrappers so ordinary tensor AD assigns cotangents to
+            // the exact selected/taken/dropped positions.
+            if self.allow_host_list_ad_rewrites
+                && matches!(func_name.as_str(), "index" | "take" | "drop")
+                && elems.len() == 5
+                && let Some(value) =
+                    self.try_lower_staged_list_selection(func_name, &elems[3], &elems[4], &ty)
             {
                 return value;
             }
@@ -5936,7 +6636,7 @@ impl LowerCtx {
         });
         match callable {
             CallableExpr::Plain(fn_expr) => {
-                Some(self.lower_plain_callable_app(&fn_expr, args, app_span, inlining_name))
+                Some(self.lower_plain_callable_app(&fn_expr, args, ty, app_span, inlining_name))
             }
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -6000,13 +6700,13 @@ impl LowerCtx {
     }
 
     fn resolve_callable_expr(&self, expr: &Expr) -> Option<CallableExpr> {
-        self.resolve_callable_expr_inner(expr, &mut HashSet::new())
+        self.resolve_callable_expr_inner(expr, &mut UnordSet::new())
     }
 
     fn resolve_callable_expr_inner(
         &self,
         expr: &Expr,
-        visited: &mut HashSet<String>,
+        visited: &mut UnordSet<String>,
     ) -> Option<CallableExpr> {
         let (tag, _, kids) = stamped_parts(expr)?;
         match tag {
@@ -6168,10 +6868,9 @@ impl LowerCtx {
     /// values. Used by both `lower_grad_callable_app` (which lowers
     /// expression arguments first) and `lower_pipe` (which inherits the
     /// argument from the previous pipe stage). A `Node` argument is the
-    /// classic tensor/scalar lane; an `Adt` argument (chelis#520 D2) is a
-    /// statically-constructed record whose float-tensor fields are
-    /// differentiated field-wise, producing an `Adt`-shaped gradient (the
-    /// pytree contract of spec/design/differentiable_language.md Decision 6).
+    /// scalar/tensor lane; tuple and ADT arguments recursively flatten their
+    /// differentiable float leaves and repack the resulting cotangent into
+    /// the exact primal structure required by spec/06 section 2.1.
     fn lower_grad_callable_with_values(
         &mut self,
         fn_expr: &Expr,
@@ -6187,73 +6886,30 @@ impl LowerCtx {
             .enumerate()
             .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
             .collect();
-        // chelis#520 D2: classify each already-lowered argument. A `Node`
-        // is the classic tensor/scalar lane. An `Adt` is a statically-
-        // constructed record: its fields must themselves be single tensor
-        // nodes (nested ADT/tuple fields are outside the slice and fail
-        // loudly). A `Tuple` argument has never been accepted here.
+        // Classify each already-lowered argument. A `Node` is the
+        // scalar/tensor lane. Tuples and ADTs are recursively flattened to
+        // typed leaf nodes while retaining a template for exact repacking.
         enum GradArgPlan {
             Tensor(NodeId),
-            Adt {
-                ctor: String,
-                field_names: Option<Vec<String>>,
-                field_nodes: Vec<NodeId>,
+            Structured {
+                template: LoweredValue,
+                leaf_nodes: Vec<NodeId>,
             },
         }
-        // chelis#520 D2: a multi-argument grad call may mix ADT and
-        // tensor/scalar arguments. Each argument is lowered independently
-        // below into its own gradient plan; the per-argument result plans
-        // repack the flat gradient roots back into the correct structure
-        // (an `Adt` for an ADT parameter, a `Node` for a tensor one), so
-        // the result is a `Tuple` whose slots line up 1:1 with the
-        // selected parameters. Structure alignment is preserved because
-        // every ADT field root gets a distinct dotted key.
+        // A multi-argument grad call may mix structured and scalar/tensor
+        // arguments. Each argument owns one result plan, so flat reverse
+        // roots repack into slots that line up with selected parameters.
         let plans: Vec<GradArgPlan> = actual_args
             .iter()
-            .enumerate()
-            .map(|(index, arg)| match arg {
+            .map(|arg| match arg {
                 LoweredValue::Node(id) => GradArgPlan::Tensor(*id),
-                LoweredValue::Adt {
-                    ctor,
-                    field_names,
-                    fields,
-                } => {
-                    let field_nodes = fields
-                        .iter()
-                        .enumerate()
-                        .map(|(fidx, field)| {
-                            field.as_single_node().unwrap_or_else(|| {
-                                let label = field_names
-                                    .as_ref()
-                                    .and_then(|names| names.get(fidx).cloned())
-                                    .unwrap_or_else(|| fidx.to_string());
-                                raise_fatal_lowering_error(
-                                    format!(
-                                        "`grad(...)` argument {index}: field `{label}` of \
-                                         constructor `{ctor}` is not a single tensor value; \
-                                         nested ADT/tuple fields are not supported yet \
-                                         (chelis#520 D2)"
-                                    ),
-                                    Some(app_span),
-                                    None,
-                                )
-                            })
-                        })
-                        .collect();
-                    GradArgPlan::Adt {
-                        ctor: ctor.clone(),
-                        field_names: field_names.clone(),
-                        field_nodes,
+                LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
+                    let leaf_nodes = recursive_list_leaf_nodes(arg);
+                    GradArgPlan::Structured {
+                        template: arg.clone(),
+                        leaf_nodes,
                     }
                 }
-                LoweredValue::Tuple(_) => raise_fatal_lowering_error(
-                    format!(
-                        "`grad(...)` argument {index} must be a tensor, scalar, or ADT of \
-                         float tensors; got a tuple value"
-                    ),
-                    Some(app_span),
-                    None,
-                ),
             })
             .collect();
         let node_type = |ctx: &Self, id: NodeId| {
@@ -6281,7 +6937,7 @@ impl LowerCtx {
         // wins on overlap). See the longer note at the sub-context seeding
         // below.
         let mut grad_prec_subst = self.prec_substitutions.clone();
-        grad_prec_subst.extend(tensor_prec_substitutions(
+        grad_prec_subst.merge(tensor_prec_substitutions(
             &subst_param_type_exprs,
             &subst_actual_types,
         ));
@@ -6294,7 +6950,7 @@ impl LowerCtx {
         // differentiating the body monomorphizes to concrete ranks, exactly
         // as the precision path does.
         let mut grad_rank_subst = self.rank_substitutions.clone();
-        grad_rank_subst.extend(tensor_rank_substitutions(
+        grad_rank_subst.merge(tensor_rank_substitutions(
             &subst_param_type_exprs,
             &subst_actual_types,
             &self.dim_axis_positions,
@@ -6358,11 +7014,41 @@ impl LowerCtx {
         // reached while differentiating the body monomorphizes to concrete
         // ranks instead of tripping the rank-monomorphization boundary.
         subctx.rank_substitutions = grad_rank_subst;
+        // Random wrapper adjoints are pathwise: the differentiated graph must
+        // consume the same handled stream as the forward execution. A fresh
+        // lowering context otherwise silently falls back to seed zero.
+        subctx.random_seed = self.random_seed;
+        subctx.random_counter = self.random_counter;
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
         subctx.current_span_id = self.current_span_id.clone();
+        let random_path_true = subctx.dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+            subctx.current_span_id.clone(),
+        );
+        subctx.random_path_condition = Some(random_path_true);
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        // Generated structured-leaf Loads share one name-keyed splice map
+        // with ordinary parameters and captured values. Keep a fresh-name
+        // set over that complete namespace: deriving a load name from an
+        // authored parameter alone lets another parameter capture the leaf
+        // (for example `xs` beside `xs__structured_leaf_0`).
+        let mut used_load_names = param_names
+            .iter()
+            .cloned()
+            .chain(
+                captured_bindings
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(name, _)| name.clone()),
+            )
+            .collect::<UnordSet<_>>();
         let mut wrt = Vec::new();
         // Actual argument node backing each `wrt` load, in `wrt` order
         // (tensor param -> the argument node, ADT field -> the field node).
@@ -6377,10 +7063,9 @@ impl LowerCtx {
         // it owns and how to reshape them.
         enum GradResultPlan {
             Tensor,
-            Adt {
-                ctor: String,
-                field_names: Option<Vec<String>>,
-                field_count: usize,
+            Structured {
+                template: LoweredValue,
+                differentiable_leaves: Vec<bool>,
             },
         }
         let mut result_plans: Vec<GradResultPlan> = Vec::new();
@@ -6390,74 +7075,68 @@ impl LowerCtx {
             .enumerate()
         {
             match plans.get(index) {
-                Some(GradArgPlan::Adt {
-                    ctor,
-                    field_names,
-                    field_nodes,
+                Some(GradArgPlan::Structured {
+                    template,
+                    leaf_nodes,
                 }) => {
-                    // chelis#520 D2: an ADT-typed differentiated parameter.
-                    // Every float-tensor field becomes its own Load + wrt
-                    // entry; the parameter name binds to the Adt of those
-                    // loads so the body's `match`/`access` destructuring
-                    // resolves statically.
-                    let selected = match wrt_indices {
-                        Some(indices) => indices.contains(&index),
-                        None => true,
-                    };
-                    let mut field_values = Vec::with_capacity(field_nodes.len());
-                    for (fidx, field_node) in field_nodes.iter().enumerate() {
-                        let field_ty = node_type(self, *field_node);
-                        if selected && !field_ty.precision.is_float() {
-                            let label = field_names
-                                .as_ref()
-                                .and_then(|names| names.get(fidx).cloned())
-                                .unwrap_or_else(|| fidx.to_string());
-                            raise_fatal_lowering_error(
-                                format!(
-                                    "`grad(...)` over ADT-typed parameter `{name}`: field \
-                                     `{label}` of constructor `{ctor}` is not a float \
-                                     tensor; mixed-struct gradients are not supported yet \
-                                     (chelis#520 D2)"
-                                ),
-                                Some(app_span),
-                                None,
-                            );
-                        }
-                        let load_name = format!("{name}__adt_field_{fidx}");
+                    let differentiable_leaves = leaf_nodes
+                        .iter()
+                        .map(|node| node_type(self, *node).precision.is_float())
+                        .collect::<Vec<_>>();
+                    let differentiable = differentiable_leaves.iter().any(|leaf| *leaf);
+                    let selected = differentiable
+                        && wrt_indices.is_none_or(|indices| indices.contains(&index));
+                    let mut leaf_values = Vec::with_capacity(leaf_nodes.len());
+                    for (leaf_index, element_node) in leaf_nodes.iter().enumerate() {
+                        let element_ty = node_type(self, *element_node);
+                        let mut suffix = 0usize;
+                        let load_name = loop {
+                            let candidate =
+                                format!("__chelis_grad_arg_{index}_leaf_{leaf_index}_{suffix}");
+                            if used_load_names.insert(candidate.clone()) {
+                                break candidate;
+                            }
+                            suffix += 1;
+                        };
                         let load = subctx.dag.add_node(
                             RiscOp::Load {
                                 name: load_name.as_str().into(),
                             },
                             vec![],
-                            field_ty.clone(),
+                            element_ty.clone(),
                             subctx.current_span_id.clone(),
                         );
-                        if selected {
+                        if selected && differentiable_leaves[leaf_index] {
                             wrt.push(load);
-                            wrt_actuals.push(*field_node);
+                            wrt_actuals.push(*element_node);
                         }
-                        remap_formal_types.push(field_ty.clone());
-                        remap_actual_types.push(field_ty);
-                        adt_arg_map_entries.push((load_name, *field_node));
-                        field_values.push(LoweredValue::Node(load));
+                        remap_formal_types.push(element_ty.clone());
+                        remap_actual_types.push(element_ty);
+                        adt_arg_map_entries.push((load_name, *element_node));
+                        leaf_values.push(LoweredValue::Node(load));
                     }
                     if selected {
-                        result_plans.push(GradResultPlan::Adt {
-                            ctor: ctor.clone(),
-                            field_names: field_names.clone(),
-                            field_count: field_nodes.len(),
+                        result_plans.push(GradResultPlan::Structured {
+                            template: template.clone(),
+                            differentiable_leaves,
                         });
                     }
+                    let mut leaf_values = leaf_values.into_iter();
                     subctx.bindings.insert(
                         name.clone(),
-                        LoweredValue::Adt {
-                            ctor: ctor.clone(),
-                            field_names: field_names.clone(),
-                            fields: field_values,
-                        },
+                        rebuild_recursive_list_like(template, &mut leaf_values),
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
+                    // [05-OP-35] List selection counts are discrete scalar
+                    // parameters, but the staged List spine still needs their
+                    // exact call-site value while the grad body is lowered.
+                    // Preserve a statically known integer through the fresh
+                    // Load so an imported list_index/take_list/drop_list
+                    // wrapper can select the correct primal positions.
+                    if let Some(value) = self.static_i64_from_node(*actual) {
+                        subctx.static_size_bindings.insert(name.clone(), value);
+                    }
                     let load = subctx.dag.add_node(
                         RiscOp::Load {
                             name: name.as_str().into(),
@@ -6501,6 +7180,11 @@ impl LowerCtx {
         }
         let lowered_output = subctx.lower_expr(body);
         let output = lowered_output.expect_node("grad requires a scalar floating output");
+        // The subcontext starts at the enclosing handler's current ordinal.
+        // Hand the consumed ordinal count back before lowering any following
+        // expression in the same `with seed` region; otherwise that expression
+        // reuses the grad forward pass's random source words.
+        self.random_counter = subctx.random_counter;
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -6511,6 +7195,46 @@ impl LowerCtx {
             // concrete callable is supplied, ordinary call-site inlining
             // re-lowers this body without markers and computes the real value.
             return LoweredValue::Tuple(Vec::new());
+        }
+        // Runtime List checks are host-visible control results even when the
+        // selected cotangent is structurally empty or the differentiated
+        // output is constant. Give every descriptor its own Copy root before
+        // AD; grad pruning preserves forward roots in order, so the enclosing
+        // helper can recover each value without exposing a new GradResult
+        // field or assuming that pruning preserves numeric node ids.
+        let runtime_list_checks = std::mem::take(&mut subctx.runtime_list_checks);
+        let mut retained_checks = Vec::with_capacity(runtime_list_checks.len());
+        for check in runtime_list_checks {
+            let mut retain = |value: NodeId| {
+                let output_type = subctx
+                    .dag
+                    .get(value)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                let retained = subctx.dag.add_node(
+                    RiscOp::Copy,
+                    vec![value],
+                    output_type,
+                    subctx.current_span_id.clone(),
+                );
+                subctx.dag.add_root(retained);
+                retained
+            };
+            retained_checks.push(match check {
+                RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value,
+                } => RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value: retain(value),
+                },
+                RuntimeListCheck::IndexBounds { index, len } => RuntimeListCheck::IndexBounds {
+                    index: retain(index),
+                    len: retain(len),
+                },
+            });
         }
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
@@ -6533,18 +7257,42 @@ impl LowerCtx {
             .zip(plans.iter())
             .filter_map(|(name, plan)| match plan {
                 GradArgPlan::Tensor(actual) => Some((name.clone(), *actual)),
-                // ADT params are served by their per-field load entries.
-                GradArgPlan::Adt { .. } => None,
+                // Structured params are served by their per-leaf entries.
+                GradArgPlan::Structured { .. } => None,
             })
             .chain(adt_arg_map_entries)
-            .chain(captured_bindings)
-            .collect::<HashMap<_, _>>();
+            .chain(captured_bindings.into_sorted())
+            .collect::<UnordMap<_, _>>();
         let specialized_grad_dag = Self::remap_callable_dim_symbols(
             &grad_result.dag,
             &remap_formal_types,
             &remap_actual_types,
         );
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
+        let mut control_roots = grad_result.dag.roots().iter().copied();
+        for check in retained_checks {
+            self.runtime_list_checks.push(match check {
+                RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value: _,
+                } => RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value: remap[&control_roots
+                        .next()
+                        .expect("retained List check root must survive AD")],
+                },
+                RuntimeListCheck::IndexBounds { .. } => RuntimeListCheck::IndexBounds {
+                    index: remap[&control_roots
+                        .next()
+                        .expect("retained List index root must survive AD")],
+                    len: remap[&control_roots
+                        .next()
+                        .expect("retained List length root must survive AD")],
+                },
+            });
+        }
         // Per-wrt gradient node (post-splice). Any output-reachable unresolved
         // callable result returned above, so a `None` entry here is proven to
         // mean that the wrt input does not influence the known output
@@ -6590,32 +7338,30 @@ impl LowerCtx {
                         }
                     }
                 }
-                GradResultPlan::Adt {
-                    ctor,
-                    field_names,
-                    field_count,
+                GradResultPlan::Structured {
+                    template,
+                    differentiable_leaves,
                 } => {
-                    let mut fields = Vec::with_capacity(*field_count);
-                    for _ in 0..*field_count {
-                        let grad_node = grad_iter.next().flatten();
-                        let actual = wrt_actual_iter.next();
-                        let node = grad_node.unwrap_or_else(|| {
-                            // The field does not influence the output:
-                            // its gradient is exactly zero. Materialize
-                            // the zero so the gradient struct keeps the
-                            // input's field structure (pytree contract).
-                            let field_ty = actual
-                                .map(|id| node_type(self, id))
-                                .unwrap_or_else(Self::default_type);
-                            self.zero_tensor_node(&field_ty, actual)
-                        });
-                        fields.push(LoweredValue::Node(node));
+                    let mut leaves = Vec::with_capacity(differentiable_leaves.len());
+                    for differentiable in differentiable_leaves {
+                        if *differentiable {
+                            let grad_node = grad_iter.next().flatten();
+                            let actual = wrt_actual_iter.next();
+                            let node = grad_node.unwrap_or_else(|| {
+                                let element_ty = actual
+                                    .map(|id| node_type(self, id))
+                                    .unwrap_or_else(Self::default_type);
+                                self.zero_tensor_node(&element_ty, actual)
+                            });
+                            leaves.push(LoweredValue::Node(node));
+                        } else {
+                            // Discrete cotangent leaves are unit; they do not
+                            // consume a backward root or an actual tensor.
+                            leaves.push(LoweredValue::Tuple(Vec::new()));
+                        }
                     }
-                    packed.push(LoweredValue::Adt {
-                        ctor: ctor.clone(),
-                        field_names: field_names.clone(),
-                        fields,
-                    });
+                    let mut leaves = leaves.into_iter();
+                    packed.push(rebuild_recursive_list_like(template, &mut leaves));
                 }
             }
         }
@@ -6627,7 +7373,7 @@ impl LowerCtx {
                     .iter()
                     .filter_map(|plan| match plan {
                         GradArgPlan::Tensor(actual) => Some(*actual),
-                        GradArgPlan::Adt { .. } => None,
+                        GradArgPlan::Structured { .. } => None,
                     })
                     .collect();
                 if candidate_inputs.len() == plans.len() {
@@ -6640,7 +7386,7 @@ impl LowerCtx {
                 }
                 LoweredValue::Node(*single)
             }
-            [single_adt @ LoweredValue::Adt { .. }] => single_adt.clone(),
+            [single] => single.clone(),
             _ => LoweredValue::Tuple(packed),
         }
     }
@@ -6675,20 +7421,34 @@ impl LowerCtx {
         let mut dims = Vec::new();
         for (axis, dim) in ty.dims.iter().enumerate() {
             dims.push(dim.clone());
-            let size = DimExpr::from(dim);
-            let symbolic = size.as_concrete().is_none();
+            let (size, inputs) = match dim {
+                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                    (RtDim::Lit(*value), vec![node])
+                }
+                DimInfo::Named(_, None) => {
+                    let source = primal.unwrap_or_else(|| {
+                        panic!(
+                            "symbolic zero tensor axis {axis} requires its differentiated primal shape source"
+                        )
+                    });
+                    (
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits int32")),
+                        },
+                        vec![node, source],
+                    )
+                }
+            };
             node = self.dag.add_node(
                 RiscOp::Expand { axis, size },
-                vec![node],
+                inputs,
                 TensorType {
                     dims: dims.clone(),
                     precision: ty.precision,
                 },
                 self.current_span_id.clone(),
             );
-            if symbolic && let Some(primal) = primal {
-                self.dag.add_shape_dep(node, primal);
-            }
         }
         node
     }
@@ -6697,6 +7457,7 @@ impl LowerCtx {
         &mut self,
         fn_expr: &Expr,
         args: &[Expr],
+        expected_return_ty: &TensorType,
         _app_span: Span,
         inlining_name: Option<String>,
     ) -> LoweredValue {
@@ -6753,6 +7514,11 @@ impl LowerCtx {
             .zip(param_types)
             .zip(param_type_exprs.iter())
         {
+            // Preserve a caller-known integer through the inlined parameter
+            // name. This is required by the [05-OP-35] wrappers: their public
+            // count parameter is renamed once more before the builtin
+            // index/take/drop app reaches the staged List rewrite.
+            let static_size = self.fold_static_size(arg_expr);
             // Item 2-extended: shadowing; the inlined fn's param name
             // is bound to a fresh value (either a `local_callable` or a
             // `bindings` entry). Drop any outer-scope
@@ -6769,6 +7535,11 @@ impl LowerCtx {
             // unresolved outer callable.
             let callable = self.resolve_callable_expr(arg_expr);
             self.fn_typed_params.remove(name);
+            if let Some(value) = static_size {
+                self.static_size_bindings.insert(name.clone(), value);
+            } else {
+                self.static_size_bindings.remove(name);
+            }
             if let Some(callable) = callable {
                 match callable {
                     // Preserve structural incompleteness when an unresolved
@@ -6799,20 +7570,20 @@ impl LowerCtx {
             }
         }
         self.dim_substitutions
-            .extend(tensor_dim_substitutions(&formal_types, &actual_types));
+            .merge(tensor_dim_substitutions(&formal_types, &actual_types));
         // Issue #388: record the positional index of each named axis in the
         // formal parameter shapes so a named reduction/expand-anchor lookup
         // can recover the axis even after monomorphization erases the named
         // axis from a literal-shaped operand's dims.
         self.dim_axis_positions
-            .extend(tensor_dim_axis_positions(&formal_type_exprs, &actual_types));
+            .merge(tensor_dim_axis_positions(&formal_type_exprs, &actual_types));
         // WS-A8: extend the precision-tvar substitution with bindings
         // from this call site's formal-vs-actual precision slots. Walks
         // the raw type-exprs (which preserve `(t-var)` shape) against
         // the actual `TensorType`s (which always carry concrete
         // primitives at lowering time).
         self.prec_substitutions
-            .extend(tensor_prec_substitutions(&formal_type_exprs, &actual_types));
+            .merge(tensor_prec_substitutions(&formal_type_exprs, &actual_types));
         // issue #319: the checker renames a separate-`sig`
         // precision-polymorphic verb's precision variable `p` to a fresh
         // internal name (e.g. `t304`) when it stamps the resolved body
@@ -6841,7 +7612,9 @@ impl LowerCtx {
         // localized to the precision-poly verb call path and is removable
         // wholesale if the checker later preserves the name — at which
         // point the name-keyed substitution subsumes it.
-        for (var_name, prim) in formal_precision_var_bindings(fn_expr, body, &actual_types) {
+        for (var_name, prim) in
+            formal_precision_var_bindings(fn_expr, body, &actual_types).into_sorted()
+        {
             self.prec_substitutions.entry(var_name).or_insert(prim);
         }
         // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
@@ -6853,7 +7626,7 @@ impl LowerCtx {
         // rank analogue of the `prec_substitutions.extend(...)` above.
         let rank_subst =
             tensor_rank_substitutions(&formal_type_exprs, &actual_types, &self.dim_axis_positions);
-        self.rank_substitutions.extend(rank_subst);
+        self.rank_substitutions.merge(rank_subst);
         // chelis#620 (Inlining-F1 successor): recursion lowers by BOUNDED
         // UNROLLING. Depth accounting installs *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
@@ -6905,6 +7678,20 @@ impl LowerCtx {
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
         let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || self.lower_expr(body));
+        if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
+            let ret_ty = Self::type_from_type_expr_with_subst(
+                ret_ty_expr,
+                &self.prec_substitutions,
+                &self.rank_substitutions,
+            );
+            self.repair_output_type_if_default(&result, &ret_ty);
+        } else {
+            // A named definition may carry its result type only in a
+            // separate `sig`; the resolved application metadata still has
+            // the fully substituted type. Preserve that rank/precision when
+            // the inlined body ends in an untyped default node.
+            self.repair_output_type_if_default(&result, expected_return_ty);
+        }
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -6945,6 +7732,14 @@ impl LowerCtx {
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             // Same shadowing rationale as `lower_plain_callable_app`.
             self.fn_typed_params.remove(name);
+            if let Some(value) = arg_id
+                .as_single_node()
+                .and_then(|node| self.static_i64_from_node(node))
+            {
+                self.static_size_bindings.insert(name.clone(), value);
+            } else {
+                self.static_size_bindings.remove(name);
+            }
             self.bindings.insert(name.clone(), arg_id);
         }
         let result = self.lower_expr(body);
@@ -7092,7 +7887,16 @@ impl LowerCtx {
             ),
         };
 
-        let mut arg_map = HashMap::new();
+        let batch_source = param_types
+            .iter()
+            .zip(canonical_args.iter().copied())
+            .find_map(|(param_ty, arg_id)| {
+                self.dag
+                    .get(arg_id)
+                    .filter(|node| node.output_type.dims.len() > param_ty.dims.len())
+                    .map(|_| arg_id)
+            });
+        let mut arg_map = UnordMap::new();
         for ((name, param_ty), arg_id) in param_names
             .iter()
             .zip(param_types.iter())
@@ -7100,10 +7904,10 @@ impl LowerCtx {
         {
             arg_map.insert(
                 name.clone(),
-                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
+                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source),
             );
         }
-        arg_map.extend(captured_bindings);
+        arg_map.merge(captured_bindings);
 
         // chelis#383: `vectorize_axis0` prepended the batch dim to EVERY
         // node type in `vmapped` (including the parameter Loads), so the
@@ -7310,7 +8114,16 @@ impl LowerCtx {
             ),
         };
 
-        let mut arg_map = HashMap::new();
+        let batch_source = param_types
+            .iter()
+            .zip(canonical_args.iter().copied())
+            .find_map(|(param_ty, arg_id)| {
+                self.dag
+                    .get(arg_id)
+                    .filter(|node| node.output_type.dims.len() > param_ty.dims.len())
+                    .map(|_| arg_id)
+            });
+        let mut arg_map = UnordMap::new();
         for ((name, param_ty), arg_id) in param_names
             .iter()
             .zip(param_types.iter())
@@ -7318,10 +8131,10 @@ impl LowerCtx {
         {
             arg_map.insert(
                 name.clone(),
-                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
+                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source),
             );
         }
-        arg_map.extend(captured_bindings);
+        arg_map.merge(captured_bindings);
 
         let remap = self.splice_dag(&vmapped, &arg_map);
         let mut flattened = wrt
@@ -7372,6 +8185,7 @@ impl LowerCtx {
         arg_id: NodeId,
         original_ty: &TensorType,
         batch_dim: &DimInfo,
+        batch_source: Option<NodeId>,
     ) -> NodeId {
         let actual_ty = self
             .dag
@@ -7384,12 +8198,24 @@ impl LowerCtx {
 
         let mut out_ty = actual_ty.clone();
         out_ty.dims.insert(0, batch_dim.clone());
+        let (size, inputs) = match batch_dim {
+            DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                (RtDim::Lit(*value), vec![arg_id])
+            }
+            DimInfo::Named(_, None) => (
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+                vec![
+                    arg_id,
+                    batch_source.expect("symbolic vmap batch requires a batched tensor actual"),
+                ],
+            ),
+        };
         self.dag.add_node(
-            RiscOp::Expand {
-                axis: 0,
-                size: DimExpr::from(batch_dim),
-            },
-            vec![arg_id],
+            RiscOp::Expand { axis: 0, size },
+            inputs,
             out_ty,
             self.current_span_id.clone(),
         )
@@ -7398,9 +8224,9 @@ impl LowerCtx {
     fn splice_dag(
         &mut self,
         dag: &Dag,
-        arg_map: &HashMap<String, NodeId>,
-    ) -> HashMap<NodeId, NodeId> {
-        let mut remap = HashMap::<NodeId, NodeId>::new();
+        arg_map: &UnordMap<String, NodeId>,
+    ) -> UnordMap<NodeId, NodeId> {
+        let mut remap = UnordMap::<NodeId, NodeId>::new();
         for node in dag.nodes() {
             let new_id = match &node.op {
                 RiscOp::Load { name } => {
@@ -7433,7 +8259,7 @@ impl LowerCtx {
                     {
                         self.dag.set_reusable_input(new_id, *mapped_input);
                     }
-                    // chelis#384/#397: preserve (remapped) Form-3 `expand`
+                    // chelis#384/#397: preserve (remapped) shape-derived `expand`
                     // shape-deps across the splice. Deps are earlier nodes,
                     // already in `remap`.
                     self.dag
@@ -7674,7 +8500,28 @@ impl LowerCtx {
                     as f64;
                 let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound")
                     as f32 as f64;
-                let seed = self.random_seed.unwrap_or(0);
+                let (seed, activation) = match self.random_path_condition {
+                    Some(activation) => {
+                        // A path-sensitive DAG has two owners. Eval lowering
+                        // carries the handler's concrete seed here. Compiled-C
+                        // helper lowering cannot bake that runtime value, and
+                        // `CHELIS_EFFECTIVE_UNIFORM_SEED` deliberately ignores
+                        // this operand whenever the activation is true. Keep
+                        // the neutral placeholder explicit instead of hiding
+                        // it behind an Option fallback.
+                        let seed = match self.random_seed {
+                            Some(seed) => seed,
+                            None => COMPILED_HANDLER_OWNED_SEED,
+                        };
+                        (seed, Some(activation))
+                    }
+                    None => {
+                        let seed = self.random_seed.unwrap_or(0)
+                            ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        self.random_counter = self.random_counter.saturating_add(1);
+                        (seed, None)
+                    }
+                };
                 // When no `type` metadata is attached to the `app` form
                 // (as is common when the host lane drives sub-expression
                 // lowering through `lower_subexpr_program` from a
@@ -7696,7 +8543,7 @@ impl LowerCtx {
                 };
                 let node = self.dag.add_node(
                     RiscOp::UniformLike { low, high, seed },
-                    vec![template],
+                    activation.map_or_else(|| vec![template], |active| vec![template, active]),
                     resolved_ty,
                     self.current_span_id.clone(),
                 );
@@ -7708,7 +8555,9 @@ impl LowerCtx {
                 // bounds): a wrapped/computed rate must resolve statically or
                 // fail loudly, never silently become 0.0 (no-op dropout).
                 let rate = self.resolve_static_f64_arg(&args[1], "dropout", "rate");
-                let seed = self.random_seed.unwrap_or(0);
+                let seed = self.random_seed.unwrap_or(0)
+                    ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                self.random_counter = self.random_counter.saturating_add(1);
                 let inferred_ty = self
                     .dag
                     .get(x)
@@ -7728,7 +8577,7 @@ impl LowerCtx {
                 self.attach_reuse_hint(node, app_span, &[x])
             }
 
-            // Tier 2 decompositions
+            // Direct Tier-1 subtraction identity
             "sub" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "sub lhs");
                 let b = self.lower_expr_node(&args[1], "sub rhs");
@@ -7740,6 +8589,7 @@ impl LowerCtx {
                 let node = tier2::lower_sub(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
+            // Tier 2 decompositions
             "relu" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "relu input");
                 // Elementwise: output dims always come from the lowered
@@ -8056,6 +8906,7 @@ impl LowerCtx {
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_neq(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
+            // Direct Tier-1 minimum selection identity
             "min_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "min_elem lhs");
                 let b = self.lower_expr_node(&args[1], "min_elem rhs");
@@ -8414,6 +9265,16 @@ impl LowerCtx {
                 let (new_shape, ty_dims, shape_srcs) = if args.len() >= 2 {
                     let checker_dims = ty.dims.clone();
                     self.extract_reshape_dim_list(&args[1], &checker_dims, &mut inputs)
+                        .or_else(|| {
+                            let template = tensor_shape_template_expr(&args[1])?;
+                            let source = self.lower_expr_node(template, "tensor_shape template");
+                            let source_ty = self.dag.get(source)?.output_type.clone();
+                            Some((
+                                source_ty.dims.iter().map(RtDim::from_dim_info).collect(),
+                                source_ty.dims,
+                                vec![source],
+                            ))
+                        })
                         .unwrap_or_else(fallback)
                 } else {
                     fallback()
@@ -8471,8 +9332,14 @@ impl LowerCtx {
                     self.current_span_id.clone(),
                 )
             }
-            "expand" if args.len() >= 2 => {
-                let x = self.lower_expr_node(&args[0], "expand input");
+            callee @ ("expand" | "insert") if args.len() >= 2 => {
+                // The two operations share every argument rule and differ only
+                // in the result shape they build. spec/04-type-system.md
+                // §4.7.2: "`expand` sets the extent at `axis` and leaves the
+                // rank unchanged; `insert` adds an axis of extent `size` at
+                // `axis` and produces rank `rank(x) + 1`."
+                let inserts = callee == "insert";
+                let x = self.lower_expr_node(&args[0], "expand/insert input");
                 // chelis#339 named-axis expand (spec §4.5.3): when the axis
                 // argument is a dimension NAME, the insertion point is
                 // resolved against the monomorphized operand dims — the
@@ -8487,6 +9354,23 @@ impl LowerCtx {
                 } else {
                     bare_var_name(&args[1])
                 };
+                // The named-axis form belongs to `insert`
+                // (spec/05-risc-primitives.md §2.4), and the checker rejects
+                // it for `expand` before lowering runs. Reaching here with one
+                // is an internal desync, not an input shape: a plain lowering
+                // diagnostic would be absorbed by the host-fallback path and
+                // emit the axis name as an undeclared C identifier.
+                if !inserts && named_insert.is_some() {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "internal lowering desync: `{callee}` reached lowering with a \
+                             named axis, which belongs to `insert` \
+                             (spec/05-risc-primitives.md \u{00a7}2.4)"
+                        ),
+                        Some(args[1].span()),
+                        args[1].span_id().map(ToOwned::to_owned),
+                    );
+                }
                 // chelis#339: the inserted name must not collide with an axis
                 // of the MONOMORPHIZED operand. The checker rejects visible
                 // collisions, but a rank spread (or a single-letter dim var,
@@ -8510,7 +9394,7 @@ impl LowerCtx {
                     // identifiers — garbage C, not a loud failure.
                     raise_fatal_lowering_error(
                         format!(
-                            "`expand` inserts an axis named `{name}`, but the monomorphized \
+                            "`{callee}` inserts an axis named `{name}`, but the monomorphized \
                              operand already carries an axis named `{name}` (a rank spread or \
                              single-letter dim var at the call boundary can cover an axis name \
                              the symbolic checker cannot see); later by-name axis lookups would \
@@ -8532,7 +9416,7 @@ impl LowerCtx {
                             Some(node) => node.output_type.dims.len(),
                             None => raise_lowering_error(
                                 format!(
-                                    "internal lowering desync: `expand` operand node {} \
+                                    "internal lowering desync: `{callee}` operand node {} \
                                      is missing from the DAG (section C1.4)",
                                     x.0
                                 ),
@@ -8548,14 +9432,14 @@ impl LowerCtx {
                     // expanding the wrong axis (section C1.4 raise-or-prove).
                     None => self.extract_usize_value(&args[1]).unwrap_or_else(|| {
                         let unsupported = Unsupported::new(
-                            UnsupportedKind::Construct(
-                                "a non-literal `expand` axis argument".to_string(),
-                            ),
-                            "the compiled-backend lowering of `expand`",
+                            UnsupportedKind::Construct(format!(
+                                "a non-literal `{callee}` axis argument"
+                            )),
+                            "the compiled-backend lowering of `expand`/`insert`",
                             Stage::Lowering,
                             chelis_types::deliberate_rejection!(
                                 "[05-AXIS-1]",
-                                "the expand axis must be an integer literal or a named \
+                                "the expand/insert axis must be an integer literal or a named \
                                  dimension; a computed axis previously fell back to axis 0 \
                                  silently (chelis#730 section C1.4, flagged by chelis#782)"
                             ),
@@ -8594,7 +9478,7 @@ impl LowerCtx {
                 // extent symbol is declared by `src`'s shape; without the dep,
                 // a `src` referenced only via `shape(src, ...)` is DCE'd and
                 // the symbol loses its source (silent wrong shape in C).
-                let mut shape_source: Option<NodeId> = None;
+                let mut inputs = vec![x];
                 let size = if args.len() >= 3 {
                     let size_arg = &args[2];
                     // (1) A fully-static size: a literal, `cast(N, _)`,
@@ -8609,7 +9493,7 @@ impl LowerCtx {
                         .fold_static_size(size_arg)
                         .and_then(|n| usize::try_from(n).ok())
                     {
-                        DimExpr::Concrete(v)
+                        RtDim::Lit(v)
                     }
                     // (2) A shape source: an inline `shape(x, axis)` read OR a
                     //     `let`-bound `len = shape(x, axis)` name (followed
@@ -8621,19 +9505,67 @@ impl LowerCtx {
                     //     asymmetry #469 tracks). The source node is recorded
                     //     as a `shape_dep` below so its `Load` survives DCE and
                     //     declares the extent symbol (chelis#384/#397).
-                    else if let Some((dim, src)) =
-                        self.dim_expr_from_shape_arg_with_source(size_arg)
+                    else if let Some((src, source_axis, _)) =
+                        self.input_axis_source_from_shape_arg(size_arg)
                     {
-                        shape_source = Some(src);
-                        dim
+                        let tensor = inputs.len();
+                        inputs.push(src);
+                        RtDim::InputAxis {
+                            tensor,
+                            axis: RtAxis::Lit(i32::try_from(source_axis).unwrap_or_else(|_| {
+                                raise_lowering_error(
+                                    format!(
+                                        "shape axis {source_axis} exceeds the int32 axis carrier"
+                                    ),
+                                    Some(size_arg.span()),
+                                    size_arg.span_id().map(ToOwned::to_owned),
+                                )
+                            })),
+                        }
                     }
                     // (3) A bare `var` naming a §4.7.2 Form-2 symbolic dim (an
                     //     in-scope tensor dimension, or a monomorphized dim
                     //     substitution). The post-node sourceless guard below
                     //     validates the symbol has a real tensor source and
                     //     fails closed otherwise.
-                    else if let Some(dim) = self.extract_dim_expr_value(size_arg) {
-                        dim
+                    else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
+                        if let Some(value) =
+                            self.dim_substitutions.get(&name).and_then(|dim| match dim {
+                                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                                    Some(*value)
+                                }
+                                DimInfo::Named(_, None) => None,
+                            })
+                        {
+                            RtDim::Lit(value)
+                        } else if let Some((src, source_axis, _)) =
+                            self.tensor_source_for_symbol(&name)
+                        {
+                            let tensor = inputs.len();
+                            inputs.push(src);
+                            RtDim::InputAxis {
+                                tensor,
+                                axis: RtAxis::Lit(i32::try_from(source_axis).unwrap_or_else(
+                                    |_| {
+                                        raise_lowering_error(
+                                            format!(
+                                                "tensor axis {source_axis} exceeds the int32 axis carrier"
+                                            ),
+                                            Some(size_arg.span()),
+                                            size_arg.span_id().map(ToOwned::to_owned),
+                                        )
+                                    },
+                                )),
+                            }
+                        } else {
+                            raise_fatal_lowering_error(
+                                format!(
+                                    "`{callee}` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                                ),
+                                Some(app_span),
+                                self.current_span_id.clone(),
+                            )
+                        }
                     }
                     // (4) Fail closed (chelis#469): a check-clean runtime size
                     //     the backend cannot yet materialize as an extent —
@@ -8648,12 +9580,12 @@ impl LowerCtx {
                     //     prevent.
                     else {
                         raise_fatal_lowering_error(
-                            "`expand` size is a runtime expression the backend cannot \
+                            "`{callee}` size is a runtime expression the backend cannot \
                              materialize as an extent: integer arithmetic that combines a \
                              `shape(tensor, axis)` read (or a symbolic dimension) with another \
                              term (e.g. `mul(shape(x, 0), 2)` or `add(shape(x, 0), 1)`) has no \
-                             single tensor axis to read the extent from. Use a literal/`cast(N, \
-                             int32)` size, a bare `shape(tensor, axis)` read, or an in-scope \
+                             single tensor axis to read the extent from. Use an exact `int64` \
+                             literal size, a bare `shape(tensor, int32-axis)` read, or an in-scope \
                              tensor dimension. Tracked by Chelis-Lang/chelis#469 \
                              (spec/04-type-system.md \u{00a7}4.7.2)",
                             Some(app_span),
@@ -8661,7 +9593,7 @@ impl LowerCtx {
                         );
                     }
                 } else {
-                    DimExpr::Concrete(1)
+                    RtDim::Lit(1)
                 };
                 // For a named insert, the new dim carries the inserted NAME
                 // (with its concrete extent when the size is static) so a
@@ -8670,65 +9602,28 @@ impl LowerCtx {
                 // DimInfo (it must be declared by a Load; the inserted name
                 // would be an undeclared symbol for the C codegen).
                 let named_dim = match (&named_insert, &size) {
-                    (Some(name), DimExpr::Concrete(n)) => {
-                        Some(DimInfo::Named(name.clone(), Some(*n)))
-                    }
+                    (Some(name), RtDim::Lit(n)) => Some(DimInfo::Named(name.clone(), Some(*n))),
                     _ => None,
                 };
-                let out_ty = self
-                    .fallback_expand_type(x, axis, &size)
-                    .map(|mut t| {
-                        if let Some(dim) = named_dim {
-                            t.dims[axis] = dim;
-                        }
-                        t
-                    })
-                    .unwrap_or_else(|| ty.clone());
-                let expand_id = self.dag.add_node(
+                let out_ty = if inserts {
+                    self.inserted_axis_type(x, axis, &size, &inputs)
+                        .map(|mut t| {
+                            if let Some(dim) = named_dim {
+                                t.dims[axis] = dim;
+                            }
+                            t
+                        })
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    self.broadcast_axis_type(x, axis, &size, &inputs, ty)
+                        .unwrap_or_else(|| ty.clone())
+                };
+                self.dag.add_node(
                     RiscOp::Expand { axis, size },
-                    vec![x],
+                    inputs,
                     out_ty,
                     self.current_span_id.clone(),
-                );
-                // chelis#384/#397: keep the `shape(src, ...)` extent source
-                // alive through DCE so the symbolic dim it declares binds from
-                // the correct tensor input.
-                if let Some(src) = shape_source {
-                    self.dag.add_shape_dep(expand_id, src);
-                }
-                // chelis#384/#397 (B): a §4.7.2 Form-3 runtime expand size that
-                // resolves to a symbolic dim with NO tensor source — neither a
-                // `shape(tensor, ...)` argument (which the shape_dep above
-                // keeps live) nor a dim carried by any tensor in scope — has no
-                // representation the backend can emit. The C codegen would read
-                // the extent from a fabricated/out-of-range operand axis
-                // (silent wrong shape — the original bug) or emit an undeclared
-                // identifier. Reject loudly at lowering with a clean diagnostic
-                // rather than the downstream `symbolic_occurrences` ICE. The
-                // size of `expand(x, 1, k)` where `k` is a scalar `int32`
-                // parameter (or a rank-var output dim like #397's `a`, sourced
-                // from a scalar `int64`) is exactly this case.
-                if shape_source.is_none()
-                    && let Some(RiscOp::Expand { size, .. }) =
-                        self.dag.get(expand_id).map(|n| &n.op)
-                    && let DimExpr::Sym(name) = size.clone()
-                    && !self.symbol_has_tensor_source(&name)
-                {
-                    raise_fatal_lowering_error(
-                        format!(
-                            "`expand` size resolves to the symbolic dimension `{name}`, but no \
-                             tensor in scope carries it: a §4.7.2 Form-3 runtime size must be a \
-                             literal/`cast(N, int32)`, an in-scope tensor dimension, or a \
-                             `shape(tensor, axis)` read. A bare runtime scalar (e.g. an `int32`/\
-                             `int64` parameter) has no shape source the backend can emit, so the \
-                             extent cannot be materialized. Tracked by Chelis-Lang/chelis#469 \
-                             (spec/04-type-system.md \u{00a7}4.7.2)"
-                        ),
-                        Some(app_span),
-                        self.current_span_id.clone(),
-                    );
-                }
-                expand_id
+                )
             }
             "pad" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "pad input");
@@ -8905,22 +9800,16 @@ impl LowerCtx {
                     .and_then(|a| usize::try_from(a).ok())
                     .expect("axis literal guarded by the arm predicate");
                 let x = self.lower_expr_node(&args[0], "shape input");
-                // The checker types `shape(...)` as an `int64` scalar
-                // ([05-DIM-2]). Pin
-                // a rank-0 integer output regardless of the incoming `ty`
-                // shape so the value node is always a well-formed scalar
-                // extent (verified by `chelis_ir::verify`).
-                let precision = if ty.precision.is_integer() {
-                    ty.precision
-                } else {
-                    Prim::Int64
-                };
+                // The checker types `shape(...)` as an exact `int64`
+                // scalar ([05-DIM-2]). Pin that carrier rather than
+                // trusting a stale incoming type, so lowering cannot
+                // narrow a runtime extent.
                 self.dag.add_node(
                     RiscOp::Shape { axis },
                     vec![x],
                     TensorType {
                         dims: Vec::new(),
-                        precision,
+                        precision: Prim::Int64,
                     },
                     self.current_span_id.clone(),
                 )
@@ -9310,6 +10199,472 @@ impl LowerCtx {
         Some(rebuild_cons_chain(items))
     }
 
+    fn int64_constant(&mut self, value: i64) -> NodeId {
+        self.dag.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("List control", Prim::Int64, value)
+                    .expect("an i64 is representable as int64"),
+            },
+            vec![],
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            },
+            self.current_span_id.clone(),
+        )
+    }
+
+    fn staged_list_parts(
+        &mut self,
+        value: &LoweredValue,
+    ) -> Option<(NodeId, NodeId, Vec<LoweredValue>)> {
+        if let Some(parts) = runtime_list_view_parts(value) {
+            return Some(parts);
+        }
+        let items = adt_cons_chain_values(value)?;
+        let len = i64::try_from(items.len()).ok()?;
+        let offset = self.int64_constant(0);
+        let len = self.int64_constant(len);
+        Some((offset, len, items))
+    }
+
+    /// Select one same-typed scalar/tensor value without evaluating an
+    /// arithmetic blend of the candidates.
+    ///
+    /// The previous one-hot `sum(mask * candidate)` spelling is not a
+    /// selection over IEEE values: an unselected NaN/Inf contaminates the
+    /// sum, and multiplying a signed zero by a mask can lose its sign. Build
+    /// a private leading-axis table with differentiable, disjoint
+    /// `ScatterAdd` writes and gather the requested row instead. A `-0`
+    /// baseline preserves both zero signs under IEEE addition (`-0 + -0`
+    /// stays negative, while `-0 + +0` is positive in the default rounding
+    /// mode). No new RISC or WireDag operation is needed.
+    fn select_runtime_node(&mut self, items: &[NodeId], effective_index: NodeId) -> Option<NodeId> {
+        let first = *items.first()?;
+        let out_ty = self.dag.get(first)?.output_type.clone();
+        if items.iter().any(|item| {
+            self.dag
+                .get(*item)
+                .is_none_or(|node| node.output_type != out_ty)
+        }) {
+            return None;
+        }
+
+        // ScatterAdd is an arithmetic carrier, so stage bools through the
+        // exact 0/1 int64 representation. The terminal checked cast restores
+        // the original bool type and remains value-independent for AD.
+        if out_ty.precision == Prim::Bool {
+            let int_ty = TensorType {
+                dims: out_ty.dims.clone(),
+                precision: Prim::Int64,
+            };
+            let cast_items = items
+                .iter()
+                .map(|item| {
+                    self.dag.add_node(
+                        RiscOp::Cast {
+                            new_precision: Prim::Int64,
+                        },
+                        vec![*item],
+                        int_ty.clone(),
+                        self.current_span_id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let selected = self.select_runtime_node(&cast_items, effective_index)?;
+            return Some(self.dag.add_node(
+                RiscOp::Cast {
+                    new_precision: Prim::Bool,
+                },
+                vec![selected],
+                out_ty,
+                self.current_span_id.clone(),
+            ));
+        }
+        if out_ty.precision == Prim::String {
+            return None;
+        }
+
+        let count = items.len();
+        let mut stacked_dims = Vec::with_capacity(out_ty.dims.len() + 1);
+        stacked_dims.push(DimInfo::Lit(count));
+        stacked_dims.extend(out_ty.dims.iter().cloned());
+        let stacked_ty = TensorType {
+            dims: stacked_dims.clone(),
+            precision: out_ty.precision,
+        };
+        let scalar_ty = TensorType {
+            dims: Vec::new(),
+            precision: out_ty.precision,
+        };
+        let baseline = if out_ty.precision.is_float() {
+            -0.0
+        } else {
+            0.0
+        };
+        let mut table = self.dag.add_node(
+            RiscOp::synth_const(out_ty.precision, baseline),
+            vec![],
+            scalar_ty,
+            self.current_span_id.clone(),
+        );
+        let mut expanded_dims = Vec::with_capacity(stacked_dims.len());
+        for (axis, dim) in stacked_dims.iter().enumerate() {
+            expanded_dims.push(dim.clone());
+            let (size, inputs) = match dim {
+                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                    (RtDim::Lit(*value), vec![table])
+                }
+                DimInfo::Named(_, None) => (
+                    RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(i32::try_from(axis - 1).expect("tensor rank fits int32")),
+                    },
+                    vec![table, first],
+                ),
+            };
+            table = self.dag.add_node(
+                RiscOp::Expand { axis, size },
+                inputs,
+                TensorType {
+                    dims: expanded_dims.clone(),
+                    precision: out_ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+        }
+        for (position, item) in items.iter().enumerate() {
+            let position = self.int64_constant(i64::try_from(position).ok()?);
+            table = self.dag.add_node(
+                RiscOp::ScatterAdd { axis: 0 },
+                vec![table, position, *item],
+                stacked_ty.clone(),
+                self.current_span_id.clone(),
+            );
+        }
+        Some(self.dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![table, effective_index],
+            out_ty,
+            self.current_span_id.clone(),
+        ))
+    }
+
+    fn blend_runtime_list_items(
+        &mut self,
+        items: &[LoweredValue],
+        effective_index: NodeId,
+    ) -> Option<LoweredValue> {
+        let first = items.first()?;
+        // A runtime outer selection may itself return a List, and candidate
+        // sublists need not have equal lengths. Own that value as one view
+        // over the candidates' concatenated payloads: select the candidate's
+        // absolute offset and logical length with the same one-hot mask used
+        // for scalar/tensor leaves. A later `index`/`take`/`drop` therefore
+        // composes with this view without enumerating any selector state.
+        if items.iter().all(|item| {
+            runtime_list_view_parts(item).is_some() || adt_cons_chain_values(item).is_some()
+        }) {
+            let candidates = items
+                .iter()
+                .map(|item| self.staged_list_parts(item))
+                .collect::<Option<Vec<_>>>()?;
+            let int_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            };
+            let mut offsets = Vec::with_capacity(candidates.len());
+            let mut lengths = Vec::with_capacity(candidates.len());
+            let mut payload = Vec::new();
+            for (position, (offset, len, candidate_payload)) in candidates.into_iter().enumerate() {
+                let prefix = i64::try_from(payload.len()).ok()?;
+                let absolute_offset = if prefix == 0 {
+                    offset
+                } else {
+                    let prefix = self.int64_constant(prefix);
+                    self.dag.add_node(
+                        RiscOp::Add,
+                        vec![prefix, offset],
+                        int_ty.clone(),
+                        self.current_span_id.clone(),
+                    )
+                };
+                let _ = position;
+                offsets.push(absolute_offset);
+                lengths.push(len);
+                payload.extend(candidate_payload);
+            }
+            let selected_offset = self.select_runtime_node(&offsets, effective_index)?;
+            let selected_len = self.select_runtime_node(&lengths, effective_index)?;
+            return Some(rebuild_runtime_list_view(
+                selected_offset,
+                selected_len,
+                payload,
+            ));
+        }
+        match first {
+            LoweredValue::Node(first_node) => {
+                let out_ty = self.dag.get(*first_node)?.output_type.clone();
+                if items.iter().any(|item| {
+                    item.as_single_node()
+                        .and_then(|node| self.dag.get(node))
+                        .is_none_or(|node| node.output_type != out_ty)
+                }) {
+                    return None;
+                }
+                let nodes = items
+                    .iter()
+                    .map(LoweredValue::as_single_node)
+                    .collect::<Option<Vec<_>>>()?;
+                Some(LoweredValue::Node(
+                    self.select_runtime_node(&nodes, effective_index)?,
+                ))
+            }
+            LoweredValue::Tuple(first_items) => {
+                if items.iter().any(|item| {
+                    !matches!(item, LoweredValue::Tuple(fields) if fields.len() == first_items.len())
+                }) {
+                    return None;
+                }
+                let mut blended = Vec::with_capacity(first_items.len());
+                for field_index in 0..first_items.len() {
+                    let fields = items
+                        .iter()
+                        .map(|item| match item {
+                            LoweredValue::Tuple(fields) => fields[field_index].clone(),
+                            _ => unreachable!("tuple shape checked above"),
+                        })
+                        .collect::<Vec<_>>();
+                    blended.push(self.blend_runtime_list_items(&fields, effective_index)?);
+                }
+                Some(LoweredValue::Tuple(blended))
+            }
+            LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields: first_fields,
+            } if ctor != RUNTIME_LIST_VIEW_CTOR => {
+                if items.iter().any(|item| {
+                    !matches!(item, LoweredValue::Adt { ctor: item_ctor, fields, .. }
+                        if item_ctor == ctor && fields.len() == first_fields.len())
+                }) {
+                    return None;
+                }
+                let mut blended = Vec::with_capacity(first_fields.len());
+                for field_index in 0..first_fields.len() {
+                    let fields = items
+                        .iter()
+                        .map(|item| match item {
+                            LoweredValue::Adt { fields, .. } => fields[field_index].clone(),
+                            _ => unreachable!("ADT shape checked above"),
+                        })
+                        .collect::<Vec<_>>();
+                    blended.push(self.blend_runtime_list_items(&fields, effective_index)?);
+                }
+                Some(LoweredValue::Adt {
+                    ctor: ctor.clone(),
+                    field_names: field_names.clone(),
+                    fields: blended,
+                })
+            }
+            LoweredValue::Adt { .. } => None,
+        }
+    }
+
+    fn try_lower_staged_list_selection(
+        &mut self,
+        name: &str,
+        list_arg: &Expr,
+        count_arg: &Expr,
+        result_ty: &TensorType,
+    ) -> Option<LoweredValue> {
+        let list = self.lower_expr(list_arg);
+        if runtime_list_view_parts(&list).is_none()
+            && let Some(raw) = self.static_i64_from_expr_or_binding(count_arg)
+        {
+            let (_, _, items) = self.staged_list_parts(&list)?;
+            if raw < 0 {
+                let argument = if name == "index" { "index" } else { "count" };
+                raise_fatal_lowering_error(
+                    format!("{name} requires non-negative {argument}, got {raw}"),
+                    Some(count_arg.span()),
+                    count_arg.span_id().map(ToOwned::to_owned),
+                );
+            }
+            let count = usize::try_from(raw).unwrap_or(usize::MAX);
+            return match name {
+                "index" => Some(items.get(count).cloned().unwrap_or_else(|| {
+                    raise_fatal_lowering_error(
+                        format!("index {raw} out of bounds for list of len {}", items.len()),
+                        Some(count_arg.span()),
+                        count_arg.span_id().map(ToOwned::to_owned),
+                    )
+                })),
+                "take" => Some(rebuild_cons_chain(items.into_iter().take(count).collect())),
+                "drop" => Some(rebuild_cons_chain(items.into_iter().skip(count).collect())),
+                _ => None,
+            };
+        }
+
+        let count = self.lower_expr(count_arg).as_single_node()?;
+        let (offset, len, items) = self.staged_list_parts(&list)?;
+        let argument = if name == "index" { "index" } else { "count" };
+        self.runtime_list_checks
+            .push(RuntimeListCheck::NonNegative {
+                operation: match name {
+                    "index" => "index",
+                    "take" => "take",
+                    "drop" => "drop",
+                    _ => return None,
+                },
+                argument,
+                value: count,
+            });
+        if name == "index" {
+            self.runtime_list_checks
+                .push(RuntimeListCheck::IndexBounds { index: count, len });
+            if items.is_empty() {
+                // The bounds check above is unconditionally false for an
+                // empty List, so this value is an unreachable typed
+                // placeholder used only to keep the forward/AD DAG valid
+                // until the host check reports the public error. It is never
+                // a silent fallback: both eval and generated C execute the
+                // check before exposing the result.
+                return Some(LoweredValue::Node(self.zero_tensor_node(result_ty, None)));
+            }
+            let int_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            };
+            // The public checks retain the original index and logical
+            // length, but the private Gather must never observe an invalid
+            // address or overflow while computing one before the host lane
+            // can render those exact diagnostics. Clamp the relative index
+            // before adding the view offset, then clamp the resulting end
+            // position for an empty view. This is bounds guarding, not a
+            // semantic fallback, because every invalid source index still
+            // takes the retained failure branch.
+            let zero = self.int64_constant(0);
+            let nonnegative_count = self.dag.add_node(
+                RiscOp::MaxElem,
+                vec![count, zero],
+                int_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let within_view = tier2::lower_min_elem(
+                &mut self.dag,
+                nonnegative_count,
+                len,
+                &int_ty,
+                self.current_span_id.as_deref(),
+            );
+            let raw_effective = self.dag.add_node(
+                RiscOp::Add,
+                vec![offset, within_view],
+                int_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let last = self.int64_constant(i64::try_from(items.len()).ok()? - 1);
+            let effective = tier2::lower_min_elem(
+                &mut self.dag,
+                raw_effective,
+                last,
+                &int_ty,
+                self.current_span_id.as_deref(),
+            );
+            return self.blend_runtime_list_items(&items, effective);
+        }
+
+        let int_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let clamped = if items.is_empty() {
+            self.int64_constant(0)
+        } else {
+            // Keep an invalid negative count out of the internal view
+            // offset/length arithmetic. The retained check still reports the
+            // original count, so this guard cannot turn a rejected program
+            // into a successful one.
+            let zero = self.int64_constant(0);
+            let nonnegative = self.dag.add_node(
+                RiscOp::MaxElem,
+                vec![count, zero],
+                int_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            tier2::lower_min_elem(
+                &mut self.dag,
+                nonnegative,
+                len,
+                &int_ty,
+                self.current_span_id.as_deref(),
+            )
+        };
+        match name {
+            "take" => Some(rebuild_runtime_list_view(offset, clamped, items)),
+            "drop" => {
+                let new_offset = self.dag.add_node(
+                    RiscOp::Add,
+                    vec![offset, clamped],
+                    int_ty.clone(),
+                    self.current_span_id.clone(),
+                );
+                let neg_clamped = self.dag.add_node(
+                    RiscOp::Neg,
+                    vec![clamped],
+                    int_ty.clone(),
+                    self.current_span_id.clone(),
+                );
+                let new_len = self.dag.add_node(
+                    RiscOp::Add,
+                    vec![len, neg_clamped],
+                    int_ty,
+                    self.current_span_id.clone(),
+                );
+                Some(rebuild_runtime_list_view(new_offset, new_len, items))
+            }
+            _ => None,
+        }
+    }
+
+    fn static_i64_from_expr_or_binding(&mut self, expr: &Expr) -> Option<i64> {
+        if let Some(value) = self.fold_static_size(expr) {
+            return Some(value);
+        }
+        let node = self.lower_expr(expr).as_single_node()?;
+        self.static_i64_from_node(node)
+    }
+
+    fn static_i64_from_node(&self, node: NodeId) -> Option<i64> {
+        let node = self.dag.get(node)?;
+        match &node.op {
+            RiscOp::Const { value } => value.as_i64_exact(),
+            // Integer count arguments are commonly materialized as
+            // `cast(<literal>, int64)` before an imported wrapper is
+            // inlined. The checker has already established an integer
+            // result type, so an exact integer input survives the cast.
+            RiscOp::Cast { .. } | RiscOp::Copy => self.static_i64_from_node(*node.inputs.first()?),
+            _ => None,
+        }
+    }
+
+    fn static_numel_from_expr(&self, expr: &Expr) -> Option<usize> {
+        let ("numel", [operand]) = app_var_name_and_args(expr)? else {
+            return None;
+        };
+        let name = bare_var_name(operand)?;
+        let source = self.bindings.get(&name)?.as_single_node()?;
+        self.dag
+            .get(source)?
+            .output_type
+            .dims
+            .iter()
+            .try_fold(1usize, |product, dim| {
+                product.checked_mul(concrete_dim_len(dim)?)
+            })
+    }
+
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {
         bare_var_name(expr)
             .and_then(|name| self.list_bindings.get(&name).cloned())
@@ -9339,9 +10694,15 @@ impl LowerCtx {
         match (name, args) {
             ("map", [callback, list_expr]) => {
                 let list_resolved = self.resolved_list_expr(list_expr);
-                let source = to_list_source_expr(&list_resolved)?;
-                let source_node = self.lower_expr_node(source, "map source");
-                self.lower_host_list_map(callback, source_node)
+                if let Some((lhs, rhs)) = zip_to_list_source_exprs(&list_resolved) {
+                    let lhs_node = self.lower_expr_node(lhs, "map zip left source");
+                    let rhs_node = self.lower_expr_node(rhs, "map zip right source");
+                    self.lower_host_list_zip_map(callback, lhs_node, rhs_node)
+                } else {
+                    let source = to_list_source_expr(&list_resolved)?;
+                    let source_node = self.lower_expr_node(source, "map source");
+                    self.lower_host_list_map(callback, source_node)
+                }
             }
             ("filter", [predicate, list_expr]) => {
                 let list_resolved = self.resolved_list_expr(list_expr);
@@ -9360,7 +10721,7 @@ impl LowerCtx {
         let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
             return None;
         };
-        let (len, elem_ty, out_dim) = self.rank1_list_source_parts(source_node)?;
+        let (source_node, len, elem_ty, out_dim) = self.flattened_list_source_parts(source_node)?;
         let mut mapped = Vec::with_capacity(len);
         for index in 0..len {
             let item = self.rank1_item(source_node, index, &elem_ty);
@@ -9370,6 +10731,39 @@ impl LowerCtx {
             mapped.push(item_out);
         }
         self.stack_scalar_nodes(&mapped, out_dim)
+    }
+
+    fn lower_host_list_zip_map(
+        &mut self,
+        callback: &Expr,
+        lhs_node: NodeId,
+        rhs_node: NodeId,
+    ) -> Option<NodeId> {
+        let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
+            return None;
+        };
+        let (lhs_node, lhs_len, lhs_elem_ty, _) = self.flattened_list_source_parts(lhs_node)?;
+        let (rhs_node, rhs_len, rhs_elem_ty, _) = self.flattened_list_source_parts(rhs_node)?;
+        // Host `zip` truncates to the shorter input. Random wrappers supply
+        // two tensors with the same template shape, but preserving the host
+        // rule keeps this AD rewrite valid for every accepted expression.
+        let len = lhs_len.min(rhs_len);
+        let mut mapped = Vec::with_capacity(len);
+        for index in 0..len {
+            let lhs_item = self.rank1_item(lhs_node, index, &lhs_elem_ty);
+            let rhs_item = self.rank1_item(rhs_node, index, &rhs_elem_ty);
+            let item_out = self
+                .lower_plain_callable_with_values(
+                    &fn_expr,
+                    &[LoweredValue::Tuple(vec![
+                        LoweredValue::Node(lhs_item),
+                        LoweredValue::Node(rhs_item),
+                    ])],
+                )
+                .expect_node("map zip callback");
+            mapped.push(item_out);
+        }
+        self.stack_scalar_nodes(&mapped, DimInfo::Lit(len))
     }
 
     fn lower_host_list_filter(&mut self, predicate: &Expr, source_node: NodeId) -> Option<NodeId> {
@@ -9453,6 +10847,41 @@ impl LowerCtx {
             precision: source_ty.precision,
         };
         Some((len, elem_ty, dim))
+    }
+
+    fn flattened_list_source_parts(
+        &mut self,
+        source_node: NodeId,
+    ) -> Option<(NodeId, usize, TensorType, DimInfo)> {
+        let source_ty = self.dag.get(source_node)?.output_type.clone();
+        let len = source_ty.dims.iter().try_fold(1usize, |product, dim| {
+            product.checked_mul(concrete_dim_len(dim)?)
+        })?;
+        let out_dim = if source_ty.dims.len() == 1 {
+            source_ty.dims[0].clone()
+        } else {
+            DimInfo::Lit(len)
+        };
+        let elem_ty = TensorType {
+            dims: vec![],
+            precision: source_ty.precision,
+        };
+        let flattened = if source_ty.dims.len() == 1 {
+            source_node
+        } else {
+            self.dag.add_node(
+                RiscOp::Reshape {
+                    new_shape: vec![RtDim::Lit(len)],
+                },
+                vec![source_node],
+                TensorType {
+                    dims: vec![out_dim.clone()],
+                    precision: source_ty.precision,
+                },
+                self.current_span_id.clone(),
+            )
+        };
+        Some((flattened, len, elem_ty, out_dim))
     }
 
     fn rank1_item(&mut self, source_node: NodeId, index: usize, elem_ty: &TensorType) -> NodeId {
@@ -9915,67 +11344,13 @@ impl LowerCtx {
         extract_int_for_dim(expr).and_then(|n| usize::try_from(n).ok())
     }
 
-    /// Const-fold a fully-static integer `expand` SIZE to its value
-    /// (chelis#469 / #528). Extends [`extract_int_for_dim`] (literal / `(lit
-    /// …)` / `cast`) with (a) the integer arithmetic the §4.7.2 checker
-    /// classifies as `SizeClass::Static` (`classify_arith_app`:
-    /// `add`/`sub`/`mul`/`mod`/`neg`) and (b) a bare/`cast`-wrapped `var`
-    /// bound by a prior `let` to a static value ([`Self::static_size_bindings`]
-    /// — the checker's "followed transitively through `let` bindings"). Folds
-    /// only when EVERY leaf is itself static; a `shape(x, …)`-touching or a
-    /// runtime-parameter-touching size returns `None` so the caller routes it
-    /// to the shape-source or fail-closed arm. (`div` is float-only per
-    /// chelis#178 and is rejected at check before lowering; `floor_div`/
-    /// `trunc_div` are not in the checker's arith set — neither reaches here
-    /// as an accepted size.) Overflow / mod-by-zero use checked arithmetic and
-    /// return `None`, never a wrapped or otherwise wrong extent.
-    ///
-    /// Deliberately kept SEPARATE from the shared [`extract_int_for_dim`]
-    /// walker, which also drives reduction / softmax / gather AXES: the
-    /// checker rejects a static-arithmetic *axis* ("sum axis must be a
-    /// compile-time constant or a named axis"), so folding arithmetic in the
-    /// shared walker would silently widen the axis contract (chelis#364).
-    /// Extent-side folding lives only here; the axis side is unchanged.
+    /// Const-fold a fully-static integer `expand` SIZE with the same checked
+    /// arithmetic walker the checker uses. Axis folding remains on the
+    /// narrower [`extract_int_for_dim`] path.
     fn fold_static_size(&self, expr: &Expr) -> Option<i64> {
-        if let Some(n) = extract_int_for_dim(expr) {
-            return Some(n);
-        }
-        let (tag, _, kids) = stamped_parts(expr)?;
-        match tag {
-            // A bare `var` bound to a static value by a prior `let`.
-            DeepTag::Var => self
-                .static_size_bindings
-                .get(&bare_var_name(expr)?)
-                .copied(),
-            // `cast(<inner>, ty)` — fold the inner value.
-            DeepTag::Cast => self.fold_static_size(kids.first()?),
-            // Integer arithmetic over static operands.
-            DeepTag::App => {
-                let op = bare_var_name(kids.first()?)?;
-                let operands = &kids[1..];
-                match (op.as_str(), operands.len()) {
-                    ("neg", 1) => self.fold_static_size(&operands[0])?.checked_neg(),
-                    ("add", 2) => self
-                        .fold_static_size(&operands[0])?
-                        .checked_add(self.fold_static_size(&operands[1])?),
-                    ("sub", 2) => self
-                        .fold_static_size(&operands[0])?
-                        .checked_sub(self.fold_static_size(&operands[1])?),
-                    ("mul", 2) => self
-                        .fold_static_size(&operands[0])?
-                        .checked_mul(self.fold_static_size(&operands[1])?),
-                    ("mod", 2) => {
-                        let divisor = self.fold_static_size(&operands[1])?;
-                        if divisor == 0 {
-                            return None;
-                        }
-                        self.fold_static_size(&operands[0])?.checked_rem(divisor)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        chelis_types::fold_static_int_expr(expr, |name| {
+            self.static_size_bindings.get(name).copied()
+        })
     }
 
     /// chelis#620: resolve an already-lowered `if` condition to a
@@ -10037,7 +11412,7 @@ impl LowerCtx {
             scalar_from_i64("fold_static_cond", Prim::Bool, i64::from(value)).ok()
         }
 
-        let mut memo: HashMap<NodeId, ScalarValue> = HashMap::new();
+        let mut memo: UnordMap<NodeId, ScalarValue> = UnordMap::new();
         // Iterative post-order: (node, inputs_pushed).
         let mut stack: Vec<(NodeId, bool)> = vec![(cond, false)];
         while let Some((id, inputs_pushed)) = stack.pop() {
@@ -10166,7 +11541,7 @@ impl LowerCtx {
     ///
     /// Takes `&mut self` because resolving a shape read lowers its operand
     /// (idempotent for the bound-`var` operands this walks; the same contract
-    /// as [`Self::dim_expr_from_shape_arg_with_source`]).
+    /// as [`Self::input_axis_source_from_shape_arg`]).
     fn fold_shape_derived_static_size(&mut self, expr: &Expr) -> Option<i64> {
         if let Some(n) = extract_int_for_dim(expr) {
             return Some(n);
@@ -10311,30 +11686,6 @@ impl LowerCtx {
         }
     }
 
-    fn extract_dim_expr_value(&self, expr: &Expr) -> Option<DimExpr> {
-        if let Some(value) = self.extract_usize_value(expr) {
-            return Some(DimExpr::Concrete(value));
-        }
-
-        match expr {
-            Expr::Atom(Atom::Name(name), _) => Some(self.resolve_dim_expr_symbol(name)),
-            Expr::List(list, _) => match (list.tag(), list.elements.get(2)) {
-                (Some(DeepTag::Var), Some(Expr::Atom(Atom::Name(name), _))) => {
-                    Some(self.resolve_dim_expr_symbol(name))
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn resolve_dim_expr_symbol(&self, name: &str) -> DimExpr {
-        self.dim_substitutions
-            .get(name)
-            .map(DimExpr::from)
-            .unwrap_or_else(|| DimExpr::Sym(name.to_string()))
-    }
-
     /// Recover a broadcast extent from a `shape(operand, axis)` size
     /// argument (issue #318). The operand is lowered (idempotently — a
     /// bound `var` returns its cached DAG node) and the extent is read
@@ -10368,16 +11719,16 @@ impl LowerCtx {
     /// carries the named dimension `name` in its shape — i.e. the symbol has a
     /// real tensor source the backend can read the extent from. Used to
     /// distinguish a valid §4.7.2 Form-2 symbolic `expand` size (an in-scope
-    /// tensor dim) from a sourceless Form-3 scalar-parameter size that the
+    /// tensor dim) from a sourceless scalar-parameter size that the
     /// backend cannot materialize.
-    fn symbol_has_tensor_source(&self, name: &str) -> bool {
-        self.dag.nodes().iter().any(|node| {
-            matches!(node.op, RiscOp::Load { .. })
-                && node
-                    .output_type
-                    .dims
-                    .iter()
-                    .any(|dim| matches!(dim, DimInfo::Named(n, _) if n == name))
+    fn tensor_source_for_symbol(&self, name: &str) -> Option<(NodeId, usize, DimInfo)> {
+        self.dag.nodes().iter().find_map(|node| {
+            let axis = node
+                .output_type
+                .dims
+                .iter()
+                .position(|dim| matches!(dim, DimInfo::Named(n, _) if n == name))?;
+            Some((node.id, axis, node.output_type.dims[axis].clone()))
         })
     }
 
@@ -10388,12 +11739,15 @@ impl LowerCtx {
     /// DCE — otherwise a `shape(x, ...)`-only-referenced `x` is eliminated and
     /// the symbolic dim it declares loses its source (silent wrong shape in
     /// the backend).
-    fn dim_expr_from_shape_arg_with_source(&mut self, expr: &Expr) -> Option<(DimExpr, NodeId)> {
+    fn input_axis_source_from_shape_arg(
+        &mut self,
+        expr: &Expr,
+    ) -> Option<(NodeId, usize, DimInfo)> {
         let (operand, axis) = self.shape_app_operand_axis_resolved(expr)?;
         let operand_id = self.lower_expr(&operand).as_single_node()?;
         let operand_ty = self.dag.get(operand_id)?.output_type.clone();
-        let dim = operand_ty.dims.get(axis)?;
-        Some((DimExpr::from(dim), operand_id))
+        let dim = operand_ty.dims.get(axis)?.clone();
+        Some((operand_id, axis, dim))
     }
 
     /// chelis#369: like the free [`shape_app_operand_axis`], but also
@@ -10487,9 +11841,34 @@ impl LowerCtx {
         match effect_kind {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
-                self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
+                let saved_counter = self.random_counter;
+                let seed = self.extract_u64_value(&elems[2]).unwrap_or_else(|| {
+                    let unsupported = Unsupported::new(
+                        UnsupportedKind::Construct(
+                            "an explicit random seed that is not a statically-resolvable signed \
+                             int64 value"
+                                .to_owned(),
+                        ),
+                        "`with seed(...)` in IR lowering",
+                        Stage::Lowering,
+                        chelis_types::deliberate_rejection!(
+                            "[05-RNG-1]",
+                            "an explicit random seed is a signed int64 value; lowering \
+                             reinterprets its two's-complement bits as uint64 and never \
+                             substitutes zero or ambient state (Chelis-Lang/chelis#794)"
+                        ),
+                    );
+                    raise_fatal_lowering_error(
+                        unsupported.to_string(),
+                        Some(elems[2].span()),
+                        elems[2].span_id().map(ToOwned::to_owned),
+                    )
+                });
+                self.random_seed = Some(seed);
+                self.random_counter = 0;
                 let result = self.lower_expr(&elems[3]);
                 self.random_seed = saved_seed;
+                self.random_counter = saved_counter;
                 result
             }
             Ok(EffectKind::Resource) if elems.len() >= 4 => self.lower_expr(&elems[3]),
@@ -10507,7 +11886,28 @@ impl LowerCtx {
     }
 
     fn extract_u64_value(&self, expr: &Expr) -> Option<u64> {
-        self.extract_usize_value(expr).map(|value| value as u64)
+        // [05-RNG-1] owns a signed int64 seed, not a dimension-like integer.
+        // Require that exact checked type before recognizing the static leaf;
+        // `extract_int_for_dim` would also accept a float-typed `(lit ... 7)`
+        // by looking only at its payload. Reinterpret the accepted signed
+        // value as two's-complement bits; negative seeds are conforming.
+        let declared = expr_type_metadata(expr)
+            .and_then(Self::try_extract_prim)
+            .or_else(|| {
+                let (DeepTag::Cast, _, kids) = stamped_parts(expr)? else {
+                    return None;
+                };
+                Self::try_extract_prim(kids.get(1)?)
+            });
+        if declared != Some(Prim::Int64) {
+            return None;
+        }
+        let value = extract_type_checked_scalar(expr)?;
+        if value.prim() != Prim::Int64 {
+            return None;
+        }
+        let signed = value.as_i64_exact()?;
+        Some(signed as u64)
     }
 
     /// Extract a compile-time-constant f64 from an expression, seeing through
@@ -10555,13 +11955,18 @@ impl LowerCtx {
                         let inner = kids.get(1)?;
                         Self::extract_f64_value(inner).map(|v| -v)
                     }
-                    // `(lit {} <atom>)` and any other list carrying a bare numeric
-                    // atom in the value slot (pre-chelis#776 behavior, preserved).
-                    _ => match kids.first() {
+                    // Only `(lit {} <atom>)` owns this value slot. Reading the
+                    // first child of an arbitrary composite silently folded
+                    // `(par {} 2.0 3.0)` to 2.0 even though `par`'s value is
+                    // its last child, 3.0 (chelis#794). Composite semantics
+                    // belong to ordinary lowering; this static extractor
+                    // rejects them instead of guessing or dropping effects.
+                    DeepTag::Lit => match kids.first() {
                         Some(Expr::Atom(Atom::Float(f), _)) => Some(*f),
                         Some(Expr::Atom(Atom::Int(n), _)) => Some(*n as f64),
                         _ => None,
                     },
+                    _ => None,
                 }
             }
             _ => None,
@@ -10690,7 +12095,7 @@ impl LowerCtx {
         let elements: Vec<Expr> = collect_cons_chain(expr)?.into_iter().cloned().collect();
         let mut op_dims = Vec::with_capacity(elements.len());
         let mut ty_dims = Vec::with_capacity(elements.len());
-        let mut srcs = Vec::new();
+        let srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
             if let Some(value) = extract_int_for_dim(elem) {
                 if value < 0 {
@@ -10698,12 +12103,25 @@ impl LowerCtx {
                 }
                 op_dims.push(RtDim::Lit(value as usize));
                 ty_dims.push(DimInfo::Lit(value as usize));
-            } else if let Some((dim_expr, src)) = self.dim_expr_from_shape_arg_with_source(elem)
-                && let Some(dim) = Self::dim_info_from_dim_expr(&dim_expr)
+            } else if let Some(value) = self.static_numel_from_expr(elem) {
+                // Rank-polymorphic stdlib wrappers flatten a concrete call
+                // site's tensor as `reshape(x, [numel(x)])` before crossing
+                // the rank-1 `to_list` boundary. Once the wrapper is inlined,
+                // the bound tensor node carries every concrete extent, so
+                // preserve that exact product in the DAG instead of falling
+                // back to an unresolved checker symbol.
+                op_dims.push(RtDim::Lit(value));
+                ty_dims.push(DimInfo::Lit(value));
+            } else if let Some((src, source_axis, dim)) =
+                self.input_axis_source_from_shape_arg(elem)
             {
-                op_dims.push(RtDim::from_dim_info(&dim));
+                let slot = inputs.len();
+                inputs.push(src);
+                op_dims.push(RtDim::InputAxis {
+                    tensor: slot,
+                    axis: RtAxis::Lit(i32::try_from(source_axis).ok()?),
+                });
                 ty_dims.push(dim);
-                srcs.push(src);
             } else if let Some(value) = self.fold_shape_derived_static_size(elem) {
                 // chelis#513 gap 3: static integer arithmetic over shape()
                 // reads of statically-sized axes (the school im2col target
@@ -11083,6 +12501,25 @@ impl LowerCtx {
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
+        // The checker stamps an alias-expanded function type on the `fn`
+        // node, but its variables are anonymous checker identities. Retain a
+        // directly lowerable authored tensor spelling so runtime dimensions
+        // keep names such as `batch`; use the checked type only where the
+        // authored spelling still contains a nominal alias.
+        let checked_param_types = elems
+            .get(1)
+            .and_then(|expr| match expr {
+                Expr::Map(meta, _) => meta
+                    .entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value),
+                _ => None,
+            })
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then_some(kids))
+            .and_then(|kids| kids.split_last().map(|(_, params)| params));
+
         // Register params as Load nodes. For `t-fn`-typed params,
         // additionally track the name in `fn_typed_params` so
         // `resolve_callable_expr_inner` can surface
@@ -11092,8 +12529,15 @@ impl LowerCtx {
         // dispatch on the callable shape, not on the binding's
         // `LoweredValue`.
         if let Some((DeepTag::Params, _, params)) = stamped_parts(&elems[2]) {
-            for param in params {
-                if let Some((name, ty_expr)) = param_name_and_type_expr(param) {
+            for (index, param) in params.iter().enumerate() {
+                if let Some((name, authored_ty_expr)) = param_name_and_type_expr(param) {
+                    let checked_ty_expr = checked_param_types.and_then(|types| types.get(index));
+                    let ty_expr = match authored_ty_expr {
+                        Some(authored) if !Self::type_expr_contains_nominal(authored) => {
+                            Some(authored)
+                        }
+                        _ => checked_ty_expr.or(authored_ty_expr),
+                    };
                     if Self::type_expr_is_fn(ty_expr) {
                         self.fn_typed_params.insert(name.clone());
                     }
@@ -11129,6 +12573,19 @@ impl LowerCtx {
         match tag {
             DeepTag::TFn => true,
             DeepTag::TRef => Self::type_expr_is_fn(kids.first()),
+            _ => false,
+        }
+    }
+
+    fn type_expr_contains_nominal(expr: &Expr) -> bool {
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            return false;
+        };
+        match tag {
+            DeepTag::TAdt => true,
+            DeepTag::TRef | DeepTag::TFn | DeepTag::TTuple => {
+                kids.iter().any(Self::type_expr_contains_nominal)
+            }
             _ => false,
         }
     }
@@ -11456,6 +12913,16 @@ impl LowerCtx {
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
+        } else if let Some(var_name) = Self::scalar_precision_var_name(&elems[3])
+            && let Some(prim) = self.prec_substitutions.get(&var_name).copied()
+        {
+            // [04-NUM-14] / section 5.8.1: an inlined bounded-binder cast
+            // reaches this lane with a concrete call-site substitution even
+            // though its target remains spelled `(t-var {} p)` in Deep. Use
+            // that installed monomorphization instead of misclassifying the
+            // target as a non-primitive expression. An unbound `t-var` still
+            // falls through to the deliberate [04-DTYPE-1] rejection below.
+            prim
         } else if let Expr::Atom(Atom::Name(pname), _) = &elems[3] {
             // Bare-symbol spelling (backward compat): parse or raise.
             match Prim::parse_name(pname) {
@@ -11578,10 +13045,50 @@ impl LowerCtx {
         if let Some(taken) = self.fold_static_cond(cond) {
             return self.lower_expr(if taken { then_expr } else { else_expr });
         }
+        let saved_random_path = self.random_path_condition;
+        if let Some(parent_path) = saved_random_path {
+            let path_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            };
+            let then_path = self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, cond],
+                path_ty,
+                self.current_span_id.clone(),
+            );
+            self.random_path_condition = Some(then_path);
+        }
         let then_value = self.lower_expr(then_expr);
         let then_node = self.expect_runtime_if_branch(then_value, "then", elems);
+        if let Some(parent_path) = saved_random_path {
+            let path_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            };
+            let one = self.dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let not_cond = self.dag.add_node(
+                RiscOp::CmpLt,
+                vec![cond, one],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let else_path = self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, not_cond],
+                path_ty,
+                self.current_span_id.clone(),
+            );
+            self.random_path_condition = Some(else_path);
+        }
         let else_value = self.lower_expr(else_expr);
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
+        self.random_path_condition = saved_random_path;
         let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(&meta.entries)
         } else {
@@ -12145,21 +13652,26 @@ impl LowerCtx {
             let mut dims = Vec::new();
             for (axis, dim) in out_ty.dims.iter().enumerate() {
                 dims.push(dim.clone());
-                expanded = self.dag.add_node(
-                    RiscOp::Expand {
-                        axis,
-                        size: DimExpr::from(dim),
+                let size = match dim {
+                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => RtDim::Lit(*value),
+                    DimInfo::Named(_, None) => RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits int32")),
                     },
-                    vec![expanded],
+                };
+                expanded = self.dag.add_node(
+                    RiscOp::Expand { axis, size },
+                    if matches!(dim, DimInfo::Named(_, None)) {
+                        vec![expanded, shape_source]
+                    } else {
+                        vec![expanded]
+                    },
                     TensorType {
                         dims: dims.clone(),
                         precision: out_ty.precision,
                     },
                     self.current_span_id.clone(),
                 );
-                // chelis#616: an unbound (possibly wildcard) `size` resolves
-                // from the branch value's actual shape at eval time.
-                self.dag.add_shape_dep(expanded, shape_source);
             }
             return expanded;
         }
@@ -12182,7 +13694,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unreachable by role construction")]
     fn collect_param_bound_names_unknown_form_guard_fires() {
-        let mut out = std::collections::HashSet::new();
+        let mut out = chelis_unord::UnordSet::new();
         let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
             head: "mystery".to_string(),
             meta: chelis_deep::ast::MetaMap::default(),
@@ -12362,7 +13874,7 @@ mod tests {
             },
             Span::new(0, 0),
         );
-        let mut env: HashMap<String, Expr> = HashMap::new();
+        let mut env: BTreeMap<String, Expr> = BTreeMap::new();
         env.insert("lib_fn".to_string(), raw);
         assert_decode_once_in_env("test", &env);
     }
@@ -12419,11 +13931,7 @@ mod tests {
 
     fn parse_and_lower_unchecked(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            LinearityInfo::default(),
-        );
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
         }
@@ -12432,11 +13940,7 @@ mod tests {
 
     #[test]
     fn typed_fail_placeholder_keeps_a_backward_shape_dependency() {
-        let mut ctx = LowerCtx::new(
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            LinearityInfo::default(),
-        );
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         let out_ty = TensorType {
             dims: vec![DimInfo::Named("result".to_string(), None)],
             precision: Prim::F32,
@@ -12524,11 +14028,7 @@ mod tests {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
         };
-        let mut ctx = LowerCtx::new(
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            LinearityInfo::default(),
-        );
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         let x = ctx
             .dag
             .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
@@ -12538,7 +14038,7 @@ mod tests {
         ctx.dag
     }
 
-    fn only_expand(dag: &Dag) -> (DimExpr, Vec<DimInfo>) {
+    fn only_expand(dag: &Dag) -> (RtDim, Vec<DimInfo>) {
         dag.nodes()
             .iter()
             .find_map(|n| match &n.op {
@@ -12578,8 +14078,11 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(2),
-            "shape-derived extent must recover x's axis-0 size 2, not the default 1; got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "shape-derived extent must retain x's axis-0 source structurally; got {size:?}",
         );
         assert_eq!(
             dims,
@@ -12625,26 +14128,29 @@ mod tests {
         );
     }
 
-    /// The fix recovers the broadcast EXTENT only; it leaves the
-    /// language's rank/insert rule for `expand` untouched. To prove the
-    /// extent recovery is orthogonal to the rank rule, lower a rank-1
-    /// size-1 source `tensor[1]` with a shape-derived size: `expand([1],
-    /// 0, shape(&x, 0))` with `x: tensor[2]`. The recovered extent at the
+    /// The fix recovers the broadcast EXTENT only; it leaves the rank rule
+    /// of the operation it lowers untouched. To prove the extent recovery
+    /// is orthogonal to that rule, lower a rank-1 size-1 source
+    /// `tensor[1]` with a shape-derived size: `insert([1], 0,
+    /// shape(&x, 0))` with `x: tensor[2]`. The recovered extent at the
     /// inserted axis must be the concrete `2` (NOT the default `1`), and
-    /// the output must follow the established INSERT semantics
-    /// (`[1] -> [2, 1]`, axis 0 inserted) — the same rule pinned by
-    /// `cli::build_c_linreg_expand_singleton_bias_keeps_rank2_shape` and
+    /// the output must follow `insert`'s rule (`[1] -> [2, 1]`, axis 0
+    /// added), the same rule pinned by
+    /// `cli::build_c_linreg_insert_singleton_bias_keeps_rank2_shape` and
     /// `chelis-compiler-api`'s
-    /// `host_runtime_expand_singleton_input_inserts_not_replicates`.
-    /// #318's real source is rank-0 (`scalar_to_tensor`), so this rank-1
-    /// case only exists to lock that the size fix did not perturb the
-    /// rank rule.
+    /// `host_runtime_insert_singleton_input_adds_an_axis`.
+    ///
+    /// The call spells `insert` because it raises the rank:
+    /// `spec/04-type-system.md` §4.7.2 gives `expand` the same-rank
+    /// broadcast and `insert` the rank-increasing form. #318's real source
+    /// is rank-0 (`scalar_to_tensor`), so this rank-1 case only exists to
+    /// lock that the size fix did not perturb the rank rule.
     #[test]
-    fn issue_318_expand_shape_arg_recovers_extent_without_changing_rank_rule() {
+    fn issue_318_insert_shape_arg_recovers_extent_without_changing_rank_rule() {
         // Source: a rank-1 size-1 constant `tensor[1]`.
         let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 1) (t-prim {} f32))}
-                 (var {} expand)
+                 (var {} insert)
                  (cast {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
                        (lit {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} 3.0)
                        (t-prim {} f32))
@@ -12660,13 +14166,16 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(2),
-            "shape-derived extent must recover 2 at the inserted axis, not the default 1; got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "shape-derived extent must retain x's inserted-axis source structurally; got {size:?}",
         );
         assert_eq!(
             dims,
             vec![DimInfo::Lit(2), DimInfo::Lit(1)],
-            "rank rule is unchanged: a rank-1 size-1 source INSERTS axis 0 \
+            "rank rule is unchanged: `insert` adds axis 0 \
              ([1] -> [2, 1]); got {dims:?}",
         );
     }
@@ -12694,8 +14203,11 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(3),
-            "extent must track the named tensor x's axis-0 size 3; got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "extent must track the named tensor x's axis-0 source; got {size:?}",
         );
         assert_eq!(
             dims,
@@ -12722,7 +14234,7 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(2),
+            RtDim::Lit(2),
             "literal size 2 must still extract; got {size:?}"
         );
         assert_eq!(
@@ -12743,11 +14255,7 @@ mod tests {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
         };
-        let mut ctx = LowerCtx::new(
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            LinearityInfo::default(),
-        );
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         let x = ctx
             .dag
             .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
@@ -12787,10 +14295,12 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(3),
-            "a `let len = shape(x, 0)`-bound extent must recover x's axis-0 \
-             size 3 through the `let` indirection, not the default 1 \
-             (chelis#369); got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "a `let len = shape(x, 0)`-bound extent must retain x's axis-0 \
+             source through the `let` indirection (chelis#369); got {size:?}",
         );
         assert_eq!(
             dims,
@@ -12833,9 +14343,12 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(5),
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
             "a `let len = shape(x, 0)`-bound extent on `x: tensor[5]` must \
-             recover Concrete(5), not a hardcoded 3 or the default 1 \
+             retain the witnessed source, not a hardcoded value \
              (chelis#369 non-hardcoding); got {size:?}",
         );
         assert_eq!(
@@ -12876,7 +14389,7 @@ mod tests {
         // default, proving the static value is materialized).
         assert_eq!(
             size,
-            DimExpr::Concrete(7),
+            RtDim::Lit(7),
             "a `let`-bound static size must fold to its own extent 7, never \
              recover x's 3 or default to 1; got {size:?}",
         );
@@ -12915,7 +14428,7 @@ mod tests {
         let (size, _dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(5),
+            RtDim::Lit(5),
             "a re-bound (shadowed) `len` must fold to the NEW static 5, never \
              recover the stale shape extent 3; got {size:?}",
         );
@@ -13051,30 +14564,31 @@ mod tests {
     }
 
     #[test]
-    fn lower_sub_decomposes() {
+    fn lower_sub_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} c (app {} (var {} sub) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a=Const(3), b=Const(1), Neg(b), Add(a, Neg(b))
-        assert_eq!(non_drop_len(&dag), 4);
+        // a=Const(3), b=Const(1), Sub(a, b)
+        assert_eq!(non_drop_len(&dag), 3);
         assert!(verify::verify(&dag).is_empty());
-        assert_eq!(root_node(&dag).op, RiscOp::Add);
+        assert_eq!(root_node(&dag).op, RiscOp::Sub);
     }
 
     #[test]
-    fn lower_relu_decomposes() {
+    fn lower_relu_preserves_identity() {
         let src = r#"
             (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} -2.0))
             (def {} y (app {} (var {} relu) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
-        // x=Const(-2), Const(0), MaxElem(x, 0)
-        assert_eq!(non_drop_len(&dag), 3);
+        // x=Const(-2), Relu(x). The identity must survive until AD applies
+        // [05-OP-43]'s dedicated zero-at-zero rule.
+        assert_eq!(non_drop_len(&dag), 2);
         assert!(verify::verify(&dag).is_empty());
-        assert_eq!(root_node(&dag).op, RiscOp::MaxElem);
+        assert_eq!(root_node(&dag).op, RiscOp::Relu);
     }
 
     #[test]
@@ -13425,7 +14939,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect::<HashMap<_, _>>(),
+                .collect::<BTreeMap<_, _>>(),
             collect_top_level_defs(checked.exprs()),
             LinearityInfo::default(),
         );
@@ -13530,7 +15044,7 @@ mod tests {
                     .type_env()
                     .iter()
                     .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                    .collect::<HashMap<_, _>>(),
+                    .collect::<BTreeMap<_, _>>(),
                 program_defs.clone(),
                 LinearityInfo::default(),
             );
@@ -13541,7 +15055,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect::<HashMap<_, _>>(),
+                .collect::<BTreeMap<_, _>>(),
             program_defs.clone(),
             LinearityInfo::default(),
         );
@@ -13585,7 +15099,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect::<HashMap<_, _>>(),
+                .collect::<BTreeMap<_, _>>(),
             program_defs,
             LinearityInfo::default(),
         );
@@ -13687,11 +15201,7 @@ mod tests {
         // `(import {} ...)` form isn't run through the regular
         // type-checker path; we want a direct lowering observation.
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            LinearityInfo::default(),
-        );
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         for expr in &exprs {
             ctx.lower_top_level(expr);
         }
@@ -13715,11 +15225,7 @@ mod tests {
             (import-all {} Math)
         "#;
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            LinearityInfo::default(),
-        );
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         for expr in &exprs {
             ctx.lower_top_level(expr);
         }
@@ -13806,17 +15312,19 @@ mod tests {
         assert_eq!(non_drop_len(&dag), 7);
     }
 
+    // --- Direct Tier-1 MinElem lowering ---
+
     #[test]
-    fn lower_min_elem_decomposes() {
+    fn lower_min_elem_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} min_elem) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, neg(a), neg(b), max(neg_a, neg_b), neg(max)
-        assert_eq!(non_drop_len(&dag), 6);
-        assert_eq!(root_node(&dag).op, RiscOp::Neg);
+        // a, b, MinElem(a, b)
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(root_node(&dag).op, RiscOp::MinElem);
         assert!(verify::verify(&dag).is_empty());
     }
 
@@ -14133,7 +15641,7 @@ mod tests {
         let result = grad_dag_checked(&dag, loss, &[x_node])
             .expect("grad through windowed max_reduce must construct (issue #320)");
         let grad_x = result.grad_nodes[&x_node];
-        let mut inputs = std::collections::HashMap::new();
+        let mut inputs = chelis_unord::UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 4.0, 3.0]),
@@ -14210,7 +15718,7 @@ mod tests {
         let grad_x = result.grad_nodes[&x_node];
 
         // Analytic: df/dx = [2, 2, 2] for any x.
-        let mut inputs = std::collections::HashMap::new();
+        let mut inputs = chelis_unord::UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -14231,7 +15739,7 @@ mod tests {
         // forward loss DAG (backend-numerics discipline).
         let base = [0.7f64, -1.3, 2.1];
         let analytic = {
-            let mut ip = std::collections::HashMap::new();
+            let mut ip = chelis_unord::UnordMap::new();
             ip.insert(
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], base.to_vec()),
@@ -14246,12 +15754,12 @@ mod tests {
             let mut minus = base;
             plus[j] += h;
             minus[j] -= h;
-            let mut ip = std::collections::HashMap::new();
+            let mut ip = chelis_unord::UnordMap::new();
             ip.insert(
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], plus.to_vec()),
             );
-            let mut im = std::collections::HashMap::new();
+            let mut im = chelis_unord::UnordMap::new();
             im.insert(
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], minus.to_vec()),
@@ -14309,7 +15817,7 @@ mod tests {
         let result = grad_dag_checked(&dag, loss, &[x_node])
             .expect("grad through windowed gather must construct (issue #320)");
         let grad_x = result.grad_nodes[&x_node];
-        let mut inputs = std::collections::HashMap::new();
+        let mut inputs = chelis_unord::UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
@@ -14401,7 +15909,7 @@ mod tests {
             .next()
             .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
             let _ = ctx.lower_expr(&expr);
         });
         let Err(diagnostic) = outcome else {
@@ -14417,6 +15925,337 @@ mod tests {
             !message.contains("is not a numeric dtype and has no finalize semantics"),
             "the unreachable-by-construction panic must not be the user-facing \
              message; got: {message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_static_float_extraction_rejects_par_instead_of_folding_first_child() {
+        let mut exprs = chelis_deep::parser::parse_str("(par {} 2.0 3.0)").expect("parse par");
+        let par = exprs.pop().expect("one par expression");
+        assert_eq!(
+            LowerCtx::extract_f64_value(&par),
+            None,
+            "a composite `par` is not a static literal: reading its first child \
+             would substitute 2.0 for its specified last-child value 3.0"
+        );
+
+        let literal = chelis_deep::parser::parse_str("(lit {type: (t-prim {} f64)} 3.0)")
+            .expect("parse literal")
+            .pop()
+            .expect("one literal");
+        assert_eq!(
+            LowerCtx::extract_f64_value(&literal),
+            Some(3.0),
+            "narrowing the extractor must preserve the admitted literal path"
+        );
+    }
+
+    #[test]
+    fn issue_794_negative_explicit_seed_reinterprets_signed_int64_bits() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} -1) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+            ctx.dag
+        });
+        let dag = outcome.expect("signed int64 seeds are valid");
+        let seed = dag
+            .nodes()
+            .iter()
+            .find_map(|node| match node.op {
+                RiscOp::UniformLike { seed, .. } => Some(seed),
+                _ => None,
+            })
+            .expect("handled body contains a uniform_like node");
+        assert_eq!(
+            seed,
+            u64::MAX,
+            "[05-RNG-1] reinterprets -1i64 as its uint64 two's-complement bits"
+        );
+    }
+
+    #[test]
+    fn issue_794_non_negative_explicit_seed_still_lowers() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} 7) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let _ = ctx.lower_expr(&expr);
+            ctx.dag
+        });
+        assert!(
+            outcome.is_ok(),
+            "non-negative seed control must lower: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted() {
+        let cases = [
+            (
+                "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+                i64::MIN as u64,
+            ),
+            (
+                "(lit {type: (t-prim {} int64)} 9223372036854775807)",
+                i64::MAX as u64,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64))",
+                7,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} bool)} true) (t-prim {} int64))",
+                1,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} int64))",
+                7,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer} 7) (t-prim {} int64))",
+                7,
+            ),
+        ];
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        for (source, expected) in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse seed control {source}: {error}"))
+                .pop()
+                .expect("one seed control");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                Some(expected),
+                "signed int64 seed control must remain admitted: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_seed_wrappers_reject_payload_type_disagreement() {
+        let cases = [
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} bool)} 1))",
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} f64)} 1))",
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} string)} 1))",
+            "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
+                 (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, \
+                 literal_source: integer} 7) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
+            "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
+                 (t-prim {} string)) (t-prim {} int64))",
+        ];
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        for source in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse forged seed {source}: {error}"))
+                .pop()
+                .expect("one forged seed");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                None,
+                "payload/type disagreement must not become a seed: {source}"
+            );
+        }
+    }
+
+    /// Negative parity for the typed fold's literal ingress: a BARE atom
+    /// carries no type metadata, so `extract_type_checked_scalar` declines it
+    /// rather than stamping a dtype the source never wrote. The
+    /// `(cast {} 42 (t-prim {} int64))` case is the one that used to fold: the
+    /// outer cast supplied the declared int64 while the bare `42` was silently
+    /// given `Prim::Int64`, which both widened this fold past the checker (a
+    /// bare atom is an UNSUFFIXED seed literal it rejects) and contradicted
+    /// spec/04-type-system.md §5.3's int32/f32 literal defaults. The stamped
+    /// `(lit {type: (t-prim {} int32)} 7)` control in
+    /// `issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted`
+    /// is the positive parity: an explicit stamp still folds.
+    #[test]
+    fn issue_794_bare_atom_seed_payload_requires_an_explicit_stamp() {
+        let cases = [
+            "42",
+            "(cast {} 42 (t-prim {} int64))",
+            "(cast {} 42.0 (t-prim {} int64))",
+            "(cast {} true (t-prim {} int64))",
+            "(app {type: (t-prim {} int64)} (var {} neg) 1)",
+            "(cast {} (cast {} 42 (t-prim {} int32)) (t-prim {} int64))",
+        ];
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        for source in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse unstamped seed {source}: {error}"))
+                .pop()
+                .expect("one unstamped seed");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                None,
+                "an unstamped literal payload must not become a seed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_malformed_literal_and_cast_modes_use_typed_unsupported_channel() {
+        let seeds = [
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
+                 (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
+        ];
+        for seed in seeds {
+            let source = format!(
+                "(handle-effect {{effect: random}} \
+                    {seed} \
+                    (app {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} \
+                         (var {{}} uniform_like) \
+                         (lit {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} 0.0) \
+                         (lit {{type: (t-prim {{}} f64)}} 0.0) \
+                         (lit {{type: (t-prim {{}} f64)}} 1.0)))"
+            );
+            let expr = chelis_deep::parser::parse_str(&source)
+                .unwrap_or_else(|error| panic!("parse malformed seed {seed}: {error}"))
+                .pop()
+                .expect("one handled-random expression");
+            let outcome = catch_lowering(move || {
+                let mut ctx =
+                    LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+                ctx.random_seed = Some(7);
+                let _ = ctx.lower_expr(&expr);
+            });
+            let diagnostic = outcome.expect_err(&format!(
+                "malformed seed must be rejected, not lowered: {seed}"
+            ));
+            assert!(
+                diagnostic.fatal,
+                "rejection must bypass host fallback: {seed}"
+            );
+            let message = diagnostic.to_string();
+            assert!(message.starts_with("unsupported:"), "{seed}: {message}");
+            assert!(
+                message.contains("[05-RNG-1]") && message.contains("int64"),
+                "{seed}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_wrong_typed_explicit_seed_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} f64)} 7) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("an f64 seed is not an int64 seed");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_bool_payload_stamped_int64_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} true) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("a bool payload is not an int64 seed");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_runtime_explicit_seed_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (var {type: (t-prim {} int64)} runtime_seed) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("a runtime seed is not statically resolvable");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
         );
     }
 
@@ -14444,7 +16283,7 @@ mod tests {
     #[test]
     fn extract_rank_var_bindings_sole_spread() {
         let actual = vec![DimInfo::Named("a".into(), None), DimInfo::Lit(4)];
-        let no_positions = HashMap::new();
+        let no_positions = UnordMap::new();
 
         let bare = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
         assert_eq!(
@@ -14479,7 +16318,7 @@ mod tests {
 
         // chelis#549: the anchor is located by its recorded extent `Lit(3)`,
         // which is unique in the actual, so it resolves to index 1.
-        let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
+        let positions = UnordMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
         let bindings = extract_rank_var_bindings(&formal, &actual, &positions);
         assert_eq!(
             bindings,
@@ -14516,7 +16355,7 @@ mod tests {
             let actual = vec![DimInfo::Lit(2), DimInfo::Lit(3)];
             // Position 9 is out of range AND extent 99 appears nowhere ->
             // unrecoverable.
-            let bad_positions = HashMap::from([("seq".to_string(), (9usize, DimInfo::Lit(99)))]);
+            let bad_positions = UnordMap::from([("seq".to_string(), (9usize, DimInfo::Lit(99)))]);
             let _ = extract_rank_var_bindings(&formal, &actual, &bad_positions);
         })
         .expect_err("an unrecoverable anchor must fail loud, not return a partial binding");
@@ -14545,7 +16384,7 @@ mod tests {
         // now holds `a`'s extent (Lit(2)). The anchor must be relocated to the
         // unique axis carrying Lit(3) (index 0), not split at the stale 1.
         let permuted_actual = vec![DimInfo::Lit(3), DimInfo::Lit(2)];
-        let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
+        let positions = UnordMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
         let bindings = extract_rank_var_bindings(&formal, &permuted_actual, &positions);
         assert_eq!(
             bindings,
@@ -14572,7 +16411,7 @@ mod tests {
             // Lit(2) now appears at BOTH axes 0 and 1, and the recorded index 2
             // holds Lit(3).
             let ambiguous_actual = vec![DimInfo::Lit(2), DimInfo::Lit(2), DimInfo::Lit(3)];
-            let positions = HashMap::from([("seq".to_string(), (2usize, DimInfo::Lit(2)))]);
+            let positions = UnordMap::from([("seq".to_string(), (2usize, DimInfo::Lit(2)))]);
             let _ = extract_rank_var_bindings(&formal, &ambiguous_actual, &positions);
         })
         .expect_err("an ambiguous post-reorder anchor must fail loud, not split silently");
@@ -14594,7 +16433,7 @@ mod tests {
     fn recover_anchor_axis_unique_resolves_ambiguous_and_unrecorded_fail_closed() {
         // Unique extent at the recorded position (no reorder): resolves there.
         let dims = vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(4)];
-        let positions = HashMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
+        let positions = UnordMap::from([("seq".to_string(), (1usize, DimInfo::Lit(3)))]);
         assert!(matches!(
             recover_anchor_axis(&dims, 0, dims.len(), "seq", &positions),
             AnchorRecovery::Axis(1)
@@ -14653,7 +16492,7 @@ mod tests {
             DimInfo::Named("seq".into(), None),
             DimInfo::Named("hidden".into(), None),
         ];
-        let bindings = extract_rank_var_bindings(&formal, &actual, &HashMap::new());
+        let bindings = extract_rank_var_bindings(&formal, &actual, &UnordMap::new());
         assert_eq!(
             bindings,
             vec![
@@ -14684,7 +16523,7 @@ mod tests {
             ],
             precision: Prim::F32,
         }];
-        let subst = tensor_rank_substitutions(&formals, &actuals, &HashMap::new());
+        let subst = tensor_rank_substitutions(&formals, &actuals, &UnordMap::new());
         assert_eq!(
             subst.get("r"),
             Some(&vec![
@@ -14761,7 +16600,7 @@ mod tests {
             precision: Prim::F32,
         };
         let mut positions = tensor_dim_axis_positions(&[concrete], std::slice::from_ref(&actual));
-        positions.extend(tensor_dim_axis_positions(
+        positions.merge(tensor_dim_axis_positions(
             &[spread],
             std::slice::from_ref(&actual),
         ));
@@ -14777,8 +16616,8 @@ mod tests {
     /// an unbound one (the speculative-annotation path repaired by inlining).
     #[test]
     fn try_extract_tensor_type_expands_bound_rank_var() {
-        let prec_subst = HashMap::new();
-        let mut rank_subst: HashMap<String, Vec<DimInfo>> = HashMap::new();
+        let prec_subst = UnordMap::new();
+        let mut rank_subst: UnordMap<String, Vec<DimInfo>> = UnordMap::new();
         rank_subst.insert("r".into(), vec![DimInfo::Lit(3), DimInfo::Lit(4)]);
 
         let bound = parse_type_expr("(t-tensor {} (d-rank {} r) (t-prim {} f32))");
@@ -14918,11 +16757,7 @@ mod regression_tests {
 
     fn parse_and_lower_unchecked(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            LinearityInfo::default(),
-        );
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
         }
@@ -15055,7 +16890,7 @@ mod regression_tests {
             "#,
         )
         .expect("parse failed");
-        let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         let _ = ctx.lower_expr(&exprs[0]);
         let load_x = ctx
             .dag
@@ -15496,6 +17331,40 @@ mod regression_tests {
     }
 
     #[test]
+    fn binder_float_literal_default_is_structural_not_value_keyed() {
+        for (literal, target) in [
+            ("16777217.0", Prim::Int64),
+            ("-16777217.0", Prim::Int64),
+            ("127.5", Prim::Int8),
+            ("128.0", Prim::Int8),
+        ] {
+            let expr = chelis_deep::parser::parse_str(&format!(
+                "(cast {{}} \
+                    (lit {{surf_literal_style: \"unsuffixed\", type: (t-var {{}} p)}} {literal}) \
+                    (t-var {{}} p))"
+            ))
+            .unwrap_or_else(|error| panic!("parse binder literal {literal}: {error}"))
+            .pop()
+            .expect("one binder cast");
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.prec_substitutions.insert("p".to_string(), target);
+            let _ = ctx.lower_expr(&expr);
+
+            let nodes = ctx.dag.nodes();
+            assert_eq!(nodes.len(), 2);
+            assert!(matches!(nodes[0].op, RiscOp::Const { .. }));
+            assert_eq!(nodes[0].output_type.precision, Prim::F32, "{literal}");
+            assert_eq!(
+                nodes[1].op,
+                RiscOp::Cast {
+                    new_precision: target
+                },
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
     fn float_if_lowers_via_masked_select() {
         // chelis#620: the condition must be a RUNTIME value (an unbound var
         // lowers to a Load, which the static fold refuses) so the mask-blend
@@ -15928,7 +17797,7 @@ mod regression_tests {
         )
         .expect("parse failed");
         let err =
-            try_lower_subexpr_program(&exprs[0], HashMap::new(), HashMap::new(), HashMap::new())
+            try_lower_subexpr_program(&exprs[0], UnordMap::new(), UnordMap::new(), UnordMap::new())
                 .expect_err("unsupported pipe stage should return diagnostic");
         let message = err.to_string();
         assert!(
@@ -16079,7 +17948,7 @@ mod regression_tests {
     // This must NOT panic and must produce a valid DAG.
     #[test]
     fn grad_applied_to_named_top_level_def_lowers_without_panic() {
-        use std::collections::HashMap;
+        use chelis_unord::UnordMap;
         let fn_src = r#"
             (fn {}
               (params {}
@@ -16107,16 +17976,16 @@ mod regression_tests {
             .into_iter()
             .next()
             .expect("app expr");
-        let mut program_defs = HashMap::new();
+        let mut program_defs = UnordMap::new();
         program_defs.insert("loss".to_string(), fn_expr);
         let input_ty = crate::dag::TensorType {
             dims: vec![crate::dag::DimInfo::Lit(1)],
             precision: chelis_types::types::Prim::F32,
         };
-        let scoped_types = HashMap::from([("input".to_string(), input_ty)]);
+        let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
         // lower_subexpr_program starts with a fresh LowerCtx (no local_callables).
         // This must NOT report `grad` as unsupported by IR evaluation.
-        let dag = lower_subexpr_program(&app_expr, scoped_types, HashMap::new(), program_defs);
+        let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);
         assert!(
             !dag.is_empty(),
             "lowering grad(named_fn)(x) must produce a non-empty DAG"
@@ -16134,7 +18003,7 @@ mod regression_tests {
     // loss(x) = sum(mul(x,x),0)  →  dL/dx = 2*x  →  at x=3.0, result=6.0.
     #[test]
     fn grad_applied_to_named_top_level_def_gradient_is_correct() {
-        use std::collections::HashMap;
+        use chelis_unord::UnordMap;
         let fn_src = r#"
             (fn {}
               (params {}
@@ -16162,16 +18031,16 @@ mod regression_tests {
             .into_iter()
             .next()
             .expect("app expr");
-        let mut program_defs = HashMap::new();
+        let mut program_defs = UnordMap::new();
         program_defs.insert("loss".to_string(), fn_expr);
         let input_ty = crate::dag::TensorType {
             dims: vec![crate::dag::DimInfo::Lit(1)],
             precision: chelis_types::types::Prim::F32,
         };
-        let scoped_types = HashMap::from([("input".to_string(), input_ty)]);
-        let dag = lower_subexpr_program(&app_expr, scoped_types, HashMap::new(), program_defs);
+        let scoped_types = UnordMap::from([("input".to_string(), input_ty)]);
+        let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);
         // Evaluate with input = [3.0]; expected gradient = 2 * 3.0 = 6.0
-        let inputs = HashMap::from([(
+        let inputs = UnordMap::from([(
             "input".to_string(),
             crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
         )]);
@@ -16198,7 +18067,7 @@ mod regression_tests {
         // Duplicate the positive test as a named alias so both
         // "lowers_without_panic" and "resolves" names both pass.
         // (The actual content is the positive numeric test above.)
-        use std::collections::HashMap;
+        use chelis_unord::UnordMap;
         let fn_src = r#"
             (fn {}
               (params {}
@@ -16226,19 +18095,19 @@ mod regression_tests {
             .into_iter()
             .next()
             .expect("app expr");
-        let mut program_defs = HashMap::new();
+        let mut program_defs = UnordMap::new();
         program_defs.insert("loss".to_string(), fn_expr);
         let input_ty = crate::dag::TensorType {
             dims: vec![crate::dag::DimInfo::Lit(1)],
             precision: chelis_types::types::Prim::F32,
         };
-        let scoped_types = HashMap::from([("input".to_string(), input_ty.clone())]);
-        let dag = lower_subexpr_program(&app_expr, scoped_types, HashMap::new(), program_defs);
+        let scoped_types = UnordMap::from([("input".to_string(), input_ty.clone())]);
+        let dag = lower_subexpr_program(&app_expr, scoped_types, UnordMap::new(), program_defs);
         assert!(
             !dag.is_empty(),
             "lower_subexpr_program of grad(named_fn)(input) must produce a non-empty DAG"
         );
-        let inputs = HashMap::from([(
+        let inputs = UnordMap::from([(
             "input".to_string(),
             crate::eval::TensorValue::from_vec(vec![1], vec![3.0]),
         )]);

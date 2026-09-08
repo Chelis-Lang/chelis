@@ -11,7 +11,7 @@
 // treated as non-tensor-carrying and rejected from the borrow path.
 //
 // Fix in `crates/chelis-types/src/linearity.rs`: `Checker` now
-// pre-computes a `tensor_carrying_adts: HashSet<String>` of every ADT
+// pre-computes a `tensor_carrying_adts: UnordSet<String>` of every ADT
 // whose definition (transitively) carries a tensor field. The
 // `t-adt` arm of `type_expr_contains_tensor` consults this set so
 // `&BatchNormParams { weight: tensor[..], ... }` is accepted as a

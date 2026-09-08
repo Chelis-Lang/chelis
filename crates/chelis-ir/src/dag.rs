@@ -3,7 +3,7 @@
 //! The DAG is a flat vector of nodes, each referencing earlier nodes by [`NodeId`].
 //! Nodes are always in topological order (an invariant maintained by append-only construction).
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 use std::fmt;
 
 use chelis_types::types::Prim;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::load_store_name::LoadStoreName;
 
 /// Index into the DAG node array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
 /// Tensor type carried on each DAG node.
@@ -52,13 +52,24 @@ impl TensorType {
 /// matters; the HIP shrink kernel, like C, reads only the per-axis `start`.
 pub const SHRINK_TO_END: usize = usize::MAX;
 
-/// A single movement-op (`Pad` / `Shrink` / `Stride`) bound value.
+/// A literal axis carried by a folded tensor-shape read.
+///
+/// Slice A of chelis#1277 admits only the normalized literal form. A
+/// node-valued axis is owned by chelis#1298 and will extend this closed carrier
+/// together with its own wire-schema version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RtAxis {
+    /// A normalized axis in `0..rank(tensor)`.
+    Lit(i32),
+}
+
+/// A single runtime-capable tensor extent.
 ///
 /// chelis#616: movement bounds were compile-time `usize` only, so a runtime
 /// (`shape()`-derived) `shrink`/`stride` bound was dropped to empty at lowering
 /// and the windowed axis degraded to a `Named("*")` wildcard. A `RtDim` can now
-/// be a compile-time literal, the full-axis sentinel, or a *runtime* value read
-/// from a rank-0 integer node.
+/// be a compile-time literal, the full-axis sentinel, a *runtime* value read
+/// from a rank-0 integer node, or a folded read from a tensor input's shape.
 ///
 /// `Node(i)` is an **absolute** index into the owning node's `inputs`, where
 /// `inputs[0]` is always the tensor operand and `inputs[1..]` are rank-0 integer
@@ -78,6 +89,11 @@ pub const SHRINK_TO_END: usize = usize::MAX;
 /// (verify rejects it in movement-bound positions): a movement bound is a
 /// scalar *value*, lowered to `Lit` or `Node`, while a reshape target may
 /// restate an axis the checker already named.
+///
+/// `InputAxis { tensor, axis }` is an **absolute** input-slot reference to a
+/// tensor whose shape supplies this extent. It is legal only in `Expand` and
+/// `Reshape`; Slice A produces only `RtAxis::Lit` axes. The tensor is a real
+/// shape-only value edge, so ordinary DCE and graph rebuilding preserve it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RtDim {
     /// A compile-time-constant bound.
@@ -88,6 +104,8 @@ pub enum RtDim {
     Node(usize),
     /// A symbolic dimension declared elsewhere; `Reshape` targets only.
     Sym(String),
+    /// A folded read of `inputs[tensor]` shape metadata.
+    InputAxis { tensor: usize, axis: RtAxis },
 }
 
 impl RtDim {
@@ -99,11 +117,15 @@ impl RtDim {
         }
     }
 
-    /// Whether this bound is only known at runtime (`Node` or `ToEnd`).
+    /// Whether this bound is only known at runtime (`Node`, `InputAxis`, or
+    /// `ToEnd`).
     /// `Sym` is not "runtime" in this sense: its extent is bound from an
     /// input shape before evaluation, not computed by a node.
     pub fn is_runtime(&self) -> bool {
-        matches!(self, RtDim::Node(_) | RtDim::ToEnd)
+        matches!(
+            self,
+            RtDim::Node(_) | RtDim::InputAxis { .. } | RtDim::ToEnd
+        )
     }
 
     /// The `inputs` slot index if this bound is node-valued.
@@ -168,7 +190,7 @@ pub enum DimExprKey {
 }
 
 impl DimExpr {
-    pub fn evaluate(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
+    pub fn evaluate(&self, bindings: &UnordMap<String, usize>) -> Result<usize, String> {
         match self {
             Self::Concrete(value) => Ok(*value),
             Self::Sym(name) => bindings
@@ -213,13 +235,13 @@ impl DimExpr {
         }
     }
 
-    pub fn symbolic_names(&self) -> HashSet<String> {
-        let mut names = HashSet::new();
+    pub fn symbolic_names(&self) -> UnordSet<String> {
+        let mut names = UnordSet::new();
         self.collect_symbolic_names(&mut names);
         names
     }
 
-    fn collect_symbolic_names(&self, names: &mut HashSet<String>) {
+    fn collect_symbolic_names(&self, names: &mut UnordSet<String>) {
         match self {
             Self::Concrete(_) => {}
             Self::Sym(name) => {
@@ -232,7 +254,7 @@ impl DimExpr {
         }
     }
 
-    pub fn bind(&self, bindings: &HashMap<String, usize>) -> Result<Self, String> {
+    pub fn bind(&self, bindings: &UnordMap<String, usize>) -> Result<Self, String> {
         match self {
             Self::Concrete(value) => Ok(Self::Concrete(*value)),
             Self::Sym(name) => {
@@ -258,8 +280,8 @@ impl DimExpr {
     /// missing-binding error.
     pub fn bind_except(
         &self,
-        bindings: &HashMap<String, usize>,
-        exempt: &HashSet<String>,
+        bindings: &UnordMap<String, usize>,
+        exempt: &UnordSet<String>,
     ) -> Result<Self, String> {
         match self {
             Self::Sym(name)
@@ -536,12 +558,12 @@ pub enum SymbolicDimSource {
     /// `int name = inputs[slot]->shape[axis];` and the eval lane binds the
     /// value from the corresponding input before evaluation.
     Load { input_label: String, axis: usize },
-    /// chelis#616: declared at run time by the owning op itself — a
-    /// node-valued movement output axis (or a runtime reshape target) whose
-    /// extent is computed from rank-0 bound scalars. The C declaration is
-    /// emitted inline at the op (the scalars are computed tensors that do
-    /// not exist at prologue time); the eval lane resolves the extent from
-    /// actual values during evaluation and never pre-binds the symbol. When
+    /// chelis#616/#1277: declared at run time by the owning op itself — a
+    /// movement output axis whose extent is computed from a rank-0 bound
+    /// scalar or an explicit `InputAxis` metadata read. The C declaration is
+    /// emitted inline at the op (the source may be a computed tensor that
+    /// does not exist at prologue time); the eval lane resolves the extent
+    /// from actual values during evaluation and never pre-binds the symbol. When
     /// the same symbol also has a `Load` source (or an earlier `OpDeclared`
     /// declarer), this site is an equality-guard site: the C emitter aborts
     /// at run time if the op's extent disagrees with the declared value.
@@ -586,6 +608,7 @@ pub struct FusedStep {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FusedStepOp {
     Add,
+    Sub,
     Mul,
     Div,
     /// Floor division step (chelis#178); see [`RiscOp::FloorDiv`].
@@ -594,6 +617,7 @@ pub enum FusedStepOp {
     /// (chelis#178); see [`RiscOp::TruncDiv`].
     TruncDiv,
     MaxElem,
+    MinElem,
     CmpLt,
     Neg,
     Recip,
@@ -626,6 +650,20 @@ pub enum ReduceWindowKind {
     Mean,
 }
 
+/// Direct extrema identity used by the reverse-mode selection adjoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExtremaKind {
+    Max,
+    Min,
+}
+
+/// Forward operand whose complete extrema cotangent is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExtremaOperand {
+    Left,
+    Right,
+}
+
 impl ReduceWindowKind {
     /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
     /// and by the AD rejection error so error messages reference the
@@ -654,6 +692,10 @@ pub enum FusedInput {
 pub enum RiscOp {
     // --- Binary elementwise ---
     Add,
+    /// Direct element-wise subtraction. Integer execution checks the exact
+    /// mathematical difference at the stored width; this identity must not
+    /// be rewritten as `Add(Neg(rhs))`.
+    Sub,
     Mul,
     /// Element-wise IEEE-754 division `a / b`. Primitive because the
     /// algebraic rewrite `mul(a, exp(neg(log(b))))` is NaN for
@@ -678,6 +720,27 @@ pub enum RiscOp {
     TruncDiv,
     CmpLt,
     MaxElem,
+    /// Direct element-wise minimum selection. This identity preserves the
+    /// selected operand bits and must not be rewritten through negation.
+    MinElem,
+
+    /// AD-only exact selected-operand cotangent for [`RiscOp::MaxElem`] and
+    /// [`RiscOp::MinElem`]. Inputs are `(left, right, cotangent)`; output is
+    /// the complete cotangent where `operand` was selected and exact zero
+    /// elsewhere under [05-OP-40].
+    ExtremaAdjoint {
+        kind: ExtremaKind,
+        operand: ExtremaOperand,
+    },
+
+    /// [05-OP-43] ReLU identity. This node must survive construction and AD
+    /// intact so its zero-at-zero adjoint is not replaced by MaxElem's
+    /// first-operand tie rule.
+    Relu,
+    /// AD-only [05-OP-43] selector. Inputs are `(x, cotangent)`; output is the
+    /// complete cotangent exactly where `0 < x`, and exact positive zero
+    /// otherwise (including both zeros and NaN).
+    ReluAdjoint,
 
     // --- Unary elementwise ---
     Neg,
@@ -837,7 +900,7 @@ pub enum RiscOp {
     },
     Expand {
         axis: usize,
-        size: DimExpr,
+        size: RtDim,
     },
     /// Internal dense one-hot marker used by IR specialization.
     ///
@@ -1241,7 +1304,13 @@ impl RiscOp {
             // drives branch-and-bound on piecewise definitions such as
             // the `erf64` sign/small-x folds) all have sound interval /
             // linear-relaxation transformers (beacon_plan.md §3.1, §3.3).
-            RiscOp::Add | RiscOp::Mul | RiscOp::Div | RiscOp::CmpLt | RiscOp::MaxElem => true,
+            RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::CmpLt
+            | RiscOp::MaxElem
+            | RiscOp::MinElem => true,
 
             // --- Unary elementwise math ---
             // `Exp`, `Log`, `Sqrt` are direct ports of the auto_LiRPA
@@ -1354,6 +1423,15 @@ impl RiscOp {
             // pinned forward surface today.
             RiscOp::ReduceWindowGrad { .. } => false,
 
+            // Internal reverse-mode selection node; Beacon targets the
+            // forward extrema identity rather than its generated adjoint.
+            RiscOp::ExtremaAdjoint { .. } => false,
+
+            // [05-OP-43] identity and its AD-only selector stay explicit so
+            // the zero-at-zero convention cannot collapse to MaxElem's tie
+            // rule. Beacon has not yet registered dedicated transformers.
+            RiscOp::Relu | RiscOp::ReluAdjoint => false,
+
             // `FusedElem` is a backend specialization that bundles
             // elementwise steps into one kernel; Beacon targets the
             // pre-fusion elementwise ops, not the fused marker, so it is
@@ -1464,7 +1542,7 @@ pub struct DagNode {
     #[serde(default)]
     pub merged_spans: Vec<String>,
     /// chelis#384/#397: nodes this node depends on ONLY for their shape, not
-    /// their data. A Form-3 `expand(b, axis, shape(x, k))` reads the
+    /// their data. An `expand(b, axis, shape(x, k))` reads the
     /// broadcast extent from `x`'s runtime shape but does not consume `x`'s
     /// data, so `x` is not in `inputs`. Without recording the dependency,
     /// `x`'s `Load` is dead-code-eliminated and the symbolic dim it declares
@@ -1524,7 +1602,7 @@ impl Dag {
     }
 
     /// chelis#384/#397: record that `id` depends on `dep` only for its shape
-    /// (a Form-3 `expand(..., shape(x, ...))` extent source). DCE keeps `dep`
+    /// (an `expand(..., shape(x, ...))` extent source). DCE keeps `dep`
     /// live through this edge; eval/backends ignore it. See
     /// [`DagNode::shape_deps`].
     pub fn add_shape_dep(&mut self, id: NodeId, dep: NodeId) {
@@ -1539,7 +1617,7 @@ impl Dag {
     /// node `new_id` in this DAG, remapping each through `remap`. Every
     /// DAG-rebuild pass (DCE, copy/drop insertion, BLAS specialization,
     /// fusion, vmap, grad, splice) must call this alongside its
-    /// `merged_spans` preservation so a Form-3 `expand` extent source is not
+    /// `merged_spans` preservation so a shape-derived `expand` extent is not
     /// silently dropped on the rebuild — losing it reintroduces the
     /// wrong-shape regression. Deps that don't survive the rebuild's remap
     /// are dropped (the consuming node was itself eliminated, so the dep is
@@ -1548,7 +1626,7 @@ impl Dag {
         &mut self,
         new_id: NodeId,
         source_deps: &[NodeId],
-        remap: &HashMap<NodeId, NodeId>,
+        remap: &UnordMap<NodeId, NodeId>,
     ) {
         if source_deps.is_empty() {
             return;
@@ -1626,8 +1704,8 @@ impl Dag {
 
 pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     let mut occurrences = Vec::new();
-    let mut seen_inputs = HashSet::new();
-    let mut named_dims_in_loads: HashSet<String> = HashSet::new();
+    let mut seen_inputs = UnordSet::new();
+    let mut named_dims_in_loads: UnordSet<String> = UnordSet::new();
 
     // First pass: collect Load occurrences. These are the canonical
     // sources for symbolic dim values (the C codegen turns each into
@@ -1654,7 +1732,7 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     // lane skips pre-eval binding for it. A symbol that is also Load-carried
     // keeps the Load as its canonical declaration; the op site then becomes
     // a runtime equality guard rather than a redeclaration.
-    let mut op_declared: HashSet<String> = HashSet::new();
+    let mut op_declared: UnordSet<String> = UnordSet::new();
     for node in dag.nodes() {
         for (symbol, axis) in op_declared_output_axes(dag, node) {
             if !named_dims_in_loads.contains(&symbol) {
@@ -1682,7 +1760,7 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     // AFTER the declarer in emission (= node id) order, or the C references
     // an undeclared identifier. A violation is a producing-pass bug; fail
     // loud rather than emit non-compiling (or worse, shadowed) C.
-    for symbol in &op_declared {
+    for symbol in op_declared.to_sorted() {
         if named_dims_in_loads.contains(symbol) {
             // Load-declared in the prologue; every reference is dominated.
             continue;
@@ -1893,35 +1971,22 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
                 _ => None,
             })
             .collect(),
-        // chelis#616: an Expand whose inserted/set axis has an ANONYMOUS
-        // (wildcard) size and a shape-dep extent source (the Sum-adjoint
-        // restore over a runtime axis, the `lower_if` mask expansion — both
-        // constructed with a POSITIONALLY-ALIGNED dep, whose `shape[axis]`
-        // is the extent) declares that axis at run time from the dep's
-        // actual shape. A real-symbol size (a Form-3 broadcast like
-        // `expand(g, 1, h)`, whose shape-dep is the SOURCE tensor with a
-        // different axis layout) resolves through its Load-declared symbol
-        // and must NOT be op-declared — a positional read of its dep would
-        // compare the wrong axis.
-        RiscOp::Expand { axis, size } => {
-            fn size_is_anon(expr: &DimExpr) -> bool {
-                match expr {
-                    DimExpr::Sym(name) => name.is_empty() || name == "*",
-                    DimExpr::Concrete(_) => false,
-                    DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
-                        size_is_anon(lhs) || size_is_anon(rhs)
-                    }
-                }
+        // A node-valued Expand size computes the inserted/set axis at run
+        // time. InputAxis normally traces to a Load, but when its explicit
+        // tensor input is itself a runtime-shaped movement result, the
+        // Expand site declares the extent directly from that tensor's
+        // metadata instead of inventing an undeclared symbolic name.
+        RiscOp::Expand { axis, size } => match (node.output_type.dims.get(*axis), size) {
+            (Some(DimInfo::Named(symbol, None)), RtDim::Node(_)) if !is_anon(symbol) => {
+                vec![(symbol.clone(), *axis)]
             }
-            match node.output_type.dims.get(*axis) {
-                Some(DimInfo::Named(symbol, None))
-                    if !is_anon(symbol) && size_is_anon(size) && !node.shape_deps.is_empty() =>
-                {
-                    vec![(symbol.clone(), *axis)]
-                }
-                _ => Vec::new(),
+            (Some(DimInfo::Named(symbol, None)), RtDim::InputAxis { .. })
+                if !is_anon(symbol) && shape_source_for_axis(dag, node.id, *axis).is_none() =>
+            {
+                vec![(symbol.clone(), *axis)]
             }
-        }
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
@@ -1946,22 +2011,11 @@ pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
             .enumerate()
             .filter_map(|(axis, target)| matches!(target, RtDim::Node(_)).then_some(axis))
             .collect(),
-        RiscOp::Expand { axis, size } => {
-            fn size_is_anon(expr: &DimExpr) -> bool {
-                match expr {
-                    DimExpr::Sym(name) => name.is_empty() || name == "*",
-                    DimExpr::Concrete(_) => false,
-                    DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
-                        size_is_anon(lhs) || size_is_anon(rhs)
-                    }
-                }
-            }
-            if size_is_anon(size) && !node.shape_deps.is_empty() {
-                vec![*axis]
-            } else {
-                Vec::new()
-            }
-        }
+        RiscOp::Expand {
+            axis,
+            size: RtDim::Node(_) | RtDim::InputAxis { .. },
+        } => vec![*axis],
+        RiscOp::Expand { .. } => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -1970,7 +2024,7 @@ pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
 /// DAG (see [`op_declared_output_axes`]). Used by [`bind_symbolic_dims`] to
 /// exempt these names from the pre-eval "missing symbolic dimension binding"
 /// error — their values do not exist until the owning op evaluates.
-pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
+pub fn op_declared_dim_names(dag: &Dag) -> UnordSet<String> {
     dag.nodes()
         .iter()
         .flat_map(|node| op_declared_output_axes(dag, node))
@@ -1982,8 +2036,8 @@ pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
 /// [`op_declared_output_axes`]), for the evaluator's mid-evaluation binding:
 /// when the declaring node's value is computed, each `(symbol, axis)` binds
 /// the symbol to the value's actual extent on that axis.
-pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> HashMap<NodeId, Vec<(String, usize)>> {
-    let mut out = HashMap::new();
+pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(String, usize)>> {
+    let mut out = UnordMap::new();
     for node in dag.nodes() {
         let axes = op_declared_output_axes(dag, node);
         if !axes.is_empty() {
@@ -2001,7 +2055,7 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> HashMap<NodeId, Vec<(String
 /// declarer's VALUE is dead (e.g. a backward `Expand` over a runtime reshape
 /// extent whose forward result the gradient never reads).
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
-    let mut declarers: HashMap<String, NodeId> = HashMap::new();
+    let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
     for node in dag.nodes() {
         for (symbol, _) in op_declared_output_axes(dag, node) {
             declarers.entry(symbol).or_insert(node.id);
@@ -2043,7 +2097,7 @@ fn bind_symbol_from_any_load(
     dag: &Dag,
     symbol: &str,
     occurrences: &mut Vec<SymbolicDimOccurrence>,
-    named_dims_in_loads: &mut HashSet<String>,
+    named_dims_in_loads: &mut UnordSet<String>,
 ) -> bool {
     for candidate in dag.nodes() {
         let RiscOp::Load { name: load_name } = &candidate.op else {
@@ -2067,9 +2121,8 @@ fn bind_symbol_from_any_load(
 }
 
 /// Symbolic dim names referenced by an op's internal fields rather than
-/// its output type: `Expand::size`, `Reshape::new_shape`, and
-/// `BlasMatmul::{batch_dims, m, n, k}`. These are the only `RiscOp`
-/// fields that carry `DimExpr` / unbound `DimInfo` payloads.
+/// its output type: `Reshape::new_shape` and
+/// `BlasMatmul::{batch_dims, m, n, k}`.
 fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
     fn collect_dim_expr(expr: &DimExpr, out: &mut Vec<String>) {
         match expr {
@@ -2084,7 +2137,6 @@ fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
 
     let mut out = Vec::new();
     match op {
-        RiscOp::Expand { size, .. } => collect_dim_expr(size, &mut out),
         RiscOp::Reshape { new_shape } => {
             for dim in new_shape {
                 if let RtDim::Sym(name) = dim {
@@ -2111,11 +2163,38 @@ fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
     out
 }
 
+/// Every symbolic dimension identity already carried by a DAG.
+///
+/// Keep output-axis and op-internal carriers behind one enumerator so a
+/// producer allocating a fresh dimension cannot accidentally reserve only
+/// the visible `TensorType` half of the namespace. The op-internal half is
+/// exactly whatever [`op_internal_symbolic_dims`] recognizes, so an op that
+/// spells a dimension symbol only inside its own payload still participates
+/// even when no node output repeats that name.
+pub(crate) fn dimension_identity_names(dag: &Dag) -> UnordSet<String> {
+    let mut names = UnordSet::new();
+    for node in dag.nodes() {
+        names.extend(node.output_type.dims.iter().filter_map(|dim| match dim {
+            DimInfo::Named(name, _) => Some(name.clone()),
+            DimInfo::Lit(_) => None,
+        }));
+        names.extend(op_internal_symbolic_dims(&node.op));
+    }
+    names
+}
+
 fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, usize)> {
     let node = dag.get(id)?;
     match &node.op {
         RiscOp::Load { name } => Some((name.as_str().to_string(), axis)),
-        RiscOp::Add | RiscOp::Mul | RiscOp::CmpLt | RiscOp::MaxElem => node
+        RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::CmpLt
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::ReluAdjoint => node
             .inputs
             .iter()
             .find_map(|input| shape_source_for_axis(dag, *input, axis)),
@@ -2131,6 +2210,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Floor
         | RiscOp::Ceil
         | RiscOp::Round
+        | RiscOp::Relu
         | RiscOp::UniformLike { .. }
         | RiscOp::Dropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         RiscOp::Copy
@@ -2155,7 +2235,20 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
             let operand_rank = dag.get(operand)?.output_type.dims.len();
             let inserts = node.output_type.dims.len() == operand_rank + 1;
             if axis == *expand_axis {
-                return None;
+                return match &node.op {
+                    RiscOp::Expand {
+                        size:
+                            RtDim::InputAxis {
+                                tensor,
+                                axis: RtAxis::Lit(source_axis),
+                            },
+                        ..
+                    } => {
+                        let source_axis = usize::try_from(*source_axis).ok()?;
+                        shape_source_for_axis(dag, *node.inputs.get(*tensor)?, source_axis)
+                    }
+                    _ => None,
+                };
             }
             if inserts && axis > *expand_axis {
                 shape_source_for_axis(dag, operand, axis - 1)
@@ -2231,6 +2324,63 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
     }
 }
 
+/// The INTERFACE bindings: one per claim with an external witness, canonical
+/// first, in assigned ABI input-slot order.
+///
+/// This is the declaration and entry-guard set, derived from
+/// [`crate::axis_sources::derive_dim_witnesses`] rather than recovered by
+/// walking for a `Load` that carries a matching string. Consumers that read
+/// only interface witnesses - the C and HIP prologues, which declare
+/// `int64_t n = inputs[s]->shape[a];` and guard each further witness at
+/// entry, and [`symbolic_params`], which reports what a caller must supply -
+/// read this.
+///
+/// The local half, an extent an operation computes at run time, is still
+/// [`symbolic_occurrences`]' to report until Slice B's guard commit places
+/// those guards at their introducing operations. Each consumer therefore
+/// reads one derivation or the other, never a mixture: two derivations that
+/// can disagree is the defect this work removes.
+///
+/// `spec/04-type-system.md` section 4.7 decides the order: "Whatever rule
+/// assigns the slots, the guard order follows the assigned slots, and never a
+/// separate traversal by binding name, hash iteration, or node identity."
+pub fn symbolic_bindings_interface(dag: &Dag) -> Vec<SymbolicDimBinding> {
+    crate::axis_sources::derive_dim_witnesses(dag)
+        .into_iter()
+        .filter_map(|class| {
+            let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+                return None;
+            };
+            // Both spellings of "an input tensor's axis" bind here, through
+            // the one predicate that answers it. Accepting only the `Load`'s
+            // own axis dropped the DECLARATION for a name whose sole
+            // interface witness is a folded `shape(t, k)` read - measured on
+            // chelis#631's avgpool program, where `main` declares
+            // `int64_t _anon_dim_1_0 = chelis_tensor_shape(inputs[0], 1);`
+            // beside the Load's own `_anon_dim_0_1` from the same axis, and
+            // the emitted C stopped compiling without it.
+            let mut occurrences = class
+                .members
+                .iter()
+                .filter_map(|member| {
+                    let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+                    let RiscOp::Load { name: label } = &dag.get(load)?.op else {
+                        return None;
+                    };
+                    Some(SymbolicDimOccurrence::load(&name, label.as_str(), axis))
+                })
+                .collect::<Vec<_>>()
+                .into_iter();
+            let canonical = occurrences.next()?;
+            Some(SymbolicDimBinding {
+                name,
+                canonical,
+                others: occurrences.collect(),
+            })
+        })
+        .collect()
+}
+
 pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
     let mut grouped = std::collections::BTreeMap::<String, Vec<SymbolicDimOccurrence>>::new();
     for occurrence in symbolic_occurrences(dag) {
@@ -2264,14 +2414,21 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
 /// shape metadata. chelis#616: op-declared dims are computed at run time by
 /// their owning op and are deliberately excluded; they are not parameters.
 pub fn symbolic_params(dag: &Dag) -> Vec<String> {
-    symbolic_bindings(dag)
+    // Deduplicated by NAME, because C2.4's scope split is about which axes are
+    // guarded together and not about how many parameters a caller supplies.
+    // One binder spelled once in a signature is one parameter however many
+    // scopes the derivation finds it in; without this a merged kernel
+    // published `["batch", "batch"]`.
+    let mut seen = std::collections::BTreeSet::new();
+    symbolic_bindings_interface(dag)
         .into_iter()
         .filter(|binding| matches!(binding.canonical.source, SymbolicDimSource::Load { .. }))
         .map(|binding| binding.name)
+        .filter(|name| seen.insert(name.clone()))
         .collect()
 }
 
-pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Result<Dag, String> {
+pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Result<Dag, String> {
     // chelis#616: an op-declared dim (a node-valued movement output extent)
     // has no pre-eval value — the evaluator computes it from actual bound
     // scalars. Leave it unbound instead of raising the loud missing-binding
@@ -2308,10 +2465,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
         let op = match &node.op {
             RiscOp::Expand { axis, size } => RiscOp::Expand {
                 axis: *axis,
-                // chelis#616: an op-declared size (e.g. the Sum adjoint's
-                // Expand over a runtime reshape extent) resolves during
-                // evaluation, not here.
-                size: size.bind_except(bindings, &op_declared)?,
+                size: size.clone(),
             },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
@@ -2334,6 +2488,10 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                         // resolved by the evaluator from `inputs`, not here.
                         RtDim::Lit(n) => Ok(RtDim::Lit(*n)),
                         RtDim::Node(i) => Ok(RtDim::Node(*i)),
+                        RtDim::InputAxis { tensor, axis } => Ok(RtDim::InputAxis {
+                            tensor: *tensor,
+                            axis: *axis,
+                        }),
                         RtDim::ToEnd => {
                             Err("reshape target dim cannot be a shrink-to-end sentinel".to_string())
                         }
@@ -2355,11 +2513,21 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Resul
                     .zip(output_type.dims.iter())
                     .map(|((start, end), dim)| {
                         if matches!(end, RtDim::ToEnd) {
-                            // The sentinel is always emitted as `(Lit(0), ToEnd)`;
-                            // a non-literal start is malformed.
-                            let start_lit = start.as_lit().ok_or_else(|| {
-                                "shrink-to-end sentinel with non-literal start".to_string()
-                            })?;
+                            // chelis#1480, `spec/05` section 2.4.1: the
+                            // sentinel is well formed only beside a `Lit(0)`
+                            // start. This used to accept any literal and
+                            // resolve `(Lit(1), ToEnd)` to `(Lit(1), Lit(1 +
+                            // size))`, which is a slice the spec says is a
+                            // malformed bound rather than a slice at all.
+                            let start_lit = match start.as_lit() {
+                                Some(0) => 0usize,
+                                _ => {
+                                    return Err(
+                                        "shrink-to-end sentinel requires a literal zero start"
+                                            .to_string(),
+                                    );
+                                }
+                            };
                             match dim {
                                 DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
                                     Ok((RtDim::Lit(start_lit), RtDim::Lit(start_lit + *size)))
@@ -2725,7 +2893,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_symbolic_dims_rewrites_output_types_and_expand_sizes() {
+    fn bind_symbolic_dims_rewrites_output_types_and_preserves_input_axis_sizes() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -2736,12 +2904,24 @@ mod tests {
             },
             None,
         );
+        let h = dag.add_node(
+            RiscOp::Load { name: "h".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("hidden".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
         let y = dag.add_node(
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Sym("hidden".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            vec![x],
+            vec![x, h],
             TensorType {
                 dims: vec![
                     DimInfo::Named("batch".into(), None),
@@ -2755,7 +2935,7 @@ mod tests {
 
         let rebound = bind_symbolic_dims(
             &dag,
-            &HashMap::from([
+            &UnordMap::from([
                 ("batch".to_string(), 3usize),
                 ("hidden".to_string(), 8usize),
             ]),
@@ -2773,7 +2953,10 @@ mod tests {
             node.op,
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Concrete(8),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             }
         );
         assert_eq!(rebound.roots(), &[y]);
@@ -2814,7 +2997,7 @@ mod tests {
         );
         dag.add_root(shrunk);
 
-        let rebound = bind_symbolic_dims(&dag, &HashMap::from([("m".to_string(), 3usize)]))
+        let rebound = bind_symbolic_dims(&dag, &UnordMap::from([("m".to_string(), 3usize)]))
             .expect("bindings should apply");
         let node = rebound.get(shrunk).unwrap();
         // The concrete axis-0 bound is untouched; the sentinel axis-1 bound
@@ -2860,7 +3043,7 @@ mod tests {
         dag.add_root(shrunk);
         // No binding for `m`: bind_dim fails first on the output type, but
         // even a partial binding map must not silently drop the sentinel.
-        let err = bind_symbolic_dims(&dag, &HashMap::new());
+        let err = bind_symbolic_dims(&dag, &UnordMap::new());
         assert!(err.is_err(), "unbound symbolic dim must fail closed");
     }
 
@@ -2877,10 +3060,7 @@ mod tests {
     // panic-don't-emit contract as output dims.
 
     #[test]
-    fn symbolic_occurrences_expand_size_sym_binds_from_load() {
-        // Positive: the op-internal `Expand::size` sym is declared by a
-        // Load, so the sweep stays quiet and the Load occurrence is the
-        // canonical (and only) source — no duplicate occurrences.
+    fn symbolic_occurrences_input_axis_uses_only_its_structural_load_source() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -2891,14 +3071,23 @@ mod tests {
             },
             None,
         );
+        let value = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
         dag.add_node(
             RiscOp::Expand {
-                axis: 1,
-                size: DimExpr::Sym("n".into()),
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            vec![x],
+            vec![value, x],
             TensorType {
-                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                dims: vec![DimInfo::Named("n".into(), None)],
                 precision: Prim::F32,
             },
             None,
@@ -2917,12 +3106,62 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "internal compiler error: symbolic dim `d7` is referenced")]
-    fn symbolic_occurrences_panics_on_expand_size_sym_without_load() {
-        // Negative: concrete output dims everywhere, but the Expand's
-        // op-internal `size` references `d7`, which no Load declares.
-        // This is the chelis#345 mixed state; the sweep must panic
-        // instead of letting an undeclared identifier reach a backend.
+    fn symbolic_occurrences_input_axis_from_runtime_movement_is_op_declared() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let runtime_source = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Named("m".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let value = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let expanded = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![value, runtime_source],
+            TensorType {
+                dims: vec![DimInfo::Named("k".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+
+        let occurrences = symbolic_occurrences(&dag);
+        assert!(occurrences.contains(&SymbolicDimOccurrence {
+            name: "k".into(),
+            source: SymbolicDimSource::OpDeclared {
+                node: expanded,
+                axis: 0,
+            },
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_expand_size_sym_without_consulting_the_symbol_walk() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -2936,7 +3175,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Sym("d7".into()),
+                size: RtDim::Sym("d7".into()),
             },
             vec![x],
             TensorType {
@@ -2945,7 +3184,13 @@ mod tests {
             },
             None,
         );
-        let _ = symbolic_occurrences(&dag);
+        let errors = crate::verify::verify(&dag);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("expand") && error.contains("Sym")),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -3039,7 +3284,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Concrete(3),
+                size: RtDim::Lit(3),
             },
             vec![x],
             TensorType {
@@ -3208,7 +3453,7 @@ mod tests {
             RiscOp::Permute { axes: vec![0] },
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             RiscOp::OneHot { vocab: 8 },
             RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(0), RtDim::Lit(0))]),
@@ -3248,6 +3493,8 @@ mod tests {
             RiscOp::ScatterAdd { axis: 0 },
             RiscOp::Scatter { axis: 0 },
             RiscOp::ScatterElements { axis: 0 },
+            RiscOp::Relu,
+            RiscOp::ReluAdjoint,
         ]
     }
 
@@ -3260,12 +3507,12 @@ mod tests {
     #[test]
     fn every_risc_op_is_classified_for_verifier_subset() {
         let all = one_of_every_risc_op();
-        // 53-variant closed vocabulary (spec WI-2 / dag.rs RiscOp); the
-        // 53rd is `CastTrunc`, the [05-OP-6] ladder rung (chelis#759).
+        // Explicit targetability samples include both dedicated ReLU
+        // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            53,
-            "one_of_every_risc_op must list all 53 RiscOp variants"
+            55,
+            "one_of_every_risc_op must list all 55 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3281,13 +3528,14 @@ mod tests {
         // (1, chelis#759), one_hot (1), the `Shape` metadata read (1), sparse
         // gather/scatter (4, including element-wise `ScatterElements`),
         // linearity/lifecycle markers + store (4), reduce-window-grad (1),
-        // and fused-elem (1) are excluded (19).
+        // fused-elem (1), and the dedicated ReLU identity/adjoint (2) are
+        // excluded (21) until Beacon registers their own transformers.
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 19,
+            excluded, 21,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

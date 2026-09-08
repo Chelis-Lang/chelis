@@ -17,7 +17,7 @@
 //! grep alone is insufficient because malformed comment emission could pass
 //! the grep but break the C/HIP source.
 
-use chelis_backend_hip::codegen_hip;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
@@ -25,6 +25,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::codegen_hip;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -90,7 +91,7 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    let include = cpu_runtime_include_dir();
+    let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
         "chelis_runtime_dtype.h",
@@ -101,7 +102,8 @@ fn copy_runtime_artifacts(dst: &Path) {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include_dir.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))

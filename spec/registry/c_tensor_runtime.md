@@ -9,7 +9,6 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | callable | exact C signature |
 |---|---|
 | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
-| borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
 | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
 | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |

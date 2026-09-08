@@ -11,9 +11,9 @@ The repository MUST track `devenv.nix`, `devenv.yaml`, `devenv.lock`, and the lo
 
 The lock file MUST pin all resolved input revisions.
 
-`devenv.yaml` MUST pin the Devenv module input to release `v2.2`. `devenv.lock` MUST resolve that input to commit `ffce215a42d09c6375c3d60dd9c4110438fc4d87`.
+`devenv.yaml` MUST pin the Devenv module input to release `v2.2.2`. `devenv.lock` MUST resolve that input to commit `b8030c58deafc013fc51791377fe8fea4dadcb00`.
 
-`devenv.yaml` MUST set `require_version: true`. The Devenv CLI MUST reject a CLI version that differs from the pinned module version.
+`devenv.yaml` MUST set the exact string constraint `require_version: ">=2.2.0, <=2.2.2"`, which the CLI enforces before Nix evaluation. This is a closed, reviewed CLI compatibility range: the repository-owned atomic load-export task MUST replace the non-atomic upstream implementation throughout the range. Because the upstream `v2.2.2` tag builds a 2.2.2 CLI while its module source still advertises `latest-version` 2.2.1, the local Devenv configuration MUST also override `devenv.latestVersion` to 2.2.2. The Devenv CLI MUST reject versions below 2.2.0 and above 2.2.2.
 
 `devenv.yaml` MUST pin the shared `nixpkgs` and `rust-overlay` inputs to exact commit revisions, not floating references. `devenv.lock` MUST resolve each shared input to its configured revision.
 
@@ -22,19 +22,23 @@ The repository MUST ignore `.devenv/` and `.devenv.flake.nix`. These paths conta
 The repository lint policy MUST exclude both generated paths. It MUST keep the tracked root files and local modules in the editable corpus.
 
 #### Scenario: The repository checks the Devenv release pin
-- **WHEN** the configured URL or locked revision differs from Devenv `v2.2`
+- **WHEN** the configured URL or locked revision differs from Devenv `v2.2.2`
 - **THEN** the static Devenv version contract test fails
 
-#### Scenario: The CLI version matches the module version
-- **WHEN** a contributor runs Devenv with the version that supplies the pinned modules
+#### Scenario: The CLI version is inside the reviewed range
+- **WHEN** a contributor runs Devenv 2.2.0, 2.2.1, or 2.2.2
 - **THEN** the CLI accepts the version requirement
 
-#### Scenario: The CLI version differs from the module version
-- **WHEN** a contributor runs Devenv with a version that differs from the pinned modules
-- **THEN** the CLI rejects the configuration before shell activation
+#### Scenario: The pinned modules carry stale release metadata
+- **WHEN** the `v2.2.2` modules advertise their upstream 2.2.1 `latest-version` value
+- **THEN** the local module overrides that value to 2.2.2 before reporting its update target
+
+#### Scenario: The CLI version is outside the reviewed range
+- **WHEN** a contributor runs Devenv below 2.2.0 or above 2.2.2
+- **THEN** the closed YAML constraint rejects the configuration before Nix evaluation or shell activation
 
 #### Scenario: The CLI version requirement is absent
-- **WHEN** `devenv.yaml` omits `require_version: true`
+- **WHEN** `devenv.yaml` omits `require_version: ">=2.2.0, <=2.2.2"`
 - **THEN** the static Devenv version contract test fails
 
 #### Scenario: A shared input uses a floating reference
@@ -61,6 +65,7 @@ The repository lint policy MUST exclude both generated paths. It MUST keep the t
 The root `devenv.nix` MUST import these local modules:
 
 - `./devenv/toolchains.nix`
+- `./devenv/entry-shell.nix`
 - `./devenv/commands.nix`
 - `./devenv/generated-files.nix`
 - `./devenv/git-hooks.nix`
@@ -84,11 +89,11 @@ The root `devenv.nix` MUST contain only the module imports. Each local module MU
 
 #### Scenario: An evaluator reads the root module
 - **WHEN** a Devenv evaluator reads `devenv.nix` without the root YAML imports
-- **THEN** it discovers all seven local modules
+- **THEN** it discovers all eight local modules
 
 #### Scenario: A contributor evaluates the composed shell
 - **WHEN** a contributor runs `devenv test`
-- **THEN** Devenv combines all seven local modules
+- **THEN** Devenv combines all eight local modules
 - **AND** the composed configuration passes the shell contract
 
 ### Requirement: Devenv exposes the canonical Nix packages
@@ -162,24 +167,26 @@ The `nixfmt` entry MUST remain inactive. The `rustfmt` entry MUST use check mode
 
 The `shellcheck` entry MUST select only `crates/chelisup/bootstrap/chelisup.sh`. The whitespace entry MUST preserve Markdown line breaks.
 
-Devenv MUST define one enabled custom hook named `no-ai-authorship`. This hook MUST use the `commit-msg` stage.
+Devenv MUST NOT define an enabled hook that installs a `commit-msg` hook of its own. An installer that records an absolute path to one worktree governs every worktree of a clone, because they share one hooks directory.
 
-The custom hook MUST invoke `scripts/check_commit_message.py` with the configured Python package. It MUST reject prohibited AI authorship markers.
+The repository MUST track a `commit-msg` hook at `.githooks/commit-msg`. It MUST resolve its repository at run time and MUST NOT name any single worktree.
 
-The custom hook MUST accept ordinary commit messages. It MUST report the matched marker when it rejects a message.
+The tracked hook MUST invoke `scripts/check_commit_message.py` with a repository-managed Python interpreter. It MUST reject prohibited AI authorship markers, MUST accept ordinary commit messages, and MUST report the matched marker when it rejects a message.
 
-Devenv MUST install the custom hook for contributors who use the Devenv shell.
+Devenv MUST copy the tracked hook into the shared hooks directory for contributors who use the Devenv shell. It MUST resolve that directory with `git rev-parse --git-common-dir` so a linked worktree installs to the same place. It MUST NOT reach the hook through `core.hooksPath`, which is repository-scoped while a tracked file is branch-scoped: a worktree on a branch without the file would then run no hook and accept the commit silently.
+
+Devenv MUST report when `core.hooksPath` is set to a location other than the shared hooks directory, because the installed hook cannot run there.
 
 The repository MUST retain the cargo-husky user hook and development dependency for contributors who use the manual setup.
 
 The cargo-husky hook MUST use minimal POSIX `sh`. It MUST invoke `scripts/check_commit_message.py` with a repository-managed Python interpreter.
 
-The repository MUST ignore `.pre-commit-config.yaml`. Devenv generates this local file when a contributor enters the shell.
+The repository MUST ignore `.pre-commit-config.yaml`. Devenv generates this local file only while a catalog hook is enabled; with every entry disabled it generates none.
 
 #### Scenario: A contributor enters the shell with the hook catalog
 - **WHEN** a contributor runs `devenv shell`
 - **THEN** no listed catalog hook is active
-- **AND** Devenv installs the custom `commit-msg` hook
+- **AND** Devenv copies the tracked `commit-msg` hook into the shared hooks directory
 
 #### Scenario: A contributor runs tests through the manual setup
 - **WHEN** a contributor runs `cargo test` outside Devenv
@@ -208,6 +215,8 @@ The macOS shims MUST suppress only the unused wrapper-argument warning. Other wa
 
 On Linux, the shell MUST provide GCC from Nixpkgs. Linux MUST NOT use the macOS compiler shims.
 
+On Apple silicon macOS, Rust build scripts targeting `aarch64-apple-darwin` MUST receive target-specific `CC` and `CXX` values that name the SDK-aware Nixpkgs compiler wrapper. Because the build is native, the shell MUST set `CRATE_CC_NO_DEFAULTS=1` so cc-rs does not add the redundant `arm64-apple-macosx` target alias. A clean `tree-sitter-chelis` build MUST NOT emit the Nix cc-wrapper multi-target warning, and the tree-sitter parser agreement suite MUST remain green.
+
 #### Scenario: macOS compiles C through the expected command
 - **WHEN** a macOS contributor compiles valid C with `gcc -Werror -fsyntax-only`
 - **THEN** the pinned Nixpkgs C compiler wrapper succeeds
@@ -228,8 +237,14 @@ On Linux, the shell MUST provide GCC from Nixpkgs. Linux MUST NOT use the macOS 
 - **WHEN** a Linux contributor runs `gcc --version` inside the shell
 - **THEN** the command reports the GCC package from Nixpkgs
 
+#### Scenario: tree-sitter builds for the native Darwin target
+- **WHEN** the Darwin smoke task builds `tree-sitter-chelis` in a fresh target directory
+- **THEN** all generated C and C++ parser sources compile through the target-specific SDK-aware Nixpkgs compiler wrapper
+- **AND** no cc-wrapper target-mismatch warning appears
+- **AND** the parser agreement tests pass
+
 ### Requirement: The shell provides the Chelis development tools
-The common shell MUST provide Rust from `rust-toolchain.toml`, rust-analyzer, Python 3.11, uv, `cargo-nextest`, `cargo-llvm-cov`, CMake, Git, and pkg-config.
+The common shell MUST provide Rust from `rust-toolchain.toml`, rust-analyzer, Python 3.11, uv, `cargo-nextest`, `cargo-llvm-cov`, CMake, Git, mdBook 0.5.2, Pyright, pkg-config, and the repository-owned Kache 0.16.0 package.
 
 The Rust module MUST set `languages.rust.toolchainFile`. It MUST provide rust-analyzer through `languages.rust.lsp.package`.
 
@@ -289,6 +304,71 @@ The base shell MUST NOT set `CVC5_DIR`. Thus, ordinary shell activation does not
 #### Scenario: A contributor enters the base shell
 - **WHEN** no SMT profile is active
 - **THEN** the shell does not add the cvc5 output to the environment
+### Requirement: The shell owns its Kache compiler wrapper
+The shell MUST build Kache 0.16.0 from source commit `a21d020142b1248537cd548ccde99a04c0a44820` and fixed-output source and Cargo hashes. It MUST apply the repository patches `nix/patches/kache-0.16.0-chelis-contract.patch` and `nix/patches/kache-0.16.0-relocatable-macos-executables.patch`, and the Nix derivation MUST run Kache's upstream unit tests.
+
+The shell MUST set `RUSTC_WRAPPER` to that exact package's `kache` binary, set `KACHE_CONFIG` to the tracked `.kache.toml`, and force `KACHE_DISABLED=0`. The tracked policy MUST ignore file-backed `KACHE_*` overrides, cache user-facing executables, and retain a 30-second heartbeat.
+
+The managed wrapper MUST take precedence over an absent, differently versioned, or hostile user Cargo wrapper configuration. The ordinary non-Devenv Cargo workflow MAY continue to honor user configuration.
+
+Kache doctor MUST exit nonzero when it reports a genuine issue. An intentionally absent local-only daemon MAY remain informational, but stale locks MUST remain a genuine issue. Heartbeats MUST show a positive ETA only below the historical typical duration, MUST say when that duration is reached, and MUST report elapsed time over typical after it is exceeded.
+
+The executable-cache regression MUST start with a fresh probe-local Kache store shared only by its cold and warm clean checkouts. Each checkout MUST own its Cargo target beneath its verified workspace root so Kache can normalize workspace identity. For every warm local-hit event, its exact cache key MUST resolve to local entry metadata with the same key and crate identity. Only a warm target candidate whose exact filename is marked executable by that entry metadata counts as restored. The regression MUST reject the executable-bypass disposition and scan every classified restored executable and its debug bundle for the cold checkout path. On Darwin, every classified executable MUST have an adjacent dSYM bundle; `dwarfdump --uuid` MUST read both members of every pair and return identical, nonempty UUID sets.
+
+On macOS, a cached debug executable MUST use a private `strip -S` store copy after Kache has produced its self-contained dSYM. The cached dSYM MUST omit donor-path relocation metadata, and Kache MUST skip cache publication when it cannot produce the path-clean executable/dSYM pair. The compiler-owned cold output MUST remain untouched.
+
+The relocatable executable/dSYM representation MUST use cache-key schema 28 rather than Kache 0.16.0's upstream schema 27. A consumer using the relocatable representation MUST therefore miss every entry produced under schema 27 instead of restoring an executable or dSYM that predates path sanitization. The executable-cache regression MUST reject restored executable metadata carrying any schema other than 28, then prove that a current-producer/current-consumer hit remains path-clean and UUID-matched.
+
+The managed environment MUST expose an oracle-only `KACHE_SCHEMA_27_WRAPPER` built from the same pinned Kache source with the Chelis doctor/heartbeat contract patch but without the schema-28 relocation patch. This fixture MUST NOT be selected as Cargo's active wrapper. Its only supported use is producing the legacy entry for the executable-cache representation-boundary regression.
+
+#### Scenario: Host Cargo configuration names another wrapper
+- **WHEN** the smoke control supplies a user Cargo config naming an absent host wrapper
+- **THEN** Cargo still compiles through the exact repository-owned `RUSTC_WRAPPER`
+
+#### Scenario: Correctness does not depend on a cache hit
+- **WHEN** the same smoke fixture compiles with no Rust compiler wrapper
+- **THEN** the build succeeds with the same source contract
+
+#### Scenario: A clean warm checkout restores a test executable
+- **WHEN** the executable-cache regression builds the selected suites in its cold checkout and then in its warm checkout
+- **THEN** both runs share one otherwise-fresh Kache store and distinct checkout-owned Cargo targets
+- **AND** a warm local-hit cache key resolves to metadata that marks the exact warm-target executable filename
+- **AND** the warm report contains restored bytes and no executable-cache bypass
+- **AND** neither a classified restored executable nor its debug bundle contains the cold checkout path
+- **AND** every restored Darwin executable and dSYM bundle has the same nonempty UUID set
+
+#### Scenario: A legacy executable entry cannot cross the representation boundary
+- **WHEN** the schema-27 fixture populates an otherwise-fresh probe store and the schema-28 wrapper compiles the same source from a clean checkout
+- **THEN** the schema-28 report contains current-consumer misses and no local hit
+- **AND** the probe store contains distinct schema-27 and schema-28 entries
+- **AND** a subsequent schema-28 producer/consumer pair still satisfies the exact executable, path-clean, and Darwin UUID checks
+
+#### Scenario: Darwin debug metadata is absent, malformed, or mismatched
+- **WHEN** a classified restored executable lacks an adjacent dSYM bundle, either artifact yields no Mach-O UUID, or their UUID sets differ
+- **THEN** the executable-cache regression fails closed
+
+#### Scenario: Doctor finds a genuine issue
+- **WHEN** any nondowngraded doctor check fails
+- **THEN** doctor reports the issue count and exits nonzero
+
+#### Scenario: A compile exceeds its historical duration
+- **WHEN** heartbeat elapsed time is greater than the typical duration
+- **THEN** the heartbeat reports time over typical
+- **AND** it does not render a positive ETA
+
+### Requirement: Python analysis has a closed repository-owned source scope
+The repository MUST track `pyrightconfig.json`. Its include roots MUST cover every tracked Python source and test, and its excludes MUST reject Devenv state, virtual environments, Cargo targets, Node modules, Git metadata, bytecode caches, and directory-symlink escapes.
+
+The executable scope checker MUST fail when a tracked Python file lies outside the include roots, when an include root can escape through a directory symlink, or when a required generated-tree exclusion is absent.
+
+#### Scenario: Pyright enumerates the repository
+- **WHEN** a contributor runs the Pyright scope smoke task
+- **THEN** every tracked Python file belongs to an intended include root
+- **AND** no generated environment, target, sibling worktree, or Nix-store tree belongs to the analysis source set
+
+#### Scenario: A new Python root is unclassified
+- **WHEN** a tracked Python file is added outside every include root
+- **THEN** the scope checker exits nonzero and names the file
 
 ### Requirement: Devenv manages the Python environment
 The shell MUST enable Python 3.11, uv, and the Devenv Python virtual environment.
@@ -321,13 +401,17 @@ The shell MUST provide these commands through Devenv scripts:
 - `chelis-z3-test` on Linux
 - `chelis-hip-test` on Linux
 
-Each command MUST use the configured Devenv Python package. Each command MUST forward all arguments to its existing tested Python file.
+Each command MUST use the configured Devenv Python package. Each command MUST forward all arguments to its existing tested Python file. Each command MUST run that file under the active Devenv virtual environment interpreter when one exists, resolved at run time rather than from an interpolated path.
 
 The command definitions MUST NOT duplicate the Python implementation inside Nix.
 
 #### Scenario: A contributor runs a command
 - **WHEN** a contributor runs a supported command in the shell
 - **THEN** Devenv invokes its repository Python file with all supplied arguments
+
+#### Scenario: A command runs under the active interpreter
+- **WHEN** a contributor runs a supported command in the shell
+- **THEN** the repository Python file runs under the active Devenv virtual environment interpreter
 
 #### Scenario: A platform-specific command is unavailable
 - **WHEN** a contributor enters the shell on an unsupported platform
@@ -356,20 +440,29 @@ The compiler smoke tasks MUST compile these files. They MUST NOT create equivale
 
 It MUST compile valid C and C++ translation units under `-Werror`. It MUST also prove that a deliberate code warning still fails.
 
-The smoke checks MUST run after `devenv:enterShell` and before `devenv:enterTest` as these independent tasks:
+The smoke checks MUST run before `devenv:enterTest` as these named tasks. The Python, Kache, Pyright, and Darwin tree-sitter tasks MUST run after `devenv:python:virtualenv`. The C and C++ compiler tasks MUST run after `devenv:files`, which materializes their declared compiler probes. Those prerequisite edges MUST be explicit so every accepted Devenv CLI schedules consumers only after their generated inputs exist. The tasks MUST NOT declare themselves after `devenv:enterShell`, because that makes ordinary shell entry execute the acceptance suite before admitting a command:
 
 - `chelis:toolchain-test`
 - `chelis:python-test`
 - `chelis:c-compiler-test`
 - `chelis:cpp-compiler-test`
+- `chelis:kache-test`
+- `chelis:pyright-test`
+- `chelis:docs-test`
+- `chelis:darwin-tree-sitter-test`
 
 The smoke-check graph MUST NOT start a Devenv service or long-running process.
 
 #### Scenario: The shell smoke check passes
 - **WHEN** all required tools and compiler commands satisfy the contract
-- **THEN** `devenv test` runs all four named tasks
+- **THEN** `devenv test` runs all eight named tasks
 - **AND** each task reports success
 - **AND** `devenv test` exits with status 0
+
+#### Scenario: A smoke task can race its generated prerequisite
+- **WHEN** a Python-backed task does not follow `devenv:python:virtualenv` or a compiler task does not follow `devenv:files`
+- **THEN** the static Devenv composition test fails
+- **AND** the task graph cannot count as acceptance evidence
 
 #### Scenario: A managed compiler command is missing
 - **WHEN** either `gcc` or `g++` does not resolve to a Nix store package
@@ -378,6 +471,33 @@ The smoke-check graph MUST NOT start a Devenv service or long-running process.
 #### Scenario: The shim hides a code warning
 - **WHEN** the deliberate warning compiles successfully under `-Werror`
 - **THEN** `devenv test` exits with a nonzero status
+
+### Requirement: Concurrent shell entry publishes one complete export payload
+The repository MUST override `devenv:enterShell` so `$DEVENV_DOTFILE/load-exports` is written to a same-directory temporary file, flushed, and installed by atomic rename with executable mode. Concurrent writers MUST expose either the previous complete payload or one new complete payload, never a missing or partial file.
+
+A committed regression MUST launch concurrent noninteractive entries in an isolated temporary checkout. Each entry MUST either complete its entry dependencies and run its payload with exit zero, or exit nonzero without running the payload. A task failure followed by a successful payload is a failure.
+
+#### Scenario: Shell entries overlap
+- **WHEN** eight warm noninteractive Devenv entries start concurrently
+- **THEN** no entry reports a missing `load-exports`
+- **AND** no entry runs its payload after an entry-task failure
+
+### Requirement: Repeated commands have a supported low-overhead path
+The supported low-overhead path for repeated work MUST be one persistent `devenv shell` session. Entry checks run once before that session admits commands; subsequent commands inherit the exact activated toolchain without reevaluating or reactivating the shell.
+
+For a single noninteractive command after one successful shell realization, contributors MAY use `devenv shell --no-reload -- <command>`. They MUST rerun normal entry after changing Devenv inputs or modules.
+
+The repository MUST provide a benchmark that reports wall, user CPU, and system CPU separately for ordinary entry, `--no-reload`, task-skipped activation diagnosis, and payloads repeated inside one persistent session. The report MUST decompose reload/evaluation, activation, entry-task, and payload estimates without claiming that wall time equals runner consumption.
+
+#### Scenario: A contributor runs repeated focused commands
+- **WHEN** the contributor enters one persistent Devenv shell and runs multiple commands
+- **THEN** every command inherits the activated environment
+- **AND** the fixed Devenv entry cost is paid once rather than once per command
+
+#### Scenario: The benchmark runs
+- **WHEN** the startup benchmark collects at least three warm samples per mode
+- **THEN** it reports wall and CPU medians separately
+- **AND** it reports the persistent payload cost and the four-part decomposition
 
 ### Requirement: Native package CI uses the reviewed portable Devenv base
 Each native Nix package job MUST invoke `Chelis-Lang/ci/actions/setup-devenv@<revision>` once before its runner verification step. `<revision>` MUST be one immutable 40-character commit SHA.
@@ -404,7 +524,7 @@ The public Devenv cache does not contain the custom Chelis cvc5 derivation. Each
 - **AND** each Nix and Devenv `run` step uses the portable shell
 - **AND** each project Python helper uses the activated project interpreter
 - **AND** each runner probe uses the portable Devenv interpreter
-- **AND** the job runs all named Devenv tasks
+- **AND** the job runs all nine named Devenv tasks
 - **AND** the job builds all three named Devenv package outputs
 - **AND** the job runs the complete native flake check
 

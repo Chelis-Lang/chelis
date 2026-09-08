@@ -21,17 +21,18 @@
 //! | bool  |  -  |  -  | bool → bool                | rejected      |
 //!
 //! Negative coverage:
-//! - f64 reaches `require_metal_admissible` and falls through to the
-//!   stub artifact (the user-facing rejection happens at the CLI gate
-//!   per spec/04-type-system.md §1.1.3).
+//! - f64 reaches `require_metal_admissible` and returns a typed rejection
+//!   without an artifact (the user-facing rejection normally happens at
+//!   the CLI gate per spec/04-type-system.md §1.1.3).
 //! - mixed-precision matmul fails the `precision` check in `MatmulInfo`
 //!   construction; the detector returns `None` and matmul never reaches
 //!   codegen.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_backend_metal::dtype;
-use chelis_ir::dag::{Dag, DagNode, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DagNode, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::{codegen_metal, try_codegen_metal};
 
 fn vec_prec(n: usize, p: Prim) -> TensorType {
     TensorType {
@@ -97,6 +98,27 @@ fn build_mul_dag(prec: Prim) -> Dag {
     dag
 }
 
+fn build_relu_dag(prec: Prim) -> Dag {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_prec(6, prec),
+        None,
+    );
+    let g = dag.add_node(
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        vec_prec(6, prec),
+        None,
+    );
+    let relu = dag.add_node(RiscOp::Relu, vec![x], vec_prec(6, prec), None);
+    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], vec_prec(6, prec), None);
+    dag.add_root(relu);
+    dag.add_root(adjoint);
+    dag
+}
+
 fn build_reduce_sum_dag(prec: Prim) -> Dag {
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -137,7 +159,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(n),
+            size: chelis_ir::dag::RtDim::Lit(n),
         },
         vec![a],
         cube(m, k, n),
@@ -146,7 +168,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(m),
+            size: chelis_ir::dag::RtDim::Lit(m),
         },
         vec![b],
         cube(m, k, n),
@@ -160,17 +182,32 @@ fn build_matmul_dag(prec: Prim) -> Dag {
             accumulator: acc,
         },
         vec![mul],
-        mat(m, n),
+        TensorType {
+            dims: vec![DimInfo::Lit(m), DimInfo::Lit(n)],
+            precision: acc,
+        },
         None,
     );
-    dag.add_root(sum);
+    let root = if acc == prec {
+        sum
+    } else {
+        dag.add_node(
+            RiscOp::Cast {
+                new_precision: prec,
+            },
+            vec![sum],
+            mat(m, n),
+            None,
+        )
+    };
+    dag.add_root(root);
     dag
 }
 
 fn assert_real_kernel(src: &str, ctx: &str) {
     assert!(
-        !src.contains("M1 fallback stub"),
-        "{ctx}: emit must produce a real kernel, not the stub fallback. \nSource was:\n{src}"
+        src.contains("kernel void") || src.contains("chelis_metal_mps_gemm_"),
+        "{ctx}: emit must produce a real kernel or MPS dispatch. \nSource was:\n{src}"
     );
 }
 
@@ -181,13 +218,13 @@ fn assert_real_kernel(src: &str, ctx: &str) {
 #[test]
 fn add_emits_typed_kernel_for_each_active_dtype() {
     let cases: &[(Prim, &str, &str)] = &[
-        (Prim::F32, "float", "CHELIS_F32"),
-        (Prim::F16, "half", "CHELIS_F16"),
-        (Prim::Bf16, "bfloat", "CHELIS_BF16"),
-        (Prim::Int8, "char", "CHELIS_I8"),
-        (Prim::Int16, "short", "CHELIS_I16"),
-        (Prim::Int32, "int", "CHELIS_I32"),
-        (Prim::Int64, "long", "CHELIS_I64"),
+        (Prim::F32, "float", "CHELIS_DTYPE_F32"),
+        (Prim::F16, "half", "CHELIS_DTYPE_F16"),
+        (Prim::Bf16, "bfloat", "CHELIS_DTYPE_BF16"),
+        (Prim::Int8, "char", "CHELIS_DTYPE_I8"),
+        (Prim::Int16, "short", "CHELIS_DTYPE_I16"),
+        (Prim::Int32, "int", "CHELIS_DTYPE_I32"),
+        (Prim::Int64, "long", "CHELIS_DTYPE_I64"),
     ];
     for (prec, msl, runtime_tag) in cases {
         let dag = build_add_dag(*prec);
@@ -224,6 +261,34 @@ fn add_bf16_wraps_kernel_in_msl_320_guard() {
         src.contains("#if __METAL_VERSION__ >= 320"),
         "bf16 add kernel must wrap body in the MSL 3.2+ guard (Apple7+ requirement): {src}"
     );
+}
+
+#[test]
+fn relu_and_adjoint_emit_exact_selection_at_every_metal_float_width() {
+    for (prec, msl) in [
+        (Prim::F32, "float"),
+        (Prim::F16, "half"),
+        (Prim::Bf16, "bfloat"),
+    ] {
+        let src = codegen_metal(&build_relu_dag(prec), &format!("relu_{}", prec.name())).mm_source;
+        assert_real_kernel(&src, &format!("relu({prec:?})"));
+        assert!(
+            src.contains(&format!(
+                "out[tid] = a[tid] < ({msl})0 ? ({msl})0 : a[tid];"
+            )),
+            "{src}"
+        );
+        assert!(
+            src.contains(&format!(
+                "out[tid] = ({msl})0 < a[tid] ? b[tid] : ({msl})0;"
+            )),
+            "{src}"
+        );
+        assert!(!src.contains("fmax"), "{src}");
+        if prec == Prim::Bf16 {
+            assert!(src.contains("#if __METAL_VERSION__ >= 320"), "{src}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -266,13 +331,13 @@ fn mul_emits_typed_kernel_for_each_active_dtype() {
 fn reduce_sum_promotes_accumulator_per_spec() {
     // (operand, expected accumulator, expected runtime output tag).
     let cases: &[(Prim, Prim, &str)] = &[
-        (Prim::F32, Prim::F32, "CHELIS_F32"),
-        (Prim::F16, Prim::F32, "CHELIS_F32"),
-        (Prim::Bf16, Prim::F32, "CHELIS_F32"),
-        (Prim::Int8, Prim::Int32, "CHELIS_I32"),
-        (Prim::Int16, Prim::Int32, "CHELIS_I32"),
-        (Prim::Int32, Prim::Int32, "CHELIS_I32"),
-        (Prim::Int64, Prim::Int64, "CHELIS_I64"),
+        (Prim::F32, Prim::F32, "CHELIS_DTYPE_F32"),
+        (Prim::F16, Prim::F32, "CHELIS_DTYPE_F32"),
+        (Prim::Bf16, Prim::F32, "CHELIS_DTYPE_F32"),
+        (Prim::Int8, Prim::Int32, "CHELIS_DTYPE_I32"),
+        (Prim::Int16, Prim::Int32, "CHELIS_DTYPE_I32"),
+        (Prim::Int32, Prim::Int32, "CHELIS_DTYPE_I32"),
+        (Prim::Int64, Prim::Int64, "CHELIS_DTYPE_I64"),
     ];
     for (operand, expected_acc, runtime_tag) in cases {
         let dag = build_reduce_sum_dag(*operand);
@@ -361,45 +426,36 @@ fn matmul_bf16_dispatches_to_tiled_msl() {
 }
 
 #[test]
-fn matmul_int_rejected_at_codegen_falls_through_to_stub() {
+fn matmul_int_rejected_at_codegen_returns_typed_unsupported() {
     // Integer matmul never reaches a healthy backend (rejected at
     // type-check per §5.7.2). The Metal blas detector also rejects it,
     // so the matmul subgraph isn't recognized; the lone Sum that
-    // remains then trips the require_static_rank1 / accumulator path
-    // and the emitter falls through to the stub. Test guards that
-    // codegen does NOT silently emit a tiled int-typed matmul kernel.
+    // remains then trips the require_static_rank1 / accumulator path.
+    // Codegen must fail before it can advertise an artifact.
     for prec in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         let dag = build_matmul_dag(prec);
-        let result = codegen_metal(&dag, "mmk_int");
-        let src = &result.mm_source;
-        assert!(
-            !src.contains("chelis_metal_mps_gemm_"),
-            "int matmul ({prec:?}) must not call any MPS helper: {src}"
+        let error = try_codegen_metal(&dag, "mmk_int").unwrap_err();
+        assert_eq!(
+            error.stage,
+            chelis_types::unsupported::Stage::Codegen("metal")
         );
-        assert!(
-            !src.contains("kernel void k_matmul"),
-            "int matmul ({prec:?}) must not emit a tiled MSL matmul kernel: {src}"
-        );
+        assert!(error.to_string().starts_with("unsupported:"), "{error}");
     }
 }
 
 // ---------------------------------------------------------------------------
-// Negative coverage: f64 falls through (CLI gate is the user-facing reject)
+// Negative coverage: f64 returns a typed error (CLI gate normally rejects first)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn f64_codegen_falls_through_to_stub() {
+fn f64_codegen_returns_typed_unsupported() {
     // f64 is hard-rejected at the CLI gate (test elsewhere) AND at the
     // codegen entry. Reaching codegen with f64 is a contract drift; the
     // emitter must not synthesize a kernel using a fictional MSL `double`
-    // type. Falling through to the stub is the defense-in-depth outcome.
+    // type or any other artifact.
     let dag = build_add_dag(Prim::F64);
-    let result = codegen_metal(&dag, "addk_f64");
-    assert!(
-        result.mm_source.contains("M1 fallback stub"),
-        "f64 must surface as the stub fallback (CLI gate is user-facing reject): {}",
-        result.mm_source
-    );
+    let error = try_codegen_metal(&dag, "addk_f64").unwrap_err();
+    assert!(error.to_string().contains("[04-TGT-1]"), "{error}");
 }
 
 // ---------------------------------------------------------------------------

@@ -87,11 +87,11 @@ fn lowers_linear_predicate_to_flattened_smt() {
 #[test]
 fn flattened_predicate_validates_with_concrete_eval() {
     use crate::concrete_eval::eval_bool;
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
     let exprs = deep_of(PROB);
     let inv = &collect_opaque_invariants(&exprs)[0];
     let smt = lower_predicate_flattened(inv, "p", &ConstEnv::new()).expect("lowerable");
-    let mut env = HashMap::new();
+    let mut env = UnordMap::new();
     env.insert("p.value".to_string(), f32_value(0.5));
     assert!(eval_bool(&smt, &env), "0.5 satisfies 0<=v<=1");
     env.insert("p.value".to_string(), f32_value(1.5));
@@ -103,7 +103,7 @@ fn flattened_predicate_validates_with_concrete_eval() {
 #[test]
 fn lowers_sum_with_constant_for_simplex_band() {
     use crate::concrete_eval::eval_bool;
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
     // Tolerance-band simplex invariant referencing a module constant `eps`.
     let surf = "module M.Simplex
 @opaque
@@ -122,7 +122,7 @@ def make(w: tensor[3, f32]) -> Simplex = Simplex { weights: w }
     assert!(s.contains("p.weights.2"), "expected all 3 elements: {s}");
 
     // A weight vector summing to exactly 1.0 satisfies the band.
-    let mut env = HashMap::new();
+    let mut env = UnordMap::new();
     env.insert("p.weights.0".to_string(), f32_value(0.2));
     env.insert("p.weights.1".to_string(), f32_value(0.3));
     env.insert("p.weights.2".to_string(), f32_value(0.5));

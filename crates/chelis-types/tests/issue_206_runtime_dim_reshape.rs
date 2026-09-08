@@ -100,7 +100,7 @@ module Probe.Runtime
 export (bias_broadcast)
 
 sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
-def bias_broadcast(x, b) = expand(b, 0, shape(x, cast(0, int32)))
+def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, int32)))
 "#,
     );
     assert!(
@@ -120,7 +120,7 @@ module Probe.Runtime
 export (bias_broadcast, flatten_batch)
 
 sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
-def bias_broadcast(x, b) = expand(b, 0, shape(x, cast(0, int32)))
+def bias_broadcast(x, b) = insert(b, 0, shape(x, cast(0, int32)))
 
 sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])

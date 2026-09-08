@@ -9,19 +9,16 @@ Four things are locked here:
   (a) the full developer gate keeps the complete default nextest profile while
       CI delegates its two census binaries from the `ci` profile to the dtype
       oracle;
-  (b) a parity assertion: every `cargo`/`chelis` invocation in a gate
-      step of `.github/workflows/ci.yml` is produced by `gate.py`. This
-      covers both `cargo ...` and bare `chelis ...` commands (the
-      `cargo run -p chelis-cli --bin chelis -- ...` form is caught by
-      the `cargo ` prefix). This is the lock that turns future
-      CI-vs-gate drift into a test failure. The non-gate jobs
-      (dtype oracle/aggregator, sanitizer, macOS-smoke, docs, LOC-report,
-      no-AI-authorship) are excluded by name so the exclusion is explicit
-      and reviewable;
+  (b) a structural parity assertion: every single-line `run:` scalar in a
+      gate-owned job exactly matches that job's reviewed allowlist. This does
+      not emulate Bash; quoting, expansion, and substitution cannot hide an
+      added command. Every other CI job is classified by name so the scope
+      exclusion is explicit and reviewable;
   (c) `--list` prints the canonical full list;
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
 
+import hashlib
 import importlib.util
 import io
 import os
@@ -102,12 +99,11 @@ PROJECT_DEVENV_WORKFLOW_JOBS = {
     "ci.yml": (
         "diagnostic-kind-oracle",
         "rejection-authority-liveness",
-        "lint-and-unit",
-        "workspace-tests",
+        "lint-rust",
+        "workspace-tests-shard",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
-        "generalize-sweep-oracle",
-        "macos-smoke",
+        "generalize-sweep-oracle-shard",
         "backend-sanitizers",
         "docs",
         "smt-build",
@@ -129,6 +125,33 @@ CARCARA_FULL_SUITE_COMMAND = (
     "devenv-retry --profile smt shell --no-tui -- "
     "cargo test -p chelis-prove --features carcara -- --test-threads=1"
 )
+SMT_FULL_SYSTEM_PACKAGES = (
+    "gcc",
+    "g++",
+    "cmake",
+    "libclang-dev",
+    "m4",
+    "make",
+    "libz3-dev",
+)
+SMT_FULL_VENDORED_SYSTEM_PACKAGES = (
+    "libgmp-dev",
+    "libmpfr-dev",
+    "libmpc-dev",
+    "libopenblas-dev",
+)
+
+
+def _read_nix_packages_workflow(path: Path | None = None) -> str:
+    """Read the exact UTF-8 workflow blob without path or newline substitution."""
+    source = NIX_PACKAGES_YML if path is None else path
+    if source.is_symlink() or not source.is_file():
+        raise AssertionError("the Nix package workflow must be a regular file")
+    raw = source.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AssertionError("the Nix package workflow must be UTF-8") from error
 
 
 def _nix_supported_systems(contracts: str) -> set[str]:
@@ -159,16 +182,46 @@ def _assert_nix_system_job_parity(contracts: str, workflow: str) -> None:
 
 
 def _workflow_job_blocks(workflow: str) -> dict[str, str]:
-    headers = list(re.finditer(r"(?m)^  (?P<name>[a-z0-9-]+):\s*$", workflow))
+    headers: list[tuple[str, int]] = []
+    in_jobs = False
+    offset = 0
+    for line in workflow.splitlines(keepends=True):
+        clean_line = line.rstrip("\r\n")
+        if _parse_workflow_jobs_header(clean_line):
+            in_jobs = True
+        elif in_jobs:
+            name = _parse_workflow_job_header(clean_line)
+            if name is not None:
+                headers.append((name, offset))
+        offset += len(line)
+
     blocks: dict[str, str] = {}
-    for index, header in enumerate(headers):
-        end = headers[index + 1].start() if index + 1 < len(headers) else len(workflow)
-        blocks[header.group("name")] = workflow[header.start() : end]
+    for index, (name, start) in enumerate(headers):
+        end = headers[index + 1][1] if index + 1 < len(headers) else len(workflow)
+        blocks[name] = workflow[start:end]
     return blocks
 
 
+# The one reviewed automatic macOS lane. macOS Smoke is the authoritative
+# workspace oracle, so its shards run on every code pull request and push; the
+# `test-telemetry` aggregate downloads their JUnit artifacts by exact name and
+# has no fallback. Every other macOS job stays manual-dispatch. Adding a name
+# here is a deliberate hosted-cost decision, not a way past the guard.
+AUTOMATIC_MACOS_JOBS = frozenset({"macos-workspace-shard"})
+
+
 def _macos_manual_dispatch_errors(workflow: str) -> list[str]:
+    # A workflow that is not block-form YAML (the JSON-shaped hardware
+    # workflows) declares no block-form jobs this guard can read; it also
+    # declares no hosted macOS runner.
+    if "\njobs:\n" not in workflow:
+        return []
     trigger = workflow[: workflow.index("\njobs:\n")]
+    # Nothing in a workflow without a `push` or `pull_request` trigger can run
+    # automatically on a pull request, so its macOS jobs need no separate
+    # per-job manual condition.
+    if "push:" not in trigger and "pull_request:" not in trigger:
+        return []
     has_manual_trigger = "workflow_dispatch:" in trigger
     manual_if = re.compile(
         r"(?m)^    if:\s*(?:\$\{\{\s*)?.*"
@@ -181,6 +234,8 @@ def _macos_manual_dispatch_errors(workflow: str) -> list[str]:
             "runs-on: ${{ matrix.os }}" in block and "os: macos-latest" in block
         )
         if not direct_macos and not matrix_macos:
+            continue
+        if job in AUTOMATIC_MACOS_JOBS:
             continue
         if not has_manual_trigger:
             errors.append(f"{job}: missing workflow_dispatch trigger")
@@ -283,11 +338,35 @@ def _assert_carcara_full_suite_command(workflow: str) -> None:
                     return True
         return False
 
+    # Cargo subcommands that only type-check or lint. The invariant here is
+    # that the Carcara *suite* runs exactly once and serialized, because a
+    # second concurrent run is the hazard; a step that merely compiles the
+    # feature executes no test and cannot violate it. The list is of
+    # non-executing subcommands rather than executing ones, so an unrecognized
+    # subcommand is treated as executing and the guard stays strict.
+    non_executing = frozenset(
+        ("check", "clippy", "doc", "fmt", "metadata", "tree", "verify-project")
+    )
+
+    def executes_tests(command: str) -> bool:
+        try:
+            words = shlex.split(command, comments=True)
+        except ValueError:
+            return True
+        for index, word in enumerate(words):
+            if word != "cargo":
+                continue
+            for candidate in words[index + 1 :]:
+                if candidate.startswith("+"):
+                    continue
+                return candidate not in non_executing
+        return True
+
     steps = run_steps()
     carcara_steps = [
         (command, conditional)
         for command, conditional in steps
-        if enables_carcara(command)
+        if enables_carcara(command) and executes_tests(command)
     ]
     canonical_words = shlex.split(CARCARA_FULL_SUITE_COMMAND)
     canonical_steps = [
@@ -302,14 +381,69 @@ def _assert_carcara_full_suite_command(workflow: str) -> None:
         )
 
 
-def _assert_carcara_feature_tree_is_gmp_only(feature_tree: str) -> None:
+def _assert_full_smt_system_packages(workflow: str) -> None:
+    block = _workflow_job_blocks(workflow).get("full-smt-prove")
+    if block is None:
+        raise AssertionError("missing full-smt-prove job")
+    commands = [
+        line.strip().removeprefix("run: ")
+        for line in block.splitlines()
+        if line.strip().startswith("run: python3 scripts/ci_apt_get.py ")
+    ]
+    forbidden = sorted(
+        {
+            package
+            for command in commands
+            for package in SMT_FULL_VENDORED_SYSTEM_PACKAGES
+            if package in shlex.split(command)
+        }
+    )
+    if forbidden:
+        raise AssertionError(
+            "full-smt-prove must build its locked native dependencies instead "
+            "of installing distribution packages: " + ", ".join(forbidden)
+        )
+    # The lane runs inside the `smt` Devenv profile, which supplies gcc/g++,
+    # cmake, libclang, m4, make, and z3. Installing any distribution package
+    # here would reintroduce the host toolchain this lane converged off.
+    if commands:
+        raise AssertionError(
+            "full-smt-prove provisions its native toolchain through the smt "
+            f"Devenv profile and must install no apt packages; found {commands!r}"
+        )
+
+
+def _assert_prove_uses_vendored_gmp_family(
+    manifest: str, carcara_feature_tree: str, all_feature_tree: str
+) -> None:
+    active_manifest = "\n".join(
+        line.split("#", 1)[0] for line in manifest.splitlines()
+    )
+    if (
+        "use-system-libs" in active_manifest
+        or "use-system-libs" in carcara_feature_tree
+        or "use-system-libs" in all_feature_tree
+    ):
+        raise AssertionError(
+            "chelis-prove must build the locked GMP/MPFR/MPC sources instead "
+            "of forcing distribution system-library versions"
+        )
+    direct_dependency = re.search(
+        r"^gmp-mpfr-sys\s*=", active_manifest, re.MULTILINE
+    )
+    if direct_dependency is not None:
+        raise AssertionError(
+            "chelis-prove must not retain a direct gmp-mpfr-sys dependency "
+            "whose only purpose was forcing system libraries"
+        )
+
     forbidden = (
         'gmp-mpfr-sys feature "mpfr"',
         'gmp-mpfr-sys feature "mpc"',
         'rug feature "float"',
         'rug feature "complex"',
     )
-    active = [feature for feature in forbidden if feature in feature_tree]
+    active = [feature for feature in forbidden if feature in carcara_feature_tree]
     if active:
         raise AssertionError(
             "Carcara feature graph must stay GMP-only; activated " + ", ".join(active)
@@ -418,37 +552,135 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
         )
 
 
-def _assert_nix_docs_only_gate(workflow: str) -> None:
-    blocks = _workflow_job_blocks(workflow)
-    changes = blocks.get("changes", "")
-    if "uses: ./.github/actions/detect-docs-only" not in changes:
+_SIMPLE_YAML_KEY = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_-]*|'(?:[^']|'')*'|\"[^\"\\]*\")"
+)
+
+
+def _parse_simple_yaml_mapping_entry(
+    line: str, *, expected_indent: int
+) -> tuple[str, str]:
+    """Parse one deliberately restricted YAML mapping entry.
+
+    The workflow policy oracle has no YAML dependency, so it accepts the plain
+    and simply quoted keys GitHub accepts and fails closed on anchors, explicit
+    keys, escaped double-quoted keys, and other shapes it cannot attribute.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        raise AssertionError(f"expected YAML mapping entry: {line!r}")
+    indent = len(line) - len(line.lstrip(" "))
+    if indent != expected_indent:
+        raise AssertionError(f"unsupported YAML indentation: {line!r}")
+    match = re.fullmatch(
+        rf" {{{expected_indent}}}(?P<key>{_SIMPLE_YAML_KEY.pattern})\s*:\s*(?P<value>.*)",
+        line,
+    )
+    if match is None:
+        raise AssertionError(f"unsupported YAML mapping entry: {line!r}")
+
+    raw_key = match.group("key")
+    if raw_key[0] == raw_key[-1] and raw_key[0] in {"'", '"'}:
+        key = raw_key[1:-1]
+        if raw_key[0] == "'":
+            key = key.replace("''", "'")
+    else:
+        key = raw_key
+    value = re.sub(r"\s+#.*$", "", match.group("value")).strip()
+    return key, value
+
+
+def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
+    lines = workflow.splitlines()
+    on_index: int | None = None
+    for index, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent != 0:
+            continue
+        entry = _parse_simple_yaml_mapping_entry(line, expected_indent=0)
+        if entry[0] == "on":
+            if on_index is not None:
+                raise AssertionError("the Nix workflow must define one on map")
+            if entry[1]:
+                raise AssertionError("the Nix workflow on map must use block form")
+            on_index = index
+    if on_index is None:
+        raise AssertionError("the Nix workflow must define an on map")
+
+    events: dict[str, dict[str, str]] = {}
+    current_event: str | None = None
+    for line in lines[on_index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            break
+        if indent == 2:
+            event, value = _parse_simple_yaml_mapping_entry(
+                line, expected_indent=2
+            )
+            if event in events:
+                raise AssertionError(f"duplicate Nix workflow event {event!r}")
+            if value:
+                raise AssertionError(
+                    f"Nix workflow event {event!r} must use block form"
+                )
+            events[event] = {}
+            current_event = event
+            continue
+        if indent == 4 and current_event is not None:
+            key, value = _parse_simple_yaml_mapping_entry(
+                line, expected_indent=4
+            )
+            if key in events[current_event]:
+                raise AssertionError(
+                    f"duplicate {current_event!r} event key {key!r}"
+                )
+            events[current_event][key] = value
+            continue
+        raise AssertionError(f"unsupported Nix workflow event entry: {line!r}")
+    return events
+
+
+_NIX_REVIEWED_WORKFLOW_SHA256 = (
+    "6a837f9489f40d8279d52442541171028a6038fe4a7a280fcc83e5a6829343f6"
+)
+
+
+def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
+    """Lock the workflow while the temporary event policy is active.
+
+    YAML has enough scalar and expression spellings that a partial parser or a
+    banlist can accept a semantically gated job. Bind every workflow byte so
+    top-level defaults, concurrency, permissions, triggers, jobs, and steps are
+    one closed reviewed artifact. A future intentional policy or recipe change
+    must replace this digest explicitly rather than inheriting a permissive
+    spelling or selection-boundary gap.
+    """
+    actual = hashlib.sha256(workflow.encode("utf-8")).hexdigest()
+    if actual != _NIX_REVIEWED_WORKFLOW_SHA256:
         raise AssertionError(
-            "the Nix workflow must compute docs_only with the shared detector"
-        )
-    linux = blocks.get("nix-linux-x86-64", "")
-    if "needs: [changes]" not in linux or DOCS_ONLY_GATE_IF not in linux:
-        raise AssertionError(
-            "the Linux Nix job must skip docs-only pull requests via the "
-            "shared job-level gate"
-        )
-    darwin = blocks.get("nix-darwin-arm64", "")
-    if "needs.changes" in darwin:
-        raise AssertionError(
-            "the darwin Nix job must keep manual dispatch as its only gate"
+            "the intentional-event-only Nix workflow must match the reviewed "
+            f"native recipe and event policy: found SHA-256 {actual}"
         )
 
 
-def _assert_darwin_manual_dispatch(workflow: str) -> None:
-    trigger_section = workflow.split("jobs:", 1)[0]
-    if "workflow_dispatch:" not in trigger_section:
-        raise AssertionError("the Nix workflow must expose a workflow_dispatch trigger")
-    blocks = _workflow_job_blocks(workflow)
-    darwin = blocks.get("nix-darwin-arm64", "")
-    if "if: github.event_name == 'workflow_dispatch'" not in darwin:
-        raise AssertionError("the darwin Nix job must run on manual dispatch only")
-    linux = blocks.get("nix-linux-x86-64", "")
-    if "github.event_name" in linux:
-        raise AssertionError("the Linux Nix job must keep pull request coverage")
+def _assert_nix_intentional_events_only(workflow: str) -> None:
+    events = _nix_workflow_events(workflow)
+    expected_events = {
+        "workflow_dispatch": {},
+        "release": {"types": "[published]"},
+    }
+    if events != expected_events:
+        raise AssertionError(
+            "the Nix workflow must run only on manual dispatch and published "
+            f"releases: found {events!r}"
+        )
+
+    _assert_nix_workflow_matches_reviewed_recipe(workflow)
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -514,11 +746,48 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
             )
 
 
+# Every single-line command allowed in the three gate-owned workers. Comparing
+# complete scalars is intentionally stricter than recognizing Cargo through
+# Bash syntax: an added command of any kind requires an explicit review here.
+GATE_WORKER_RUN_COMMANDS = {
+    "lint-rust": (
+        f"{DEVENV_COMMAND_PREFIX}python scripts/gate.py lint-and-unit",
+    ),
+    "workspace-tests-shard": (
+        f"{DEVENV_COMMAND_PREFIX}python scripts/gate.py integration --tests-only "
+        "--partition hash:${{ matrix.shard }}/2",
+        f"{DEVENV_COMMAND_PREFIX}python scripts/gate.py integration --support-only",
+        f"{DEVENV_COMMAND_PREFIX}python -m unittest "
+        "scripts.test_nextest_profile_partition.ProfilePartitionTests",
+    ),
+    # Rule-id: GATE-STAGE-RUNTIME-REPRESENTATION -- chelis#893 Phase 0's oracle
+    # is its own gate stage because its release-profile reproducers and serial
+    # mutation re-scans cost about eleven hosted minutes, which doubled the
+    # workspace shard that used to carry it. The job restores the read-only
+    # workspace cache and needs `clang` for the C/Objective-C header lanes.
+    "runtime-representation-phase0-oracle": (
+        "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
+        "python3 scripts/ci_setup_uv_python.py",
+        "python3 scripts/gate.py runtime-representation",
+    ),
+}
+
+
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
-# `gate.py` only owns the `lint-and-unit` and `workspace-tests` jobs; these
-# are listed by name so the parity test's exclusion is visible.
+# `gate.py` only owns the three workers above; every other job is listed by name
+# so a new job cannot silently escape a scope decision.
 NON_GATE_JOBS = {
+    # CI-owned Python unit coverage; it runs no canonical gate stage.
+    "script-unit",
+    # Stable branch-protection aggregates, not command-producing workers.
+    "lint-and-unit",
+    "workspace-tests",
+    "macos-workspace-shard",
     "macos-smoke",
+    # Rule-id: GATE-SCOPE-WORKSPACE-AGGREGATE -- the stable aggregate merges
+    # shard JUnit, checks timing, and publishes telemetry with Python. The
+    # workspace-tests-shard workers own the gate.py commands.
+    "workspace-tests",
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
@@ -544,11 +813,21 @@ NON_GATE_JOBS = {
     # the workspace and dtype legs and is aggregated under the stable
     # branch-protection context.
     "faithful-observation-phase2-oracle",
+    # Rule-id: GATE-SCOPE-COMPILED-VALUE-OWNERSHIP-ORACLE -- chelis#1286's
+    # authoritative Phase 0 detector and typed expected-failure matrix is a
+    # dedicated CI job aggregated under the stable integration context.
+    "compiled-value-ownership-phase0-oracle",
     # Rule-id: GATE-SCOPE-GENERALIZE-SWEEP-ORACLE -- chelis#1207's exact
     # sweep-versus-level parity corpus intentionally bypasses nextest's
-    # default filter and is owned by its dedicated blocking CI leg.
+    # default filter. Four CI-owned shards execute its disjoint partitions;
+    # the aggregate retains the stable blocking status context.
+    "generalize-sweep-oracle-shard",
     "generalize-sweep-oracle",
     "integration",
+    # Rule-id: GATE-SCOPE-TEST-TELEMETRY -- this CI-owned aggregate reads
+    # nextest artifacts produced by the gate and oracle jobs. It runs no
+    # cargo or Chelis command itself.
+    "test-telemetry",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
     # design, like backend-sanitizers; the full prove corpus lives in
@@ -604,8 +883,8 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
 
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
-# `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
-# but in their own files). They run their own commands the gate does not
+# `gate.py` quartet (like the backend-sanitizers / macos-workspace-shard jobs
+# in ci.yml, but in their own files). They run their own commands the gate does not
 # produce, by design. Listed here so the exclusion is explicit and reviewable.
 # Rule-id: GATE-SCOPE-CONFORMANCE -- the Hull conformance gate runs a Python
 # corpus runner against the built binary; it is a CI job, NOT part of the cargo
@@ -615,6 +894,9 @@ NON_GATE_WORKFLOWS = {
     "ci.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
+    # Manually dispatched Phase 3 acceptance on a provisioned AMD GPU runner;
+    # the hardware oracle is not part of the per-PR developer gate.
+    "ownership-hip.yml",
     "release.yml",
     "conformance.yml",
     "conformance-nightly.yml",
@@ -674,6 +956,40 @@ class StageUnionTests(unittest.TestCase):
             "no gate command should appear in more than one stage",
         )
 
+    def test_lint_stage_does_not_repeat_the_workspace_build(self):
+        self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
+        self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
+
+    def test_integration_partition_selects_only_the_nextest_command(self):
+        commands = gate.selected_stage_commands(
+            "integration",
+            tests_only=True,
+            support_only=False,
+            partition="hash:1/2",
+        )
+        self.assertEqual(
+            commands,
+            [gate.NEXTEST_WORKSPACE_CI + ["--partition", "hash:1/2"]],
+        )
+
+    def test_integration_support_selects_each_non_test_oracle_once(self):
+        commands = gate.selected_stage_commands(
+            "integration",
+            tests_only=False,
+            support_only=True,
+            partition=None,
+        )
+        self.assertEqual(commands, gate.STAGES["integration"][1:])
+
+    def test_partition_is_rejected_outside_tests_only_integration(self):
+        for argv in (
+            ["lint-and-unit", "--partition", "hash:1/2"],
+            ["integration", "--partition", "hash:1/2"],
+            ["integration", "--support-only", "--partition", "hash:1/2"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                gate.parse_args(argv)
+
 
 class ListOutputTests(unittest.TestCase):
     def test_list_prints_canonical_full_list(self):
@@ -723,11 +1039,13 @@ class ListOutputTests(unittest.TestCase):
         # too (chelis#875 and chelis#959).
         rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
         self.assertIn("cargo test -p chelis-types --doc", rendered)
+        self.assertIn("cargo test -p chelis-ir --doc", rendered)
         self.assertIn("cargo test -p chelis-compiler-api --doc", rendered)
 
     def test_pipeline_compile_fail_contracts_are_in_the_lint_and_unit_stage(self):
         rendered = [gate.render(command) for command in gate.STAGES["lint-and-unit"]]
         for command in (
+            "cargo test -p chelis-ir --doc",
             "cargo test -p chelis-compiler-api --doc",
             "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
@@ -737,11 +1055,36 @@ class ListOutputTests(unittest.TestCase):
     def test_pipeline_compile_fail_contracts_are_in_the_local_subset(self):
         rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
         for command in (
+            "cargo test -p chelis-ir --doc",
             "cargo test -p chelis-compiler-api --doc",
             "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
         ):
             self.assertIn(command, rendered)
+
+    def test_phase_b_compile_fail_is_continuous_and_local(self):
+        # The ban's liveness proof. Without it, deleting the `disallowed-types`
+        # entries from clippy.toml leaves every continuous job green.
+        command = "<managed-python> scripts/check_hash_order_phase_b_compile_fail.py"
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+
+    def test_configuration_closure_is_continuous_and_local(self):
+        command = "<managed-python> scripts/check_configuration_closure.py"
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
 
     def test_pipeline_core_boundary_guards_are_in_the_lint_and_unit_stage(self):
         # The dependency guard, documentation guard, and pipeline-artifact
@@ -754,6 +1097,20 @@ class ListOutputTests(unittest.TestCase):
             "<managed-python> scripts/check_pipeline_core_compile_fail.py",
         ):
             self.assertIn(command, rendered)
+
+    def test_chelis_std_generated_artifacts_are_checked_continuously_and_locally(self):
+        command = (
+            "<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check"
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
 
     def test_unrepresentable_domain_oracle_runs_in_the_per_pr_gate(self):
         # chelis#908's "Constraint on every fix in this class": the oracle
@@ -775,6 +1132,33 @@ class ListOutputTests(unittest.TestCase):
             [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
         )
         self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+
+    def test_runtime_representation_phase0_oracle_is_continuous_and_local(self):
+        command = (
+            "<managed-python> scripts/runtime_representation_oracle.py --phase 0"
+        )
+        # The oracle is a stage of its own so hosted CI can give it a runner of
+        # its own; it must not also ride on the integration support slice.
+        self.assertEqual(
+            [gate.render(entry) for entry in gate.STAGES["runtime-representation"]],
+            [command],
+        )
+        self.assertNotIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["integration"]],
+        )
+        self.assertEqual(gate.STAGE_ORDER[-1], "runtime-representation")
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+        script = REPO_ROOT / "scripts" / "runtime_representation_oracle.py"
+        self.assertTrue(script.is_file())
+        self.assertIn(
+            "RUNTIME REPRESENTATION PHASE 0: PASS",
+            script.read_text(),
+        )
 
     def test_front_end_performance_oracle_runs_in_continuous_integration(self):
         command = "<managed-python> scripts/compiler_front_end_performance.py"
@@ -1215,16 +1599,15 @@ class ListOutputTests(unittest.TestCase):
         self.assertNotIn("cargo test --workspace", rendered)
 
 
-# A gate `run:` step is "gate-relevant" if it invokes the Rust
-# toolchain (`cargo ...`) or the Chelis CLI directly (`chelis ...`).
-# The `cargo run -p chelis-cli --bin chelis -- ...` form is already
-# covered by the `cargo ` prefix; the bare `chelis ...` form is the
-# case the original `cargo `-only filter missed (RT-2 finding). Both
-# the module docstring and
-# docs/investigations/test_toolchain_guards_design.md describe the lock
-# as covering "every `cargo`/`chelis` invocation", so the parser must
-# catch both.
-_GATE_COMMAND_PREFIXES = ("cargo ", "chelis ")
+_WORKFLOW_JOB_ID_PATTERN = r"[A-Za-z_][A-Za-z0-9_-]*"
+_WORKFLOW_JOB_HEADER = re.compile(r"^  (?P<key>\S.*?):\s*(?:#.*)?$")
+_WORKFLOW_JOBS_HEADER = re.compile(
+    r"^(?:jobs|'jobs'|\"jobs\")\s*:\s*(?P<value>.*)$"
+)
+_WORKFLOW_STEPS_HEADER = re.compile(
+    r"^(?P<indent> +)(?:steps|'steps'|\"steps\")\s*:\s*(?P<value>.*)$"
+)
+_UNSUPPORTED_RUN_SCALAR = "<unsupported-run-scalar>"
 
 
 def _unwrap_devenv_command(command: str) -> str:
@@ -1241,11 +1624,19 @@ def _is_gate_relevant_command(command: str) -> bool:
     logical_command = _unwrap_devenv_command(command)
     return any(logical_command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES)
 
+def _parse_workflow_jobs_header(line: str) -> bool:
+    """Recognize the block-form `jobs` map and reject inline variants."""
+    match = _WORKFLOW_JOBS_HEADER.fullmatch(line)
+    if match is None:
+        return False
+    value = match.group("value").strip()
+    if not value or value.startswith("#"):
+        return True
+    raise AssertionError(f"unsupported workflow jobs mapping: {line!r}")
 
-def _parse_ci_gate_invocations() -> dict[str, list[str]]:
-    """Parse `.github/workflows/ci.yml` and return, per gate job, the
-    list of `run:` command lines that invoke `cargo` or `chelis`
-    (including the `cargo run ... chelis ... lint` form).
+
+def _parse_workflow_job_header(line: str) -> str | None:
+    """Decode one top-level job key without silently approximating YAML.
 
     The parser is intentionally simple line-based YAML-shape matching:
     it tracks the current `<job>:` header (two-space indent under
@@ -1255,32 +1646,230 @@ def _parse_ci_gate_invocations() -> dict[str, list[str]]:
     Multi-line `run: |` blocks in the gate jobs are not used today; if
     one is introduced the parity test will not see it, which the
     `test_no_multiline_run_in_gate_jobs` guard catches.
+    GitHub accepts simple quoted mapping keys as job IDs. Double-quoted YAML
+    escapes need a real YAML decoder, so this dependency-free parity parser
+    fails closed for that shape instead of potentially omitting a CI job.
     """
-    text = CI_YML.read_text()
+    indent = len(line) - len(line.lstrip(" "))
+    content = line.strip()
+    # A comment is legal YAML anywhere inside `jobs:` and is never a job id.
+    # Reject it before matching, not only on the regex-miss path: the pattern's
+    # `\S.*?` starts happily at `#`, so a comment ending in a colon matches and
+    # would otherwise be reported as a malformed job id (chelis#1443).
+    if content.startswith("#"):
+        return None
+
+    match = _WORKFLOW_JOB_HEADER.fullmatch(line)
+    if match is None:
+        if indent == 2 and content:
+            raise AssertionError(f"unsupported workflow job entry: {line!r}")
+        return None
+
+    raw = match.group("key").strip()
+    if re.fullmatch(_WORKFLOW_JOB_ID_PATTERN, raw):
+        return raw
+
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        inner = raw[1:-1]
+        if raw[0] == '"' and "\\" in inner:
+            raise AssertionError(f"unsupported quoted workflow job id: {raw!r}")
+        if raw[0] == "'":
+            inner = inner.replace("''", "'")
+        if re.fullmatch(_WORKFLOW_JOB_ID_PATTERN, inner):
+            return inner
+        raise AssertionError(f"unsupported quoted workflow job id: {raw!r}")
+
+    raise AssertionError(f"unsupported workflow job id header: {raw!r}")
+
+
+def _assert_supported_workflow_step_shapes(workflow: str) -> None:
+    """Reject step YAML shapes the dependency-free parser cannot attribute."""
+    steps_indent: int | None = None
+    unsupported_entry = re.compile(r"^-\s*(?:[?{*&'\"!]|<<:)")
+    unsupported_key = re.compile(r"^(?:[?:{*&'\"!]|<<:)")
+    explicit_steps_key = re.compile(
+        r"^\s*(?:\?\s*(?:steps|'steps'|\"steps\")|"
+        r"&\S+\s+(?:steps|'steps'|\"steps\")\s*:|"
+        r"\*\S+\s*:).*$"
+    )
+
+    for line in workflow.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+
+        if steps_indent is not None:
+            if stripped and not stripped.startswith("#") and indent <= steps_indent:
+                steps_indent = None
+            else:
+                relative_indent = indent - steps_indent
+                if relative_indent == 2 and unsupported_entry.match(stripped):
+                    raise AssertionError(
+                        f"unsupported workflow step shape: {line!r}"
+                    )
+                if relative_indent == 4 and unsupported_key.match(stripped):
+                    raise AssertionError(
+                        f"unsupported workflow step shape: {line!r}"
+                    )
+
+        if steps_indent is None:
+            if explicit_steps_key.fullmatch(line):
+                raise AssertionError(
+                    f"unsupported workflow step shape: {line!r}"
+                )
+            match = _WORKFLOW_STEPS_HEADER.fullmatch(line)
+            if match is None:
+                continue
+            value = match.group("value").strip()
+            if value and not value.startswith("#"):
+                raise AssertionError(
+                    f"unsupported workflow step shape: {line!r}"
+                )
+            steps_indent = len(match.group("indent"))
+
+
+def _strip_yaml_scalar_quotes(command: str) -> str:
+    """Remove one matching YAML quote pair and its trailing comment.
+
+    This is deliberately a small scalar normalizer rather than a second YAML
+    implementation. The parity guard only needs the shell command text, but it
+    must recognize quoted scalars whose closing quote is followed by a YAML
+    comment or appears on a continuation line.
+    """
+    command = command.strip()
+    if not command or command[0] not in ("'", '"'):
+        return re.sub(r"\s+#.*$", "", command).strip()
+
+    # YAML double-quoted scalars interpret escapes and line continuations.
+    # This dependency-free guard does not reproduce that grammar; reject the
+    # unsupported shape so a decoded cargo/chelis command cannot disappear.
+    if command[0] == '"' and "\\" in command:
+        return _UNSUPPORTED_RUN_SCALAR
+
+    quote = command[0]
+    index = 1
+    while index < len(command):
+        if quote == "'" and command[index] == "'":
+            if index + 1 < len(command) and command[index + 1] == "'":
+                index += 2
+                continue
+            trailing = command[index + 1 :].strip()
+            if not trailing or trailing.startswith("#"):
+                return command[1:index].replace("''", "'").strip()
+            return command
+        if quote == '"':
+            if command[index] == "\\":
+                index += 2
+                continue
+            if command[index] == '"':
+                trailing = command[index + 1 :].strip()
+                if not trailing or trailing.startswith("#"):
+                    return command[1:index].strip()
+                return command
+        index += 1
+    return command
+
+
+def _is_yaml_block_scalar(value: str) -> bool:
+    if not value:
+        return False
+    return re.fullmatch(
+        r"[|>](?:[+-][1-9]?|[1-9][+-]?)?",
+        value.split(maxsplit=1)[0],
+    ) is not None
+
+
+def _parse_ci_run_commands(text: str | None = None) -> dict[str, list[str]]:
+    """Parse `.github/workflows/ci.yml` and return every `run:` command.
+
+    The parser is intentionally narrow line-based YAML-shape matching: it
+    tracks the current `<job>:` header (two-space indent under `jobs:`), then
+    reconstructs plain and quoted `run:` scalars across indented continuation
+    lines. Matching outer YAML quotes and YAML comments are removed. Literal
+    or folded block-scalar indicators are recorded as a sentinel. The gate
+    parity lock compares this complete list with an exact per-job allowlist;
+    it never tries to infer which executable Bash will ultimately run.
+    """
+    if text is None:
+        text = CI_YML.read_text()
+    _assert_supported_workflow_step_shapes(text)
     lines = text.splitlines()
     current_job: str | None = None
     invocations: dict[str, list[str]] = {}
-    job_header = re.compile(r"^  ([a-z0-9-]+):\s*$")
-    run_inline = re.compile(r"^\s*run:\s*(.+?)\s*$")
-    for line in lines:
-        m = job_header.match(line)
-        if m is not None:
-            current_job = m.group(1)
+    run_inline = re.compile(
+        r"^(?P<indent>\s*)(?P<dash>-\s*)?run\s*:\s*(?P<value>.*?)\s*$"
+    )
+    in_jobs = False
+    in_defaults = False
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        if _parse_workflow_jobs_header(line):
+            in_jobs = True
+            line_index += 1
+            continue
+        if not in_jobs:
+            line_index += 1
+            continue
+        job_name = _parse_workflow_job_header(line)
+        if job_name is not None:
+            current_job = job_name
             invocations.setdefault(current_job, [])
+            in_defaults = False
+            line_index += 1
             continue
         if current_job is None:
+            line_index += 1
+            continue
+        # A job-level `defaults:` mapping carries its own `run:` key (the
+        # Devenv shell selector). That key is a shell declaration, not a step
+        # command, so skip the whole block rather than reconstructing
+        # `shell: ...` as an invocation.
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if in_defaults and stripped and not stripped.startswith("#") and indent <= 4:
+            in_defaults = False
+        if indent == 4 and stripped == "defaults:":
+            in_defaults = True
+            line_index += 1
+            continue
+        if in_defaults:
+            line_index += 1
             continue
         rm = run_inline.match(line)
         if rm is None:
+            line_index += 1
             continue
-        command = rm.group(1).strip()
-        if command == "|":
-            # Multi-line block; record a sentinel so the dedicated
-            # guard test can detect it.
+
+        scalar_parts = [rm.group("value").strip()]
+        continuation_floor = len(rm.group("indent")) + len(rm.group("dash") or "")
+        next_index = line_index + 1
+        while next_index < len(lines):
+            continuation = lines[next_index]
+            if not continuation.strip():
+                next_index += 1
+                continue
+            continuation_indent = len(continuation) - len(
+                continuation.lstrip(" ")
+            )
+            if continuation_indent <= continuation_floor:
+                break
+            scalar_parts.append(continuation.strip())
+            next_index += 1
+
+        command = " ".join(part for part in scalar_parts if part).strip()
+        if command.startswith(("&", "*", "!")):
+            raise AssertionError(
+                f"unsupported workflow run scalar: {command!r}"
+            )
+        if _is_yaml_block_scalar(command):
+            # Literal or folded block; record a sentinel so the dedicated
+            # guard test can detect every YAML-equivalent spelling.
             invocations[current_job].append("<multiline-run-block>")
+            line_index = next_index
             continue
-        if _is_gate_relevant_command(command):
-            invocations[current_job].append(_unwrap_devenv_command(command))
+        command = _strip_yaml_scalar_quotes(command)
+        invocations[current_job].append(command)
+        line_index = next_index
     return invocations
 
 
@@ -1311,26 +1900,143 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
         )
 
 
+def _ci_step_block(job_block: str, step_name: str) -> str:
+    """Return one step's raw text from a job block, without the next step.
+
+    Steps are `      - name: ...` items, so a step ends at the next line with
+    that exact indentation and dash. Splitting on the marker keeps every
+    continuation line, including a `run:` scalar and any `if:` condition.
+    """
+    marker = f"      - name: {step_name}\n"
+    if job_block.count(marker) != 1:
+        raise AssertionError(
+            f"expected exactly one step named {step_name!r}, "
+            f"found {job_block.count(marker)}"
+        )
+    tail = job_block[job_block.index(marker) + len(marker) :]
+    end = re.search(r"^      - ", tail, re.MULTILINE)
+    return tail[: end.start()] if end else tail
+
+
 def _workflow_job_block(path: Path, job: str) -> str:
     """Return the raw workflow text block for one job."""
-    lines = path.read_text().splitlines()
-    header = f"  {job}:"
-    start: int | None = None
-    for idx, line in enumerate(lines):
-        if line == header:
-            start = idx
-            break
-    if start is None:
+    block = _workflow_job_blocks(path.read_text()).get(job)
+    if block is None:
         raise AssertionError(f"missing workflow job {job!r} in {path}")
-    end = len(lines)
-    for idx in range(start + 1, len(lines)):
-        if re.match(r"^  [a-z0-9-]+:\s*$", lines[idx]):
-            end = idx
-            break
-    return "\n".join(lines[start:end])
+    return block.rstrip("\r\n")
+
+
+def _rust_cache_steps(job_block: str) -> list[dict[str, str]]:
+    """Return every Swatinem/rust-cache step's `with:` inputs in a job."""
+    _assert_supported_workflow_step_shapes(job_block)
+    lines = job_block.splitlines()
+    uses_indices = []
+    uses_line = re.compile(r"(?:-\s*)?uses\s*:\s*(?P<value>.+?)\s*$")
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if re.fullmatch(r"(?:-\s*)?uses\s*:\s*(?:#.*)?", stripped):
+            raise AssertionError("unsupported workflow action reference")
+        match = uses_line.fullmatch(stripped)
+        if match is None:
+            continue
+        raw_action = match.group("value").strip()
+        if raw_action.startswith(("&", "*", "!")) or _is_yaml_block_scalar(
+            raw_action
+        ):
+            raise AssertionError(
+                f"unsupported workflow action reference: {raw_action!r}"
+            )
+        action = _strip_yaml_scalar_quotes(raw_action)
+        if raw_action[0] in {"'", '"'} and action == raw_action:
+            raise AssertionError(
+                f"unsupported workflow action reference: {raw_action!r}"
+            )
+        if action == _UNSUPPORTED_RUN_SCALAR:
+            raise AssertionError(
+                "unsupported quoted workflow action reference"
+            )
+        action_name, separator, _action_ref = action.partition("@")
+        if separator and action_name.casefold() == "swatinem/rust-cache":
+            uses_indices.append(idx)
+    steps: list[dict[str, str]] = []
+    for uses_idx in uses_indices:
+        with_idx: int | None = None
+        for idx in range(uses_idx + 1, len(lines)):
+            if re.match(r"^\s*- ", lines[idx]):
+                break
+            stripped = lines[idx].strip()
+            if re.match(r"^with\s*:", stripped):
+                if stripped != "with:":
+                    raise AssertionError(
+                        "unsupported rust-cache input shape: "
+                        f"{stripped!r}"
+                    )
+                with_idx = idx
+                break
+        if with_idx is None:
+            steps.append({})
+            continue
+
+        inputs: dict[str, str] = {}
+        for line in lines[with_idx + 1 :]:
+            if re.match(r"^\s*- ", line):
+                break
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            match = re.fullmatch(
+                r"(?P<key>[A-Za-z0-9_-]+)\s*:\s*(?P<value>.+?)",
+                stripped,
+            )
+            if match is None:
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            key = match.group("key")
+            raw_value = match.group("value").strip()
+            if (
+                raw_value.startswith(("&", "*", "!", "{", "[", "#"))
+                or _is_yaml_block_scalar(raw_value)
+            ):
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            value = _strip_yaml_scalar_quotes(raw_value)
+            if value == _UNSUPPORTED_RUN_SCALAR or (
+                raw_value.startswith(("'", '"')) and value == raw_value
+            ):
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            if not value or key in inputs:
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            if key == "shared-key" and ("${{" in value or "}}" in value):
+                raise AssertionError(
+                    "rust-cache shared-key must be a literal scalar: "
+                    f"{stripped!r}"
+                )
+            inputs[key] = value
+        steps.append(inputs)
+    return steps
 
 
 def _assert_no_workflow_ci_policy(workflow: str) -> None:
+    # Only Devenv-run jobs inherit the profile's CI policy. A job that keeps the
+    # hosted toolchain (the macOS workspace shards) declares its own build
+    # environment, so exclude those blocks before scanning.
+    try:
+        blocks = _workflow_job_blocks(workflow)
+    except AssertionError:
+        blocks = {}
+    for job, block in blocks.items():
+        if PORTABLE_DEVENV_SHELL not in block:
+            workflow = workflow.replace(block, f"  {job}:\n")
     forbidden = (
         "CARGO_PROFILE_DEV_DEBUG:",
         "CARGO_PROFILE_TEST_DEBUG:",
@@ -1382,37 +2088,96 @@ def _assert_devenv_job_recipe(job_block: str, expected_profile: str = "ci") -> N
 
 
 def _rust_cache_inputs(job_block: str) -> dict[str, str]:
-    """Return the `with:` inputs for a job's Swatinem/rust-cache step."""
-    lines = job_block.splitlines()
-    uses_idx: int | None = None
-    for idx, line in enumerate(lines):
-        if line.strip() == "uses: Swatinem/rust-cache@v2":
-            uses_idx = idx
-            break
-    if uses_idx is None:
-        raise AssertionError("missing Swatinem/rust-cache@v2 step")
+    """Return inputs when a job has exactly one rust-cache step."""
+    steps = _rust_cache_steps(job_block)
+    if len(steps) != 1:
+        raise AssertionError(
+            "expected exactly one Swatinem/rust-cache@v2 step, "
+            f"found {len(steps)}"
+        )
+    return steps[0]
 
-    with_idx: int | None = None
-    for idx in range(uses_idx + 1, len(lines)):
-        if re.match(r"^\s*- ", lines[idx]):
-            break
-        if lines[idx].strip() == "with:":
-            with_idx = idx
-            break
-    if with_idx is None:
-        return {}
 
-    inputs: dict[str, str] = {}
-    for line in lines[with_idx + 1 :]:
-        if re.match(r"^\s*- ", line):
-            break
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.+?)\s*$", stripped)
-        if m is not None:
-            inputs[m.group(1)] = m.group(2)
-    return inputs
+def _assert_shared_rust_cache_writer_contract(workflow: str) -> None:
+    """Require exactly one reviewed writer for each shared cache namespace."""
+    census: list[tuple[str, dict[str, str]]] = []
+    for job, block in _workflow_job_blocks(workflow).items():
+        census.extend((job, inputs) for inputs in _rust_cache_steps(block))
+
+    expected = {
+        "linux-workspace": (
+            "workspace-tests-shard",
+            "${{ matrix.shard == 1 }}",
+        ),
+        "macos-workspace": (
+            "macos-workspace-shard",
+            "${{ matrix.shard == 1 }}",
+        ),
+    }
+    for shared_key, expected_writer in expected.items():
+        namespace = [
+            (job, inputs)
+            for job, inputs in census
+            if inputs.get("shared-key") == shared_key
+        ]
+        writers = [
+            (job, inputs.get("save-if", "true"))
+            for job, inputs in namespace
+            if inputs.get("save-if", "true") != "false"
+        ]
+        if len(writers) != 1:
+            raise AssertionError(
+                f"{shared_key} must have exactly one writer across the "
+                f"workflow, found {writers}"
+            )
+        if writers[0] != expected_writer:
+            raise AssertionError(
+                f"{shared_key} writer must be {expected_writer}, "
+                f"found {writers[0]}"
+            )
+
+
+def _assert_hash_partition_contract(
+    shard_block: str, *, expected_count: int
+) -> None:
+    matrix_match = re.search(r"^\s+shard:\s*\[([^]]+)\]$", shard_block, re.M)
+    if matrix_match is None:
+        raise AssertionError("missing explicit shard matrix")
+    shards = [int(value.strip()) for value in matrix_match.group(1).split(",")]
+    partition_match = re.search(
+        r"--partition hash:\$\{\{ matrix\.shard \}\}/(\d+)",
+        shard_block,
+    )
+    if partition_match is None:
+        raise AssertionError("missing hash partition command")
+    partition_count = int(partition_match.group(1))
+    if partition_count != expected_count:
+        raise AssertionError(
+            f"expected {expected_count} partitions, found {partition_count}"
+        )
+    expected = list(range(1, partition_count + 1))
+    if shards != expected:
+        raise AssertionError(
+            "the shard matrix must cover every nextest hash partition exactly "
+            f"once: expected {expected}, found {shards}"
+        )
+
+
+def _assert_generalize_sweep_partition_contract(shard_block: str) -> None:
+    _assert_hash_partition_contract(shard_block, expected_count=4)
+
+
+def _assert_read_only_workspace_cache(job_block: str) -> None:
+    inputs = _rust_cache_inputs(job_block)
+    if inputs.get("shared-key") != "linux-workspace":
+        raise AssertionError("read-only job does not use the workspace cache")
+    if inputs.get("save-if") != "false":
+        raise AssertionError("read-only job must not save a competing cache entry")
+    if "CARGO_TARGET_DIR:" in job_block:
+        raise AssertionError(
+            "an explicit target path changes rust-cache's environment hash and "
+            "silently prevents reuse of the workspace cache"
+        )
 
 
 class DevenvWorkflowJobTests(unittest.TestCase):
@@ -1450,7 +2215,7 @@ class DevenvWorkflowJobTests(unittest.TestCase):
             _assert_no_workflow_ci_policy(mutated)
 
     def test_host_uv_setup_fails_the_devenv_recipe(self) -> None:
-        block = _ci_job_block("lint-and-unit")
+        block = _ci_job_block("lint-rust")
         mutated = block.replace(
             "      - name: Cache cargo registry and build",
             "      - uses: astral-sh/setup-uv@v8.1.0\n\n"
@@ -1461,10 +2226,11 @@ class DevenvWorkflowJobTests(unittest.TestCase):
             _assert_devenv_job_recipe(mutated)
 
     def test_direct_devenv_python_path_fails_the_recipe(self) -> None:
-        block = _ci_job_block("lint-and-unit")
+        block = _ci_job_block("lint-rust")
         mutated = block.replace(
-            f"{DEVENV_COMMAND_PREFIX}python -m unittest discover",
-            ".devenv/state/venv/bin/python -m unittest discover",
+            "      - name: Cache cargo registry and build",
+            "      - run: .devenv/state/venv/bin/python -m unittest discover\n\n"
+            "      - name: Cache cargo registry and build",
             1,
         )
         with self.assertRaisesRegex(AssertionError, "nonportable toolchain setup"):
@@ -1472,45 +2238,50 @@ class DevenvWorkflowJobTests(unittest.TestCase):
 
 
 class CiParityTests(unittest.TestCase):
-    """The lock: every cargo/chelis gate invocation in the CI workflow
-    must be produced by `gate.py`. If a future edit hand-inlines a
-    cargo command into the `lint-and-unit` or `workspace-tests` job, this
-    test fails."""
+    """Lock the complete CI topology around the canonical developer gate."""
 
     def test_ci_file_exists(self):
         self.assertTrue(CI_YML.is_file(), f"missing {CI_YML}")
 
     def test_gate_jobs_call_gate_py(self):
-        # The `lint-and-unit` and `workspace-tests` jobs must invoke
-        # `python3 scripts/gate.py <stage>` and must NOT hand-inline
-        # any `cargo` or `chelis` command.
-        invocations = _parse_ci_gate_invocations()
-        for job in ("lint-and-unit", "workspace-tests"):
-            self.assertIn(job, invocations, f"CI job '{job}' not found")
+        # Every run scalar in a gate-owned worker is reviewed here. This is a
+        # structural contract, not a partial Bash executable classifier.
+        commands = _parse_ci_run_commands()
+        for job, expected in GATE_WORKER_RUN_COMMANDS.items():
+            self.assertIn(job, commands, f"CI job '{job}' not found")
             self.assertEqual(
-                invocations[job],
-                [],
+                commands[job],
+                list(expected),
                 (
-                    f"CI job '{job}' hand-inlines cargo/chelis command(s) "
-                    f"{invocations[job]}; route them through "
-                    f"scripts/gate.py instead"
+                    f"CI job '{job}' has unreviewed or reordered run commands; "
+                    "route gate work through scripts/gate.py and review any "
+                    "bootstrap or reporting command explicitly"
                 ),
             )
         # Positive parity: the workflow text must actually call
-        # gate.py for both stages.
+        # gate.py for every stage. The workspace test shards select only the
+        # partitioned nextest command; shard 2 selects the remaining
+        # integration oracles exactly once after its test partition; the
+        # runtime-representation stage has a worker of its own.
         text = CI_YML.read_text()
         self.assertIn("scripts/gate.py lint-and-unit", text)
-        self.assertIn("scripts/gate.py integration", text)
+        self.assertIn(
+            "scripts/gate.py integration --tests-only "
+            "--partition hash:${{ matrix.shard }}/2",
+            text,
+        )
+        self.assertIn("scripts/gate.py integration --support-only", text)
+        self.assertIn("scripts/gate.py runtime-representation", text)
 
     def test_python_binding_ingress_suite_is_continuous(self):
         text = CI_YML.read_text()
         self.assertIn(
-            f"{DEVENV_COMMAND_PREFIX}python -m unittest discover "
+            ".venv/bin/python -m unittest discover "
             "-s bindings/python/tests -p 'test_*.py'",
             text,
             (
                 "bindings/python/tests contains the #729 Python-ingress oracle; "
-                "the lint-and-unit job must discover it continuously"
+                "the script-unit job must discover it continuously"
             ),
         )
 
@@ -1522,8 +2293,16 @@ class CiParityTests(unittest.TestCase):
         top_level_permissions = workflow[
             workflow.index("permissions:\n") : workflow.index("\nenv:\n")
         ]
+        numpy_command = "run: uv pip install --python .venv/bin/python 'numpy>=2.0'"
         oracle_command = (
             f"run: {DEVENV_COMMAND_PREFIX}python scripts/dtype_phase3_oracle.py"
+        )
+        authenticated_oracle = (
+            "env:\n"
+            "          GH_TOKEN: ${{ github.token }}\n"
+            "          CHELIS_TEST_SHARED_REEF_HOME: "
+            "${{ runner.temp }}/chelis-test-shared-reef\n"
+            f"        {oracle_command}"
         )
         self.assertNotIn("  issues: read", top_level_permissions)
         self.assertNotIn(oracle_command, workspace_block)
@@ -1534,7 +2313,10 @@ class CiParityTests(unittest.TestCase):
         _assert_executable_run_once(
             oracle_block, "python scripts/dtype_phase3_oracle.py"
         )
-        self.assertIn("needs: [changes]", workspace_block)
+        self.assertIn(
+            "needs: [changes, workspace-tests-shard]",
+            workspace_block,
+        )
         self.assertIn("needs: [changes]", oracle_block)
         self.assertEqual(oracle_block.count("    needs:"), 1)
         self.assertNotIn("needs.workspace-tests", oracle_block)
@@ -1542,11 +2324,13 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
             "needs: [changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
+            "faithful-observation-phase2-oracle, "
+            "compiled-value-ownership-phase0-oracle, "
+            "runtime-representation-phase0-oracle, generalize-sweep-oracle]",
             aggregate_block,
         )
-        self.assertNotIn("always()", aggregate_block)
-        self.assertIn("!cancelled()", aggregate_block)
+        self.assertIn("always()", aggregate_block)
+        self.assertNotIn("!cancelled()", aggregate_block)
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
     def test_faithful_observation_phase2_oracle_is_a_dedicated_blocking_job(self):
@@ -1566,10 +2350,7 @@ class CiParityTests(unittest.TestCase):
         cache_inputs = _rust_cache_inputs(oracle_block)
         self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(cache_inputs.get("save-if"), "false")
-        self.assertIn(
-            "CARGO_TARGET_DIR: ${{ github.workspace }}/target",
-            oracle_block,
-        )
+        self.assertNotIn("CARGO_TARGET_DIR:", oracle_block)
         _assert_executable_run_once(oracle_block, command)
         self.assertNotIn(command, workspace_block)
         self.assertNotIn(command, dtype_block)
@@ -1578,53 +2359,794 @@ class CiParityTests(unittest.TestCase):
             aggregate_block,
         )
 
-    def test_generalize_sweep_oracle_is_a_dedicated_blocking_job(self):
-        oracle_block = _ci_job_block("generalize-sweep-oracle")
+    def test_compiled_value_ownership_stable_job_invokes_phase2_and_launch_oracles(self):
+        workspace_block = _ci_job_block("workspace-tests")
+        dtype_block = _ci_job_block("dtype-phase3-oracle")
+        faithful_block = _ci_job_block("faithful-observation-phase2-oracle")
+        oracle_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         aggregate_block = _ci_job_block("integration")
-        command = (
-            "cargo nextest run --workspace --ignore-default-filter "
-            "--features chelis-types/generalize-sweep-oracle --no-fail-fast"
+        commands = (
+            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2",
+            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch",
         )
 
-        self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
+        self.assertIn(
+            "name: Compiled Value Ownership Phase 2 Oracle",
+            oracle_block,
+        )
         self.assertIn("needs: [changes]", oracle_block)
         self.assertIn("contents: read", oracle_block)
-        self.assertIn(f"uses: {DEVENV_SETUP_ACTION}", oracle_block)
-        self.assertNotIn("dtolnay/rust-toolchain@stable", oracle_block)
-        self.assertNotIn("scripts/ci_setup_uv_python.py", oracle_block)
-        self.assertNotIn("taiki-e/install-action@nextest", oracle_block)
+        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
         cache_inputs = _rust_cache_inputs(oracle_block)
         self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(cache_inputs.get("save-if"), "false")
+        self.assertNotIn("CARGO_TARGET_DIR:", oracle_block)
+        for command in commands:
+            _assert_executable_run_once(oracle_block, command)
+            self.assertNotIn(command, workspace_block)
+            self.assertNotIn(command, dtype_block)
+            self.assertNotIn(command, faithful_block)
         self.assertIn(
-            "CARGO_TARGET_DIR: ${{ github.workspace }}/target",
+            "compiled-value-ownership-phase0-oracle=${{ "
+            "needs.compiled-value-ownership-phase0-oracle.result }}",
+            aggregate_block,
+        )
+
+    def test_runtime_representation_phase0_oracle_is_a_dedicated_gate_job(self):
+        workspace_block = _ci_job_block("workspace-tests-shard")
+        ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
+        oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
+        aggregate_block = _ci_job_block("integration")
+        command = "python3 scripts/gate.py runtime-representation"
+
+        self.assertIn(
+            "name: Runtime Representation Phase 0 Oracle",
             oracle_block,
         )
+        self.assertIn("needs: [changes]", oracle_block)
+        self.assertIn("contents: read", oracle_block)
+        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
+        self.assertIn("taiki-e/install-action@nextest", oracle_block)
+        # The oracle's C/Objective-C header lanes parse through clang.
+        self.assertIn(
+            "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev "
+            "libasan8 libubsan1",
+            oracle_block,
+        )
+        _assert_read_only_workspace_cache(oracle_block)
         _assert_executable_run_once(oracle_block, command)
+        # The stage runs in exactly one job: not on the workspace shards, whose
+        # support slice it left, and not folded into another oracle's job.
+        self.assertNotIn(command, workspace_block)
+        self.assertNotIn(command, ownership_block)
+        self.assertNotIn("runtime_representation_oracle.py", workspace_block)
+        self.assertIn(
+            "runtime-representation-phase0-oracle=${{ "
+            "needs.runtime-representation-phase0-oracle.result }}",
+            aggregate_block,
+        )
+
+    def test_generalize_sweep_oracle_is_a_sharded_blocking_aggregate(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
+        oracle_block = _ci_job_block("generalize-sweep-oracle")
+        aggregate_block = _ci_job_block("integration")
+        command = (
+            "cargo nextest run --workspace --profile ci-full "
+            "--ignore-default-filter "
+            "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
+            "-E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
+            "| (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
+            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' "
+            "--partition hash:${{ matrix.shard }}/4"
+        )
+
+        self.assertIn(
+            "name: Typecheck Level Generalization Oracle "
+            "(shard ${{ matrix.shard }}/4)",
+            shard_block,
+        )
+        self.assertIn("fail-fast: false", shard_block)
+        self.assertIn("shard: [1, 2, 3, 4]", shard_block)
+        self.assertIn("needs: [changes]", shard_block)
+        self.assertIn("contents: read", shard_block)
+        self.assertIn(f"uses: {DEVENV_SETUP_ACTION}", shard_block)
+        self.assertIn(f"uses: {DEVENV_AUTH_ACTION}", shard_block)
+        self.assertIn(f"shell: {PORTABLE_DEVENV_SHELL}", shard_block)
+        _assert_executable_run_once(shard_block, command)
+
+        self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
+        self.assertIn(
+            "needs: [changes, generalize-sweep-oracle-shard]",
+            oracle_block,
+        )
+        self.assertIn("contents: read", oracle_block)
+        self.assertNotIn("cargo nextest", oracle_block)
+        _assert_executable_run_once(
+            oracle_block,
+            "python3 scripts/ci_require_success.py "
+            "generalize-sweep-oracle-shard="
+            "${{ needs.generalize-sweep-oracle-shard.result }}",
+        )
         self.assertIn(
             "generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}",
             aggregate_block,
         )
 
+    def test_generalize_sweep_partition_contract_has_no_gap_or_overlap(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
+        _assert_generalize_sweep_partition_contract(shard_block)
+
+    def test_generalize_sweep_partition_contract_rejects_a_missing_shard(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
+        mutated = shard_block.replace(
+            "shard: [1, 2, 3, 4]", "shard: [1, 2, 3]", 1
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "cover every nextest hash partition exactly once",
+        ):
+            _assert_generalize_sweep_partition_contract(mutated)
+
+    def test_workspace_suite_is_two_disjoint_shards_plus_one_support_job(self):
+        shard_block = _ci_job_block("workspace-tests-shard")
+        aggregate_block = _ci_job_block("workspace-tests")
+        _assert_hash_partition_contract(shard_block, expected_count=2)
+        self.assertIn(
+            "name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)",
+            shard_block,
+        )
+        self.assertIn("fail-fast: false", shard_block)
+        self.assertIn("scripts/gate.py integration --tests-only", shard_block)
+        self.assertIn("scripts/gate.py integration --support-only", shard_block)
+        self.assertIn(
+            "- name: Gate (integration support subset)\n"
+            "        if: matrix.shard == 2",
+            shard_block,
+        )
+        self.assertIn(
+            "- name: Verify nextest profile coverage\n"
+            "        if: matrix.shard == 1",
+            shard_block,
+        )
+        self.assertEqual(shard_block.count("--support-only"), 1)
+        self.assertIn(
+            "needs: [changes, workspace-tests-shard]",
+            aggregate_block,
+        )
+        self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_workspace_junit_shards_merge_before_one_validated_timing_report(self):
+        shard_block = _ci_job_block("workspace-tests-shard")
+        aggregate_block = _ci_job_block("workspace-tests")
+        self.assertEqual(shard_block.count("uses: actions/upload-artifact@v7"), 1)
+        self.assertIn(
+            "name: junit-linux-workspace-${{ matrix.shard }}", shard_block
+        )
+        self.assertIn("path: target/nextest/ci/junit.xml", shard_block)
+        self.assertIn("if-no-files-found: error", shard_block)
+        self.assertNotIn("scripts/test_timing_check.py", shard_block)
+        self.assertEqual(aggregate_block.count("uses: actions/download-artifact@v7"), 2)
+        self.assertIn("name: junit-linux-workspace-1", aggregate_block)
+        self.assertIn("name: junit-linux-workspace-2", aggregate_block)
+        self.assertIn("scripts/ci_test_telemetry.py", aggregate_block)
+        self.assertIn("--require-disjoint", aggregate_block)
+        self.assertIn("scripts/test_timing_check.py", aggregate_block)
+        self.assertRegex(aggregate_block, r"(?m)^\s+--informational\s*$")
+        self.assertNotIn("--informational-relative", aggregate_block)
+        self.assertIn("name: Validate and report test timing", aggregate_block)
+        self.assertNotIn("continue-on-error: true", aggregate_block)
+
+    def test_every_partitioned_test_lane_publishes_named_junit(self):
+        expectations = {
+            "workspace-tests-shard": (
+                "junit-linux-workspace-${{ matrix.shard }}",
+                "target/nextest/ci/junit.xml",
+            ),
+            "dtype-phase3-oracle": (
+                "junit-linux-dtype",
+                "target/nextest/ci-full/junit.xml",
+            ),
+            "generalize-sweep-oracle-shard": (
+                "junit-linux-generalization-${{ matrix.shard }}",
+                "target/nextest/ci-full/junit.xml",
+            ),
+            "macos-workspace-shard": (
+                "junit-macos-workspace-${{ matrix.shard }}",
+                "target/nextest/ci-full/junit.xml",
+            ),
+        }
+        for job, (artifact, path) in expectations.items():
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                self.assertEqual(block.count("uses: actions/upload-artifact@v7"), 1)
+                self.assertIn(f"name: {artifact}", block)
+                self.assertIn(f"path: {path}", block)
+                self.assertIn("if-no-files-found: error", block)
+
+    def test_every_nonworkspace_pr_lane_validates_and_reports_timing(self):
+        expectations = {
+            "dtype-phase3-oracle": "target/nextest/ci-full/junit.xml",
+            "generalize-sweep-oracle-shard": (
+                "target/nextest/ci-full/junit.xml"
+            ),
+            "macos-workspace-shard": "target/nextest/ci-full/junit.xml",
+        }
+        for job, junit in expectations.items():
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                self.assertEqual(
+                    block.count("name: Validate and report test timing"), 1
+                )
+                self.assertIn("scripts/test_timing_check.py", block)
+                self.assertIn(f"--junit {junit}", block)
+                self.assertRegex(block, r"(?m)^\s+--informational\s*$")
+                self.assertNotIn("--informational-relative", block)
+                self.assertNotIn("continue-on-error: true", block)
+
+    def test_cross_lane_telemetry_requires_every_expected_artifact(self):
+        block = _ci_job_block("test-telemetry")
+        self.assertIn("name: CI Test Telemetry", block)
+        self.assertIn(
+            "needs: [changes, workspace-tests-shard, dtype-phase3-oracle, "
+            "generalize-sweep-oracle-shard, macos-workspace-shard]",
+            block,
+        )
+        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 9)
+        for artifact in (
+            "junit-linux-workspace-1",
+            "junit-linux-workspace-2",
+            "junit-linux-dtype",
+            "junit-linux-generalization-1",
+            "junit-linux-generalization-2",
+            "junit-linux-generalization-3",
+            "junit-linux-generalization-4",
+            "junit-macos-workspace-1",
+            "junit-macos-workspace-2",
+        ):
+            self.assertIn(f"name: {artifact}", block)
+        self.assertIn("scripts/ci_test_telemetry.py", block)
+        self.assertNotIn("--require-disjoint", block)
+        self.assertIn("uses: actions/upload-artifact@v7", block)
+
+    def test_macos_suite_is_two_disjoint_shards_behind_stable_aggregate(self):
+        shard_block = _ci_job_block("macos-workspace-shard")
+        aggregate_block = _ci_job_block("macos-smoke")
+        _assert_hash_partition_contract(shard_block, expected_count=2)
+        self.assertIn("cargo nextest run --workspace", shard_block)
+        self.assertIn("--partition hash:${{ matrix.shard }}/2", shard_block)
+        self.assertIn("if: matrix.shard == 2", shard_block)
+        self.assertIn("name: macOS Smoke", aggregate_block)
+        self.assertIn(
+            "needs: [changes, macos-workspace-shard]", aggregate_block
+        )
+        self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_topology_docs_name_current_shard_owners(self):
+        agent_contract = (REPO_ROOT / "AGENTS.md").read_text()
+        phase_oracles = (REPO_ROOT / "docs" / "phase_oracles.md").read_text()
+        macos_runbook = (
+            REPO_ROOT / "docs" / "local_macos_environment.md"
+        ).read_text()
+        runtime_diagnosis = (
+            REPO_ROOT
+            / "docs"
+            / "investigations"
+            / "ci_integration_test_runtime_diagnosis.md"
+        ).read_text()
+        metal_plan = (
+            REPO_ROOT / "spec" / "design" / "chelis_metal_backend_plan.md"
+        ).read_text()
+        checker_totality = (
+            REPO_ROOT / "spec" / "design" / "checker_totality.md"
+        ).read_text()
+        unrepresentable_domain = (
+            REPO_ROOT / "spec" / "design" / "unrepresentable_ast_domain.md"
+        ).read_text()
+        reef_distribution = (
+            REPO_ROOT / "spec" / "design" / "reef_distribution.md"
+        ).read_text()
+        remediation_status = (
+            REPO_ROOT
+            / "docs"
+            / "investigations"
+            / "remediation_status_2026_08_04.md"
+        ).read_text()
+        toolchain_design = (
+            REPO_ROOT
+            / "docs"
+            / "investigations"
+            / "test_toolchain_guards_design.md"
+        ).read_text()
+        generalization_plan = (
+            REPO_ROOT
+            / "spec"
+            / "design"
+            / "typecheck_levels_generalization_plan.md"
+        ).read_text()
+        # AGENTS.md no longer describes which CI shard owns which stage: that
+        # topology belongs to the docs asserted below, and the contract keeps
+        # only what an agent runs. The remaining assertion is the one contract
+        # claim about this test's own subject.
+        self.assertIn(
+            "pins the complete ordered set of\nsingle-line `run:` commands",
+            agent_contract,
+        )
+        self.assertIn(
+            "`macos-workspace-shard` job runs "
+            "`python3 .github/scripts/smoke_macos_metal.py` on shard 2",
+            phase_oracles,
+        )
+        self.assertIn(
+            "`macos-workspace-shard` matrix runs the full workspace test suite",
+            macos_runbook,
+        )
+        self.assertIn(
+            "nextest hash partitions `1/4` through `4/4` run concurrently",
+            runtime_diagnosis,
+        )
+        self.assertIn("all four shards succeed", runtime_diagnosis)
+        self.assertIn(
+            "`workspace-tests-shard`\n> matrix, and only shard 1 saves",
+            runtime_diagnosis,
+        )
+        self.assertIn(
+            "append metal compile/link step to macos-workspace-shard "
+            "job (shard 2)",
+            metal_plan,
+        )
+        self.assertIn(
+            "hosted CI's `workspace-tests-shard` matrix",
+            checker_totality,
+        )
+        self.assertIn(
+            "hosted CI's `workspace-tests-shard` matrix",
+            unrepresentable_domain,
+        )
+        self.assertIn("CI's `lint-rust` worker", checker_totality)
+        self.assertIn(
+            "`lint-rust` worker deliberately does not install",
+            unrepresentable_domain,
+        )
+        self.assertIn("hosted `lint-rust` worker", reef_distribution)
+        self.assertIn(
+            "`workspace-tests-shard` matrix on every non-docs-only PR",
+            remediation_status,
+        )
+        self.assertIn(
+            "Two `workspace-tests-shard` workers invoke disjoint partitions",
+            toolchain_design,
+        )
+        self.assertIn(
+            "parity guard pins the complete ordered set of single-line "
+            "`run:` scalars",
+            toolchain_design,
+        )
+        self.assertIn(
+            "CI executes the same selection as four deterministic, disjoint "
+            "nextest hash\npartitions:",
+            generalization_plan,
+        )
+
+    def test_topology_docs_guard_runs_in_docs_job(self):
+        docs_block = _ci_job_block("docs")
+        self.assertIn(f"uses: {DEVENV_SETUP_ACTION}", docs_block)
+        self.assertIn(
+            f"{DEVENV_COMMAND_PREFIX}python "
+            "-m unittest scripts.test_gate.CiParityTests."
+            "test_topology_docs_name_current_shard_owners",
+            docs_block,
+        )
+
+    def test_phase4b_freeze_oracle_runs_in_the_always_run_docs_job(self):
+        # chelis#729's Phase 4B freeze is enforced by document digests over
+        # spec/ and spec/design/. A docs-only pull request skips every heavy
+        # job, so the oracle has to live in an always-run job or the edits most
+        # likely to break the freeze are the ones nothing checks.
+        docs_block = _ci_job_block("docs")
+        command = "python scripts/dtype_phase4b_oracle.py"
+        _assert_executable_run_once(docs_block, command)
+        self.assertIn(f"uses: {DEVENV_SETUP_ACTION}", docs_block)
+        self.assertLess(
+            docs_block.index(command),
+            docs_block.index(f"run: {DEVENV_COMMAND_PREFIX}mdbook build docs/book"),
+            "the freeze oracle must fail before the slower mdBook build",
+        )
+        self.assertNotIn(
+            "dtype_phase4b_oracle.py",
+            _ci_job_block("changes"),
+            "the docs-only detector must not gate the freeze oracle",
+        )
+        # A job-level `if:` is caught by test_always_run_jobs_are_not_gated, but
+        # a STEP-level one is not, and the step is where a future editor would
+        # add `docs_only` -- the exact evasion this wiring exists to prevent.
+        step = _ci_step_block(docs_block, "Validate the chelis#729 Phase 4B freeze")
+        conditioned = [
+            line for line in step.splitlines() if re.match(r"^\s+if:", line)
+        ]
+        self.assertEqual(
+            conditioned,
+            [],
+            f"the freeze step must run unconditionally; found {conditioned}",
+        )
+
+    def test_phase4b_acknowledgement_gate_is_enforced_on_pull_requests(self):
+        # The whole-file digest table used to be the additive-contradiction
+        # gate, and it was checked on every event. Its replacement needs a pull
+        # request body, so the enforcing run is a separate step gated on the
+        # event -- never on `docs_only`, which is the evasion the unconditional
+        # step above exists to prevent.
+        docs_block = _ci_job_block("docs")
+        command = (
+            "python scripts/dtype_phase4b_oracle.py --require-acknowledgement "
+            "--acknowledgements-env PR_BODY"
+        )
+        _assert_executable_run_once(docs_block, command)
+        step = _ci_step_block(docs_block, "Require frozen contract acknowledgements")
+        conditions = [
+            line.split("if:", 1)[1].strip()
+            for line in step.splitlines()
+            if re.match(r"^\s+if:", line)
+        ]
+        self.assertEqual(conditions, ["github.event_name == 'pull_request'"])
+        # The body is attacker-controlled text. It reaches the oracle through
+        # the environment, so it is never interpolated into a shell command.
+        self.assertIn("PR_BODY: ${{ github.event.pull_request.body }}", step)
+        # The base stays the default `origin/main`, which on a merge-ref
+        # checkout resolves to the merge commit's first parent. The payload's
+        # `base.sha` is the base tip at event time and lags when `main` moves
+        # before the checkout, which would charge main's changes to this branch.
+        self.assertNotIn("base.sha", step)
+        self.assertNotIn("--base", step)
+        # A step-level `continue-on-error: true` would leave the command pin
+        # above matching while the gate stopped gating.
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("${{ github.event.pull_request.body }}", step.split("run:")[-1])
+
+    def test_docs_checkout_is_deep_enough_for_the_merge_base(self):
+        # The acknowledgement gate diffs against the merge base with the base
+        # branch. A shallow checkout cannot compute one, and the gate fails
+        # loudly rather than passing, so the depth is part of the wiring.
+        docs_block = _ci_job_block("docs")
+        checkout = docs_block[: docs_block.index("- name: Free disk space")]
+        self.assertIn("uses: actions/checkout@v6", checkout)
+        self.assertIn("fetch-depth: 0", checkout)
+
+    def test_commented_phase4b_oracle_is_not_an_executable_step(self):
+        block = _ci_job_block("docs")
+        command = (
+            f"{DEVENV_COMMAND_PREFIX}python scripts/dtype_phase4b_oracle.py"
+        )
+        mutated = block.replace(
+            f"run: {command}",
+            f'# run: {command}\n        run: "true"',
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            _assert_executable_run_once(mutated, command)
+
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
-        workspace_inputs = _rust_cache_inputs(_ci_job_block("workspace-tests"))
-        oracle_inputs = _rust_cache_inputs(_ci_job_block("dtype-phase3-oracle"))
+        _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
+        workspace_inputs = _rust_cache_inputs(
+            _ci_job_block("workspace-tests-shard")
+        )
+        read_only_jobs = (
+            "dtype-phase3-oracle",
+            "faithful-observation-phase2-oracle",
+            "compiled-value-ownership-phase0-oracle",
+            "runtime-representation-phase0-oracle",
+            "generalize-sweep-oracle-shard",
+        )
         self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
-        self.assertEqual(oracle_inputs.get("shared-key"), "linux-workspace")
-        self.assertNotEqual(workspace_inputs.get("save-if"), "false")
-        self.assertEqual(oracle_inputs.get("save-if"), "false")
+        self.assertEqual(
+            workspace_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+        )
+        macos_inputs = _rust_cache_inputs(
+            _ci_job_block("macos-workspace-shard")
+        )
+        self.assertEqual(macos_inputs.get("shared-key"), "macos-workspace")
+        self.assertEqual(
+            macos_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+        )
+        for job in read_only_jobs:
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                _assert_read_only_workspace_cache(block)
+
+    def test_capacity_rustdoc_cache_is_restored_by_both_census_consumers(self):
+        path = "path: target/agents/729-capacity-rustdoc"
+        key = (
+            "key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-"
+            "${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', "
+            "'scripts/capacity_census_typed.py', "
+            "'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}"
+        )
+        dtype = _ci_job_block("dtype-phase3-oracle")
+        generalization = _ci_job_block("generalize-sweep-oracle-shard")
+        for name, block in (
+            ("dtype-phase3-oracle", dtype),
+            ("generalize-sweep-oracle-shard", generalization),
+        ):
+            with self.subTest(job=name):
+                self.assertEqual(block.count("uses: actions/cache/restore@v4"), 1)
+                self.assertIn(path, block)
+                self.assertIn(key, block)
+        self.assertEqual(dtype.count("uses: actions/cache/save@v4"), 1)
+        self.assertIn("github.event_name == 'push'", dtype)
+        self.assertIn("github.ref == 'refs/heads/main'", dtype)
+        self.assertNotIn("uses: actions/cache/save@v4", generalization)
+
+    def test_nextest_jobs_share_one_reef_fixture_root_per_runner(self):
+        setting = (
+            "CHELIS_TEST_SHARED_REEF_HOME: "
+            "${{ runner.temp }}/chelis-test-shared-reef"
+        )
+        execution_steps = {
+            "workspace-tests-shard": "Gate (workspace test shard)",
+            "dtype-phase3-oracle": "Dtype Phase 0-3 oracle",
+            "faithful-observation-phase2-oracle": (
+                "Faithful observation Phase 2 oracle"
+            ),
+            "generalize-sweep-oracle-shard": (
+                "Typecheck level generalization oracle"
+            ),
+            "macos-workspace-shard": "Workspace tests",
+        }
+        for job, step in execution_steps.items():
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                self.assertEqual(block.count(setting), 1)
+                step_start = block.index(f"- name: {step}\n")
+                step_end = block.find("\n      - name:", step_start + 1)
+                if step_end == -1:
+                    step_end = len(block)
+                execution_step = block[step_start:step_end]
+                self.assertIn("\n        env:\n", execution_step)
+                self.assertIn(setting, execution_step)
+    def test_shared_cache_writer_contract_censuses_every_ci_job(self):
+        workflow = CI_YML.read_text()
+        competing_step = (
+            "\n      - name: Competing cache writer\n"
+            "        uses: Swatinem/rust-cache@v2\n"
+            "        with:\n"
+            "          shared-key: linux-workspace\n"
+            "          save-if: true\n"
+        )
+        mutated = workflow.replace(
+            "\n  workspace-tests-shard:",
+            competing_step + "\n  workspace-tests-shard:",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow, "mutation did not apply")
+        with self.assertRaisesRegex(
+            AssertionError,
+            "linux-workspace.*exactly one writer",
+        ):
+            _assert_shared_rust_cache_writer_contract(mutated)
+
+    def test_cache_input_parser_normalizes_or_rejects_yaml_equivalents(self):
+        cases = (
+            (
+                '        with:\n          shared-key: "linux-workspace"\n'
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key: 'linux-workspace'\n"
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key: linux-workspace # writer\n"
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key : linux-workspace\n"
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key: &workspace_key "
+                "linux-workspace\n          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with:\n          shared-key: !!str linux-workspace\n"
+                "          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with:\n          shared-key: >-\n"
+                "            linux-workspace\n          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                '        with:\n          "shared-key": linux-workspace\n'
+                "          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with:\n          ? shared-key\n"
+                "          : linux-workspace\n          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with: {shared-key: linux-workspace, "
+                "save-if: true}\n",
+                "unsupported rust-cache input shape",
+            ),
+        )
+        workflow = CI_YML.read_text()
+        for with_map, error in cases:
+            with self.subTest(with_map=with_map):
+                step = (
+                    "\n      - name: Competing cache writer\n"
+                    "        uses: Swatinem/rust-cache@v2\n"
+                    + with_map
+                )
+                mutated = workflow.replace(
+                    "\n  workspace-tests-shard:",
+                    step + "\n  workspace-tests-shard:",
+                    1,
+                )
+                with self.assertRaisesRegex(AssertionError, error):
+                    _assert_shared_rust_cache_writer_contract(mutated)
+
+    def test_read_only_cache_contract_rejects_a_second_cache_step(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        second_steps = (
+            (
+                "\n      - name: Competing cache writer\n"
+                "        uses: Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          shared-key: linux-workspace\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses: Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses: 'Swatinem/rust-cache@v2'\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                '\n      - uses: "Swatinem/rust-cache@v2"\n'
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses : Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses: swatinem/rust-cache@v2.7.8\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses: SWATINEM/RUST-CACHE@master\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+        )
+        for second_step in second_steps:
+            with self.subTest(second_step=second_step):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "exactly one Swatinem/rust-cache@v2 step",
+                ):
+                    _assert_read_only_workspace_cache(block + second_step)
+
+    def test_read_only_cache_contract_rejects_escaped_action_references(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        mutated = block + (
+            '\n      - uses: "\\x53watinem/rust-cache@v2"\n'
+            "        with:\n"
+            "          save-if: true\n"
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "unsupported quoted workflow action reference",
+        ):
+            _assert_read_only_workspace_cache(mutated)
+
+    def test_read_only_cache_contract_rejects_yaml_action_references(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        for uses in (
+            "uses: &cache_action Swatinem/rust-cache@v2",
+            "uses: *cache_action",
+            "uses: !!str Swatinem/rust-cache@v2",
+        ):
+            with self.subTest(uses=uses):
+                mutated = block + (
+                    f"\n      - {uses}\n"
+                    "        with:\n"
+                    "          save-if: true\n"
+                )
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "unsupported workflow action reference",
+                ):
+                    _assert_read_only_workspace_cache(mutated)
+
+    def test_read_only_cache_contract_rejects_unsupported_step_maps(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        second_steps = (
+            (
+                "\n      - ? uses\n"
+                "        : Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - {uses: Swatinem/rust-cache@v2, "
+                "with: {save-if: true}}\n"
+            ),
+            "\n      - *competing_cache_step\n",
+            (
+                "\n      - uses: |-\n"
+                "          Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses:\n"
+                "          Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+        )
+        for second_step in second_steps:
+            with self.subTest(second_step=second_step):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "unsupported workflow (?:step shape|action reference)",
+                ):
+                    _assert_read_only_workspace_cache(block + second_step)
+
+    def test_shared_cache_contract_rejects_an_explicit_target_override(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        mutated = block.replace(
+            "    steps:",
+            "    env:\n"
+            "      CARGO_TARGET_DIR: ${{ github.workspace }}/target\n"
+            "    steps:",
+            1,
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "explicit target path changes rust-cache's environment hash",
+        ):
+            _assert_read_only_workspace_cache(mutated)
 
     def test_profile_partition_set_math_runs_continuously(self):
-        lint_block = _ci_job_block("lint-and-unit")
-        workspace_block = _ci_job_block("workspace-tests")
-        self.assertIn(
-            'CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH: "1"',
-            lint_block,
-        )
-        _assert_executable_run_once(
-            workspace_block,
+        workspace_block = _ci_job_block("workspace-tests-shard")
+        generalization_block = _ci_job_block("generalize-sweep-oracle-shard")
+        default_census = (
             "python -m unittest "
-            "scripts.test_nextest_profile_partition.ProfilePartitionTests",
+            "scripts.test_nextest_profile_partition.ProfilePartitionTests"
+        )
+        generalization_census = (
+            "python -m unittest "
+            "scripts.test_nextest_profile_partition.GeneralizationPartitionTests"
+        )
+        _assert_executable_run_once(workspace_block, default_census)
+        _assert_executable_run_once(generalization_block, generalization_census)
+        # Each census lists the configuration its job has already compiled.
+        # Listing the feature-enabled generalization lane on the workspace
+        # shard recompiled the workspace a second time (4.4 hosted minutes).
+        self.assertNotIn("GeneralizationPartitionTests", workspace_block)
+        self.assertNotIn("ProfilePartitionTests", generalization_block)
+        self.assertIn(
+            "- name: Verify generalization lane selection\n"
+            "        if: matrix.shard == 1",
+            generalization_block,
         )
 
     def test_quoted_oracle_name_is_not_an_executable_oracle_step(self):
@@ -1656,11 +3178,9 @@ class CiParityTests(unittest.TestCase):
             _assert_executable_run_once(mutated, command)
 
     def test_non_gate_jobs_are_excluded_by_name(self):
-        # The non-gate jobs are allowed to keep their own cargo/chelis
-        # invocations. This test pins the exclusion list so it stays
-        # visible: if a new non-gate job is added, the author must
-        # decide explicitly whether it is in scope.
-        invocations = _parse_ci_gate_invocations()
+        # Non-gate jobs keep their own commands. Pin the exclusion list so a
+        # rename or removal requires an explicit scope update.
+        invocations = _parse_ci_run_commands()
         present_jobs = set(invocations.keys())
         for job in NON_GATE_JOBS:
             self.assertIn(
@@ -1671,6 +3191,262 @@ class CiParityTests(unittest.TestCase):
                     f"renamed or removed, update NON_GATE_JOBS"
                 ),
             )
+
+    def test_every_ci_job_is_scope_classified(self):
+        commands = _parse_ci_run_commands()
+        gate_workers = set(GATE_WORKER_RUN_COMMANDS)
+        unclassified = set(commands) - gate_workers - NON_GATE_JOBS
+        self.assertEqual(
+            unclassified,
+            set(),
+            (
+                "CI job(s) are neither gate workers nor "
+                f"explicit NON_GATE_JOBS: {sorted(unclassified)}"
+            ),
+        )
+
+    def test_parser_reads_quoted_inline_commands(self):
+        for quote in ('"', "'"):
+            with self.subTest(quote=quote):
+                workflow = (
+                    "jobs:\n"
+                    "  probe:\n"
+                    "    steps:\n"
+                    f"      - run: {quote}cargo check -p chelis-types{quote}\n"
+                )
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["probe"],
+                    ["cargo check -p chelis-types"],
+                )
+
+    def test_parser_reads_shell_quoted_commands_without_interpreting_them(self):
+        for command in (
+            '"cargo" check -p chelis-types',
+            "c'a'rgo check -p chelis-types",
+            r"car\go check -p chelis-types",
+            '"chelis" lint --check .',
+        ):
+            with self.subTest(command=command):
+                workflow = (
+                    "jobs:\n"
+                    "  probe:\n"
+                    "    steps:\n"
+                    f"      - run: {command}\n"
+                )
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["probe"],
+                    [command],
+                )
+
+    def test_parser_retains_benign_shell_text_without_classifying_it(self):
+        workflow = (
+            "jobs:\n"
+            "  probe:\n"
+            "    steps:\n"
+            "      - run: echo cargo\n"
+        )
+        self.assertEqual(
+            _parse_ci_run_commands(workflow)["probe"],
+            ["echo cargo"],
+        )
+
+    def test_parser_marks_literal_and_folded_yaml_run_blocks(self):
+        for indicator in ("|", "|-", "|+", ">", ">-", ">+", "|2", ">2-"):
+            with self.subTest(indicator=indicator):
+                workflow = (
+                    "jobs:\n"
+                    "  probe:\n"
+                    "    steps:\n"
+                    f"      - run: {indicator}\n"
+                    "          cargo check -p chelis-types\n"
+                )
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["probe"],
+                    ["<multiline-run-block>"],
+                )
+
+    def test_parser_reconstructs_plain_and_quoted_yaml_scalars(self):
+        cases = (
+            (
+                "      - run: 'cargo check -p chelis-types' # comment\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run:\n"
+                "          cargo check -p chelis-types\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run: cargo\n"
+                "          check -p chelis-types\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run: 'cargo check\n"
+                "          -p chelis-types'\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run : cargo check -p chelis-types\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run:\n"
+                "          python3 scripts/gate.py lint-and-unit;\n"
+                "          cargo check -p chelis-types\n",
+                "python3 scripts/gate.py lint-and-unit; cargo check -p chelis-types",
+            ),
+        )
+        for run_scalar, expected in cases:
+            with self.subTest(run_scalar=run_scalar):
+                workflow = "jobs:\n  probe:\n    steps:\n" + run_scalar
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["probe"],
+                    [expected],
+                )
+
+    def test_parser_accepts_full_github_job_id_grammar(self):
+        for spelling in (
+            "Unclassified_job",
+            "'Unclassified_job'",
+            '"Unclassified_job"',
+        ):
+            with self.subTest(spelling=spelling):
+                workflow = (
+                    "jobs:\n"
+                    f"  {spelling}:\n"
+                    "    needs: [changes]\n"
+                    "    if: always()\n"
+                    "    steps:\n"
+                    "      - run: cargo check -p chelis-types\n"
+                )
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["Unclassified_job"],
+                    ["cargo check -p chelis-types"],
+                )
+                self.assertEqual(
+                    _parse_job_attrs(workflow)["Unclassified_job"],
+                    {"needs": "[changes]", "if": "always()"},
+                )
+                self.assertIn(
+                    "Unclassified_job", _workflow_job_blocks(workflow)
+                )
+
+    def test_escaped_quoted_job_ids_fail_closed(self):
+        workflow = (
+            "jobs:\n"
+            '  "\\x51uoted_Job":\n'
+            "    steps:\n"
+            "      - run: cargo check -p chelis-types\n"
+        )
+        for parser in (
+            _parse_ci_run_commands,
+            _parse_job_attrs,
+            _workflow_job_blocks,
+        ):
+            with self.subTest(parser=parser.__name__):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "unsupported quoted workflow job id",
+                ):
+                    parser(workflow)
+
+    def test_unsupported_job_mapping_shapes_fail_closed(self):
+        workflows = (
+            (
+                "jobs:\n"
+                "  ? Explicit_Job\n"
+                "  :\n"
+                "    runs-on: ubuntu-latest\n"
+            ),
+            (
+                "jobs:\n"
+                "  Hidden_Job: &hidden_job\n"
+                "    runs-on: ubuntu-latest\n"
+            ),
+            "jobs: {Inline_Job: {runs-on: ubuntu-latest}}\n",
+        )
+        for workflow in workflows:
+            for parser in (
+                _parse_ci_run_commands,
+                _parse_job_attrs,
+                _workflow_job_blocks,
+            ):
+                with self.subTest(workflow=workflow, parser=parser.__name__):
+                    with self.assertRaisesRegex(
+                        AssertionError,
+                        "unsupported workflow job",
+                    ):
+                        parser(workflow)
+
+    def test_comments_inside_jobs_are_not_job_ids(self):
+        """A YAML comment is legal inside `jobs:` and is never a job id.
+
+        Both spellings are here on purpose. The pattern's `\\S.*?` starts at
+        `#`, so a comment whose last character is a colon matches the job-id
+        regex and used to be reported as a malformed job id, while the same
+        comment ending in a period did not (chelis#1443). Only the final
+        character differed, so testing one spelling proves nothing about the
+        other.
+        """
+        for trailer in (".", ":"):
+            workflow = (
+                "jobs:\n"
+                f"  # Rule-id: GATE-SCOPE-EXAMPLE -- why this job is exempt{trailer}\n"
+                "  exempt-job:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: cargo check -p chelis-types\n"
+            )
+            with self.subTest(trailer=trailer):
+                self.assertIsNone(
+                    _parse_workflow_job_header(
+                        f"  # Rule-id: GATE-SCOPE-EXAMPLE -- why this job is exempt{trailer}"
+                    )
+                )
+                # The comment must not displace the job that follows it.
+                self.assertIn("exempt-job", _parse_job_attrs(workflow))
+                self.assertIn("exempt-job", _workflow_job_blocks(workflow))
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["exempt-job"],
+                    ["cargo check -p chelis-types"],
+                )
+
+    def test_unsupported_run_step_shapes_fail_closed(self):
+        steps = (
+            "      - run: *hidden_command\n",
+            "      - run: &hidden_command cargo check -p chelis-types\n",
+            '      - run: !!str "\\x63argo check -p chelis-types"\n',
+            (
+                "      - ? run\n"
+                "        : cargo check -p chelis-types\n"
+            ),
+            "      - {run: cargo check -p chelis-types}\n",
+            "      - *hidden_run_step\n",
+            '      - "run": cargo check -p chelis-types\n',
+        )
+        for step in steps:
+            workflow = "jobs:\n  probe:\n    steps:\n" + step
+            with self.subTest(step=step):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "unsupported workflow (?:run scalar|step shape)",
+                ):
+                    _parse_ci_run_commands(workflow)
+
+    def test_escaped_double_quoted_scalars_fail_closed(self):
+        cases = (
+            '      - run: "\\x63argo check -p chelis-types"\n',
+            '      - run: "car\\\n'
+            '          go check -p chelis-types"\n',
+        )
+        for run_scalar in cases:
+            with self.subTest(run_scalar=run_scalar):
+                workflow = "jobs:\n  probe:\n    steps:\n" + run_scalar
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["probe"],
+                    ["<unsupported-run-scalar>"],
+                )
 
     def test_all_workflow_files_are_scope_classified(self):
         # Every workflow file under .github/workflows/ must be explicitly
@@ -1700,11 +3476,10 @@ class CiParityTests(unittest.TestCase):
             self.assertIn(name, NON_GATE_WORKFLOWS)
 
     def test_no_multiline_run_in_gate_jobs(self):
-        # A `run: |` block in a gate job would hide its commands from
-        # the line-based parity parser. Disallow it for the two gate
-        # jobs so parity stays enforceable.
-        invocations = _parse_ci_gate_invocations()
-        for job in ("lint-and-unit", "workspace-tests"):
+        # Multi-line shell bodies are deliberately outside the exact scalar
+        # contract for gate-owned workers.
+        invocations = _parse_ci_run_commands()
+        for job in GATE_WORKER_RUN_COMMANDS:
             self.assertNotIn(
                 "<multiline-run-block>",
                 invocations.get(job, []),
@@ -1719,9 +3494,29 @@ class CiParityTests(unittest.TestCase):
 class NixPackagesWorkflowTests(unittest.TestCase):
     """Lock the two native Nix package jobs and their complete check command."""
 
+    def test_workflow_reader_preserves_raw_newlines_for_the_digest(self):
+        raw = NIX_PACKAGES_YML.read_bytes().replace(b"\n", b"\r\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nix-packages.yml"
+            path.write_bytes(raw)
+            text = _read_nix_packages_workflow(path)
+        self.assertEqual(text.encode("utf-8"), raw)
+        with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
+            _assert_nix_intentional_events_only(text)
+
+    def test_workflow_reader_rejects_a_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "canonical.yml"
+            target.write_bytes(NIX_PACKAGES_YML.read_bytes())
+            link = root / "nix-packages.yml"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(AssertionError, "regular file"):
+                _read_nix_packages_workflow(link)
+
     def test_native_nix_workflow_has_both_authoritative_jobs(self):
         self.assertTrue(NIX_PACKAGES_YML.is_file(), "missing Nix package workflow")
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         required = [
             "name: Nix Packages (x86_64-linux)",
             "runs-on: ubuntu-latest",
@@ -1732,7 +3527,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_each_native_job_runs_the_complete_flake_check_set(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(
             text.count("run: nix flake check --print-build-logs"),
             2,
@@ -1745,14 +3540,14 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         )
 
     def test_each_native_job_rejects_the_wrong_runner_system(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(text.count("name: Verify the runner system"), 2)
         self.assertIn('assert system == "x86_64-linux", system', text)
         self.assertIn('assert system == "aarch64-darwin", system', text)
 
     def test_supported_systems_have_exact_native_job_parity(self):
         contracts = (REPO_ROOT / "nix" / "contracts.nix").read_text(encoding="utf-8")
-        workflow = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        workflow = _read_nix_packages_workflow()
         _assert_nix_system_job_parity(contracts, workflow)
 
     def test_supported_system_without_native_job_fails_parity(self):
@@ -1788,7 +3583,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_native_devenv_recipe(mutated)
 
     def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_native_devenv_recipe(text)
 
     def test_missing_devenv_package_build_fails_the_native_recipe(self):
@@ -1809,19 +3604,19 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_native_devenv_recipe(mutated)
 
     def test_missing_central_devenv_action_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace(f"uses: {DEVENV_SETUP_ACTION}", "uses: omitted", 1)
         with self.assertRaisesRegex(AssertionError, "setup-devenv"):
             _assert_native_devenv_recipe(mutated)
 
     def test_missing_portable_shell_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace(f"shell: {PORTABLE_DEVENV_SHELL}", "shell: bash", 1)
         with self.assertRaisesRegex(AssertionError, "devenv-ci"):
             _assert_native_devenv_recipe(mutated)
 
     def test_late_central_devenv_action_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         setup = f"uses: {DEVENV_SETUP_ACTION}"
         mutated = text.replace(setup, "uses: omitted", 1).replace(
             "run: devenv-retry test --no-tui",
@@ -1831,52 +3626,169 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "precede the runner verification"):
             _assert_native_devenv_recipe(mutated)
 
-    def test_linux_job_skips_docs_only_pull_requests(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        _assert_nix_docs_only_gate(text)
+    def test_workflow_runs_on_intentional_events_only(self):
+        text = _read_nix_packages_workflow()
+        _assert_nix_intentional_events_only(text)
 
-    def test_missing_docs_only_gate_fails_the_skip_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(f"    {DOCS_ONLY_GATE_IF}\n", "", 1)
-        with self.assertRaisesRegex(AssertionError, "shared job-level gate"):
-            _assert_nix_docs_only_gate(mutated)
+    def test_automatic_pr_push_and_schedule_triggers_fail_the_event_lock(self):
+        text = _read_nix_packages_workflow()
+        for trigger in ("pull_request:", "'pull_request':", "push:", "schedule:"):
+            with self.subTest(trigger=trigger):
+                mutated = text.replace(
+                    "  workflow_dispatch:\n",
+                    f"  workflow_dispatch:\n  {trigger}\n",
+                    1,
+                )
+                with self.assertRaisesRegex(AssertionError, "only on"):
+                    _assert_nix_intentional_events_only(mutated)
 
-    def test_missing_docs_only_detector_fails_the_skip_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+    def test_missing_release_trigger_fails_the_event_lock(self):
+        text = _read_nix_packages_workflow()
+        mutated = text.replace("  release:\n    types: [published]\n", "", 1)
+        with self.assertRaisesRegex(AssertionError, "published releases"):
+            _assert_nix_intentional_events_only(mutated)
+
+    def test_event_specific_job_gate_fails_the_event_lock(self):
+        text = _read_nix_packages_workflow()
         mutated = text.replace(
-            "uses: ./.github/actions/detect-docs-only", "uses: omitted", 1
-        )
-        with self.assertRaisesRegex(AssertionError, "shared detector"):
-            _assert_nix_docs_only_gate(mutated)
-
-    def test_docs_only_gate_on_the_darwin_job_fails_the_skip_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(
-            "    if: github.event_name == 'workflow_dispatch'\n",
-            f"    needs: [changes]\n    {DOCS_ONLY_GATE_IF}\n",
+            "    runs-on: macos-latest\n",
+            "    if: github.event_name == 'workflow_dispatch'\n"
+            "    runs-on: macos-latest\n",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "manual dispatch as its only"):
-            _assert_nix_docs_only_gate(mutated)
+        with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
+            _assert_nix_intentional_events_only(mutated)
 
-    def test_darwin_job_runs_on_manual_dispatch_only(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        _assert_darwin_manual_dispatch(text)
-
-    def test_darwin_pull_request_trigger_fails_the_manual_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(
-            "    if: github.event_name == 'workflow_dispatch'\n", "", 1
-        )
-        with self.assertRaisesRegex(AssertionError, "manual dispatch"):
-            _assert_darwin_manual_dispatch(mutated)
+    def test_policy_oracle_rejects_comment_and_job_gate_evasions(self):
+        text = _read_nix_packages_workflow()
+        mutations = {
+            "comment-only release": (
+                text.replace(
+                    "  release:\n    types: [published]\n",
+                    "  # release:\n  #   types: [published]\n",
+                    1,
+                ),
+                "published releases",
+            ),
+            "wrong release action hidden by comment": (
+                text.replace(
+                    "    types: [published]\n",
+                    "    types: [created]\n    # types: [published]\n",
+                    1,
+                ),
+                "published releases",
+            ),
+            "Linux dispatch blocked": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    if: github.event.action == 'published'\n"
+                    "    runs-on: ubuntu-latest\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "Darwin disabled": (
+                text.replace(
+                    "    runs-on: macos-latest\n",
+                    "    if: false\n    runs-on: macos-latest\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "event-dependent empty matrix": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    strategy:\n"
+                    "      matrix:\n"
+                    "        lane: ${{ github.event_name == 'workflow_dispatch' "
+                    "&& fromJSON('[\"run\"]') || fromJSON('[]') }}\n"
+                    "    runs-on: ubuntu-latest\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "event-dependent runner": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    runs-on: ${{ github.event_name == 'workflow_dispatch' "
+                    "&& 'ubuntu-latest' || 'no-such-runner' }}\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "event-gated complete check step": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        if: github.event_name == 'workflow_dispatch'\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "escaped event-gated complete check step": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n"
+                    "        if: \"${{ gith\\u0075b.event_name == "
+                    "'workflow_dispatch' }}\"\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "complete check allowed to fail": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        continue-on-error: true\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "sandbox false hidden by comment": (
+                text.replace(
+                    "        sandbox = true\n",
+                    "        sandbox = false # sandbox = true\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "workflow working directory override": (
+                text.replace(
+                    "jobs:\n",
+                    "defaults:\n"
+                    "  run:\n"
+                    "    working-directory: definitely-missing-native-recipe\n\n"
+                    "jobs:\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "workflow concurrency override": (
+                text.replace(
+                    "  group: nix-packages-${{ github.ref }}\n",
+                    "  group: all-nix-runs-share-one-group\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+        }
+        for name, (mutated, message) in mutations.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(AssertionError, message):
+                    _assert_nix_intentional_events_only(mutated)
 
     def test_each_job_bounds_runner_resources(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_runner_resource_bounds(text)
 
     def test_unbounded_build_parallelism_fails_the_resource_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("        max-jobs = 2\n", "", 1)
         with self.assertRaisesRegex(AssertionError, "max-jobs = 2"):
             _assert_runner_resource_bounds(mutated)
@@ -1893,7 +3805,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_runner_resource_bounds(mutated)
 
     def test_each_job_caches_the_cvc5_toolchain_closure(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_cvc5_closure_cache(text)
 
     def test_missing_cvc5_restore_fails_the_cache_lock(self):
@@ -1905,7 +3817,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_cvc5_closure_cache(mutated)
 
     def test_direct_devenv_bootstrap_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         setup = f"uses: {DEVENV_SETUP_ACTION}"
         duplicated = (
             f"{setup}\n"
@@ -1928,6 +3840,15 @@ class SmtCiSplitTests(unittest.TestCase):
         self.assertIn("verify_release_smt.py ./target/debug/chelis", block)
         self.assertIn(
             "cargo test -p chelis-prove --features smt --lib cvc5_engine_",
+            block,
+        )
+        # chelis#1125 PP7: prove_deep_obligations.rs is `#![cfg(feature =
+        # "smt")]` and had no runner anywhere, so its assertion that the `.dp`
+        # surface proves at `proof_tier = smt` could not fail. The step below
+        # is the runner; pinning it here is what keeps a merged smt-gated test
+        # from going uninvoked again.
+        self.assertIn(
+            "cargo test -p chelis-cli --features smt --test prove_deep_obligations",
             block,
         )
         forbidden = [
@@ -2029,6 +3950,37 @@ class SmtCiSplitTests(unittest.TestCase):
                 ):
                     _assert_carcara_full_suite_command(mutated)
 
+        # The narrowing is to non-executing subcommands only: a Clippy step
+        # that enables every feature compiles the Carcara lane without running
+        # its suite, and must not read as a second run.
+        for lint_only in (
+            "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+            "cargo check -p chelis-prove --features carcara",
+        ):
+            with self.subTest(lint_only=lint_only):
+                _assert_carcara_full_suite_command(
+                    text.replace(
+                        f"run: {CARCARA_FULL_SUITE_COMMAND}",
+                        f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+                        "      - name: Lint-only Carcara compile\n"
+                        f"        run: {lint_only}",
+                    )
+                )
+
+        # ... but an unrecognized subcommand still counts as executing.
+        with self.assertRaisesRegex(
+            AssertionError, "complete serialized Carcara suite"
+        ):
+            _assert_carcara_full_suite_command(
+                text.replace(
+                    f"run: {CARCARA_FULL_SUITE_COMMAND}",
+                    f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+                    "      - name: Unknown Carcara subcommand\n"
+                    "        run: cargo some-new-runner -p chelis-prove "
+                    "--features carcara",
+                )
+            )
+
         multiline = text.replace(
             f"run: {CARCARA_FULL_SUITE_COMMAND}",
             f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
@@ -2064,17 +4016,38 @@ class SmtCiSplitTests(unittest.TestCase):
         ):
             _assert_carcara_full_suite_command(conditional)
 
-    def test_carcara_dependency_stays_gmp_only(self):
+    def test_full_smt_uses_vendored_gmp_family(self):
+        text = SMT_FULL_PROVE_YML.read_text()
+        _assert_full_smt_system_packages(text)
+
+        for package in SMT_FULL_VENDORED_SYSTEM_PACKAGES:
+            # The converged lane installs nothing, so each control adds an
+            # apt step carrying the vendored package back in.
+            step = (
+                "      - name: Install C dependencies\n"
+                f"        run: python3 scripts/ci_apt_get.py {package}\n"
+            )
+            for location, mutated in (
+                (
+                    "primary",
+                    text.replace("      - name: Set up portable Devenv\n",
+                                 step + "      - name: Set up portable Devenv\n", 1),
+                ),
+                (
+                    "later",
+                    text.replace("      - name: Build smt feature\n",
+                                 step + "      - name: Build smt feature\n", 1),
+                ),
+            ):
+                with self.subTest(package=package, location=location):
+                    with self.assertRaisesRegex(
+                        AssertionError, "locked native dependencies"
+                    ):
+                        _assert_full_smt_system_packages(mutated)
+
+    def test_prove_feature_graph_uses_vendored_gmp_family(self):
         text = CHELIS_PROVE_TOML.read_text()
-        dependency = next(
-            line for line in text.splitlines() if line.startswith("gmp-mpfr-sys = ")
-        )
-        self.assertIn("default-features = false", dependency)
-        self.assertIn("optional = true", dependency)
-        self.assertNotIn(", features =", dependency)
-        self.assertNotIn("gmp-mpfr-sys/mpfr", text)
-        self.assertNotIn("gmp-mpfr-sys/mpc", text)
-        result = subprocess.run(
+        carcara_result = subprocess.run(
             [
                 "cargo",
                 "tree",
@@ -2093,10 +4066,32 @@ class SmtCiSplitTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        _assert_carcara_feature_tree_is_gmp_only(result.stdout)
-        with self.assertRaisesRegex(AssertionError, "must stay GMP-only"):
-            _assert_carcara_feature_tree_is_gmp_only(
-                result.stdout + '\ngmp-mpfr-sys feature "mpfr"\nrug feature "float"'
+        all_result = subprocess.run(
+            [
+                "cargo",
+                "tree",
+                "-p",
+                "chelis-prove",
+                "--all-features",
+                "-e",
+                "features",
+                "--prefix",
+                "none",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        _assert_prove_uses_vendored_gmp_family(
+            text, carcara_result.stdout, all_result.stdout
+        )
+        with self.assertRaisesRegex(AssertionError, "locked GMP/MPFR/MPC sources"):
+            _assert_prove_uses_vendored_gmp_family(
+                text,
+                carcara_result.stdout,
+                all_result.stdout + '\ngmp-mpfr-sys feature "use-system-libs"',
             )
 
     def test_clarabel_linux_uses_devenv_openblas(self):
@@ -2156,30 +4151,30 @@ class SmtCiSplitTests(unittest.TestCase):
         )
 
 
-def _parse_job_attrs() -> dict[str, dict[str, str]]:
+def _parse_job_attrs(text: str | None = None) -> dict[str, dict[str, str]]:
     """Parse `.github/workflows/ci.yml` and return, per job, its
     top-level `needs:` and `if:` lines (the first occurrence at the
     job's own indent). Line-based to match the existing parser style and
     avoid a PyYAML dependency the CI venv may not carry."""
-    text = CI_YML.read_text()
+    if text is None:
+        text = CI_YML.read_text()
     lines = text.splitlines()
     current_job: str | None = None
     attrs: dict[str, dict[str, str]] = {}
-    job_header = re.compile(r"^  ([a-z0-9-]+):\s*$")
     attr_line = re.compile(r"^    (needs|if):\s*(.+?)\s*$")
     # Only parse headers inside the `jobs:` block; `on:` triggers like
     # `  push:` share the two-space indent and would otherwise read as
     # jobs.
     in_jobs = False
     for line in lines:
-        if line.rstrip() == "jobs:":
+        if _parse_workflow_jobs_header(line):
             in_jobs = True
             continue
         if not in_jobs:
             continue
-        m = job_header.match(line)
-        if m is not None:
-            current_job = m.group(1)
+        job_name = _parse_workflow_job_header(line)
+        if job_name is not None:
+            current_job = job_name
             attrs.setdefault(current_job, {})
             continue
         if current_job is None:
@@ -2256,7 +4251,8 @@ class MacosManualOnlyTests(unittest.TestCase):
             found,
             [
                 ("ci.yml", "smt-build-darwin-arm64"),
-                ("ci.yml", "macos-smoke"),
+                # The reviewed automatic macOS lane; see AUTOMATIC_MACOS_JOBS.
+                ("ci.yml", "macos-workspace-shard"),
                 ("nix-packages.yml", "nix-darwin-arm64"),
                 ("release.yml", "build-chelis-release"),
                 ("release.yml", "consume-chelis-release-darwin"),
@@ -2280,7 +4276,7 @@ class MacosManualOnlyTests(unittest.TestCase):
         text = CI_YML.read_text(encoding="utf-8")
         mutated = text.replace("  workflow_dispatch:\n", "", 1)
         self.assertIn(
-            "macos-smoke: missing workflow_dispatch trigger",
+            "smt-build-darwin-arm64: missing workflow_dispatch trigger",
             _macos_manual_dispatch_errors(mutated),
         )
 
@@ -2292,6 +4288,50 @@ class MacosManualOnlyTests(unittest.TestCase):
         publish = _workflow_job_blocks(text)["publish-release"]
         self.assertIn("startsWith(github.ref, 'refs/tags/v')", publish)
         self.assertNotIn("github.event_name == 'push'", publish)
+TELEMETRY_JOB = "test-telemetry"
+
+
+def _telemetry_junit_producers(attrs: dict[str, dict[str, str]]) -> tuple[str, ...]:
+    """Return the telemetry job's JUnit producers, in `needs:` order.
+
+    `changes` is a gate input, not a producer. Every other entry runs
+    nextest and uploads at least one report the telemetry job later
+    downloads by exact name.
+    """
+    raw = attrs.get(TELEMETRY_JOB, {}).get("needs", "")
+    match = re.match(r"^\[(?P<body>.*)\]$", raw.strip())
+    if match is None:
+        raise AssertionError(f"unreadable telemetry needs list: {raw!r}")
+    entries = (entry.strip() for entry in match.group("body").split(","))
+    producers = tuple(entry for entry in entries if entry and entry != "changes")
+    if not producers:
+        raise AssertionError("the telemetry job must name its JUnit producers")
+    return producers
+
+
+def _assert_telemetry_skips_without_every_junit(
+    attrs: dict[str, dict[str, str]],
+) -> None:
+    """Lock the producer-success gate on the cross-lane telemetry job.
+
+    Each download names one artifact and carries no fallback, so a
+    producer that never started -- a hosted runner the job was never
+    assigned -- and a producer that died at its own upload step both
+    leave this job failing on `Artifact not found`. That second red
+    describes the infrastructure, not the defect, while the required
+    aggregate already reports the producer honestly. Requiring every
+    producer to have succeeded is safe only because this aggregate is
+    not a required status context and asserts no contract of its own;
+    required aggregates stay `always()` and fail closed.
+    """
+    cond = attrs.get(TELEMETRY_JOB, {}).get("if", "")
+    for producer in _telemetry_junit_producers(attrs):
+        clause = f"needs.{producer}.result == 'success'"
+        if clause not in cond:
+            raise AssertionError(
+                f"the telemetry job must skip unless {producer!r} succeeded: "
+                f"missing {clause!r} in {cond!r}"
+            )
 
 
 class DocsOnlySkipTests(unittest.TestCase):
@@ -2305,17 +4345,31 @@ class DocsOnlySkipTests(unittest.TestCase):
 
     # Jobs that must skip on a docs-only PR.
     HEAVY_GATED_JOBS = {
-        "workspace-tests",
+        "lint-rust",
+        "script-unit",
+        "workspace-tests-shard",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
-        "generalize-sweep-oracle",
+        "compiled-value-ownership-phase0-oracle",
+        "runtime-representation-phase0-oracle",
+        "generalize-sweep-oracle-shard",
+        "macos-workspace-shard",
         "backend-sanitizers",
         "smt-build",
     }
-    MANUAL_ONLY_JOBS = {"macos-smoke", "smt-build-darwin-arm64"}
+    MANUAL_ONLY_JOBS = {"smt-build-darwin-arm64"}
     # The stable required context aggregates the parallel integration legs,
     # so it needs their results as well as the docs-only classification.
-    HEAVY_AGGREGATOR_JOBS = {"integration"}
+    HEAVY_AGGREGATOR_JOBS = {
+        "lint-and-unit",
+        "workspace-tests",
+        "generalize-sweep-oracle",
+        "integration",
+        "macos-smoke",
+    }
+    # Best-effort reporting aggregates run after failed dependencies but may
+    # skip on cancellation because they are not required status contexts.
+    HEAVY_REPORT_JOBS = {"test-telemetry"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
@@ -2324,7 +4378,6 @@ class DocsOnlySkipTests(unittest.TestCase):
     }
     # Jobs that must ALWAYS run (never gated on docs_only).
     ALWAYS_RUN_JOBS = {
-        "lint-and-unit",
         "no-ai-authorship",
         "docs",
         "changes",
@@ -2348,7 +4401,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("scripts/ci_detect_docs_only.py", action)
         self.assertIn("git diff --name-only", action)
-        for path in (CI_YML, NIX_PACKAGES_YML, WORKFLOWS_DIR / "conformance.yml"):
+        for path in (CI_YML, WORKFLOWS_DIR / "conformance.yml"):
             with self.subTest(workflow=path.name):
                 block = _workflow_job_block(path, "changes")
                 self.assertIn("uses: ./.github/actions/detect-docs-only", block)
@@ -2419,19 +4472,107 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertEqual(
             integration.get("needs"),
             "[changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
+            "faithful-observation-phase2-oracle, "
+            "compiled-value-ownership-phase0-oracle, "
+            "runtime-representation-phase0-oracle, generalize-sweep-oracle]",
         )
         cond = integration.get("if", "")
-        self.assertNotIn("always()", cond)
-        self.assertIn("!cancelled()", cond)
+        self.assertIn("always()", cond)
+        self.assertNotIn("!cancelled()", cond)
         self.assertIn("needs.changes.result != 'success'", cond)
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
         block = _ci_job_block("integration")
         self.assertIn("needs.workspace-tests.result", block)
         self.assertIn("needs.dtype-phase3-oracle.result", block)
         self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
+        self.assertIn(
+            "needs.compiled-value-ownership-phase0-oracle.result",
+            block,
+        )
+        self.assertIn(
+            "needs.runtime-representation-phase0-oracle.result",
+            block,
+        )
         self.assertIn("needs.generalize-sweep-oracle.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
+
+    def test_generalize_sweep_aggregator_is_fail_closed_and_docs_gated(self):
+        attrs = _parse_job_attrs()
+        aggregate = attrs["generalize-sweep-oracle"]
+        self.assertEqual(
+            aggregate.get("needs"),
+            "[changes, generalize-sweep-oracle-shard]",
+        )
+        cond = aggregate.get("if", "")
+        self.assertIn("always()", cond)
+        self.assertNotIn("!cancelled()", cond)
+        self.assertIn("needs.changes.result != 'success'", cond)
+        self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
+        block = _ci_job_block("generalize-sweep-oracle")
+        self.assertIn("needs.generalize-sweep-oracle-shard.result", block)
+        self.assertIn("scripts/ci_require_success.py", block)
+
+    def test_every_required_aggregator_runs_after_cancelled_dependencies(self):
+        attrs = _parse_job_attrs()
+        for job in self.HEAVY_AGGREGATOR_JOBS:
+            with self.subTest(job=job):
+                cond = attrs[job].get("if", "")
+                self.assertIn("always()", cond)
+                self.assertNotIn("!cancelled()", cond)
+
+    def test_nonrequired_report_aggregator_skips_on_cancellation(self):
+        attrs = _parse_job_attrs()
+        for job in self.HEAVY_REPORT_JOBS:
+            with self.subTest(job=job):
+                cond = attrs[job].get("if", "")
+                self.assertIn("!cancelled()", cond)
+                self.assertNotIn("always()", cond)
+
+    def test_telemetry_skips_unless_every_junit_producer_succeeded(self):
+        _assert_telemetry_skips_without_every_junit(_parse_job_attrs())
+
+    def test_telemetry_producer_list_matches_the_report_aggregate(self):
+        attrs = _parse_job_attrs()
+        self.assertIn(TELEMETRY_JOB, self.HEAVY_REPORT_JOBS)
+        self.assertEqual(
+            _telemetry_junit_producers(attrs),
+            (
+                "workspace-tests-shard",
+                "dtype-phase3-oracle",
+                "generalize-sweep-oracle-shard",
+                "macos-workspace-shard",
+            ),
+        )
+
+    def test_dropping_one_producer_clause_fails_the_telemetry_gate(self):
+        attrs = _parse_job_attrs()
+        for producer in _telemetry_junit_producers(attrs):
+            with self.subTest(producer=producer):
+                mutated = {job: dict(values) for job, values in attrs.items()}
+                mutated[TELEMETRY_JOB]["if"] = mutated[TELEMETRY_JOB]["if"].replace(
+                    f" && needs.{producer}.result == 'success'", "", 1
+                )
+                with self.assertRaisesRegex(AssertionError, producer):
+                    _assert_telemetry_skips_without_every_junit(mutated)
+
+    def test_a_weaker_non_cancelled_producer_clause_fails_the_gate(self):
+        attrs = _parse_job_attrs()
+        mutated = {job: dict(values) for job, values in attrs.items()}
+        mutated[TELEMETRY_JOB]["if"] = mutated[TELEMETRY_JOB]["if"].replace(
+            "needs.macos-workspace-shard.result == 'success'",
+            "needs.macos-workspace-shard.result != 'cancelled'",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "macos-workspace-shard"):
+            _assert_telemetry_skips_without_every_junit(mutated)
+
+    def test_unreadable_telemetry_needs_list_fails_loudly(self):
+        with self.assertRaisesRegex(AssertionError, "unreadable telemetry"):
+            _telemetry_junit_producers({TELEMETRY_JOB: {"needs": "changes"}})
+
+    def test_a_producerless_telemetry_needs_list_fails_loudly(self):
+        with self.assertRaisesRegex(AssertionError, "must name its JUnit"):
+            _telemetry_junit_producers({TELEMETRY_JOB: {"needs": "[changes]"}})
 
     def test_always_run_jobs_are_not_gated(self):
         attrs = _parse_job_attrs()
@@ -2456,6 +4597,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         classified = (
             self.HEAVY_GATED_JOBS
             | self.HEAVY_AGGREGATOR_JOBS
+            | self.HEAVY_REPORT_JOBS
             | self.CHANGE_GATED_JOBS
             | self.MANUAL_ONLY_JOBS
             | self.ALWAYS_RUN_JOBS

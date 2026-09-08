@@ -1,14 +1,16 @@
 use chelis_shell::{
-    PackageId, ShellModule, ShellPackage, ShellSymbol, SymbolKind, read_shell, write_shell,
+    PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage, ShellSymbol, SymbolKind,
+    TypeVariableDomain, TypeVariableRestriction, read_shell, write_shell,
 };
 use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
     PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
+use chelis_unord::{UnordMap, UnordSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -441,6 +443,12 @@ pub struct PreparedProgram {
     /// The cross-process chelis-std typecheck cache content-addresses
     /// this. Empty when the graph has no chelis-std package.
     pub stdlib_decls: Vec<Decl>,
+    /// Digest of the exact chelis-std manifest, source inventory, source
+    /// bytes, and published artifact identities that produced
+    /// `stdlib_decls`. The typecheck cache requires this determinant in
+    /// addition to the parsed declarations so trivia-only source edits cannot
+    /// stale-hit an artifact built from different bytes.
+    pub stdlib_source_digest: [u8; 32],
     /// `decls` minus `stdlib_decls`, in the same relative order: the
     /// user package's own modules plus any non-stdlib path-deps. Checked
     /// `_with_context` against the cached chelis-std sub-context.
@@ -1374,6 +1382,7 @@ fn collect_type_references(ty: &TypeExpr, out: &mut BTreeSet<String>) {
         TypeExpr::Named(name, _) | TypeExpr::RankSpread(name, _) => {
             out.insert(name.clone());
         }
+        TypeExpr::DimensionLiteral(_, _) => {}
         TypeExpr::Tensor(dims, _, _) | TypeExpr::Tuple(dims, _) => {
             for dim in dims {
                 collect_type_references(dim, out);
@@ -1544,6 +1553,10 @@ pub struct PreparedReefGraph {
     /// from the linked chelis-std decls. Empty when the graph has no
     /// chelis-std package, such as a package that depends on nothing.
     pub linked_stdlib_decls: Vec<Decl>,
+    /// Exact-source determinant paired with `linked_stdlib_decls`. Persisting
+    /// it in the prepared graph keeps the typecheck-cache hot path free of a
+    /// second filesystem walk while preserving trivia and inventory changes.
+    stdlib_source_digest: [u8; 32],
     /// `linked_library_decls` minus `linked_stdlib_decls`, in the same
     /// relative order: the user package's own modules plus any non-stdlib
     /// path-deps. The chelis-std typecheck cache checks this `_with_context`
@@ -1554,7 +1567,7 @@ pub struct PreparedReefGraph {
     /// Linker-produced declarations from dependency packages only. This is a
     /// provenance partition, not a name filter.
     pub linked_dependency_decls: Vec<Decl>,
-    pub(crate) internal_maps: HashMap<(String, String), HashMap<String, String>>,
+    pub(crate) internal_maps: UnordMap<(String, String), UnordMap<String, String>>,
     pub(crate) dep_shells: BTreeMap<String, ShellPackage>,
     pub(crate) eval_module_prefix: String,
 }
@@ -1570,6 +1583,11 @@ impl PreparedReefGraph {
         bincode::deserialize(bytes).map_err(|e| format!("decode prepared graph: {e}"))
     }
 
+    /// Exact source determinant for the linked chelis-std slice.
+    pub fn stdlib_source_digest(&self) -> [u8; 32] {
+        self.stdlib_source_digest
+    }
+
     /// Returns a content digest for the complete live `.ch` inventory under
     /// every declared source root backing this graph, including path and
     /// registry dependencies. Inventory paths as well as exact file bytes are
@@ -1583,6 +1601,25 @@ impl PreparedReefGraph {
     ///
     pub fn source_digests(&self) -> Result<Vec<SourceDigest>, String> {
         self.source_digests_inner(false)
+    }
+
+    fn compute_stdlib_source_digest(&self) -> Result<[u8; 32], String> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"chelis-std-exact-source-v1");
+        for digest in self
+            .source_digests()?
+            .into_iter()
+            .filter(|digest| digest.package_name == CHELIS_STD_PACKAGE_NAME)
+        {
+            hasher.update((digest.package_name.len() as u64).to_le_bytes());
+            hasher.update(digest.package_name.as_bytes());
+            hasher.update((digest.package_version.len() as u64).to_le_bytes());
+            hasher.update(digest.package_version.as_bytes());
+            hasher.update((digest.module_name.len() as u64).to_le_bytes());
+            hasher.update(digest.module_name.as_bytes());
+            hasher.update(digest.sha256);
+        }
+        Ok(hasher.finalize().into())
     }
 
     fn validated_source_digests(&self) -> Result<Vec<SourceDigest>, String> {
@@ -2075,6 +2112,7 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         entry_decls,
         package_root: root,
         stdlib_decls: graph.linked_stdlib_decls.clone(),
+        stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls: graph.linked_non_stdlib_library_decls.clone(),
         dependency_decls: graph.linked_dependency_decls.clone(),
     }))
@@ -2195,17 +2233,20 @@ fn prepare_graph_from_loaded(
         linked_library_decls.extend(module.decls);
     }
 
-    Ok(PreparedReefGraph {
+    let mut prepared = PreparedReefGraph {
         package_root: root,
         graph,
         linked_library_decls,
         linked_stdlib_decls,
+        stdlib_source_digest: [0; 32],
         linked_non_stdlib_library_decls,
         linked_dependency_decls,
         internal_maps,
         dep_shells,
         eval_module_prefix,
-    })
+    };
+    prepared.stdlib_source_digest = prepared.compute_stdlib_source_digest()?;
+    Ok(prepared)
 }
 
 const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
@@ -2213,12 +2254,22 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // for multi-dependency graphs, changing the serialized decl order. Bumped so a
 // warm project does not load a stale old-order graph (which would make #1182
 // inert and make the same binary emit different C depending on cache state).
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 2;
+// v3 (chelis#1341 Phase B): PreparedReefGraph persists the exact-source
+// chelis-std digest used by the typecheck-cache key. V2 payloads lack the field
+// and must clean-miss before positional bincode decoding.
+// v4 (chelis#1341 Phase B): the filename key and envelope carry the exact
+// running compiler build identity, not the release version shared by distinct
+// builds. V3 envelopes cannot prove that identity and must clean-miss.
+// v5 combines that V4 lineage with chelis#1247's independent V3 payload, whose
+// declarations can carry dimension-valued nominal arguments. Either preceding
+// branch format clean-misses before positional bincode decoding.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 5;
+const PREPARED_GRAPH_CACHE_KEY_DOMAIN: &[u8] = b"chelis-prepared-graph-cache-key-v1\0";
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
     version: u32,
-    compiler_version: String,
+    compiler_identity: String,
     source_hash: [u8; 32],
     payload_sha256: [u8; 32],
     payload: Vec<u8>,
@@ -2313,16 +2364,43 @@ fn prepared_graph_cache_path(root: &Path) -> Option<PathBuf> {
             .join("chelis")
             .join("prepared-graphs")
     };
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let identity: [u8; 32] = hasher.finalize().into();
+    let inputs = prepared_graph_cache_key_input_bytes(root).ok()?;
+    let identity: [u8; 32] = Sha256::digest(inputs).into();
     let identity_hex = identity[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Some(cache_dir.join(format!("{identity_hex}.graph")))
+}
+
+/// Exact byte preimage hashed to name the prepared-graph cache artifact.
+///
+/// Fields are domain-separated and length-delimited. The opaque compiler
+/// identity is the same shared running-image fingerprint exported by
+/// `chelis-compiler-api`, while the canonical package root is encoded with the
+/// platform's lossless `OsStr` representation rather than a lossy display
+/// string.
+pub fn prepared_graph_cache_key_input_bytes(root: &Path) -> Result<Vec<u8>, String> {
+    prepared_graph_cache_key_input_bytes_for_identity(root, chelis_image_id::build_fingerprint())
+}
+
+fn prepared_graph_cache_key_input_bytes_for_identity(
+    root: &Path,
+    compiler_identity: &str,
+) -> Result<Vec<u8>, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize cache package root: {error}"))?;
+    let root_bytes = canonical.as_os_str().as_encoded_bytes();
+    let mut inputs = Vec::with_capacity(
+        PREPARED_GRAPH_CACHE_KEY_DOMAIN.len() + 16 + compiler_identity.len() + root_bytes.len(),
+    );
+    inputs.extend_from_slice(PREPARED_GRAPH_CACHE_KEY_DOMAIN);
+    inputs.extend_from_slice(&(compiler_identity.len() as u64).to_le_bytes());
+    inputs.extend_from_slice(compiler_identity.as_bytes());
+    inputs.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
+    inputs.extend_from_slice(root_bytes);
+    Ok(inputs)
 }
 
 fn prepared_graph_source_hash(graph: &PreparedReefGraph) -> Result<[u8; 32], String> {
@@ -2369,7 +2447,7 @@ fn load_prepared_graph_cache(
             envelope.version, PREPARED_GRAPH_CACHE_VERSION
         ));
     }
-    if envelope.compiler_version != env!("CARGO_PKG_VERSION") {
+    if envelope.compiler_identity != chelis_image_id::build_fingerprint() {
         return Ok(None);
     }
     let payload_sha256: [u8; 32] = Sha256::digest(&envelope.payload).into();
@@ -2407,7 +2485,7 @@ fn save_prepared_graph_cache_with_hash(
     let payload = graph.encode()?;
     let envelope = PreparedGraphCacheEnvelope {
         version: PREPARED_GRAPH_CACHE_VERSION,
-        compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+        compiler_identity: chelis_image_id::build_fingerprint().to_string(),
         source_hash,
         payload_sha256: Sha256::digest(&payload).into(),
         payload,
@@ -2485,6 +2563,252 @@ pub fn rewrite_entry_decls_with_reef_graph(
     )
 }
 
+/// One selected callable root in an independently scoped entry module.
+///
+/// The source name is resolved by that module's ordinary Reef resolver. The
+/// linker inserts a collision-free synthetic call binding and returns its
+/// exact internal name in [`RewrittenEntryBatch`].
+#[derive(Debug, Clone)]
+pub struct SelectedEntryRoot {
+    pub name: String,
+    pub span: chelis_deep::Span,
+}
+
+/// A source entry that must retain its own module scope while sharing one
+/// prepared package graph and evaluator with other entries.
+#[derive(Debug, Clone)]
+pub struct IsolatedEntryModule {
+    /// Stable namespace key supplied by the caller's manifest. Paths and
+    /// authored module names are deliberately not identity inputs.
+    pub manifest_index: usize,
+    pub declarations: Vec<Decl>,
+    pub selected_roots: Vec<SelectedEntryRoot>,
+}
+
+/// Opaque result of independently rewriting a set of entry modules.
+///
+/// Private fields prevent callers from manufacturing a purportedly rewritten
+/// batch from raw declarations. Consumers may inspect the rewritten decls and
+/// resolve selected roots, but construction always goes through
+/// [`rewrite_isolated_entry_modules_with_reef_graph`].
+#[derive(Debug, Clone)]
+pub struct RewrittenEntryBatch {
+    declarations: Vec<Decl>,
+    exact_roots: BTreeMap<(usize, String), String>,
+}
+
+impl RewrittenEntryBatch {
+    pub fn declarations(&self) -> &[Decl] {
+        &self.declarations
+    }
+
+    pub fn exact_root(&self, manifest_index: usize, source_name: &str) -> Option<&str> {
+        self.exact_roots
+            .get(&(manifest_index, source_name.to_string()))
+            .map(String::as_str)
+    }
+}
+
+fn isolated_entry_module_name(graph: &PreparedReefGraph, manifest_index: usize) -> String {
+    let reserved = format!("__ChelisTestBatch{manifest_index}");
+    if graph.eval_module_prefix.is_empty() {
+        reserved
+    } else {
+        format!("{}.{reserved}", graph.eval_module_prefix)
+    }
+}
+
+fn isolated_root_binding_name(occupied: &BTreeSet<String>, ordinal: usize) -> String {
+    let base = format!("__chelis_batch_root_{ordinal}");
+    if !occupied.contains(&base) {
+        return base;
+    }
+    for suffix in 1usize.. {
+        let candidate = format!("{base}_{suffix}");
+        if !occupied.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the finite source symbol set always leaves a synthetic root name")
+}
+
+/// Rewrite each entry through the ordinary module resolver before combining
+/// their declarations. Every resolver sees only its entry's local symbols,
+/// declared imports, and the prepared package graph; sibling entry symbols
+/// are never published into its scope.
+pub fn rewrite_isolated_entry_modules_with_reef_graph(
+    graph: &PreparedReefGraph,
+    entries: &[IsolatedEntryModule],
+) -> Result<RewrittenEntryBatch, String> {
+    let mut seen_indices = BTreeSet::new();
+    let mut declarations = Vec::new();
+    let mut exact_roots = BTreeMap::new();
+
+    for entry in entries {
+        if !seen_indices.insert(entry.manifest_index) {
+            return Err(format!(
+                "duplicate isolated entry manifest index {}",
+                entry.manifest_index
+            ));
+        }
+
+        let module_name = isolated_entry_module_name(graph, entry.manifest_index);
+        let module_key = (graph.graph.root_package.clone(), module_name.clone());
+        if graph.internal_maps.contains_key(&module_key) {
+            return Err(format!(
+                "reserved isolated entry module `{module_name}` collides with the prepared graph"
+            ));
+        }
+        for declaration in &entry.declarations {
+            if let Some(name) = entry_decl_binding_name(declaration)
+                && chelis_types::is_linker_format_name(name)
+            {
+                return Err(format!(
+                    "`{name}` uses the reef package-linker's reserved internal-name format \
+                     (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
+                ));
+            }
+        }
+
+        let definitions = entry
+            .declarations
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut selected_names = BTreeSet::new();
+        let mut occupied = collect_symbol_kinds(&entry.declarations)
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        // A synthetic local shadows an unqualified import during ordinary
+        // rewriting. Reserve every prepared-graph source symbol as well as
+        // every entry-local declaration so adding the call roots cannot
+        // change the meaning of either selective or wildcard imports.
+        occupied.extend(
+            graph
+                .internal_maps
+                .to_sorted()
+                .into_iter()
+                .map(|(_, symbols)| symbols)
+                .flat_map(|symbols| {
+                    symbols
+                        .to_sorted()
+                        .into_iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>()
+                }),
+        );
+        let mut source_decls = entry.declarations.clone();
+        let mut synthetic_roots = Vec::new();
+
+        for (ordinal, root) in entry.selected_roots.iter().enumerate() {
+            if !selected_names.insert(root.name.clone()) {
+                return Err(format!(
+                    "isolated entry {} selects root `{}` more than once",
+                    entry.manifest_index, root.name
+                ));
+            }
+            if !definitions.contains(&root.name) {
+                return Err(format!(
+                    "isolated entry {} selects missing root `{}`",
+                    entry.manifest_index, root.name
+                ));
+            }
+
+            let synthetic = isolated_root_binding_name(&occupied, ordinal);
+            occupied.insert(synthetic.clone());
+            let call = Expr::Apply(
+                Box::new(Expr::Var(root.name.clone(), root.span)),
+                Vec::new(),
+                root.span,
+            );
+            source_decls.push(Decl::LetDef {
+                name: synthetic.clone(),
+                ty: None,
+                value: call,
+                span: root.span,
+            });
+            synthetic_roots.push((root.name.clone(), synthetic));
+        }
+
+        validate_source_signature_pairs(&source_decls, &module_name)?;
+        let symbols = collect_symbol_kinds(&source_decls);
+        let local_map = symbols
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    internal_name(&graph.graph.root_package, &module_name, name),
+                )
+            })
+            .collect::<UnordMap<_, _>>();
+        let mut internal_maps = graph.internal_maps.clone();
+        internal_maps.insert(module_key, local_map.clone());
+        let module = ModuleSource {
+            package_name: graph.graph.root_package.clone(),
+            module_name,
+            decls: source_decls,
+            file_rel: PathBuf::from(format!("__test_batch_{}.ch", entry.manifest_index)),
+            source_root: "tests".to_string(),
+            exports: BTreeSet::new(),
+            symbols,
+        };
+        let rewritten =
+            rewrite_module_decls(&module, &graph.graph, &internal_maps, &graph.dep_shells)?;
+
+        for (source_name, synthetic) in synthetic_roots {
+            let exact = local_map.get(&synthetic).ok_or_else(|| {
+                format!(
+                    "isolated entry {} lost synthetic root `{synthetic}`",
+                    entry.manifest_index
+                )
+            })?;
+            exact_roots.insert((entry.manifest_index, source_name), exact.clone());
+        }
+        declarations.extend(rewritten);
+    }
+
+    Ok(RewrittenEntryBatch {
+        declarations,
+        exact_roots,
+    })
+}
+
+fn assemble_rewritten_entry_program(
+    graph: &PreparedReefGraph,
+    rewritten_entry_decls: &[Decl],
+) -> PreparedProgram {
+    let mut decls = graph.linked_library_decls.clone();
+    decls.extend(rewritten_entry_decls.iter().cloned());
+
+    let mut non_stdlib_decls = graph.linked_non_stdlib_library_decls.clone();
+    non_stdlib_decls.extend(rewritten_entry_decls.iter().cloned());
+
+    PreparedProgram {
+        decls,
+        entry_decls: rewritten_entry_decls.to_vec(),
+        package_root: graph.package_root.clone(),
+        stdlib_decls: graph.linked_stdlib_decls.clone(),
+        stdlib_source_digest: graph.stdlib_source_digest(),
+        non_stdlib_decls,
+        dependency_decls: graph.linked_dependency_decls.clone(),
+    }
+}
+
+/// Append an already isolated and rewritten batch to the prepared library
+/// without routing it through the eval-entry rewriter a second time.
+pub fn compile_rewritten_entry_batch_with_reef_graph(
+    graph: &PreparedReefGraph,
+    batch: &RewrittenEntryBatch,
+) -> Result<PreparedProgram, String> {
+    Ok(assemble_rewritten_entry_program(
+        graph,
+        batch.declarations(),
+    ))
+}
+
 /// Compile an in-memory entry decl list against a previously prepared reef
 /// graph. This is the cheap per-file work: only the entry module is rewritten
 /// and appended to the cached library decls.
@@ -2493,24 +2817,10 @@ pub fn compile_with_reef_graph(
     entry_decls: &[Decl],
 ) -> Result<PreparedProgram, String> {
     let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(graph, entry_decls)?;
-
-    let mut decls = graph.linked_library_decls.clone();
-    decls.extend(rewritten_entry_decls.iter().cloned());
-
-    // The eval entry decls are not chelis-std; they join the non-stdlib
-    // partition. `stdlib_decls` is the graph's already-partitioned
-    // chelis-std slice.
-    let mut non_stdlib_decls = graph.linked_non_stdlib_library_decls.clone();
-    non_stdlib_decls.extend(rewritten_entry_decls.iter().cloned());
-
-    Ok(PreparedProgram {
-        decls,
-        entry_decls: rewritten_entry_decls,
-        package_root: graph.package_root.clone(),
-        stdlib_decls: graph.linked_stdlib_decls.clone(),
-        non_stdlib_decls,
-        dependency_decls: graph.linked_dependency_decls.clone(),
-    })
+    Ok(assemble_rewritten_entry_program(
+        graph,
+        &rewritten_entry_decls,
+    ))
 }
 
 /// Resolve a `PackageGraph` for eval: fast-path the lockfile when present,
@@ -2609,7 +2919,7 @@ pub fn build_package_with_options(
         .flat_map(|module| module.decls)
         .collect::<Vec<_>>();
     let deep = expanded_desugared_program(&linked_decls)?;
-    let checked = checked_program_with_effects(&deep)?;
+    let checked = checked_library_with_effects(&deep)?;
 
     let dist_dir = root.join("dist");
     fs::create_dir_all(&dist_dir).map_err(|e| e.to_string())?;
@@ -4852,8 +5162,8 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
     // Map (name, version) -> index for edge resolution. Built up
     // front so cycle detection can map back to (name, version) pairs
     // inside the DFS.
-    let mut index_by_key: std::collections::HashMap<(String, String), usize> =
-        std::collections::HashMap::new();
+    let mut index_by_key: chelis_unord::UnordMap<(String, String), usize> =
+        chelis_unord::UnordMap::new();
     for (i, (name, version, _)) in nodes.iter().enumerate() {
         if let Some(prior) = index_by_key.insert((name.clone(), version.clone()), i) {
             // Defensive: bootstrap-input dedup happens before topo
@@ -5086,15 +5396,14 @@ pub fn install_bootstrap(
     // two versions in the input list is ambiguous; refuse rather than
     // silently picking one.
     {
-        let mut by_name: std::collections::HashMap<&str, Vec<&str>> =
-            std::collections::HashMap::new();
+        let mut by_name: chelis_unord::UnordMap<&str, Vec<&str>> = chelis_unord::UnordMap::new();
         for (name, version, _) in &nodes {
             by_name
                 .entry(name.as_str())
                 .or_default()
                 .push(version.as_str());
         }
-        for (name, versions) in &by_name {
+        for (name, versions) in by_name.to_sorted() {
             if versions.len() > 1 {
                 let mut sorted: Vec<String> = versions.iter().map(|s| s.to_string()).collect();
                 sorted.sort();
@@ -5110,8 +5419,8 @@ pub fn install_bootstrap(
     }
 
     // Build (name, version) -> index for edge validation.
-    let mut index_by_key: std::collections::HashMap<(String, String), usize> =
-        std::collections::HashMap::with_capacity(nodes.len());
+    let mut index_by_key: chelis_unord::UnordMap<(String, String), usize> =
+        chelis_unord::UnordMap::new();
     for (i, (name, version, _)) in nodes.iter().enumerate() {
         index_by_key.insert((name.clone(), version.clone()), i);
     }
@@ -5310,10 +5619,15 @@ fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
 
 // ─── Issue #492: Machine-readable ABI/package schema ───
 
+/// Public JSON schema format. Version 2 adds exact quantified type-variable
+/// domain restrictions and is intentionally not compatible with version 1.
+pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 2;
+
 /// Machine-readable package schema describing exported functions, types,
 /// constructors, and required authoring signatures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageSchema {
+    pub format_version: u32,
     pub package: PackageId,
     pub compiler: String,
     pub modules: Vec<ModuleSchema>,
@@ -5332,6 +5646,7 @@ pub struct ModuleSchema {
 pub struct FunctionSchema {
     pub name: String,
     pub type_repr: Option<String>,
+    pub type_variable_restrictions: Vec<TypeVariableRestriction>,
     pub effects: Vec<String>,
     pub has_body: bool,
 }
@@ -5370,7 +5685,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
     let linked = link_graph(&graph, &entry_modules)?;
     let linked_decls: Vec<_> = linked.into_iter().flat_map(|m| m.decls).collect();
     let deep = expanded_desugared_program(&linked_decls)?;
-    let checked = checked_program_with_effects(&deep)?;
+    let checked = checked_library_with_effects(&deep)?;
 
     let mut modules = Vec::new();
     for module_source in root_pkg.modules.values() {
@@ -5383,15 +5698,9 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                 internal_name(&root_pkg.id.name, &module_source.module_name, export_name);
             match kind {
                 Some(chelis_shell::SymbolKind::Value) => {
-                    let type_repr = checked
-                        .type_env()
-                        .get(&internal)
-                        .map(|expr| {
-                            chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
-                                .trim()
-                                .to_string()
-                        })
-                        .or_else(|| sig_type_repr(module_source, export_name));
+                    let signature = exported_function_type(&checked, &internal, || {
+                        sig_type_repr(module_source, export_name)
+                    })?;
                     let effects = symbol_effects(module_source, export_name);
                     let has_body = module_source.decls.iter().any(|d| {
                         matches!(d,
@@ -5401,7 +5710,8 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                     });
                     functions.push(FunctionSchema {
                         name: export_name.clone(),
-                        type_repr,
+                        type_repr: signature.type_repr,
+                        type_variable_restrictions: signature.type_variable_restrictions,
                         effects,
                         has_body,
                     });
@@ -5428,14 +5738,11 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                                         &module_source.module_name,
                                         &v.name,
                                     );
-                                    let ctor_type =
-                                        checked.type_env().get(&ctor_internal).map(|expr| {
-                                            chelis_deep::printer::print_canonical(
-                                                std::slice::from_ref(expr),
-                                            )
-                                            .trim()
-                                            .to_string()
-                                        });
+                                    let ctor_type = checked
+                                        .program()
+                                        .type_env()
+                                        .get(&ctor_internal)
+                                        .map(canonical_shell_type_repr);
                                     ConstructorSchema {
                                         name: v.name.clone(),
                                         kind: if has_invariant {
@@ -5469,6 +5776,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
     modules.sort_by(|a, b| a.module.cmp(&b.module));
 
     Ok(PackageSchema {
+        format_version: PACKAGE_SCHEMA_FORMAT_VERSION,
         package: PackageId {
             name: manifest.package.name.clone(),
             version: manifest.package.version.clone(),
@@ -5957,7 +6265,7 @@ fn validate_manifest_with(
     if let Some(warning) = compiler_pin_outcome(manifest, allow_compiler_drift)? {
         eprintln!("{warning}");
     }
-    let mut seen_additional = HashSet::new();
+    let mut seen_additional = UnordSet::new();
     for entry in &manifest.package.additional_sources {
         if entry.trim().is_empty() {
             return Err("package.additional_sources entries must not be empty".to_string());
@@ -6012,7 +6320,7 @@ fn validate_manifest_with(
         }
     }
     if let Some(src) = &manifest.chelis_src {
-        let mut seen_crate = HashSet::new();
+        let mut seen_crate = UnordSet::new();
         for entry in &src.crates {
             if entry.trim().is_empty() {
                 return Err("chelis-src.crates entries must not be empty".to_string());
@@ -6141,7 +6449,7 @@ fn is_safe_artifact_name(name: &str) -> bool {
 
 fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGraph, String> {
     let mut packages = BTreeMap::new();
-    let mut by_name = HashMap::<String, PackageId>::new();
+    let mut by_name = UnordMap::<String, PackageId>::new();
     let mut stack = Vec::new();
     let root_manifest = read_manifest(&root.join("reef.toml"))?;
     let root_id = PackageId {
@@ -6178,7 +6486,7 @@ fn resolve_package_recursive(
     maybe_shell: Option<ShellPackage>,
     remote_origin: Option<String>,
     packages: &mut BTreeMap<String, LoadedPackage>,
-    by_name: &mut HashMap<String, PackageId>,
+    by_name: &mut UnordMap<String, PackageId>,
     stack: &mut Vec<String>,
     options: LoadOptions,
 ) -> Result<(), String> {
@@ -7115,7 +7423,7 @@ fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {
     // required for chelis#157: a downstream module that imports `Column`
     // must be able to write `IntCol(...)` and resolve it to the exporting
     // module's mangled constructor.
-    let ctors_for_type: HashMap<&str, &[Variant]> = decls
+    let ctors_for_type: UnordMap<&str, &[Variant]> = decls
         .iter()
         .filter_map(|decl| match decl {
             Decl::TypeDef { name, variants, .. } => Some((name.as_str(), variants.as_slice())),
@@ -7484,9 +7792,485 @@ fn shell_package_sha256(shell: &ShellPackage) -> Result<String, String> {
         .map_err(|e| format!("encode shell for content identity: {e}"))
 }
 
+/// Render one exported checker type for a CHB/package-schema boundary.
+///
+/// Solver-variable numbers are allocation identities, not part of a public
+/// type. They can differ between otherwise equivalent checker runs when an
+/// internal map chooses a different traversal order. Persisting those numbers
+/// made the CHB content hash depend on that incidental order. Rename each
+/// variable class by deterministic first occurrence before printing so equal
+/// type structures have one byte representation while shared and independent
+/// variables remain distinguishable.
+fn canonical_shell_type_repr(expr: &chelis_deep::Expr) -> String {
+    let mut renamer = ShellTypeVariableRenamer::default();
+    let canonical = renamer.rewrite(expr);
+    chelis_deep::printer::print_canonical(std::slice::from_ref(&canonical))
+        .trim()
+        .to_string()
+}
+
+#[derive(Default)]
+struct ShellTypeVariableRenamer {
+    type_vars: BTreeMap<String, String>,
+    dim_vars: BTreeMap<String, String>,
+    rank_vars: BTreeMap<String, String>,
+}
+
+impl ShellTypeVariableRenamer {
+    fn rewrite(&mut self, expr: &chelis_deep::Expr) -> chelis_deep::Expr {
+        use chelis_deep::{Expr as DeepExpr, List, MetaExpr, UnknownFormData};
+
+        match expr {
+            DeepExpr::Atom(..) => expr.clone(),
+            DeepExpr::Map(meta, span) => DeepExpr::Map(self.rewrite_meta(meta), *span),
+            DeepExpr::MetaExpr(meta, span) => DeepExpr::MetaExpr(
+                MetaExpr {
+                    entries: meta
+                        .entries
+                        .iter()
+                        .map(|(key, value)| (key.clone(), self.rewrite(value)))
+                        .collect(),
+                    expr: Box::new(self.rewrite(&meta.expr)),
+                },
+                *span,
+            ),
+            DeepExpr::Node(node, span) => {
+                let tag = node.tag();
+                let children = node
+                    .children_slice()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| self.rewrite_child(tag, index, child))
+                    .collect();
+                DeepExpr::node(tag, self.rewrite_meta(node.meta()), children, *span)
+            }
+            DeepExpr::List(list, span) => {
+                let tag = list.tag();
+                let elements = list
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| match tag {
+                        Some(tag) if index >= 2 => self.rewrite_child(tag, index - 2, child),
+                        _ => self.rewrite(child),
+                    })
+                    .collect();
+                DeepExpr::List(List { elements }, *span)
+            }
+            DeepExpr::BareList(children, span) => DeepExpr::BareList(
+                children.iter().map(|child| self.rewrite(child)).collect(),
+                *span,
+            ),
+            DeepExpr::UnknownForm(data) => DeepExpr::UnknownForm(Box::new(UnknownFormData {
+                head: data.head.clone(),
+                meta: self.rewrite_meta(&data.meta),
+                children: data
+                    .children
+                    .iter()
+                    .map(|child| self.rewrite(child))
+                    .collect(),
+                span: data.span,
+            })),
+        }
+    }
+
+    fn rewrite_meta(&mut self, meta: &chelis_deep::MetaMap) -> chelis_deep::MetaMap {
+        chelis_deep::MetaMap {
+            entries: meta
+                .entries
+                .iter()
+                .map(|(key, value)| (key.clone(), self.rewrite(value)))
+                .collect(),
+        }
+    }
+
+    fn rewrite_child(
+        &mut self,
+        tag: chelis_deep::DeepTag,
+        index: usize,
+        child: &chelis_deep::Expr,
+    ) -> chelis_deep::Expr {
+        use chelis_deep::{Atom, Expr as DeepExpr};
+
+        if index == 0
+            && let DeepExpr::Atom(Atom::Name(name), span) = child
+        {
+            let renamed = match tag {
+                chelis_deep::DeepTag::TVar => Self::canonical_name(&mut self.type_vars, "t", name),
+                chelis_deep::DeepTag::DVar => Self::canonical_name(&mut self.dim_vars, "d", name),
+                chelis_deep::DeepTag::DRank => Self::canonical_name(&mut self.rank_vars, "r", name),
+                _ => return self.rewrite(child),
+            };
+            return DeepExpr::Atom(Atom::Name(renamed), *span);
+        }
+        self.rewrite(child)
+    }
+
+    fn canonical_name(
+        names: &mut BTreeMap<String, String>,
+        prefix: &str,
+        original: &str,
+    ) -> String {
+        if let Some(existing) = names.get(original) {
+            return existing.clone();
+        }
+        // Every variable occurrence is rewritten, so allocating by map length
+        // cannot collide even when an input already uses (for example) `t0`:
+        // that input spelling is itself assigned exactly one output spelling.
+        let canonical = format!("{prefix}{}", names.len());
+        names.insert(original.to_string(), canonical.clone());
+        canonical
+    }
+}
+
+#[cfg(test)]
+mod shell_type_variable_canonicalization_tests {
+    use super::{canonical_shell_scheme, canonical_shell_type_repr};
+    use chelis_shell::{TypeVariableDomain, TypeVariableRestriction};
+    use chelis_types::infer::type_to_deep_expr;
+    use chelis_types::types::{
+        Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, TypeVarRestriction,
+    };
+
+    fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type {
+        Type::Fn(
+            vec![
+                Type::Var(TypeVar(t_first)),
+                Type::Ref(Box::new(Type::Tensor(
+                    vec![Dim::Var(DimVar(dim)), Dim::Rank(RankVar(rank))],
+                    TensorPrec::Var(TypeVar(t_second)),
+                ))),
+                Type::Adt(
+                    "Boxed".to_string(),
+                    vec![Type::Tuple(vec![
+                        Type::Var(TypeVar(t_first)),
+                        Type::Var(TypeVar(t_second)),
+                    ])],
+                ),
+            ],
+            Box::new(Type::Tensor(
+                vec![Dim::Var(DimVar(dim)), Dim::Rank(RankVar(rank))],
+                TensorPrec::Var(TypeVar(t_first)),
+            )),
+        )
+    }
+
+    #[test]
+    fn alpha_equivalent_type_dim_and_rank_ids_render_identically() {
+        let first =
+            canonical_shell_type_repr(&type_to_deep_expr(&representative_type(9, 42, 17, 23)));
+        let second =
+            canonical_shell_type_repr(&type_to_deep_expr(&representative_type(701, 3, 999, 2)));
+
+        assert_eq!(first, second);
+        assert!(first.contains("(t-var {} t0)"));
+        assert!(first.contains("(t-var {} t1)"));
+        assert!(first.contains("(d-var {} d0)"));
+        assert!(first.contains("(d-rank {} r0)"));
+    }
+
+    #[test]
+    fn shared_and_independent_variables_remain_distinct() {
+        let shared = Type::Fn(
+            vec![Type::Var(TypeVar(50)), Type::Var(TypeVar(50))],
+            Box::new(Type::Var(TypeVar(50))),
+        );
+        let independent = Type::Fn(
+            vec![Type::Var(TypeVar(50)), Type::Var(TypeVar(51))],
+            Box::new(Type::Var(TypeVar(50))),
+        );
+
+        assert_ne!(
+            canonical_shell_type_repr(&type_to_deep_expr(&shared)),
+            canonical_shell_type_repr(&type_to_deep_expr(&independent)),
+        );
+    }
+
+    #[test]
+    fn canonical_names_do_not_collapse_existing_canonical_looking_ids() {
+        let ty = Type::Tuple(vec![Type::Var(TypeVar(99)), Type::Var(TypeVar(0))]);
+        let rendered = canonical_shell_type_repr(&type_to_deep_expr(&ty));
+
+        assert_eq!(rendered.matches("(t-var {} t0)").count(), 1);
+        assert_eq!(rendered.matches("(t-var {} t1)").count(), 1);
+    }
+
+    #[test]
+    fn scheme_restrictions_follow_structural_alpha_renaming_across_namespaces() {
+        let first = Scheme {
+            tvars: vec![TypeVar(9), TypeVar(42)],
+            tvar_restrictions: vec![
+                (TypeVar(42), TypeVarRestriction::ActiveFloat),
+                (TypeVar(9), TypeVarRestriction::ActiveFloat),
+            ],
+            dvars: vec![DimVar(9)],
+            rvars: vec![RankVar(9)],
+            body: representative_type(9, 42, 9, 9),
+        };
+        let second = Scheme {
+            tvars: vec![TypeVar(701), TypeVar(3)],
+            tvar_restrictions: vec![
+                (TypeVar(701), TypeVarRestriction::ActiveFloat),
+                (TypeVar(3), TypeVarRestriction::ActiveFloat),
+            ],
+            dvars: vec![DimVar(701)],
+            rvars: vec![RankVar(701)],
+            body: representative_type(701, 3, 701, 701),
+        };
+
+        let first = canonical_shell_scheme(&first).expect("first scheme must canonicalize");
+        let second = canonical_shell_scheme(&second).expect("second scheme must canonicalize");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.type_variable_restrictions,
+            vec![
+                TypeVariableRestriction {
+                    variable: "t0".to_string(),
+                    domain: TypeVariableDomain::ActiveFloat,
+                },
+                TypeVariableRestriction {
+                    variable: "t1".to_string(),
+                    domain: TypeVariableDomain::ActiveFloat,
+                },
+            ]
+        );
+        let rendered = first.type_repr.unwrap();
+        assert!(rendered.contains("(t-var {} t0)"));
+        assert!(rendered.contains("(t-var {} t1)"));
+        assert!(rendered.contains("(d-var {} d0)"));
+        assert!(rendered.contains("(d-rank {} r0)"));
+    }
+
+    #[test]
+    fn unrestricted_and_monomorphic_schemes_emit_an_empty_ledger() {
+        for scheme in [
+            Scheme {
+                tvars: vec![TypeVar(33)],
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(
+                    vec![Type::Var(TypeVar(33))],
+                    Box::new(Type::Var(TypeVar(33))),
+                ),
+            },
+            Scheme::mono(Type::Prim(chelis_types::types::Prim::Int32)),
+        ] {
+            assert!(
+                canonical_shell_scheme(&scheme)
+                    .expect("scheme must canonicalize")
+                    .type_variable_restrictions
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn restriction_for_a_variable_absent_from_the_body_is_rejected() {
+        let scheme = Scheme {
+            tvars: vec![TypeVar(5)],
+            tvar_restrictions: vec![(TypeVar(5), TypeVarRestriction::ActiveFloat)],
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Prim(chelis_types::types::Prim::Int32),
+        };
+
+        assert_eq!(
+            canonical_shell_scheme(&scheme).unwrap_err(),
+            "checker scheme restricts type variable ?5 absent from its body"
+        );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalExportedType {
+    type_repr: Option<String>,
+    type_variable_restrictions: Vec<TypeVariableRestriction>,
+}
+
+fn exported_function_type(
+    checked: &chelis_pipeline_core::CheckedLibrary,
+    internal_name: &str,
+    authored_fallback: impl FnOnce() -> Option<String>,
+) -> Result<CanonicalExportedType, String> {
+    if let Some(scheme) = checked.type_env().scheme(internal_name) {
+        return canonical_shell_scheme(scheme);
+    }
+
+    Ok(CanonicalExportedType {
+        type_repr: checked
+            .program()
+            .type_env()
+            .get(internal_name)
+            .map(canonical_shell_type_repr)
+            .or_else(authored_fallback),
+        type_variable_restrictions: Vec::new(),
+    })
+}
+
+fn canonical_shell_scheme(
+    scheme: &chelis_types::types::Scheme,
+) -> Result<CanonicalExportedType, String> {
+    use chelis_types::infer::type_to_deep_expr;
+    use chelis_types::types::TypeVarRestriction;
+
+    let mut renamer = SchemeVariableRenamer::default();
+    let canonical_body = renamer.rewrite_type(&scheme.body);
+    let quantified = scheme.tvars.iter().copied().collect::<UnordSet<_>>();
+    let mut seen = UnordSet::new();
+    let mut restrictions = Vec::with_capacity(scheme.tvar_restrictions.len());
+
+    for (variable, restriction) in &scheme.tvar_restrictions {
+        if !quantified.contains(variable) {
+            return Err(format!(
+                "checker scheme restricts unquantified type variable ?{}",
+                variable.0
+            ));
+        }
+        if !seen.insert(*variable) {
+            return Err(format!(
+                "checker scheme repeats the restriction for type variable ?{}",
+                variable.0
+            ));
+        }
+        let canonical = renamer.type_vars.get(variable).copied().ok_or_else(|| {
+            format!(
+                "checker scheme restricts type variable ?{} absent from its body",
+                variable.0
+            )
+        })?;
+        let domain = match restriction {
+            TypeVarRestriction::ActiveFloat => TypeVariableDomain::ActiveFloat,
+            TypeVarRestriction::ActiveInt => TypeVariableDomain::ActiveInt,
+            TypeVarRestriction::ActiveNumeric => TypeVariableDomain::ActiveNumeric,
+        };
+        restrictions.push((
+            canonical.0,
+            TypeVariableRestriction {
+                variable: format!("t{}", canonical.0),
+                domain,
+            },
+        ));
+    }
+    restrictions.sort_by_key(|(index, _)| *index);
+
+    Ok(CanonicalExportedType {
+        type_repr: Some(canonical_shell_type_repr(&type_to_deep_expr(
+            &canonical_body,
+        ))),
+        type_variable_restrictions: restrictions
+            .into_iter()
+            .map(|(_, restriction)| restriction)
+            .collect(),
+    })
+}
+
+#[derive(Default)]
+struct SchemeVariableRenamer {
+    type_vars: UnordMap<chelis_types::types::TypeVar, chelis_types::types::TypeVar>,
+    dim_vars: UnordMap<chelis_types::types::DimVar, chelis_types::types::DimVar>,
+    rank_vars: UnordMap<chelis_types::types::RankVar, chelis_types::types::RankVar>,
+}
+
+impl SchemeVariableRenamer {
+    fn rewrite_type(&mut self, ty: &chelis_types::types::Type) -> chelis_types::types::Type {
+        use chelis_types::types::{NominalArg, TensorPrec, Type};
+
+        match ty {
+            Type::Prim(prim) => Type::Prim(*prim),
+            Type::Fn(arguments, result) => Type::Fn(
+                arguments
+                    .iter()
+                    .map(|argument| self.rewrite_type(argument))
+                    .collect(),
+                Box::new(self.rewrite_type(result)),
+            ),
+            Type::Ref(inner) => Type::Ref(Box::new(self.rewrite_type(inner))),
+            Type::Tensor(dimensions, precision) => Type::Tensor(
+                dimensions
+                    .iter()
+                    .map(|dimension| self.rewrite_dimension(dimension))
+                    .collect(),
+                match precision {
+                    TensorPrec::Concrete(prim) => TensorPrec::Concrete(*prim),
+                    TensorPrec::Var(variable) => TensorPrec::Var(self.type_variable(*variable)),
+                },
+            ),
+            Type::Adt(name, arguments) => Type::Adt(
+                name.clone(),
+                arguments
+                    .iter()
+                    .map(|argument| self.rewrite_type(argument))
+                    .collect(),
+            ),
+            Type::KindedAdt(name, arguments) => Type::KindedAdt(
+                name.clone(),
+                arguments
+                    .iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.rewrite_type(ty)),
+                        NominalArg::Dimension(dim) => {
+                            NominalArg::Dimension(self.rewrite_dimension(dim))
+                        }
+                    })
+                    .collect(),
+            ),
+            Type::Var(variable) => Type::Var(self.type_variable(*variable)),
+            Type::Tuple(elements) => Type::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.rewrite_type(element))
+                    .collect(),
+            ),
+            Type::Unit => Type::Unit,
+            Type::Error(witness) => Type::Error(*witness),
+        }
+    }
+
+    fn rewrite_dimension(
+        &mut self,
+        dimension: &chelis_types::types::Dim,
+    ) -> chelis_types::types::Dim {
+        use chelis_types::types::Dim;
+
+        match dimension {
+            Dim::Name(name) => Dim::Name(name.clone()),
+            Dim::Var(variable) => Dim::Var(self.dimension_variable(*variable)),
+            Dim::Lit(value) => Dim::Lit(*value),
+            Dim::Wildcard => Dim::Wildcard,
+            Dim::Rank(variable) => Dim::Rank(self.rank_variable(*variable)),
+        }
+    }
+
+    fn type_variable(
+        &mut self,
+        variable: chelis_types::types::TypeVar,
+    ) -> chelis_types::types::TypeVar {
+        let next = chelis_types::types::TypeVar(self.type_vars.len() as u32);
+        *self.type_vars.entry(variable).or_insert(next)
+    }
+
+    fn dimension_variable(
+        &mut self,
+        variable: chelis_types::types::DimVar,
+    ) -> chelis_types::types::DimVar {
+        let next = chelis_types::types::DimVar(self.dim_vars.len() as u32);
+        *self.dim_vars.entry(variable).or_insert(next)
+    }
+
+    fn rank_variable(
+        &mut self,
+        variable: chelis_types::types::RankVar,
+    ) -> chelis_types::types::RankVar {
+        let next = chelis_types::types::RankVar(self.rank_vars.len() as u32);
+        *self.rank_vars.entry(variable).or_insert(next)
+    }
+}
+
 fn build_shell_package(
     package: &LoadedPackage,
-    checked: &chelis_types::CheckedProgram,
+    checked: &chelis_pipeline_core::CheckedLibrary,
     archive_sha256: &str,
 ) -> Result<ShellPackage, String> {
     let mut modules = Vec::new();
@@ -7498,21 +8282,26 @@ fn build_shell_package(
                     format!("export `{name}` not defined in {}", module.module_name)
                 })?;
             let internal = internal_name(&package.id.name, &module.module_name, name);
-            let type_repr = checked
-                .type_env()
-                .get(&internal)
-                .map(|expr| {
-                    chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
-                        .trim()
-                        .to_string()
-                })
-                .or_else(|| sig_type_repr(module, name));
+            let signature = if kind == SymbolKind::Value {
+                exported_function_type(checked, &internal, || sig_type_repr(module, name))?
+            } else {
+                CanonicalExportedType {
+                    type_repr: checked
+                        .program()
+                        .type_env()
+                        .get(&internal)
+                        .map(canonical_shell_type_repr)
+                        .or_else(|| sig_type_repr(module, name)),
+                    type_variable_restrictions: Vec::new(),
+                }
+            };
             let effects = symbol_effects(module, name);
             let has_body = module.decls.iter().any(|decl| matches!(decl, Decl::FunDef { name: decl_name, .. } | Decl::LetDef { name: decl_name, .. } if decl_name == name));
             exports.push(ShellSymbol {
                 name: name.clone(),
                 kind,
-                type_repr,
+                type_repr: signature.type_repr,
+                type_variable_restrictions: signature.type_variable_restrictions,
                 effects,
                 has_body,
             });
@@ -7525,6 +8314,7 @@ fn build_shell_package(
     }
     modules.sort_by(|a, b| a.module.cmp(&b.module));
     Ok(ShellPackage {
+        format_version: SHELL_FORMAT_VERSION,
         package: package.id.clone(),
         compiler: package.manifest.package.compiler.clone(),
         modules,
@@ -7551,11 +8341,7 @@ fn sig_type_repr(module: &ModuleSource, name: &str) -> Option<String> {
     let chelis_deep::ast::Expr::List(list, _) = expr else {
         return None;
     };
-    list.elements.get(3).map(|ty| {
-        chelis_deep::printer::print_canonical(std::slice::from_ref(ty))
-            .trim()
-            .to_string()
-    })
+    list.elements.get(3).map(canonical_shell_type_repr)
 }
 
 fn symbol_effects(module: &ModuleSource, name: &str) -> Vec<String> {
@@ -7648,11 +8434,13 @@ fn dependency_shells(graph: &PackageGraph) -> BTreeMap<String, ShellPackage> {
         .collect::<BTreeMap<_, _>>()
 }
 
-fn build_internal_maps(graph: &PackageGraph) -> HashMap<(String, String), HashMap<String, String>> {
-    let mut maps = HashMap::new();
+fn build_internal_maps(
+    graph: &PackageGraph,
+) -> UnordMap<(String, String), UnordMap<String, String>> {
+    let mut maps = UnordMap::new();
     for (package_name, package) in &graph.packages {
         for module in package.modules.values() {
-            let mut module_map = HashMap::new();
+            let mut module_map = UnordMap::new();
             for name in module.symbols.keys() {
                 module_map.insert(
                     name.clone(),
@@ -7671,17 +8459,17 @@ fn build_internal_maps(graph: &PackageGraph) -> HashMap<(String, String), HashMa
 fn build_name_resolver(
     module: &ModuleSource,
     graph: &PackageGraph,
-    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<NameResolver, String> {
-    let mut qualified = HashMap::<String, HashMap<String, String>>::new();
-    let mut unqualified = HashMap::<String, String>::new();
+    let mut qualified = UnordMap::<String, UnordMap<String, String>>::new();
+    let mut unqualified = UnordMap::<String, String>::new();
     let module_internal = internal_maps
         .get(&(module.package_name.clone(), module.module_name.clone()))
         .cloned()
         .unwrap_or_default();
 
-    for (name, internal) in &module_internal {
+    for (name, internal) in module_internal.to_sorted() {
         unqualified.insert(name.clone(), internal.clone());
     }
 
@@ -7735,12 +8523,12 @@ fn build_name_resolver(
                     .get(name)
                     .map(|internal| (name.clone(), internal.clone()))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         qualified.insert(import_module.clone(), qualified_map.clone());
         match kind {
             ImportKind::Qualified => {}
             ImportKind::All => {
-                for (name, internal) in qualified_map {
+                for (name, internal) in qualified_map.into_sorted() {
                     import_sources
                         .entry(name.clone())
                         .or_default()
@@ -7809,7 +8597,7 @@ fn build_name_resolver(
 fn rewrite_module_decls(
     module: &ModuleSource,
     graph: &PackageGraph,
-    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<Vec<Decl>, String> {
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
@@ -7864,7 +8652,7 @@ fn drain_qualified_failures(resolver: &NameResolver) -> Result<(), String> {
 fn rewrite_eval_module_decls(
     module: &ModuleSource,
     graph: &PackageGraph,
-    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<Vec<Decl>, String> {
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
@@ -7965,9 +8753,9 @@ fn find_imported_module<'a>(
 }
 
 struct NameResolver {
-    own_names: HashMap<String, String>,
-    imported_names: HashMap<String, String>,
-    qualified_modules: HashMap<String, HashMap<String, String>>,
+    own_names: UnordMap<String, String>,
+    imported_names: UnordMap<String, String>,
+    qualified_modules: UnordMap<String, UnordMap<String, String>>,
     /// Qualified references whose head named an imported module but whose leaf
     /// that module does not export — a typo or unexported name. Recorded by
     /// the expression / pattern / type resolvers as they run, then drained
@@ -8010,7 +8798,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
     match decl {
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -8020,11 +8808,20 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
+            // [05-OP-35] exposes Std.Sort.sort as the sole stdlib identity
+            // while its body delegates to the compiler primitive of the
+            // same spelling. Keep that one body reference bare so builtin-
+            // first dispatch reaches the primitive instead of rewriting it
+            // into trivial self-recursion. Entry source cannot take this
+            // path: it is exact to the bundled package/module identity.
+            if package == "chelis-std" && module == "Std.Sort" && name == "sort" {
+                locals.insert(name.clone());
+            }
             let body = rewrite_expr(body, resolver, &mut locals);
             Decl::FunDef {
                 name: internal_name(package, module, name),
-                dim_params: dim_params.clone(),
+                type_binders: type_binders.clone(),
                 params: params
                     .iter()
                     .map(|param| rewrite_param(param, resolver))
@@ -8043,7 +8840,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
         } => Decl::LetDef {
             name: internal_name(package, module, name),
             ty: ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
-            value: rewrite_expr(value, resolver, &mut HashSet::new()),
+            value: rewrite_expr(value, resolver, &mut UnordSet::new()),
             span: *span,
         },
         Decl::Property {
@@ -8057,7 +8854,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             Decl::Property {
                 name: internal_name(package, module, name),
                 params: params
@@ -8078,11 +8875,13 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
         }
         Decl::Sig {
             name,
+            type_binders,
             ty,
             effects,
             span,
         } => Decl::Sig {
             name: internal_name(package, module, name),
+            type_binders: type_binders.clone(),
             ty: rewrite_type(ty, resolver),
             effects: effects.clone(),
             span: *span,
@@ -8124,7 +8923,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             body,
             span,
         } => {
-            let mut locals = params.iter().cloned().collect::<HashSet<_>>();
+            let mut locals = params.iter().cloned().collect::<UnordSet<_>>();
             Decl::MacroDef {
                 name: internal_name(package, module, name),
                 params: params.clone(),
@@ -8147,7 +8946,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
     match decl {
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -8157,11 +8956,11 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             let body = rewrite_expr(body, resolver, &mut locals);
             Decl::FunDef {
                 name: name.clone(),
-                dim_params: dim_params.clone(),
+                type_binders: type_binders.clone(),
                 params: params
                     .iter()
                     .map(|param| rewrite_param(param, resolver))
@@ -8180,7 +8979,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
         } => Decl::LetDef {
             name: name.clone(),
             ty: ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
-            value: rewrite_expr(value, resolver, &mut HashSet::new()),
+            value: rewrite_expr(value, resolver, &mut UnordSet::new()),
             span: *span,
         },
         Decl::Property {
@@ -8194,7 +8993,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             Decl::Property {
                 name: name.clone(),
                 params: params
@@ -8215,11 +9014,13 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
         }
         Decl::Sig {
             name,
+            type_binders,
             ty,
             effects,
             span,
         } => Decl::Sig {
             name: name.clone(),
+            type_binders: type_binders.clone(),
             ty: rewrite_type(ty, resolver),
             effects: effects.clone(),
             span: *span,
@@ -8269,7 +9070,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
         } => Decl::MacroDef {
             name: name.clone(),
             params: params.clone(),
-            body: rewrite_expr(body, resolver, &mut HashSet::new()),
+            body: rewrite_expr(body, resolver, &mut UnordSet::new()),
             span: *span,
         },
         Decl::Dim { names, span } => Decl::Dim {
@@ -8281,7 +9082,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
 }
 
 fn rewrite_property_option(option: &PropertyOption, resolver: &NameResolver) -> PropertyOption {
-    let mut locals = HashSet::new();
+    let mut locals = UnordSet::new();
     match option {
         PropertyOption::Tolerance(value, span) => {
             PropertyOption::Tolerance(rewrite_expr(value, resolver, &mut locals), *span)
@@ -8347,7 +9148,7 @@ fn rewrite_variant_fields(fields: &VariantFields, resolver: &NameResolver) -> Va
 /// to in-module zero-arg constants get reef-mangled while the binder
 /// stays bare (mirrors the `Decl::Property` precondition/body rewrite).
 fn rewrite_invariant(invariant: &TypeInvariant, resolver: &NameResolver) -> TypeInvariant {
-    let mut locals = HashSet::new();
+    let mut locals = UnordSet::new();
     locals.insert(invariant.binder.clone());
     TypeInvariant {
         binder: invariant.binder.clone(),
@@ -8382,6 +9183,7 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
         // A rank variable `..r` is local to its def/sig and never a
         // module-qualified name, so it passes through name resolution as-is.
         TypeExpr::RankSpread(name, span) => TypeExpr::RankSpread(name.clone(), *span),
+        TypeExpr::DimensionLiteral(value, span) => TypeExpr::DimensionLiteral(*value, *span),
         TypeExpr::Tensor(parts, precision, span) => TypeExpr::Tensor(
             parts
                 .iter()
@@ -8419,7 +9221,7 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
     }
 }
 
-fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<String>) -> Expr {
+fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut UnordSet<String>) -> Expr {
     if let Some(resolved) = resolve_qualified_expr(expr, resolver) {
         return resolved;
     }
@@ -8602,7 +9404,7 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
     }
 }
 
-fn rewrite_arm(arm: &MatchArm, resolver: &NameResolver, locals: &mut HashSet<String>) -> MatchArm {
+fn rewrite_arm(arm: &MatchArm, resolver: &NameResolver, locals: &mut UnordSet<String>) -> MatchArm {
     let mut scoped = locals.clone();
     collect_pattern_binders(&arm.pattern, &mut scoped);
     MatchArm {
@@ -8658,7 +9460,7 @@ fn rewrite_pattern(pattern: &Pattern, resolver: &NameResolver) -> Pattern {
 fn rewrite_let_binding(
     binding: &LetBinding,
     resolver: &NameResolver,
-    locals: &mut HashSet<String>,
+    locals: &mut UnordSet<String>,
 ) -> LetBinding {
     let value = rewrite_expr(&binding.value, resolver, locals);
     collect_let_pattern_binders(&binding.pattern, locals);
@@ -8672,7 +9474,7 @@ fn rewrite_let_binding(
 // Deliberately separate from `chelis_deep::pattern_binder_names`: Reef is
 // resolving the Surf parser's `Pattern` AST before any Deep pattern exists.
 // Deep consumers must use the shared helper instead of copying its tag walk.
-fn collect_pattern_binders(pattern: &Pattern, locals: &mut HashSet<String>) {
+fn collect_pattern_binders(pattern: &Pattern, locals: &mut UnordSet<String>) {
     match pattern {
         Pattern::Var(name, _) => {
             locals.insert(name.clone());
@@ -8695,7 +9497,7 @@ fn collect_pattern_binders(pattern: &Pattern, locals: &mut HashSet<String>) {
     }
 }
 
-fn collect_let_pattern_binders(pattern: &LetPattern, locals: &mut HashSet<String>) {
+fn collect_let_pattern_binders(pattern: &LetPattern, locals: &mut UnordSet<String>) {
     match pattern {
         LetPattern::Var(name, _) => {
             locals.insert(name.clone());
@@ -8709,7 +9511,7 @@ fn collect_let_pattern_binders(pattern: &LetPattern, locals: &mut HashSet<String
     }
 }
 
-fn resolve_name(name: &str, resolver: &NameResolver, locals: &HashSet<String>) -> String {
+fn resolve_name(name: &str, resolver: &NameResolver, locals: &UnordSet<String>) -> String {
     if locals.contains(name) {
         return name.to_string();
     }
@@ -8834,6 +9636,7 @@ fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Ex
         .map_err(|err| err.to_string())
 }
 
+#[cfg(test)]
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
@@ -8850,6 +9653,19 @@ fn checked_program_with_effects(
     chelis_pipeline_core::complete_checks(analysis, chelis_pipeline_core::SemanticContext::Isolated)
         .map(|checked| checked.into_parts().2)
         .map_err(|error| error.to_string())
+}
+
+fn checked_library_with_effects(
+    deep_exprs: &[chelis_deep::ast::Expr],
+) -> Result<chelis_pipeline_core::CheckedLibrary, String> {
+    let _linked = chelis_types::install_linked_program_guard();
+    let prepared = chelis_pipeline_core::PreparedProgram::from_expanded_deep(deep_exprs.to_vec());
+    chelis_pipeline_core::check_prepared_library(prepared).map_err(|error| match error {
+        chelis_pipeline_core::LibraryRejection::Type { report } => {
+            format!("Type errors: {:?}", report.errors)
+        }
+        other => other.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -8897,7 +9713,7 @@ mod tests {
         let span = Span::new(0, 0);
         let fun = Decl::FunDef {
             name: "pkg__a__B__c".to_string(),
-            dim_params: vec![],
+            type_binders: vec![],
             params: vec![],
             ret_ty: None,
             effects: None,
@@ -10480,6 +11296,206 @@ module_prefix = "OrphanSig"
         compile_with_reef_graph(&graph, &paired).expect("paired entry signature must link");
     }
 
+    fn selected_entry_root(declarations: &[Decl], name: &str) -> SelectedEntryRoot {
+        let span = declarations
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef {
+                    name: candidate,
+                    span,
+                    ..
+                } if candidate == name => Some(*span),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing selected function `{name}`"));
+        SelectedEntryRoot {
+            name: name.to_string(),
+            span,
+        }
+    }
+
+    #[test]
+    fn isolated_entries_do_not_publish_symbols_and_roots_avoid_source_collisions() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let first = chelis_surf::parser::parse_str("def test_first() -> bool = sibling_value()\n")
+            .expect("parse first entry");
+        let second = chelis_surf::parser::parse_str(
+            "def sibling_value() -> bool = true\n\
+             def __chelis_batch_root_0() -> bool = true\n\
+             def test_second() -> bool = sibling_value()\n",
+        )
+        .expect("parse second entry");
+        let entries = vec![
+            IsolatedEntryModule {
+                manifest_index: 7,
+                declarations: first.clone(),
+                selected_roots: vec![selected_entry_root(&first, "test_first")],
+            },
+            IsolatedEntryModule {
+                manifest_index: 9,
+                declarations: second.clone(),
+                selected_roots: vec![selected_entry_root(&second, "test_second")],
+            },
+        ];
+
+        let batch = rewrite_isolated_entry_modules_with_reef_graph(&graph, &entries)
+            .expect("rewrite isolated entries");
+        assert_eq!(
+            batch.exact_root(7, "test_first"),
+            Some(
+                internal_name("myapp", "Myapp.__ChelisTestBatch7", "__chelis_batch_root_0")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            batch.exact_root(9, "test_second"),
+            Some(
+                internal_name(
+                    "myapp",
+                    "Myapp.__ChelisTestBatch9",
+                    "__chelis_batch_root_0_1"
+                )
+                .as_str()
+            ),
+            "an authored synthetic-prefix name must not collide with the inserted root"
+        );
+
+        let prepared = compile_rewritten_entry_batch_with_reef_graph(&graph, &batch)
+            .expect("append rewritten batch");
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar batch");
+        let error = checked_program_with_effects(&deep)
+            .expect_err("the first entry cannot borrow the second entry's declaration");
+        assert!(
+            error.contains("unbound variable: sibling_value"),
+            "unexpected isolated-entry rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn isolated_roots_do_not_shadow_selectively_imported_bindings() {
+        let (_dir, root) = shared_graph_fixture();
+        write(
+            &root.join("mylib/src/math.ch"),
+            "module Mylib.Math\n\n\
+             export (add, __chelis_batch_root_0)\n\
+             def add(x: int32, y: int32) -> int32 = x + y\n\
+             def __chelis_batch_root_0() -> bool = true\n",
+        );
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let declarations = chelis_surf::parser::parse_str(
+            "import Mylib.Math (__chelis_batch_root_0)\n\
+             def test_imported() -> bool = __chelis_batch_root_0()\n",
+        )
+        .expect("parse selectively imported entry");
+        let entry = IsolatedEntryModule {
+            manifest_index: 0,
+            declarations: declarations.clone(),
+            selected_roots: vec![selected_entry_root(&declarations, "test_imported")],
+        };
+
+        let batch = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[entry])
+            .expect("rewrite imported entry");
+        assert_eq!(
+            batch.exact_root(0, "test_imported"),
+            Some(
+                internal_name(
+                    "myapp",
+                    "Myapp.__ChelisTestBatch0",
+                    "__chelis_batch_root_0_1"
+                )
+                .as_str()
+            ),
+            "the inserted root must not shadow an imported binding"
+        );
+
+        let prepared = compile_rewritten_entry_batch_with_reef_graph(&graph, &batch)
+            .expect("append rewritten batch");
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar batch");
+        checked_program_with_effects(&deep).expect("selectively imported entry must type-check");
+    }
+
+    #[test]
+    fn isolated_entry_manifest_and_root_identity_fail_closed() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let declarations =
+            chelis_surf::parser::parse_str("def test_one() -> bool = true\n").expect("parse entry");
+        let entry = IsolatedEntryModule {
+            manifest_index: 3,
+            declarations: declarations.clone(),
+            selected_roots: vec![selected_entry_root(&declarations, "test_one")],
+        };
+        let duplicate_error =
+            rewrite_isolated_entry_modules_with_reef_graph(&graph, &[entry.clone(), entry.clone()])
+                .expect_err("duplicate manifest indices must be rejected");
+        assert!(duplicate_error.contains("duplicate isolated entry manifest index 3"));
+
+        let missing = IsolatedEntryModule {
+            manifest_index: 4,
+            declarations,
+            selected_roots: vec![SelectedEntryRoot {
+                name: "missing".to_string(),
+                span: chelis_deep::Span::new(0, 0),
+            }],
+        };
+        let missing_error = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[missing])
+            .expect_err("missing selected roots must be rejected");
+        assert!(missing_error.contains("selects missing root `missing`"));
+
+        let reserved_declarations =
+            chelis_surf::parser::parse_str("def pkg__forged__Module__test_one() -> bool = true\n")
+                .expect("parse reserved-name entry");
+        let reserved = IsolatedEntryModule {
+            manifest_index: 5,
+            declarations: reserved_declarations.clone(),
+            selected_roots: vec![selected_entry_root(
+                &reserved_declarations,
+                "pkg__forged__Module__test_one",
+            )],
+        };
+        let reserved_error = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[reserved])
+            .expect_err("authored reserved linker names must stay rejected in batch mode");
+        assert!(reserved_error.contains("only the linker may produce"));
+    }
+
+    #[test]
+    fn isolated_entry_local_map_covers_every_declaration_namespace() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let declarations = chelis_surf::parser::parse_str(
+            "dim n\n\
+             sig helper: int32 -> int32\n\
+             def helper(x: int32) -> int32 = x\n\
+             type Row = tensor[n, int32]\n\
+             type Boxed = | Wrap(Row)\n\
+             macro identity(x) = x\n\
+             @property stable forall(x: int32): helper(x) == x\n\
+             def test_all() -> bool = true\n",
+        )
+        .expect("parse every-namespace entry");
+        let entry = IsolatedEntryModule {
+            manifest_index: 11,
+            declarations: declarations.clone(),
+            selected_roots: vec![selected_entry_root(&declarations, "test_all")],
+        };
+
+        let batch = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[entry])
+            .expect("rewrite every declaration namespace");
+        let names = collect_symbol_kinds(batch.declarations())
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        for source_name in [
+            "n", "helper", "Row", "Boxed", "Wrap", "identity", "stable", "test_all",
+        ] {
+            let exact = internal_name("myapp", "Myapp.__ChelisTestBatch11", source_name);
+            assert!(
+                names.contains(&exact),
+                "isolated local map omitted `{source_name}`: {names:?}"
+            );
+        }
+    }
+
     // ---- chelis#157: module-scoped constructor resolution ----
 
     /// Build a two-package graph where the dependency (`coral`) and the
@@ -11100,14 +12116,14 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/sd.ch"),
             "module Demo.Sd\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         // `combo` pulls in both modules qualified-access-only (`()`), so no
         // unqualified `Mode`/`Train`/`Eval`/`use` collide, and reaches each
@@ -11117,7 +12133,7 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def go() -> i64 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
+             def go() -> int32 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
         );
         write(
             &root.join("reef.lock"),
@@ -11214,13 +12230,13 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/combo.ch"),
             "module Demo.Combo\n\
              import Demo.Dropout\n\
-             def go() -> i64 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
+             def go() -> int32 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
         );
         write(
             &root.join("reef.lock"),
@@ -11283,8 +12299,8 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def classify_dropout() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
-             def classify_sd() -> i64 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+             def classify_dropout() -> int32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+             def classify_sd() -> int32 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
         );
         write(
             &root.join("reef.lock"),
@@ -11376,14 +12392,14 @@ module_prefix = "Demo"
             "module Demo.Dropout\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         write(
             &root.join("src/sd.ch"),
             "module Demo.Sd\n\
              export (Mode, use)\n\
              type Mode = | Train | Eval\n\
-             def use(m: Mode) -> i64 = match m with { | Train => 1 | Eval => 0 }\n",
+             def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n",
         );
         // `relay` annotates its parameter with the qualified type and forwards
         // it to the qualified `use`. Both `Mode` ADTs are linked, so a bare
@@ -11393,7 +12409,7 @@ module_prefix = "Demo"
             "module Demo.Combo\n\
              import Demo.Dropout\n\
              import Demo.Sd\n\
-             def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n",
+             def relay(m: Demo.Dropout.Mode) -> int32 = Demo.Dropout.use(m)\n",
         );
         write(
             &root.join("reef.lock"),
@@ -11640,7 +12656,7 @@ module_prefix = "Stray"
             "digests must be sorted by (package, module)"
         );
         // No two rows for the same module — the walker must not double-count.
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
         for d in &digests {
             assert!(
                 seen.insert((d.package_name.clone(), d.module_name.clone())),
@@ -11708,9 +12724,10 @@ module_prefix = "RegistryLib"
             graph,
             linked_library_decls: Vec::new(),
             linked_stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             linked_non_stdlib_library_decls: Vec::new(),
             linked_dependency_decls: Vec::new(),
-            internal_maps: HashMap::new(),
+            internal_maps: UnordMap::new(),
             dep_shells: BTreeMap::new(),
             eval_module_prefix: "Consumer".to_string(),
         };
@@ -11832,6 +12849,7 @@ module_prefix = "RegistryLib"
             entry_decls,
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
         };
@@ -11871,6 +12889,7 @@ module_prefix = "RegistryLib"
             entry_decls: invariant_entry,
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
         };
@@ -11904,6 +12923,7 @@ module_prefix = "RegistryLib"
             entry_decls: macro_entry,
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
         };
@@ -11932,7 +12952,7 @@ module_prefix = "RegistryLib"
 
         // Spot-check the fields that matter for downstream compilation:
         // package_root + linked decl count + dep shell count + module
-        // prefix. Full PartialEq isn't derived (HashMap key-order would
+        // prefix. Full PartialEq isn't derived (UnordMap key-order would
         // make it non-deterministic anyway), so check the load-bearing
         // surface explicitly.
         assert_eq!(original.package_root, restored.package_root);
@@ -11976,6 +12996,96 @@ module_prefix = "RegistryLib"
         assert!(
             chelis_surf::format::format_program(&changed.linked_library_decls).contains("x - y"),
             "changed dependency source cannot reuse stale graph"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_version_tracks_both_branch_formats() {
+        assert_eq!(PREPARED_GRAPH_CACHE_VERSION, 5);
+    }
+
+    #[test]
+    fn prepared_graph_cache_rejects_the_preceding_positional_format() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        let graph = prepare_reef_graph_cached(&root).expect("cold graph");
+        assert_ne!(
+            graph.stdlib_source_digest(),
+            [0; 32],
+            "prepared graph carries the exact stdlib source determinant"
+        );
+        let cache_path = prepared_graph_cache_path(&root).expect("cache path");
+        let bytes = fs::read(&cache_path).expect("read prepared graph cache");
+        let mut envelope: PreparedGraphCacheEnvelope =
+            bincode::deserialize(&bytes[PREPARED_GRAPH_CACHE_MAGIC.len()..])
+                .expect("decode prepared graph envelope");
+        envelope.version = PREPARED_GRAPH_CACHE_VERSION - 1;
+        let encoded = bincode::serialize(&envelope).expect("encode preceding envelope");
+        let mut preceding = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
+        preceding.extend(encoded);
+        fs::write(&cache_path, preceding).expect("write preceding-format cache");
+
+        let error = load_prepared_graph_cache(&cache_path, &root)
+            .expect_err("preceding positional payload must be rejected before decode");
+        assert!(
+            error.contains("format version 4 unsupported (expected 5)"),
+            "unexpected version diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_key_separates_exact_build_identities() {
+        let (_dir, root) = shared_graph_fixture();
+        let first = prepared_graph_cache_key_input_bytes_for_identity(&root, "build-a")
+            .expect("first key input");
+        let second = prepared_graph_cache_key_input_bytes_for_identity(&root, "build-b")
+            .expect("second key input");
+        assert_ne!(
+            first, second,
+            "different compiler builds cannot share a key"
+        );
+        assert_eq!(
+            first,
+            prepared_graph_cache_key_input_bytes_for_identity(&root, "build-a")
+                .expect("stable key input"),
+            "identical semantic inputs have one byte preimage"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_envelope_rejects_a_distinct_build_identity() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        prepare_reef_graph_cached(&root).expect("cold graph");
+        let cache_path = prepared_graph_cache_path(&root).expect("cache path");
+        let bytes = fs::read(&cache_path).expect("read prepared graph cache");
+        let mut envelope: PreparedGraphCacheEnvelope =
+            bincode::deserialize(&bytes[PREPARED_GRAPH_CACHE_MAGIC.len()..])
+                .expect("decode prepared graph envelope");
+        assert_eq!(
+            envelope.compiler_identity,
+            chelis_image_id::build_fingerprint(),
+            "the envelope must carry the same opaque identity as the cache key"
+        );
+        envelope.compiler_identity.push_str("-other-build");
+        let encoded = bincode::serialize(&envelope).expect("encode changed envelope");
+        let mut changed = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
+        changed.extend(encoded);
+        fs::write(&cache_path, changed).expect("write changed-build cache");
+
+        assert!(
+            load_prepared_graph_cache(&cache_path, &root)
+                .expect("build mismatch is a clean miss")
+                .is_none(),
+            "another build's prepared graph cannot be accepted"
         );
     }
 

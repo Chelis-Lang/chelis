@@ -330,7 +330,7 @@ def bad() -> f32 = nonexistent_var
     let errors = check_errors(source);
     let unbound_errors: Vec<_> = errors
         .iter()
-        .filter(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
+        .filter(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }))
         .collect();
     assert!(
         !unbound_errors.is_empty(),

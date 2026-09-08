@@ -537,12 +537,18 @@ fn matrix_driver(rows: usize, cols: usize, values: &[f64]) -> String {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {{
     int64_t shape[2] = {{{rows}, {cols}}};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[{n}] = {{{init}}};
-    memcpy(x->data, xd, sizeof(xd));
+    chelis_tensor_write* x_guard = chelis_tensor_begin_write(x);
+    chelis_write_view x_view = chelis_tensor_write_view(x_guard);
+    memcpy(x_view.data, xd, sizeof(xd));
+    chelis_tensor_end_write(x_guard);
     chelis_tensor* g = out(x);
-    if (g->size != {n}) {{ printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }}
-    for (int i = 0; i < {n}; i++) printf("%.6f\n", g->data[i]);
+    chelis_read_view g_view = chelis_tensor_read_view(g);
+    if (g_view.count != {n}) {{ printf("FAIL_SIZE %lld\n", (long long)g_view.count); return 1; }}
+    for (int i = 0; i < {n}; i++) printf("%.6f\n", ((const float *)g_view.data)[i]);
+    chelis_tensor_release(g);
+    chelis_tensor_release(x);
     return 0;
 }}
 "#
@@ -862,7 +868,7 @@ fn issue_513_reshape_arith_gate_refused_grad_numel_mismatch_errs_in_both_lanes()
     expect_grad_failure(
         &source,
         "gaterefused",
-        "elements but the input has",
+        "elements but tensor has",
         "runtime numel mismatch under grad",
     );
 

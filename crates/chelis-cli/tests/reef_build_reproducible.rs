@@ -46,7 +46,13 @@ additional_sources = ["properties"]
     .expect("write zeta");
     fs::write(
         root.join("src/main.ch"),
-        "module Repro.Main\n\ndef main() -> int32 = 1\n",
+        "module Repro.Main\n\
+         export (main, identity, choose_left, tensor_identity, matrix_identity)\n\n\
+         def main() -> int32 = 1\n\
+         def identity[a](x: a) -> a = x\n\
+         def choose_left[a, b](x: a, y: b) -> a = x\n\
+         def tensor_identity[p](x: &tensor[..r, p]) -> &tensor[..r, p] = x\n\
+         def matrix_identity[n, m, p](x: &tensor[n, m, p]) -> &tensor[n, m, p] = x\n",
     )
     .expect("write main");
     fs::write(

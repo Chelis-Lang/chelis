@@ -471,6 +471,211 @@ fn tagged_ingress_rejects_a_different_tag() {
 }
 
 #[test]
+fn type_ingress_stamps_one_closed_type_expression() {
+    let ty = chelis_deep::parse_and_stamp_type(
+        "(t-fn {} (t-tensor {} (d-rank {} r0) (t-var {} t0)) (t-var {} t0))",
+    )
+    .expect("a canonical function type must stamp at a type position");
+
+    assert_eq!(ty.tag(), Some(DeepTag::TFn));
+
+    let multiple = chelis_deep::parse_and_stamp_type("(t-prim {} f32) (t-prim {} f64)")
+        .expect_err("a singular type boundary must reject multiple expressions");
+    assert!(multiple.to_string().contains("exactly one type expression"));
+
+    let unknown = chelis_deep::parse_and_stamp_type("(not-a-type {} f32)")
+        .expect_err("type syntax has a closed structural vocabulary");
+    assert!(unknown.to_string().contains("undecodable type head"));
+}
+
+#[test]
+fn type_ingress_accepts_the_complete_authored_type_grammar() {
+    let valid = [
+        "(t-prim {doc: \"primitive\"} f32)",
+        "(t-var {} t0)",
+        "(t-unit {})",
+        "(t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f16)))",
+        "(t-tensor {} (d-name {} *) (t-prim {} f32))",
+        "(t-tensor {} (d-name {} batch) (d-var {} width) (d-lit {} 3) (d-rank {} tail) (t-var {} t0))",
+        "(t-adt {} List (t-var {} t0))",
+        "(t-adt {} Map (t-prim {} string) (t-tuple {} (t-prim {} int64) (t-unit {})))",
+        "(t-tuple {} (t-prim {} bool) (t-ref {} (t-adt {} List (t-var {} t0))))",
+        "(t-fn {eff: (effects {} random (resource {} \"gpu:0\"))} (t-ref {} (t-tensor {} (d-rank {} r0) (t-var {} t0))) (t-tuple {} (t-var {} t0) (t-unit {})))",
+    ];
+
+    for source in valid {
+        let expression = chelis_deep::parse_and_stamp_type(source)
+            .unwrap_or_else(|error| panic!("valid authored type `{source}` was rejected: {error}"));
+        assert!(
+            matches!(
+                expression.tag(),
+                Some(
+                    DeepTag::TPrim
+                        | DeepTag::TVar
+                        | DeepTag::TUnit
+                        | DeepTag::TRef
+                        | DeepTag::TTensor
+                        | DeepTag::TAdt
+                        | DeepTag::TTuple
+                        | DeepTag::TFn
+                )
+            ),
+            "type ingress returned a non-type root for `{source}`: {expression:?}"
+        );
+    }
+}
+
+#[test]
+fn type_ingress_rejects_every_non_type_carrier_and_role_swap() {
+    let invalid = [
+        ("zero expressions", ""),
+        ("multiple expressions", "(t-unit {}) (t-unit {})"),
+        ("invalid syntax", "(t-unit {}"),
+        ("bare atom", "f32"),
+        ("empty bare list", "()"),
+        ("nonempty bare list", "(f32)"),
+        ("bare map", "{type: (t-prim {} f32)}"),
+        (
+            "legacy metadata-expression wrapper",
+            "^{:doc \"legacy\"} (t-prim {} f32)",
+        ),
+        ("runtime literal root", "(lit {} 1)"),
+        ("runtime function root", "(fn {} (params {}) (lit {} 1))"),
+        ("declaration root", "(defsig {} f (t-unit {}))"),
+        ("pattern root", "(pat-var {} x)"),
+        ("dimension-name root", "(d-name {} batch)"),
+        ("dimension-variable root", "(d-var {} d0)"),
+        ("dimension-literal root", "(d-lit {} 2)"),
+        ("rank root", "(d-rank {} r0)"),
+        ("recognized transform root", "(grad {} (var {} x))"),
+        ("recognized helper root", "(effects {} random)"),
+        ("unknown tag", "(not-a-type {} f32)"),
+        ("nested runtime node", "(t-fn {} (lit {} 1) (t-unit {}))"),
+        ("primitive with non-name payload", "(t-prim {} 32)"),
+        ("type variable with non-name payload", "(t-var {} 0)"),
+        ("unit with a child", "(t-unit {} (t-prim {} f32))"),
+        (
+            "tensor type variable in dimension role",
+            "(t-tensor {} (t-var {} t0) (t-prim {} f32))",
+        ),
+        (
+            "tensor primitive in dimension role",
+            "(t-tensor {} (t-prim {} f32) (t-prim {} f32))",
+        ),
+        (
+            "tensor function in dimension role",
+            "(t-tensor {} (t-fn {} (t-unit {})) (t-prim {} f32))",
+        ),
+        (
+            "tensor reference in dimension role",
+            "(t-tensor {} (t-ref {} (t-prim {} f32)) (t-prim {} f32))",
+        ),
+        (
+            "tensor ADT in dimension role",
+            "(t-tensor {} (t-adt {} List (t-prim {} f32)) (t-prim {} f32))",
+        ),
+        (
+            "tensor unit in dimension role",
+            "(t-tensor {} (t-unit {}) (t-prim {} f32))",
+        ),
+        (
+            "tensor tuple in dimension role",
+            "(t-tensor {} (t-tuple {} (t-prim {} f32)) (t-prim {} f32))",
+        ),
+        (
+            "tensor rank in dtype role",
+            "(t-tensor {} (d-name {} n) (d-rank {} r0))",
+        ),
+        (
+            "tensor dimension in dtype role",
+            "(t-tensor {} (d-var {} d0))",
+        ),
+        (
+            "function dimension in type role",
+            "(t-fn {} (d-name {} n) (t-unit {}))",
+        ),
+        ("reference rank in type role", "(t-ref {} (d-rank {} r0))"),
+        (
+            "adt rank in nominal-argument role",
+            "(t-adt {} List (d-rank {} r0))",
+        ),
+        (
+            "adt non-name constructor role",
+            "(t-adt {} (t-var {} t0) (t-prim {} f32))",
+        ),
+        (
+            "tuple dimension in element role",
+            "(t-tuple {} (d-var {} d0))",
+        ),
+        (
+            "dimension with nested type name",
+            "(t-tensor {} (d-name {} (t-var {} t0)) (t-prim {} f32))",
+        ),
+        (
+            "dimension literal with symbolic payload",
+            "(t-tensor {} (d-lit {} n) (t-prim {} f32))",
+        ),
+        (
+            "dimension variable with integer payload",
+            "(t-tensor {} (d-var {} 0) (t-prim {} f32))",
+        ),
+        (
+            "rank variable with integer payload",
+            "(t-tensor {} (d-rank {} 0) (t-prim {} f32))",
+        ),
+    ];
+
+    let admitted = invalid
+        .iter()
+        .filter_map(|(label, source)| {
+            chelis_deep::parse_and_stamp_type(source)
+                .ok()
+                .map(|_| *label)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        admitted.is_empty(),
+        "type ingress admitted non-type carriers or role swaps: {admitted:?}"
+    );
+}
+
+#[test]
+fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
+    for source in [
+        "(defsig {} bad (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))",
+        "(def {} bad (fn {} (params {} (x {type: (t-adt {} Rows (d-rank {} r))})) (var {} x)))",
+    ] {
+        let error = chelis_deep::parse_and_stamp_file(source)
+            .expect_err("[04-ADT-4] forbids a rank spread in a nominal argument slot");
+        let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
+            panic!("expected a stamp rejection, got: {error:?}");
+        };
+        assert!(
+            matches!(
+                stamp.kind,
+                StampErrorKind::RequiresTypeSyntaxRole {
+                    expected: chelis_deep::role::TypeSyntaxRole::NominalArgument,
+                    ref got,
+                } if *got == FormIdentity::Head("d-rank".to_string())
+            ),
+            "expected the nominal-argument role to reject d-rank, got: {:?}",
+            stamp.kind
+        );
+    }
+}
+
+#[test]
+fn file_ingress_keeps_nominal_dimensions_and_tensor_rank_spreads_legal() {
+    for source in [
+        "(defsig {} sized (t-fn {} (t-adt {} Rows (d-lit {} 3)) (t-unit {})))",
+        "(defsig {} ranked (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))",
+    ] {
+        chelis_deep::parse_and_stamp_file(source)
+            .unwrap_or_else(|error| panic!("spec-valid file ingress was rejected: {error}"));
+    }
+}
+
+#[test]
 fn declaration_ingress_rejects_a_module_wrapper_a_file_ingress_admits() {
     // The two whole-text entry points are deliberately different languages:
     // `parse_and_stamp` is a declaration bundle, `parse_and_stamp_file` is a

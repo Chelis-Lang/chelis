@@ -95,8 +95,8 @@ fn eval_first_line(program: &str) -> Result<String, String> {
 }
 
 /// f32 bit pattern of the 222.0 branch payload as it appears in emitted
-/// `chelis_fill_f32_bits` calls (111.0 is 0x42de0000; the broken rows
-/// assert on the DELETED branch's bits, which is 222.0's).
+/// `chelis_fill_scalar` calls (111.0 is 0x42de0000; the broken rows assert on
+/// the DELETED branch's bits, which is 222.0's).
 const BITS_222: &str = "435e0000";
 
 // ===========================================================================

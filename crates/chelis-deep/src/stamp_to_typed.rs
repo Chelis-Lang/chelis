@@ -7,8 +7,8 @@ use crate::ast::{Atom, Expr, MetaMap};
 use crate::node::Node;
 use crate::raw::{RawAtom, RawExpr};
 use crate::role::{
-    BypassExpectation, ChildStampRole, bypass_child_expectation, child_stamp_role,
-    is_declaration_tag, is_pattern_tag,
+    BypassExpectation, ChildStampRole, TypeSyntaxRole, bypass_child_expectation, child_stamp_role,
+    is_declaration_tag, is_pattern_tag, type_syntax_child_role, type_syntax_role_accepts_tag,
 };
 use crate::span::Span;
 use crate::tag::DeepTag;
@@ -116,6 +116,11 @@ pub enum StampErrorKind {
     NameAtExprSlot { name: String },
     /// A list at a Type position had an undecodable head.
     UndecodableTypeHead { form: FormIdentity },
+    /// A serialized type fragment did not satisfy its recursive grammar role.
+    RequiresTypeSyntaxRole {
+        expected: TypeSyntaxRole,
+        got: FormIdentity,
+    },
     /// A bypass slot required a declaration but the form was not one.
     RequiresDeclaration { form: FormIdentity },
     /// A bypass slot required a specific tag but got something else.
@@ -144,6 +149,9 @@ impl std::fmt::Display for StampError {
             }
             StampErrorKind::UndecodableTypeHead { form } => {
                 write!(f, "undecodable type head {form}")
+            }
+            StampErrorKind::RequiresTypeSyntaxRole { expected, got } => {
+                write!(f, "expected {expected:?} type syntax, got {got}")
             }
             StampErrorKind::RequiresDeclaration { form } => {
                 write!(f, "expected declaration, got {form}")
@@ -335,13 +343,14 @@ fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
 /// A bare identifier here is a name per [03-ROLE-1] (a dtype spelling, a
 /// type parameter), so atoms pass through; a non-empty list must decode
 /// to a vocabulary node, because type syntax is closed and an undecodable
-/// head has no type reading to fall back to.
-fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
+/// head has no type reading to fall back to. Nominal applications use the
+/// dedicated recursive type grammar so their argument slots cannot inherit
+/// the broader `Type` role and admit rank spreads ([04-ADT-4]).
+pub(crate) fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
-                // Empty list at type position (e.g. empty type-params `()`).
                 return Ok(Expr::BareList(vec![], span));
             }
             let (form, tag_opt) = decode_list_head(&elements);
@@ -359,6 +368,71 @@ fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
             expr,
             span,
         } => stamp_meta_expr(entries, *expr, span),
+    }
+}
+
+/// Stamp one complete serialized type representation with the recursive
+/// type/dimension/rank grammar. Unlike the broader in-program `Type` child
+/// role, this public-boundary form has no bare cast-target or record-name
+/// alternatives.
+pub(crate) fn stamp_serialized_type(raw: RawExpr) -> Result<Expr, StampError> {
+    stamp_type_in_role(raw, TypeSyntaxRole::Type)
+}
+
+fn stamp_type_in_role(raw: RawExpr, expected: TypeSyntaxRole) -> Result<Expr, StampError> {
+    if expected == TypeSyntaxRole::Name {
+        return match raw {
+            RawExpr::Atom(RawAtom::Symbol(name), span) => Ok(Expr::Atom(Atom::Name(name), span)),
+            other => Err(StampError {
+                kind: StampErrorKind::RequiresTypeSyntaxRole {
+                    expected,
+                    got: FormIdentity::of(&other),
+                },
+                span: other.span(),
+            }),
+        };
+    }
+    if expected == TypeSyntaxRole::Integer {
+        return match raw {
+            RawExpr::Atom(RawAtom::Int(value), span) => Ok(Expr::Atom(Atom::Int(value), span)),
+            other => Err(StampError {
+                kind: StampErrorKind::RequiresTypeSyntaxRole {
+                    expected,
+                    got: FormIdentity::of(&other),
+                },
+                span: other.span(),
+            }),
+        };
+    }
+
+    let span = raw.span();
+    match raw {
+        RawExpr::List(elements, span) => {
+            let (form, tag_opt) = decode_list_head(&elements);
+            match tag_opt {
+                Some(tag) if type_syntax_role_accepts_tag(expected, tag) => {
+                    build_type_node(tag, elements, span)
+                }
+                Some(_) => Err(StampError {
+                    kind: StampErrorKind::RequiresTypeSyntaxRole {
+                        expected,
+                        got: form,
+                    },
+                    span,
+                }),
+                None => Err(StampError {
+                    kind: StampErrorKind::UndecodableTypeHead { form },
+                    span,
+                }),
+            }
+        }
+        other => Err(StampError {
+            kind: StampErrorKind::RequiresTypeSyntaxRole {
+                expected,
+                got: FormIdentity::of(&other),
+            },
+            span,
+        }),
     }
 }
 
@@ -549,6 +623,14 @@ fn decode_list_head(elements: &[RawExpr]) -> (FormIdentity, Option<DeepTag>) {
 
 /// Build a Node from a raw list whose head decoded as `tag`.
 fn build_node(tag: DeepTag, elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampError> {
+    // A nominal application carries its own recursive child grammar wherever
+    // it is decoded, including inside `type:` metadata that crosses a Syntax
+    // role. Centralizing the dispatch here prevents those alternate carriers
+    // from reopening rank spreads in nominal argument slots (chelis#1125).
+    if tag == DeepTag::TAdt {
+        return build_type_node(tag, elements, span);
+    }
+
     if elements.len() < 2 {
         return Err(StampError {
             kind: StampErrorKind::MissingMetaMap,
@@ -576,6 +658,42 @@ fn build_node(tag: DeepTag, elements: Vec<RawExpr>, span: Span) -> Result<Expr, 
     }
     let node = Node::try_new(tag, meta, children).map_err(|e| StampError {
         kind: StampErrorKind::NodeError(e),
+        span,
+    })?;
+    Ok(Expr::Node(Box::new(node), span))
+}
+
+/// Build a node inside one serialized type tree using the dedicated
+/// type/dimension/rank grammar rather than the broader Deep child-role table.
+fn build_type_node(tag: DeepTag, elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampError> {
+    if elements.len() < 2 {
+        return Err(StampError {
+            kind: StampErrorKind::MissingMetaMap,
+            span,
+        });
+    }
+    let mut iter = elements.into_iter();
+    let _head = iter.next();
+    let meta_raw = iter.next().expect("length checked above");
+    let meta = match meta_raw {
+        RawExpr::Map(entries, _) => convert_meta_map(entries)?,
+        _ => {
+            return Err(StampError {
+                kind: StampErrorKind::MissingMetaMap,
+                span,
+            });
+        }
+    };
+    let raw_children = iter.collect::<Vec<_>>();
+    let arity = raw_children.len();
+    let mut children = Vec::with_capacity(arity);
+    for (index, child) in raw_children.into_iter().enumerate() {
+        let expected = type_syntax_child_role(tag, index, arity)
+            .expect("type node classification must have child roles");
+        children.push(stamp_type_in_role(child, expected)?);
+    }
+    let node = Node::try_new(tag, meta, children).map_err(|error| StampError {
+        kind: StampErrorKind::NodeError(error),
         span,
     })?;
     Ok(Expr::Node(Box::new(node), span))

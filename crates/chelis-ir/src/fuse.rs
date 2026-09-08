@@ -8,7 +8,7 @@
 //! **Invariant:** fusion never duplicates computation. A node with multiple
 //! consumers is never absorbed into a fused chain.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{Dag, DagNode, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp};
 
@@ -17,7 +17,7 @@ pub struct FuseResult {
     /// Fused DAG.
     pub dag: Dag,
     /// Mapping from original node IDs to node IDs in the fused DAG.
-    pub old_to_new: HashMap<NodeId, NodeId>,
+    pub old_to_new: UnordMap<NodeId, NodeId>,
 }
 
 /// Apply greedy kernel fusion to a DAG.
@@ -31,7 +31,7 @@ pub fn fuse_with_remap(dag: &Dag) -> FuseResult {
     if dag.is_empty() {
         return FuseResult {
             dag: Dag::new(),
-            old_to_new: HashMap::new(),
+            old_to_new: UnordMap::new(),
         };
     }
 
@@ -67,22 +67,28 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
 fn is_fusible_elementwise(node: &DagNode) -> bool {
-    // chelis#729 Phase 3 / chelis#699: the C backend now has a typed,
-    // trapping direct integer-Abs kernel, while its general fused integer
-    // kernel is still deliberately unavailable. Keep integer Abs
-    // materialized so ordinary source programs cannot be optimized back
-    // onto the float-only fused path. Float Abs remains fusible.
-    if matches!(node.op, RiscOp::Abs) && node.output_type.precision.is_integer() {
+    // chelis#729 Phase 3 / chelis#699: the typed backends now have trapping
+    // direct integer Abs/Sub/extrema kernels, while their general fused
+    // integer kernels are still deliberately unavailable. Keep those integer
+    // identities materialized so ordinary source programs cannot be optimized
+    // back onto a float-only fused path. Their float forms remain fusible.
+    if matches!(
+        node.op,
+        RiscOp::Abs | RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem
+    ) && node.output_type.precision.is_integer()
+    {
         return false;
     }
     matches!(
         node.op,
         RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::MaxElem
+            | RiscOp::MinElem
             | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
@@ -104,11 +110,13 @@ fn is_fusible_elementwise(node: &DagNode) -> bool {
 fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
     match op {
         RiscOp::Add => FusedStepOp::Add,
+        RiscOp::Sub => FusedStepOp::Sub,
         RiscOp::Mul => FusedStepOp::Mul,
         RiscOp::Div => FusedStepOp::Div,
         RiscOp::FloorDiv => FusedStepOp::FloorDiv,
         RiscOp::TruncDiv => FusedStepOp::TruncDiv,
         RiscOp::MaxElem => FusedStepOp::MaxElem,
+        RiscOp::MinElem => FusedStepOp::MinElem,
         RiscOp::CmpLt => FusedStepOp::CmpLt,
         RiscOp::Neg => FusedStepOp::Neg,
         RiscOp::Recip => FusedStepOp::Recip,
@@ -192,11 +200,11 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
 }
 
 /// Rebuild the DAG, replacing chain nodes with FusedElem nodes.
-fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, NodeId>) {
+fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, NodeId>) {
     // Map old node ID → chain index (if part of a chain).
-    let mut node_to_chain: HashMap<usize, usize> = HashMap::new();
+    let mut node_to_chain: UnordMap<usize, usize> = UnordMap::new();
     // For each chain, which node is the "representative" (last node, produces output).
-    let mut chain_output: HashMap<usize, NodeId> = HashMap::new();
+    let mut chain_output: UnordMap<usize, NodeId> = UnordMap::new();
 
     for (ci, chain) in chains.iter().enumerate() {
         for &nid in &chain.nodes {
@@ -206,7 +214,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
     }
 
     let mut new_dag = Dag::new();
-    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         let old_id = node.id.0;
@@ -309,7 +317,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
             {
                 new_node.merged_spans = node.merged_spans.clone();
             }
-            // chelis#384/#397: preserve (remapped) Form-3 `expand` shape-deps.
+            // chelis#384/#397: preserve (remapped) shape-derived `expand` deps.
             if !node.shape_deps.is_empty() {
                 let mapped: Vec<NodeId> = node
                     .shape_deps
@@ -332,6 +340,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
     }
 
     let old_to_new = id_map
+        .into_sorted()
         .into_iter()
         .map(|(old_id, new_id)| (NodeId(old_id), new_id))
         .collect();
@@ -346,16 +355,16 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
 fn build_fused_elem(
     dag: &Dag,
     chain: &Chain,
-    _id_map: &HashMap<usize, NodeId>,
+    _id_map: &UnordMap<usize, NodeId>,
 ) -> (RiscOp, Vec<NodeId>) {
-    let chain_set: std::collections::HashSet<usize> = chain.nodes.iter().map(|n| n.0).collect();
+    let chain_set: chelis_unord::UnordSet<usize> = chain.nodes.iter().map(|n| n.0).collect();
 
     // Collect external inputs: inputs to chain nodes that are NOT other chain nodes.
     let mut external_inputs: Vec<NodeId> = Vec::new();
-    let mut ext_index: HashMap<usize, usize> = HashMap::new(); // old_id → index in external_inputs
+    let mut ext_index: UnordMap<usize, usize> = UnordMap::new(); // old_id → index in external_inputs
 
     // Also track: for each chain node, its step index.
-    let mut step_index: HashMap<usize, usize> = HashMap::new();
+    let mut step_index: UnordMap<usize, usize> = UnordMap::new();
 
     let mut steps: Vec<FusedStep> = Vec::new();
 
@@ -390,7 +399,7 @@ fn build_fused_elem(
 }
 
 fn reusable_external_input(dag: &Dag, chain: &Chain, external_inputs: &[NodeId]) -> Option<NodeId> {
-    let external: HashSet<NodeId> = external_inputs.iter().copied().collect();
+    let external: UnordSet<NodeId> = external_inputs.iter().copied().collect();
     let mut reusable = None;
 
     for &nid in &chain.nodes {
@@ -416,9 +425,9 @@ fn reusable_external_input(dag: &Dag, chain: &Chain, external_inputs: &[NodeId])
 /// eliminating the intermediate buffer. Returns a set of node IDs that the
 /// emitter should skip (no allocation, no standalone emission) and the
 /// reduction should handle by inlining the fused steps.
-pub fn reduction_inlined_fused_elems(dag: &Dag) -> HashSet<NodeId> {
+pub fn reduction_inlined_fused_elems(dag: &Dag) -> UnordSet<NodeId> {
     let consumer_count = build_consumer_counts(dag);
-    let mut inlined = HashSet::new();
+    let mut inlined = UnordSet::new();
 
     for node in dag.nodes() {
         let is_reduction = matches!(node.op, RiscOp::Sum { .. } | RiscOp::MaxReduce { .. });

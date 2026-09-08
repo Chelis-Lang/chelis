@@ -26,11 +26,10 @@ Use this skill whenever a change affects public language/compiler behavior.
 
 ## Verification
 
-Run the minimum repo gate after the edits:
+Run the pre-push gate after the edits, and the full local gate once on the committed
+candidate before ready-for-review:
 
 ```sh
-cargo build --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
+python3 scripts/gate.py --fast
+python3 scripts/gate.py --local
 ```

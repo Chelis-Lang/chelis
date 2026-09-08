@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_ir::dag::{Dag, NodeId, RiscOp};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict, eval_tensor_with_strict};
@@ -47,14 +47,14 @@ pub fn build_mnist_program() -> Result<MnistProgram, String> {
     })
 }
 
-fn require_root<'a>(roots: &'a HashMap<String, NodeId>, name: &str) -> Result<&'a NodeId, String> {
+fn require_root<'a>(roots: &'a UnordMap<String, NodeId>, name: &str) -> Result<&'a NodeId, String> {
     roots
         .get(name)
         .ok_or_else(|| format!("compiled MNIST program is missing `{name}` root"))
 }
 
-fn reachable_nodes(dag: &Dag, root: NodeId) -> HashSet<NodeId> {
-    let mut seen = HashSet::new();
+fn reachable_nodes(dag: &Dag, root: NodeId) -> UnordSet<NodeId> {
+    let mut seen = UnordSet::new();
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
@@ -67,7 +67,7 @@ fn reachable_nodes(dag: &Dag, root: NodeId) -> HashSet<NodeId> {
     seen
 }
 
-fn find_reachable_load(dag: &Dag, reachable: &HashSet<NodeId>, name: &str) -> Option<NodeId> {
+fn find_reachable_load(dag: &Dag, reachable: &UnordSet<NodeId>, name: &str) -> Option<NodeId> {
     dag.nodes().iter().find_map(|node| {
         if reachable.contains(&node.id)
             && matches!(&node.op, RiscOp::Load { name: load } if load == name)
@@ -80,7 +80,7 @@ fn find_reachable_load(dag: &Dag, reachable: &HashSet<NodeId>, name: &str) -> Op
 }
 
 /// Initialize random parameters
-pub fn init_params(rng_seed: u64) -> HashMap<String, TensorValue> {
+pub fn init_params(rng_seed: u64) -> UnordMap<String, TensorValue> {
     // Simple LCG for reproducibility
     let mut state = rng_seed;
     let mut next_f64 = || -> f64 {
@@ -90,7 +90,7 @@ pub fn init_params(rng_seed: u64) -> HashMap<String, TensorValue> {
         ((state >> 33) as f64) / (1u64 << 31) as f64 - 0.5
     };
 
-    let mut params = HashMap::new();
+    let mut params = UnordMap::new();
 
     // Xavier initialization: scale = sqrt(2 / (fan_in + fan_out))
     let w1_scale = (2.0 / (784.0 + 128.0_f64)).sqrt();
@@ -121,7 +121,7 @@ pub fn train_step(
     grad_result: &GradResult,
     _loss_node: NodeId,
     param_nodes: &[(String, NodeId)],
-    params: &mut HashMap<String, TensorValue>,
+    params: &mut UnordMap<String, TensorValue>,
     x_batch: &TensorValue,
     y_batch: &TensorValue,
     lr: f64,
@@ -161,7 +161,7 @@ pub fn train_step(
 /// Compute accuracy: fraction of samples where argmax(pred) == argmax(label)
 pub fn accuracy(
     dag: &Dag,
-    params: &HashMap<String, TensorValue>,
+    params: &UnordMap<String, TensorValue>,
     data: &[(TensorValue, TensorValue)],
     logits_node: NodeId,
 ) -> Result<f64, String> {

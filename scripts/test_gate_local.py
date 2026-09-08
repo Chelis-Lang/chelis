@@ -13,13 +13,17 @@ What is locked here:
   (b) paths outside every workspace member map to no crate, and an
       empty diff yields the explicit "no crate changes detected"
       message instead of silently running nothing;
-  (c) the `--local` command list is exactly the static pre-push subset
-      (workspace clippy, fmt --check, chelis lint --check .) plus one
+  (c) the `--local` command list is exactly the static once-per-pull-request subset
+      (two of the three workspace clippy configurations, fmt --check,
+      chelis lint --check ., the guards and oracles) plus one
       `cargo nextest run -p <crate>` per changed crate -- no workspace
-      build, no workspace nextest;
-  (d) `--list` annotates every canonical command as either in the
-      `--local` subset or CI-owned, without changing the command list
-      itself (the command-list lock stays in `scripts/test_gate.py`).
+      build, no workspace nextest, and no `--no-default-features` clippy
+      row (CI-owned; see the comment on the exact list below);
+  (d) `--list` annotates every canonical command as in the `--fast` pass
+      and the `--local` subset, in the `--local` subset only, or CI-owned,
+      without changing the command list itself (the command-list lock
+      stays in `scripts/test_gate.py`), and prints the `--fast` note
+      before the `--local` note.
 
 No test here runs cargo, nextest, git, or any real gate stage: git
 output and the member->package mapping are injected as canned inputs,
@@ -30,6 +34,7 @@ and a synthesized temp workspace.
 
 import importlib.util
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -188,26 +193,50 @@ class WorkspaceMemberPackagesTests(unittest.TestCase):
 class LocalCommandListTests(unittest.TestCase):
     def test_static_subset_has_the_exact_compile_time_contracts(self):
         # `cargo nextest` does not execute doctests. The static subset
-        # drives the chelis#731 `ErrorWitness` contracts, the compiler
-        # pipeline artifact contracts, the raw-checkpoint fixture, the
+        # drives the chelis#731 `ErrorWitness` contracts, chelis#1286's
+        # ownership-boundary contracts, the compiler pipeline artifact
+        # contracts, the raw-checkpoint fixture, the
         # two cheap pipeline-core boundary guards (dependency + no_std doc),
-        # and the chelis#908 unrepresentable-domain oracle.
-        # Assert the exact list so no pre-push stage disappears silently.
+        # the canonical chelis-std generated-artifact currency check, and the
+        # chelis#908 unrepresentable-domain oracle, and chelis#893's
+        # release-profile runtime-representation Phase 0 oracle.
+        # Two clippy configurations, not three: the closure check's leg 3
+        # needs the solver-free row on a fresh target (it is the only
+        # per-pull-request row compiling crates/chelis-prove/src/
+        # clarabel_sos.rs), while the --no-default-features row compiles a
+        # strict subset of the default row and is CI-owned through
+        # `gate.py lint-and-unit`.
+        # Assert the exact list so no `--local` stage disappears silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
             rendered,
             [
                 "cargo clippy --workspace --all-targets -- -D warnings",
+                "cargo clippy --workspace --all-targets --features "
+                "chelis-backend-c/sleef,"
+                "chelis-e2e/hip-local-gpu,"
+                "chelis-prove/clarabel,"
+                "chelis-python/extension-module,"
+                "chelis-runtime/ownership-ledger,"
+                "chelis-types/checkpoint-compile-probe,"
+                "chelis-types/generalize-sweep-oracle -- -D warnings",
                 "cargo fmt --all -- --check",
                 "cargo run -p chelis-cli --bin chelis --quiet -- "
                 "lint --check .",
+                "<managed-python> scripts/regenerate_chelis_std_bundle.py "
+                "--debug --check",
                 "cargo test -p chelis-types --doc",
+                "cargo test -p chelis-ir --doc",
                 "cargo test -p chelis-compiler-api --doc",
                 "cargo test -p chelis-pipeline-core --doc",
                 "<managed-python> scripts/check_checkpoint_compile_fail.py",
+                "<managed-python> scripts/check_hash_order_phase_b_compile_fail.py",
+                "<managed-python> scripts/check_configuration_closure.py",
                 "<managed-python> scripts/pipeline_core_dependency_guard.py",
                 "<managed-python> scripts/pipeline_core_documentation_guard.py",
                 "<managed-python> scripts/unrepresentable_domain_oracle.py",
+                "<managed-python> scripts/runtime_representation_oracle.py "
+                "--phase 0",
             ],
         )
 
@@ -267,30 +296,38 @@ class ListAnnotationTests(unittest.TestCase):
                 annotation,
                 (
                     gate.LOCAL_ANNOTATION,
+                    gate.FAST_ANNOTATION,
                     gate.CI_OWNED_ANNOTATION,
                     gate.FULL_GATE_SPLIT_ANNOTATION,
                 ),
             )
             annotations[command] = annotation
-        # The local subset: clippy, fmt, chelis lint. The workspace build is
-        # CI-owned; the full gate's default-profile workspace suite is covered
-        # in CI by the split workspace and dtype-oracle jobs.
+        # The local subset: two clippy rows, fmt, chelis lint. The standalone
+        # workspace build is intentionally absent: clippy already compiles all
+        # targets, and the full gate's default-profile workspace suite is
+        # covered in CI by the split workspace and dtype-oracle jobs.
         self.assertEqual(
             annotations[gate.render(gate.CLIPPY_WORKSPACE)],
             gate.LOCAL_ANNOTATION,
         )
         self.assertEqual(
+            annotations[gate.render(gate.CLIPPY_SOLVER_FREE_FEATURES)],
+            gate.LOCAL_ANNOTATION,
+        )
+        self.assertEqual(
+            annotations[gate.render(gate.CLIPPY_NO_DEFAULT_FEATURES)],
+            gate.CI_OWNED_ANNOTATION,
+        )
+        self.assertEqual(
             annotations[gate.render(gate.FMT_CHECK)],
             gate.LOCAL_ANNOTATION,
         )
+        # The lint row is the one command `--fast` shares with `--local`.
         self.assertEqual(
             annotations[gate.render(gate.CHELIS_LINT_CHECK)],
-            gate.LOCAL_ANNOTATION,
+            gate.FAST_ANNOTATION,
         )
-        self.assertEqual(
-            annotations[gate.render(gate.BUILD_WORKSPACE)],
-            gate.CI_OWNED_ANNOTATION,
-        )
+        self.assertNotIn(gate.render(gate.BUILD_WORKSPACE), annotations)
         self.assertEqual(
             annotations[gate.render(gate.NEXTEST_WORKSPACE)],
             gate.FULL_GATE_SPLIT_ANNOTATION,
@@ -300,6 +337,18 @@ class ListAnnotationTests(unittest.TestCase):
         lines = self._list_lines()
         self.assertEqual(lines[-1], gate.LOCAL_DYNAMIC_NOTE)
         self.assertIn("cargo nextest run -p <crate>", lines[-1])
+
+    def test_fast_note_precedes_the_local_note(self):
+        lines = self._list_lines()
+        self.assertEqual(lines[-2], gate.FAST_DYNAMIC_NOTE)
+        self.assertTrue(lines[-2].startswith("# --fast runs"))
+        self.assertIn("regen_all.py --tier 0", lines[-2])
+        self.assertIn("cargo clippy -p <crate> --tests", lines[-2])
+        # Exactly the two trailing notes; every other line is a command.
+        self.assertEqual(
+            [ln for ln in lines if ln.startswith("#")],
+            [gate.FAST_DYNAMIC_NOTE, gate.LOCAL_DYNAMIC_NOTE],
+        )
 
 
     def test_quoted_diff_paths_still_derive_their_crate(self):
@@ -314,9 +363,32 @@ class ListAnnotationTests(unittest.TestCase):
         self.assertEqual(crates, ["chelis-renamed"])
 
 
+CANNED_GIT_FACTS = {
+    "head": "1111111111111111111111111111111111111111",
+    "origin_main": "2222222222222222222222222222222222222222",
+    "merge_base": "2222222222222222222222222222222222222222",
+}
+
+
+def _canned_probe(*_args, **_kwargs):
+    return {"verdict": "ok", "exit_code": 0, "output": "exec ok (1 ms)"}
+
+
+def _isolated_environ(tmp: str) -> dict:
+    """An environment that neither inherits a developer's CARGO_TARGET_DIR
+    nor writes the summary or the lease anywhere but under `tmp`."""
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        gate.REPORT_DIR_ENV: tmp,
+        gate.LEASE_DIR_ENV: tmp,
+    }
+
+
 class LocalMainTests(unittest.TestCase):
-    """Drive `gate.main(["--local"])` end to end with canned git output
-    and a recorded `run_commands`, so no subprocess ever runs."""
+    """Drive `gate.main(["--local"])` end to end with canned git output,
+    canned git facts and probe, and a recorded `run_commands`, so no gate
+    stage ever runs. The preflight's interpreter probe and the lease in a
+    temporary directory are the only real side effects."""
 
     def _run_local(self, diff_output, status_output, run_rc=0):
         recorded = []
@@ -333,7 +405,12 @@ class LocalMainTests(unittest.TestCase):
             return run_rc
 
         buf = io.StringIO()
-        with mock.patch.object(gate, "_git_output", fake_git_output), \
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(gate, "_git_output", fake_git_output), \
+                mock.patch.object(
+                    gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)
+                ), \
+                mock.patch.object(gate, "run_probe", _canned_probe), \
                 mock.patch.object(
                     gate,
                     "workspace_member_packages",
@@ -341,7 +418,7 @@ class LocalMainTests(unittest.TestCase):
                 ), \
                 mock.patch.object(gate, "run_commands", fake_run_commands), \
                 redirect_stdout(buf):
-            rc = gate.main(["--local"])
+            rc = gate.main(["--local"], environ=_isolated_environ(tmp))
         return rc, recorded, buf.getvalue()
 
     def test_runs_static_subset_plus_changed_crate_suites(self):
@@ -390,7 +467,12 @@ class LocalMainTests(unittest.TestCase):
             )
 
         err = io.StringIO()
-        with mock.patch.object(gate, "_git_output", failing_git_output), \
+        # `_git_facts` is deliberately NOT patched: it must swallow the same
+        # failure on its own, and `--local`'s own diff/status call still
+        # reports it loudly with the git exit code.
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(gate, "_git_output", failing_git_output), \
+                mock.patch.object(gate, "run_probe", _canned_probe), \
                 mock.patch.object(
                     gate,
                     "run_commands",
@@ -398,8 +480,8 @@ class LocalMainTests(unittest.TestCase):
                         "run_commands must not run when git fails"
                     ),
                 ), \
-                redirect_stderr(err):
-            rc = gate.main(["--local"])
+                redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = gate.main(["--local"], environ=_isolated_environ(tmp))
         self.assertEqual(rc, 128)
         self.assertIn("git failed", err.getvalue())
         self.assertIn("fatal: bad revision", err.getvalue())
@@ -413,6 +495,11 @@ class LocalMainTests(unittest.TestCase):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
             gate.main(["--list", "--local"])
+
+    def test_local_cannot_be_combined_with_fast(self):
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            gate.main(["--fast", "--local"])
 
 
 if __name__ == "__main__":

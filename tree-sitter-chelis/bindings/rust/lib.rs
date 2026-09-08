@@ -106,8 +106,124 @@ mod tests {
             "@property contracted forall():\n  true\n  with contract = \"std.identity\"\n",
             "result = seed\n  |> f\n  |> g\n  |> h\n",
             "result = {\n  x =\n    seed\n    |> f\n    |> g\n    |> h\n  x\n}\n",
+            // spec/02 §P4c dtype-family bounds (chelis#1417), on both
+            // declaration forms and at every family.
+            "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
+            "sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]\n",
+            "sig total[p: Numeric]: p -> p -> p\n",
+            "def only_ints[p: Int](x: p) -> p = x\n",
+            "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
+            "def unbounded[a](x: a) -> a = x\n",
         ] {
             assert_surf_parser_parity(source, true);
+        }
+    }
+
+    /// Both parsers reject the same non-family bound spellings, so an ADT
+    /// name in the bound position cannot become a silent bound in an editor.
+    #[test]
+    fn surf_dtype_family_bounds_reject_the_same_spellings_in_both_parsers() {
+        for source in [
+            "sig f[p: Tensor]: p -> p\n",
+            "sig f[p: float]: p -> p\n",
+            "sig f[p: f32]: p -> p\n",
+            "def f[p: ](x: p) -> p = x\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
+    /// chelis#849 / #1024: the newline-continuation rule is a two-parser
+    /// contract, so the parity corpus owns it too.
+    ///
+    /// `|>` was already covered above. `then` and `else` are newly admitted
+    /// as continuations, and the layout they enable reaches every
+    /// `block_expr_end` consumer -- block binding values, block tails, `do`
+    /// and `par` items, and property option values. Without these rows a
+    /// tree-sitter regression on the new layout would be invisible to the
+    /// committed suite even though the Rust side is locked.
+    #[test]
+    fn surf_v019_tree_sitter_accepts_newline_led_then_and_else() {
+        for source in [
+            // block binding value
+            "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  d = if c\n  then a\n  else b\n  d\n}\n",
+            // block tail
+            "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else b\n}\n",
+            // `do` item
+            "def f(a: f32, b: f32) -> f32 ! { IO } = {\n  c = neq(a, a)\n  g = do {\n    if c\n    then print(\"y\")\n    else print(\"n\")\n  }\n  a\n}\n",
+            // `par` item
+            "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  g = par {\n    if c\n    then a\n    else b\n  }\n  g\n}\n",
+            // property option value
+            "@property p forall(x: f32): true\n  with tolerance = if lte(x, 1.0f32)\n  then 1e-6f32\n  else 1e-3f32\n",
+            // the multiline `else if` chain that motivated admitting `then`
+            "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else if lt(a, b)\n  then b\n  else mul(a, b)\n}\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+        }
+    }
+
+    /// The permissive boundaries, which the closed continuation set does NOT
+    /// govern (spec/02 P12). A declaration body ends only at a declaration
+    /// start, so a newline-led `with` continues it. Pinned in both parsers so
+    /// #849 cannot narrow a boundary it does not own.
+    #[test]
+    fn surf_v019_tree_sitter_keeps_the_permissive_declaration_boundary() {
+        for source in [
+            "type Point = | Point { x: f32 }\ndef update(p: Point) -> Point = p\n  with { x: 1.0f32 }\n",
+            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+        }
+    }
+
+    /// Admitting a keyword as a newline continuation must not make it
+    /// OPTIONAL. Both parsers must still reject a half-formed `if`.
+    #[test]
+    fn surf_v019_tree_sitter_still_rejects_a_half_formed_if() {
+        for source in [
+            "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n}\n",
+            "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  else b\n}\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
+    /// spec/02 P12's block continuation set is closed. Infix tokens other
+    /// than `|>` remain separators when they lead the next physical line,
+    /// even though they cannot begin a standalone expression. Cover every
+    /// `block_expr_end` consumer so the editor grammar cannot silently widen
+    /// a boundary the Rust parser keeps closed.
+    #[test]
+    fn surf_v019_tree_sitter_rejects_newline_led_non_continuations() {
+        for source in [
+            // block binding value
+            "def f() -> int32 = {\n  x = 1i32\n  + 2i32\n  x\n}\n",
+            // block tail
+            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            // `do` item
+            "def f() -> bool = {\n  x = do {\n    true\n    == false\n  }\n  x\n}\n",
+            // `par` item
+            "def f() -> bool = {\n  x = par {\n    true\n    && false\n  }\n  x\n}\n",
+            // property option value
+            "@property p forall(): true\n  with samples = 1i32\n  + 1i32\n  with seed = 1i64\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
+    /// Representative excluded infix families at the block-tail boundary.
+    /// Non-prefix status is a safety argument for a selected continuation;
+    /// it does not itself admit every infix token after a separator.
+    #[test]
+    fn surf_v019_tree_sitter_keeps_the_exact_block_continuation_set() {
+        for source in [
+            "def f() -> int32 = {\n  x = 1i32\n  x\n  + 2i32\n}\n",
+            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            "def f() -> bool = {\n  x = 1i32\n  x\n  == 2i32\n}\n",
+            "def f() -> bool = {\n  x = true\n  x\n  && false\n}\n",
+            "def f() -> bool = {\n  x = true\n  x\n  || false\n}\n",
+        ] {
+            assert_surf_parser_parity(source, false);
         }
     }
 

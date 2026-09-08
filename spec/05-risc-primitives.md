@@ -24,9 +24,12 @@ RISC primitives are built-in functions in the compiler's scope, not syntax tags.
 
 Read-only tensor primitive parameters are typed as `&tensor[...]` at the type-system
 surface. Owned tensor arguments auto-borrow at ordinary call sites and pipe stages.
-Outputs remain owned tensors. The borrow distinction is erased before IR and backend
-lowering: primitive DAG nodes and backend kernels carry values, not borrow markers.
-Consuming operations such as `realize` and explicit `drop` keep owned parameters.
+Outputs remain owned tensors. Source borrow syntax and primitive-DAG borrow markers
+are erased before backend emission: primitive nodes and kernels carry values, not
+source markers. The resolved disposition of every use is not erased; ownership
+lowering first records explicit borrow, move, clone, and terminal `Drop` obligations
+in the verified ownership representation consumed by every backend. Consuming
+operations such as `realize` and explicit `drop` keep owned parameters.
 
 The same observational rule covers the read-only `List` / `Dict` queries `len` and
 `index`: they auto-borrow their container argument rather than consuming it, so the
@@ -56,11 +59,12 @@ The primitive surface includes
 `diagonal` / `trace`, and `clamp`. `School.Nn.Embedding` (moved to the `school` library
 in chelis-std) is the named library surface over `gather`.
 
-Chelis rejects deterministic literal-driven value errors
-at check time when enough information is concrete in source (for example, statically
-inconsistent `einsum` extents or duplicate indices in `scatter(..., "replace")`).
-When those constraints depend on runtime values instead, the evaluator and generated C
-runtime reject them during execution; compiled C exits non-zero rather than aborting.
+Chelis rejects deterministic literal-driven value errors at check time when enough
+information is concrete in source (for example, statically inconsistent `einsum`
+extents or out-of-bounds scatter indices). When those constraints depend on runtime
+values instead, the evaluator and generated C runtime reject them during execution;
+compiled C exits non-zero rather than aborting. Duplicate replace-scatter indices are
+not errors: they follow §3.5's deterministic last-write-wins rule.
 
 ---
 
@@ -200,8 +204,6 @@ and float precisions as their tensor forms and use the same adjoint rule.
 > `string`, reserved dtype spellings, mixed dtypes or surfaces, and mismatched
 > tensor dimensions are type errors.
 
-*(Not fully implemented; chelis#1306.)*
-
 ### 2.2 Elementwise Unary
 
 | Name | Signature | Semantics | AD Adjoint |
@@ -300,7 +302,7 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > zero-length axis is a type error when statically known. If an execution-time
 > extent is zero, a guard before the composition traps `Domain` as operation
 > `mean` at the result dtype. The single-axis adjoint is
-> `expand(g / divisor, original_shape, axis)` at the operand dtype. One or
+> `insert(g / divisor, axis, original_extent)` at the operand dtype. One or
 > more positional or named axes follow spec/04 §4.5.3: the call executes
 > these exact single-axis graphs in highest-original-position-first order and
 > the adjoint reverses that composition. Mixed, duplicate, dynamic, absent,
@@ -433,12 +435,17 @@ primitive — the reductions here, `softmax`, `mean`, `gather`,
 `scatter`, and the movement and ordering ops — and is the convention
 the formula examples below already use (`axis=-1` for the last axis).
 
-> **[05-AXIS-1]** A reduction axis and `expand`'s insert axis SHALL be
+> **[05-AXIS-1]** A reduction axis, `expand`'s broadcast axis, and `insert`'s
+> new-axis position SHALL be
 > statically resolvable either as an integer constant (a literal or a literal
 > wrapped in an integer cast) or as a named dimension of the operand. A
 > runtime integer expression and an unknown dimension name are type errors at
 > the call site; no lowering or backend SHALL substitute axis zero or another
-> axis.
+> axis. `insert`'s named-axis form (`spec/04-type-system.md` §4.5.3) names the
+> dimension it creates, which is by construction not a dimension of the
+> operand; that name SHALL be statically resolvable in the same sense and is a
+> type error when it already names an operand dimension. Its optional anchor
+> is a named dimension of the operand and follows the operand rule above.
 
 The reduction axis must resolve statically: a literal, a
 `cast(N, int32)`-wrapped literal, or a named operand dimension as specified by
@@ -448,7 +455,8 @@ dimension is dropped from a runtime integer value. A reduction whose axis is
 a runtime expression (for example a function-parameter `int32`) is rejected
 at the reduction call site with a diagnostic naming the constant-or-named-axis
 requirement, rather than leaving the output shape unresolved (chelis#259).
-The same constraint and diagnostic apply to `expand`'s insert axis.
+The same constraint and diagnostic apply to `expand`'s broadcast axis and
+to `insert`'s new-axis position.
 
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
 
@@ -644,18 +652,21 @@ tree, or compatibility mode is not conforming.
 |---|---|---|
 | `reshape` | `(&tensor[D_old,p], shape: List<int64>) -> tensor[D_new,p]` | Reinterpret memory layout. Product of dimensions must match. |
 | `permute` | `(&tensor[d1,...,dn,p], axes: int32...) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1, passed as one scalar argument per axis. |
-| `expand` | `(&tensor[D_small,p], axis: int32, size: int64) -> tensor[D_large,p]` | Insert or set a dimension at position `axis` with width `size` (size-1 broadcast). Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
+| `expand` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D',p]` | Set the size-1 dimension at position `axis` to width `size`. Rank is unchanged and the operand's extent at `axis` is 1. Does NOT copy data. |
+| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | Insert a new dimension of width `size` at position `axis`, producing rank `rank(x) + 1`. Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
 | `pad` | `(&tensor[D,p], padding: List<List<int64>>, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
 | `shrink` | `(&tensor[D,p], bounds: List<List<int64>>) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
 | `stride` | `(&tensor[D,p], strides: int64...) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
 
-`expand`'s positional form is the (tensor, axis, size) triop; a
-two-argument list form is an arity error. The named-axis form
-(`expand(x, new, size)` with a dimension name) and the four-argument
-anchored form remain as `spec/04-type-system.md` §4.5.3 states them.
-Where the axis is positional it is axis-domain `int32`; `size` is
-extent-domain `int64` in every form, which makes the canonical broadcast
-idiom `expand(b, axis, shape(x, axis))` well-typed by construction.
+`expand` and `insert` each take the (tensor, axis, size) triop
+positionally; a two-argument list form is an arity error. `expand` sets an
+existing size-1 axis and leaves the rank alone; `insert` adds an axis and
+raises the rank by one. The named-axis form (`insert(x, new, size)` with a
+dimension name) and the four-argument anchored form belong to `insert` and
+remain as `spec/04-type-system.md` §4.5.3 states them. Where the axis is
+positional it is axis-domain `int32`; `size` is extent-domain `int64` in
+every form, which makes the canonical broadcast idiom
+`insert(b, axis, shape(x, axis))` well-typed by construction.
 
 **Movement AD adjoints:**
 
@@ -663,7 +674,8 @@ idiom `expand(b, axis, shape(x, axis))` well-typed by construction.
 |---|---|
 | `reshape` | `reshape(g, original_shape)` |
 | `permute` | `permute(g, inverse_permutation)` |
-| `expand` | `sum(g, expanded_axes)` — collapse the expanded dimensions |
+| `expand` | `insert(sum(g, axis), axis, 1i64)` — sum over the broadcast axis, then restore its extent-1 slot so the adjoint keeps the operand's rank |
+| `insert` | `sum(g, axis)` — collapse the inserted dimension |
 | `pad` | `shrink(g, inverse_padding)` — extract the non-padded region |
 | `shrink` | `pad(g, inverse_bounds)` — pad gradient back to original size |
 | `stride` | [05-MOV-1]'s exact zero-filled inverse sampling map at the original shape; runtime steps have zero cotangent |
@@ -729,26 +741,60 @@ synthesized-arithmetic clause, not by this section.
 
 #### 2.4.1 Runtime (node-valued) bounds and reshape targets
 
-A movement bound (`pad` before/after, `shrink` start/end, `stride` step) and a
-`reshape` target extent are each represented as a `RtDim`:
+A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
+`expand` or `insert` size, and a `reshape` target extent are each represented
+as a `RtDim`:
 
 - `Lit(n)` — a compile-time-constant extent.
 - `ToEnd` — the full-axis sentinel; legal only as a `shrink` end (the identity
-  slice of a symbolic bystander axis).
+  slice of a symbolic bystander axis), and well formed only when the start
+  paired with it is `Lit(0)`. A `ToEnd` end over any other start is a
+  malformed bound: every stage that validates a bound rejects it rather than
+  resolving it to a slice.
 - `Node(i)` — a **runtime** extent read from the owning node's `inputs[i]`, a
-  rank-0 integer scalar (a `shape()` read or integer arithmetic over one:
-  `add`/`mul`/`floor_div`/`neg`/`cast`). The index is absolute: `inputs[0]` is
-  always the tensor operand and `inputs[1..]` are the bound scalars.
+  rank-0 integer scalar. The index is absolute: `inputs[0]` is always the
+  tensor operand, and `inputs[1..]` are the bound scalars, any rank-0 `int32`
+  axis scalar a node-valued `InputAxis` axis names, and any shape-only tensor
+  operand an `InputAxis` names.
 - `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
   legal only as a `reshape` target.
+- `InputAxis(t, a)` — the extent of an earlier tensor node's axis, read
+  directly from that tensor's shape metadata: `t` is an absolute index into
+  the owning node's `inputs` naming a tensor operand, and `a` is a normalized
+  `int32` axis literal in `0..rank(t)` (spec/04-type-system.md §4.7.1
+  normalizes a negative literal statically) or an absolute input index naming
+  a rank-0 `int32` scalar (a computed axis under [05-OP-7]). Legal only as an
+  `expand` or `insert` size or a `reshape` target. It is the folded
+  extent-argument form of §2.5.1 for a direct `shape(x, axis)` extent
+  argument and, in an `expand` or `insert` size, for an in-scope dimension
+  binder instantiated by a tensor axis; a
+  `reshape` target that restates such a binder is `Sym`, and the same read
+  bound to a `pad`, `shrink`, or `stride` position is the rank-0 `Node` form.
+  The read carries no identity: whether the resulting axis keeps the source
+  dimension's name is decided by ordinary type reasoning
+  (spec/04-type-system.md §4.7.3), and an unproved identity is a fresh extent
+  under an equality guard.
+
+`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`; `expand` and `insert`
+admit `Lit`, `Node`, and `InputAxis`; `pad`, `shrink`, and `stride` admit
+`Lit` and `Node`, plus `ToEnd` for a `shrink` end.
+
+`expand` sets the extent at `axis` and is well formed only when the operand's
+extent at `axis` is 1 (the size-1 broadcast of §2.4's table); the operation is
+a claim that the operand's extent at `axis` is 1. A literal operand extent at
+`axis` other than 1 is a type error. A symbolic or runtime operand extent at
+`axis` other than 1 fails that claim's runtime extent guard and traps
+`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and
+[04-NUM-9].
 
 Runtime bounds are validated in every execution mode with matching language
 errors: a negative bound, a shrink range overshoot, a non-positive stride
 step, a negative reshape target extent, and a reshape target whose element
 product disagrees with the input all trap before allocation or access. The reshape numel
 guard fires for ANY reshape whose output or input extents are not all static
-literals — Sym-resolved targets and literal targets over runtime-sized inputs
-included, not only node-valued targets — and same-shape elementwise ops guard
+literals — named-dimension targets read as `InputAxis` and literal targets
+over runtime-sized inputs included, not only node-valued targets — and
+same-shape elementwise ops guard
 operand-shape agreement at equal rank whenever a non-static extent is
 involved (chelis#664; rank-0 scalar operands are the backend's broadcast
 idiom and are exempt). A dim whose extent
@@ -781,15 +827,16 @@ they are discrete index math, carry exact zero cotangent, and do not pull their
 producers (for example a window-count `floor_div`) into a structural
 differentiability rejection.
 
-> **[05-MOV-1]** Runtime movement bounds and reshape targets, their validation,
-> and the exact adjoints above SHALL be available in every language execution
-> mode for every active tensor dtype admitted by the owning movement
+> **[05-MOV-1]** Runtime movement bounds, `expand` and `insert` sizes, and
+> reshape targets, their validation, and the exact adjoints above SHALL be
+> available in every
+> language execution mode for every active tensor dtype admitted by the owning movement
 > operation. Eval, C, HIP, and Metal execute the same runtime values and
 > traps. No lowering may erase a runtime value, substitute a literal bound,
 > require host provenance, emit a statically guessed extent, or turn a backend
 > implementation gap into a language restriction.
 
-*(Not fully implemented; chelis#1298.)*
+*(Not fully implemented; chelis#1277, chelis#1298.)*
 
 ### 2.5 Memory
 
@@ -837,9 +884,10 @@ per [05-DIM-2] — extent-domain out, axis-domain in.
 
 Two semantic use shapes exist, and they are distinct:
 
-- **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
-  into the movement node's `DimExpr` (the output dim), not materialized as a
-  value node.
+- **As an extent argument** to `expand` / `insert` / `reshape`, a `shape()`
+  read is folded
+  into the movement node's `InputAxis` carrier (§2.4.1), not materialized as
+  a value node.
 - **As a scalar VALUE** (used in arithmetic, a `mean` divisor, or any other
   value position), a `shape()` read remains a dedicated typed extent operation
   whose int32 `axis` is an ordinary checked runtime value. It produces a
@@ -864,10 +912,11 @@ values rather than baked at codegen time.
 
 A `shape()` read whose `axis` is data- or metadata-derived remains the same
 operation as a literal-axis read. Using the extent as a runtime movement-op
-bound or reshape target (a `shrink`/`stride`/`pad` bound or window count
-derived from a `shape()` value, and the integer arithmetic feeding it) uses
-§2.4.1's node-valued `RtDim` capability; it does not allocate a second shape
-operation or a compile-time-only alias.
+bound or as a reshape target computed by integer arithmetic over one (a
+`shrink`/`stride`/`pad` bound or window count derived from a `shape()` value,
+and the integer arithmetic feeding it) uses §2.4.1's node-valued `RtDim`
+capability; it does not allocate a second shape operation or a
+compile-time-only alias.
 
 ### 2.6 Effectful Primitive
 
@@ -988,8 +1037,6 @@ program did not request.
 > has no accumulator. `bool`, `string`, reserved dtype spellings, mixed dtypes
 > or surfaces, and mismatched tensor dimensions are type errors.
 
-*(Not fully implemented; chelis#1306.)*
-
 ### 3.2 Comparison and Logical Operations
 
 | Name | Integer lowering | Float lowering |
@@ -1109,8 +1156,6 @@ intact Tier-2 identity.
 > may it decompose to the lowering, so the adjoint attaches to the identity
 > rather than to `max_elem`'s tie rule. Non-float operands are type errors.
 > The operation has no accumulator.
-
-*(Not fully implemented; chelis#1313.)*
 
 ### 3.4 Higher-Level Operations
 
@@ -1333,6 +1378,17 @@ different dtype than the initial value's dtype are rejected with
 the enclosing handler is rejected by the ordinary effect rules; neither an
 unreachable definition nor another definition's effects change this call's
 legality.
+
+> **[05-HOST-4]** `list_dir(path: string) -> List[string]` returns one element
+> per directory entry, each the entry's own name rather than a path, and
+> retains its declared `IO` effect. The current-directory and parent-directory
+> links are not entries. The result is ordered by the byte sequence of the
+> entry name the host reports, which for a name that is valid UTF-8 is
+> lexicographically by Unicode scalar value. That order is fixed on the host's
+> names before any conversion to `string`, so it does not depend on how a name
+> that is not valid UTF-8 converts. A directory with no entries yields the
+> empty `List`. The operation is outside AD: it has no adjoint, no cotangent,
+> and no accumulator.
 
 ### 3.6.1 The `test_*` assertion family
 
@@ -1606,19 +1662,17 @@ exact ADT identity by [05-OP-34].
 >
 > `typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;`
 >
-> `typedef struct { uint8_t is_some; uint8_t reserved[7]; chelis_scalar value; } chelis_option_scalar;`
->
 > `typedef uint8_t chelis_value_tag;`
 >
-> `enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7 };`
+> `enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };`
 >
 > `typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;`
 >
 > `typedef struct { chelis_value_tag tag; uint8_t reserved[7]; chelis_value_payload payload; } chelis_value;`
 >
-> `typedef struct { uint8_t is_some; uint8_t reserved[7]; chelis_value value; } chelis_option_value;`
+> `typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;`
 >
-> `typedef struct { void *data; const int64_t *shape; const int64_t *strides; int64_t size; int64_t byte_capacity; int32_t rank; chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } chelis_tensor;`
+> `typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;`
 >
 > `typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;`
 >
@@ -1633,45 +1687,49 @@ exact ADT identity by [05-OP-34].
 > dtype mismatch traps `Domain` at that boundary; no operation repairs or
 > reinterprets it.
 >
-> Every `reserved` byte is zero. Each option discriminant is exactly zero or
-> one; a `None` carrier has an all-zero value field, and `Some` validates its
-> value before crossing the boundary. A `chelis_value` tag is exactly one of
-> the eight constants above. Unit has a null, otherwise-zero payload; Scalar
+> Every `reserved` byte is zero. An optional scalar result is one owned
+> [05-OP-44] option node whose `Some` child is a validated scalar-tagged
+> value; there is no by-value option carrier. A `chelis_value` tag is exactly
+> one of the ten constants above. Unit has a null, otherwise-zero payload; Scalar
 > embeds the complete canonical `chelis_scalar`; every heap tag carries a
 > non-null owned handle in `payload.handle` and zero bytes in the remainder of
-> the union. The natural C ABI of these fixed-width field declarations is the
-> ABI; no feature macro, build mode, or typedef substitution may change their
-> order, widths, or signedness.
+> the union, and that handle is exactly one [05-OP-44] owner. The natural C
+> ABI of these fixed-width field declarations is the ABI; no feature macro,
+> build mode, or typedef substitution may change their order, widths, or
+> signedness. `chelis_tensor` is [05-OP-44]'s opaque descriptor handle and
+> has no public field.
 >
-> Every public `chelis_tensor` is contiguous row-major storage. It has rank in
-> `0..=INT32_MAX`; rank zero has null `shape` and `strides` pointers, while a
-> positive rank has non-null pointers to exactly `rank` int64 entries that the
-> runtime owns for the carrier lifetime. Every extent is nonnegative and the
-> strides are the exact checked products of the following extents in element
-> units. `size` is the checked product of the extents, with the rank-zero
-> empty product equal to one. There is no rank-eight limit.
-> `byte_capacity` is nonnegative and at least the checked product
-> `size * chelis_dtype_size(dtype)`. A zero-size tensor has null `data` and
-> zero `byte_capacity`; a nonempty tensor has a non-null pointer aligned for
-> its validated dtype. `owns_data` is exactly zero or one and both reserved
-> bytes are zero. When ownership is one, the runtime owns the complete
-> `byte_capacity`-byte allocation beginning at `data` and releases it exactly
-> once; when ownership is zero, it never releases that storage. An internal
-> noncontiguous view is materialized before it crosses this public carrier.
-> `chelis_alloc_view` copies the supplied shape into runtime-owned metadata and
-> derives the canonical strides. Its caller must provide a readable and writable
-> allocation of the declared capacity that remains live for the view's
-> lifetime; the runtime validates the declared metadata and bounds but cannot
-> prove a foreign allocation's lifetime or physical size.
+> Every public tensor descriptor observes as contiguous row-major storage
+> through a view. It has rank in `0..=INT32_MAX` read through
+> `chelis_tensor_rank` and exactly `rank` nonnegative int64 extents read
+> through `chelis_tensor_shape`; a rank-zero descriptor has no extents. Its
+> element count is the checked product of the extents, with the rank-zero
+> empty product equal to one. There is no rank-eight limit. A read view or
+> write view of a descriptor has `count` equal to that element count, `dtype`
+> equal to the descriptor's validated dtype, and zero `reserved` bytes; its
+> byte size is the checked product `count * chelis_dtype_size(dtype)`. A view
+> with zero `count` has null `data`; a nonempty view has a non-null pointer
+> aligned for its validated dtype. A read view is valid only while an owner
+> of its descriptor is live and until that descriptor is passed to
+> `chelis_tensor_begin_write`, whichever comes first. A successful begin
+> invalidates every read view previously returned for that descriptor;
+> dereferencing such a stale view violates the caller precondition. A write
+> view is valid only while its exclusive guard is live; nothing is retained,
+> released, or freed through a view pointer.
+> An internal noncontiguous view is materialized before it crosses a public
+> view. Foreign storage enters only through [05-OP-44]'s entry borrow, which
+> validates the declared metadata and bounds but cannot prove a foreign
+> allocation's lifetime or physical size.
 > Each `chelis_dict_entry` contains two independently canonical
 > `chelis_value` carriers in key-then-value order.
 >
 > `chelis_dtype_size` returns the exact byte width of the validated stored
 > representation. Tensor extraction requires a rank-zero tensor with exactly
 > one element. Fill requires the scalar dtype to equal the tensor dtype and
-> writes the exact scalar bits to every element. Neither operation converts
-> through `double` or another dtype. The family does not convert through
-> `double` at any other edge. Rendering follows [05-OBS-1..2] at the
+> writes the exact scalar bits to every element through [05-OP-44]'s
+> exclusive write guard. Neither operation converts through `double` or
+> another dtype. The family does not convert through `double` at any other
+> edge. Rendering follows [05-OBS-1..2] at the
 > scalar's own dtype; a stored NaN renders as `NaN` and therefore preserves
 > its class but not its payload through text. Parsing ignores surrounding
 > ASCII space and tab. Signed-decimal integer text is exactly an optional
@@ -1732,7 +1790,8 @@ exact ADT identity by [05-OP-34].
 > `dict_from_pairs` and `dict_merge` process entries from left to right; a
 > later duplicate replaces the value at the existing insertion position,
 > and a new key appends. `dict_insert` uses the same rule, `dict_remove` of an
-> absent key is unchanged, and `dict_get` returns `None` only for absence.
+> absent key is unchanged, and `dict_get` returns one owned [05-OP-44] option
+> node that is `None` only for absence.
 > Recursive dictionary observation is canonical rather than insertion-ordered:
 > bool keys order `false` before `true`, integer keys order by exact
 > mathematical value within their one static key dtype, and string keys order
@@ -1749,7 +1808,11 @@ exact ADT identity by [05-OP-34].
 > `{` followed by `R(key): R(value)` pairs separated by `, ` and then `}`;
 > `{}` is empty. An ADT renders its exact stored constructor-name bytes followed by `(`,
 > its fields in index order rendered by `R` and separated by `, `, and then
-> `)`; a zero-field constructor therefore renders as `Ctor()`. No structure
+> `)`; a zero-field constructor therefore renders as `Ctor()`. An option node
+> renders as `None` when it owns no child and otherwise as `Some(` followed by
+> `R` of its child and `)`, the exact spelling of the ADT rule for those two
+> constructors. A mapped file renders as `<mapped-file:` followed by its exact
+> int64 byte length in decimal digits and then `>`. No structure
 > inserts quoting or escaping. The grammar is deliberately non-injective:
 > unit and an empty tuple both render `()`, and string bytes are unquoted.
 > `read_bytes` and `mmap_read` return int64 elements in `0..=255`; mapped
@@ -1766,13 +1829,15 @@ exact ADT identity by [05-OP-34].
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the twenty-three final public C callable identities enumerated in
+> exactly the twenty-two final public C callable identities enumerated in
 > the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
 > incorporates by reference. These
 > signatures are canonical: axes and rank are `int32_t`; extents, sizes,
 > offsets, counts, and element counts are `int64_t`; dtype arguments are
-> `chelis_dtype`; and an untyped, string-mode, or dtype-named successor has no
-> authority from this atom.
+> `chelis_dtype`; tensor arguments and results are [05-OP-44]'s opaque
+> `chelis_tensor` handles, and every tensor result is a new owner; and an
+> untyped, string-mode, or dtype-named successor has no authority from this
+> atom.
 >
 > This atom's selection rule also governs exactly the language builtin
 > `where(condition, then, else)` with signature
@@ -1785,17 +1850,19 @@ exact ADT identity by [05-OP-34].
 > has no cotangent. Signed-integer and bool branches are forward-only. The
 > operation has no accumulator.
 >
-> Every entry validates every observable input-tensor invariant from
-> [05-OP-31], including dtype, shape, canonical strides, size, capacity,
-> alignment, and ownership metadata, before reading data. The rank is nonnegative
-> and representable as int32; every extent
-> is nonnegative; a positive-rank shape pointer is non-null; and a nonempty
-> borrowed view has a non-null, representation-aligned data pointer. Shape
+> Every entry validates every observable input-descriptor invariant from
+> [05-OP-31] and [05-OP-44], including dtype, shape, element count, capacity,
+> alignment, live-owner state, and write-guard state, before reading data. The
+> rank is nonnegative and representable as int32; every extent
+> is nonnegative; a positive-rank shape pointer passed to allocation or entry
+> borrow is non-null; and a nonempty entry borrow has a non-null,
+> representation-aligned data pointer. Shape
 > products, byte counts, offsets, output extents, and allocation sizes use
 > checked arithmetic. A malformed carrier or invalid axis traps `Domain`; an
 > unrepresentable count, extent, offset, or allocation size traps `Overflow`
 > before allocation or element access. Each language operation follows its
-> own axis atom: [05-AXIS-1] governs the static reduction/expand family, while
+> own axis atom: [05-AXIS-1] governs the reduction, `expand`, and `insert`
+> family, while
 > [05-OP-7]/[05-SHAPE-1] admits a computed int32 axis for `shape`. C-family
 > axis parameters are runtime int32 values. Every signed axis accepted by this C family first
 > applies §2.3's one-step negative normalization; an axis still out of range
@@ -1803,9 +1870,9 @@ exact ADT identity by [05-OP-34].
 >
 > Allocation returns owned, contiguous, row-major, zero-filled storage at the
 > requested representation. A zero extent means zero elements, never one
-> synthetic element. A view is non-owning contiguous storage whose declared
-> capacity covers its checked byte size, and releasing
-> it never releases the caller's data. `contiguous` preserves every element's
+> synthetic element. Foreign storage enters only through [05-OP-44]'s entry
+> borrow; no callable in this family constructs a non-owning view, adopts
+> caller bytes, or frees storage. `contiguous` preserves every element's
 > exact stored bits in row-major order. Tensor ingress accepts a rectangular
 > nested list whose scalar leaves all have exactly the requested dtype; it
 > neither infers nor converts that dtype. `chelis_tensor_elements` boxes every
@@ -1835,8 +1902,8 @@ exact ADT identity by [05-OP-34].
 > inverse gather shape contract: `updates.shape` is
 > `base[..axis] ++ indices.shape ++ base[axis+1..]`, while base, updates, and
 > result have one dtype. Replace admits every active dtype, including bool,
-> and is [05-SPARSE-1..2]'s row-major
-> last-write-wins operation and structurally rejects `grad`. Add starts each
+> and follows [05-SPARSE-1] plus §3.5's row-major last-write-wins rule; it
+> structurally rejects `grad`. Add starts each
 > destination's leaf sequence with the base value, admits exactly active
 > signed-integer and float dtypes, and follows the base by targeting
 > updates in increasing row-major flat-index order, and combines those leaves
@@ -1914,6 +1981,163 @@ exact ADT identity by [05-OP-34].
 > treats bool as numeric storage, silently changes an axis width, or supplies a
 > compatibility alias. Except for the stated cumsum, trace, and einsum rules,
 > the family has no user-selectable accumulator.
+>
+> **[05-OP-44]** `heap_lifetime(handle, parameters...) -> result` governs
+> exactly the heap-handle, strong-owner, tagged-value conversion, option-node,
+> entry-borrow, and guarded-access callable identities enumerated in the
+> normative registry `spec/registry/c_heap_lifetime.md`, which this atom
+> incorporates by reference. The signature is part of each identity; a
+> differently named, unguarded, field-reading, or ownership-ambiguous
+> successor has no authority from this atom. (The opaque carrier and the
+> lifetime callables are not yet fully implemented; see chelis#1286.)
+>
+> The final public declarations are exact:
+>
+> `typedef struct { void *handle; } chelis_string;`
+>
+> `typedef struct chelis_tensor chelis_tensor;`
+>
+> `typedef struct chelis_tensor_write chelis_tensor_write;`
+>
+> `typedef struct chelis_list chelis_list;`
+>
+> `typedef struct chelis_tuple chelis_tuple;`
+>
+> `typedef struct chelis_dict chelis_dict;`
+>
+> `typedef struct chelis_adt chelis_adt;`
+>
+> `typedef struct chelis_option chelis_option;`
+>
+> `typedef struct chelis_mapped_file chelis_mapped_file;`
+>
+> The heap-kind universe is closed and exact: `String`, `Tensor`,
+> `TensorStorage`, `List`, `Tuple`, `Dict`, `Adt`, `Option`, and `MappedFile`.
+> Every heap allocation carries exactly one of those kinds and exactly one
+> strong-owner count, and every kind has exactly one finalizer.
+> `TensorStorage` is private: it is reached only through a `Tensor` descriptor
+> and has no public handle, value tag, or callable. Each of the eight public
+> kinds has exactly one public ownership carrier declared above, exactly one
+> `chelis_value` tag (`CHELIS_VALUE_STRING`, `CHELIS_VALUE_TENSOR`,
+> `CHELIS_VALUE_LIST`, `CHELIS_VALUE_TUPLE`, `CHELIS_VALUE_DICT`,
+> `CHELIS_VALUE_ADT`, `CHELIS_VALUE_OPTION`, and `CHELIS_VALUE_MAPPED_FILE`),
+> one retain callable, one release callable, one take conversion into a
+> value, one take conversion out of a value, and one borrow conversion out of
+> a value. The registry enumerates exactly those identities plus the option,
+> entry-borrow, view, and guard callables below; there is no kind-generic
+> handle, untagged payload, owner flag, or second representation of any kind.
+> Tensor, List, tuple, dictionary, ADT, option, and mapped-file carriers are
+> pointers to incomplete C types. `chelis_string` is the one fixed by-value
+> wrapper; its `handle` field preserves that wrapper's ABI, while the object it
+> points to is opaque and callers never read, compare, or write through it.
+>
+> A live handle is one logical owner under [04-LIN-3]. Retain creates one
+> additional owner by a checked relaxed increment; a count that would exceed
+> the representable owner range traps `Overflow`. Release consumes one owner;
+> the final release synchronizes with release/acquire ordering before running
+> the kind's finalizer exactly once, and the finalizer releases each stored
+> child exactly once before freeing its own allocation once. Every handle or
+> guard argument must be backed by the live owner that the call consumes or
+> borrows. A retain, release, take, borrow, view, or guard operation on a null
+> handle, or on a live handle whose kind disagrees with the callable or with
+> the value tag, traps `Domain`; no operation repairs, ignores, or reinterprets
+> it. A take, final release, or guard end consumes that caller-held handle or
+> guard. Reusing its stale pointer afterward violates the live-handle
+> precondition; because the allocation may already be freed, the ABI does not
+> promise a diagnostic or retain a tombstone to recognize that invalid C use.
+>
+> Every heap-tagged `chelis_value` holds exactly one owner of its handle;
+> there is no non-owning value. `chelis_value_clone` creates one additional
+> owner for a heap tag and copies a unit or scalar payload;
+> `chelis_value_release` consumes a heap tag's owner and consumes nothing for
+> unit or scalar. A take conversion into a value moves the caller's owner into
+> the value. A take conversion out of a value moves the value's owner to the
+> returned handle and ends the value. A borrow conversion out of a value
+> returns the handle without creating or consuming an owner and is valid only
+> while an owner of that value is live. A conversion whose tag does not match
+> its named kind traps `Domain`.
+>
+> Strings, option nodes, Lists, tuples, dictionaries, ADTs, and mapped files
+> are immutable after construction. A constructor clones each borrowed child
+> exactly once; a by-value accessor, including `chelis_option_unwrap` and
+> [05-OP-32]'s index, field, and lookup callables, clones the stored child
+> exactly once; a finalizer releases each stored child exactly once. Because a
+> stored child set never changes, no value contains itself and no heap graph
+> has a cycle, so strong ownership is complete and no collector exists.
+>
+> Every target-representable option, including an option of a scalar, of a
+> mapped file, or of another option, is one option node: `chelis_option_none`
+> owns no child and `chelis_option_some` owns exactly one tagged child.
+> `chelis_option_is_some` reads the discriminant, and `chelis_option_unwrap`
+> of a `None` node traps `Domain`. There is no by-value,
+> discriminant-plus-payload, or scalar-special option carrier. A mapped file is
+> a resource whose
+> bytes are read only through [05-OP-32]'s mapped-read callables;
+> `chelis_mapped_file_retain` and `chelis_mapped_file_release` follow the
+> owner rule above, and `CHELIS_VALUE_MAPPED_FILE` is its only tagged
+> representation.
+>
+> A tensor handle is a descriptor that retains exactly one storage allocation
+> for its whole lifetime; a descriptor's finalizer releases its storage once,
+> and the storage finalizer frees the bytes once. Descriptors that share one
+> storage are views. `chelis_tensor_retain` and `chelis_tensor_release` are the
+> only public tensor lifetime operations, and no public callable frees,
+> adopts, or transfers storage bytes. `chelis_tensor_read_view` returns
+> [05-OP-31]'s read view of a descriptor's contiguous row-major elements with
+> the owner-and-write-begin validity bound defined there.
+> `chelis_tensor_begin_write` succeeds only when the descriptor has exactly
+> one live owner, its storage has exactly one live descriptor, the storage is
+> runtime-owned, and no guard is active on it; it returns the one exclusive
+> non-owning guard embedded in that descriptor. A successful begin invalidates
+> every read view previously returned for that descriptor before it activates
+> the guard. Dereferencing one afterward violates the caller precondition; the
+> runtime does not promise to diagnose that stale pointer. The guard borrows,
+> but neither consumes nor clones, the descriptor's existing owner for the
+> guard lifetime; it allocates no guard object. Every other begin, read view,
+> retain, clone, or release of that descriptor traps `Domain` until
+> `chelis_tensor_end_write` consumes and deactivates the guard without freeing
+> an allocation or consuming the descriptor owner. `chelis_tensor_write_view` borrows its `const` guard and
+> is valid only while that guard is live; an ended guard has no view. Fill
+> under [05-OP-31] and every other public
+> element mutation takes the guard, never the descriptor. The runtime performs these
+> checks itself on the live counts and write state; a compiler's reuse proof
+> never replaces them.
+>
+> `chelis_tensor_repurpose` is the one descriptor-metadata mutation. Its rank
+> and each shape extent arrive as exact `int64` `chelis_scalar` values; any
+> other scalar dtype or a nonzero reserved byte traps `Domain`. It
+> succeeds only when the descriptor has exactly one live owner, its storage
+> has exactly one live descriptor, the storage is runtime-owned, and no write
+> guard is active. It validates `rank` and `shape` by the same rules as
+> `chelis_alloc`, using the descriptor's existing dtype, and requires the new
+> checked byte size to equal the storage allocation's byte capacity exactly.
+> It then replaces the rank, shape, canonical row-major strides, and element
+> count while preserving the descriptor, storage, dtype, stored bits, and all
+> owner counts. Success invalidates every earlier read view for the descriptor;
+> a failed uniqueness, provenance, active-guard, or exact-capacity condition
+> traps `Domain`, and invalid metadata arithmetic traps `Overflow`, without
+> adopting, freeing, transferring, or reallocating storage bytes. This
+> operation is outside AD and has no adjoint or accumulator.
+>
+> An entry borrow, following [04-LIN-7], is a descriptor over storage the
+> caller owns: `chelis_tensor_entry_borrow` validates the declared rank,
+> extents, dtype, alignment, and capacity exactly as [05-OP-33] validates an
+> owned allocation, admits a null `data` pointer only for a zero element
+> count, requires a nonnegative `byte_capacity` at least the checked byte size,
+> and produces storage that is never runtime-owned. Releasing it never
+> releases the caller's bytes; `chelis_tensor_begin_write` on it traps
+> `Domain`; and no address comparison, retain count, or later invocation makes
+> that storage runtime-owned. An owned result crossing that boundary always
+> has runtime-owned storage. The runtime validates the declared metadata and
+> bounds but cannot prove a foreign allocation's lifetime or physical size;
+> those remain the caller's preconditions.
+>
+> This family carries no numeric payload of its own: a read or write view
+> exposes the exact stored bits at the descriptor's validated dtype and never
+> converts, and `chelis_tensor_entry_borrow` accepts only a validated
+> `chelis_dtype`. It has no alias, wrapper, deprecated spelling, field-level
+> access, owner flag, or free-style path; it has no accumulator and is outside
+> AD.
 >
 > **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the five
 > exported stdlib ADT identities enumerated in the normative registry

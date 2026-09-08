@@ -4,8 +4,9 @@
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
+use chelis_types::ElementRef;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -18,7 +19,7 @@ fn load(dag: &mut Dag, name: &str, ty: TensorType) -> NodeId {
     dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty, None)
 }
 
-fn eval_dag(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+fn eval_dag(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let vals = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
         .expect("evaluation should succeed");
@@ -66,7 +67,7 @@ fn adv1_long_chain_5_ops() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -104,7 +105,7 @@ fn adv2_mixed_unary_binary_chain() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 4.0, 9.0, 16.0]),
@@ -147,7 +148,7 @@ fn adv3_external_input_used_by_multiple_steps() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -186,7 +187,7 @@ fn adv4_fused_and_unfused_feed_same_output() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -222,7 +223,7 @@ fn adv5_intermediate_multi_consumer_splits_chain() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -260,7 +261,7 @@ fn adv6_entire_dag_is_fusible() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -307,7 +308,7 @@ fn adv7_store_in_middle_of_chain() {
     let fused = fuse(&dag);
 
     // Store is NOT fusible, so Neg→Exp should NOT fuse (Store adds a consumer to 'a')
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -340,7 +341,7 @@ fn adv8_cast_not_fusible() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
     )]
@@ -379,7 +380,7 @@ fn adv9_cmplt_in_fused_chain_produces_bool() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [
+    let inputs: UnordMap<String, TensorValue> = [
         (
             "x".into(),
             TensorValue::from_vec(vec![4], vec![1.0, 5.0, 3.0, 7.0]),
@@ -406,7 +407,7 @@ fn adv9_cmplt_in_fused_chain_produces_bool() {
 }
 
 // ============================================================================
-// ADV-10: MaxElem in fused chain uses fmaxf
+// ADV-10: MaxElem in fused chain preserves exact selected-operand semantics
 // ============================================================================
 #[test]
 fn adv10_maxelem_in_fused_chain() {
@@ -425,9 +426,9 @@ fn adv10_maxelem_in_fused_chain() {
 
     let fused = fuse(&dag);
 
-    let inputs: HashMap<String, TensorValue> = [(
+    let inputs: UnordMap<String, TensorValue> = [(
         "x".into(),
-        TensorValue::from_vec(vec![4], vec![-1.0, 2.0, -3.0, 4.0]),
+        TensorValue::from_vec(vec![4], vec![-0.0, 2.0, -3.0, 4.0]),
     )]
     .into_iter()
     .collect();
@@ -436,9 +437,19 @@ fn adv10_maxelem_in_fused_chain() {
     let fuse_out = eval_dag(&fused, &inputs);
     assert_close(&orig, &fuse_out, 1e-6, "ADV-10: maxelem→neg");
 
-    // relu(-1)=0, relu(2)=2, relu(-3)=0, relu(4)=4
-    // neg: [0, -2, 0, -4]
-    assert_eq!(fuse_out[0].to_f64_lossy_vec(), vec![0.0, -2.0, 0.0, -4.0]);
+    let stored_f32_bits = |value: &TensorValue| {
+        (0..value.len())
+            .map(|index| match value.storage().element_ref(index) {
+                ElementRef::F32(element) => element.to_bits(),
+                other => panic!("ADV-10 expected f32 storage, got {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    // The left operand wins the -0/+0 tie. Negating the selected -0 yields
+    // +0; an fmaxf-style surrogate would choose/re-encode +0 and yield -0.
+    let expected = vec![0x0000_0000, 0xc000_0000, 0x8000_0000, 0xc080_0000];
+    assert_eq!(stored_f32_bits(&orig[0]), expected);
+    assert_eq!(stored_f32_bits(&fuse_out[0]), expected);
 }
 
 fn main() {}

@@ -46,8 +46,9 @@ triggers the cvc5 source build (~2-5 minutes on first compile, cached thereafter
 
 The optional `carcara` feature re-checks cvc5 Alethe proofs. The pinned
 Carcara dependency enables only Rug's integer and rational support, so this
-gate needs GMP but not MPFR or MPC. Install `libgmp-dev` on Debian/Ubuntu or
-`brew install gmp` on macOS.
+gate needs GMP but not MPFR or MPC. Cargo builds the GMP version locked by
+`gmp-mpfr-sys`; do not install or configure a distribution GMP for this gate.
+The source build needs a C toolchain, `m4`, and `make`.
 
 Run the complete suite serially. A nightly parallel process exited with
 SIGSEGV after tests, while the same unit, integration, and doctest set passed

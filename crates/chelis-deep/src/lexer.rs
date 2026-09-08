@@ -287,6 +287,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     span: Span::new(start, i - start),
                 });
             }
+            b'*' => {
+                // `*` is the canonical concrete wildcard dimension name in
+                // `(d-name {} *)` (spec/03 §2.6). Its role is validated by
+                // the structural type consumer; the lexer preserves the
+                // spelling as one symbol rather than rejecting generated
+                // canonical types before role validation.
+                tokens.push(Token {
+                    kind: TokenKind::Symbol("*".to_string()),
+                    span: Span::new(start, 1),
+                });
+                i += 1;
+            }
             b if is_ident_start(b) => {
                 while i < bytes.len() && is_ident_continue(bytes[i]) {
                     i += 1;
@@ -694,6 +706,7 @@ mod tests {
                 TokenKind::Symbol("x-y".into()),
             ]
         );
+        assert_eq!(lex_kinds("*"), vec![TokenKind::Symbol("*".into())]);
     }
 
     #[test]

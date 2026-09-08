@@ -207,7 +207,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
     fn walk(
         expr: &chelis_deep::ast::Expr,
         prefix: Option<&str>,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut chelis_unord::UnordSet<String>,
     ) -> Option<String> {
         let (_, children) = deep_node_parts(expr)?;
         let name = module_name(expr)?;
@@ -225,7 +225,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         }
         None
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     for expr in exprs {
         if let Some(dup) = walk(expr, None, &mut seen) {
             return Some(dup);
@@ -241,7 +241,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
     fn walk(
         expr: &chelis_deep::ast::Expr,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut chelis_unord::UnordSet<String>,
     ) -> Option<String> {
         let (tag, children) = deep_node_parts(expr)?;
         match tag {
@@ -258,7 +258,7 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         }
     }
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     exprs.iter().find_map(|expr| walk(expr, &mut seen))
 }
 
@@ -320,6 +320,7 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
         match child.as_rule() {
             deep::Rule::node => validate_deep_node(child.clone())?,
             deep::Rule::typed_helper => validate_typed_helper(child.clone())?,
+            deep::Rule::bare_list => validate_bare_list(child.clone())?,
             deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
             other => {
                 return Err(ValidationError::Failed(format!(
@@ -332,6 +333,31 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
     }
 
     validate_tag_shape(deep_tag, &children, span.start())
+}
+
+fn validate_bare_list(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
+    for item in pair.into_inner().filter(is_structural_pair) {
+        let child = match item.as_rule() {
+            deep::Rule::bare_list_item => item.into_inner().find(is_structural_pair),
+            _ => Some(item),
+        };
+        let Some(child) = child else {
+            continue;
+        };
+        match child.as_rule() {
+            deep::Rule::node => validate_deep_node(child)?,
+            deep::Rule::typed_helper => validate_typed_helper(child)?,
+            deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
+            other => {
+                return Err(ValidationError::Failed(format!(
+                    "unexpected Deep bare-list rule {:?} at byte {}",
+                    other,
+                    child.as_span().start()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_typed_helper(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
@@ -598,6 +624,13 @@ mod tests {
         let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
         validate_deep(source)
             .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
+    }
+
+    #[test]
+    fn deep_accepts_canonical_nominal_parameter_lists() {
+        let source = "(deftype {} Column (n a) (variant {} Column (field {} items (t-tensor {} (d-var {} n) (t-var {} a)))))\n";
+        validate_deep(source)
+            .expect("validator must accept the compiler's canonical bare nominal-parameter list");
     }
 
     fn assert_duplicate_defsig_rejected(source: &str) {
@@ -1065,5 +1098,101 @@ mod tests {
         // not be swallowed into a comment and silently accepted.
         let source = "; a comment\n@@@ not a node\n";
         validate_deep(source).expect_err("garbage after a comment must still fail to parse");
+    }
+
+    /// chelis#1417: `dtype_bounds` is the first map-valued metadata key, so
+    /// this grammar is the second implementation that has to admit it.
+    /// Reverting `meta_value`'s `meta` alternative turns this RED with
+    /// `expected meta_value`, which is exactly how every migrated stdlib
+    /// module failed `chelis deep <file> | chelis validate --deep`.
+    #[test]
+    fn deep_admits_a_map_valued_metadata_key() {
+        for source in [
+            "(defsig {dtype_bounds: {p: int}} arange (t-fn {} (t-var {} p) (t-var {} p)))\n",
+            "(defsig {dtype_bounds: {p: float, q: numeric}} f (t-fn {} (t-var {} p) (t-var {} q)))\n",
+            // The empty map is a legal value, as it is a legal node meta.
+            "(defsig {dtype_bounds: {}} f (t-fn {} (t-var {} p) (t-var {} p)))\n",
+        ] {
+            validate_deep(source)
+                .unwrap_or_else(|e| panic!("map-valued metadata must validate: {source}\n{e}"));
+        }
+    }
+
+    /// The Surf half of the same second-implementation contract. `validate_surf`
+    /// has a "grammar rejects, parser accepts" rescue, so without these the new
+    /// binder syntax would pass through that hole and the grammar would cover
+    /// none of it. Reverting `type_binders` in `surf.pest` does not change the
+    /// exit verdict, so these assert on the GRAMMAR directly.
+    #[test]
+    fn surf_grammar_admits_the_dtype_family_binder_list() {
+        use pest::Parser;
+        for source in [
+            "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
+            "sig total[p: Numeric]: p -> p -> p\n",
+            "def only_floats[p: Float](x: p) -> p = x\n",
+            "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
+            "def unbounded[a](x: a) -> a = x\n",
+        ] {
+            super::surf::Grammar::parse(super::surf::Rule::program, source)
+                .unwrap_or_else(|e| panic!("the Surf grammar must admit `{source}`: {e}"));
+            validate_surf(source).expect("and the compiler parser agrees");
+        }
+    }
+
+    /// The negative half: the bound position is a closed three-name set in the
+    /// grammar too, so an ADT name there is not quietly admitted.
+    #[test]
+    fn surf_grammar_rejects_a_non_family_bound() {
+        use pest::Parser;
+        for source in ["sig f[p: Tensor]: p -> p\n", "sig f[p: f32]: p -> p\n"] {
+            assert!(
+                super::surf::Grammar::parse(super::surf::Rule::program, source).is_err(),
+                "the Surf grammar must reject `{source}`"
+            );
+            validate_surf(source).expect_err("and the compiler parser rejects it too");
+        }
+    }
+
+    /// §1.1 declares the metadata key charset as `[A-Za-z_][A-Za-z0-9_]*`.
+    /// `dtype_bounds` needs the underscore; §7's PEG and this grammar are the
+    /// two implementations that have to agree with that sentence.
+    #[test]
+    fn deep_admits_the_declared_metadata_key_charset() {
+        for key in [
+            "dtype_bounds",
+            "chelis_role",
+            "surf_path",
+            "_leading",
+            "Upper",
+        ] {
+            let source = format!("(defsig {{{key}: x}} f (t-var {{}} p))\n");
+            validate_deep(&source)
+                .unwrap_or_else(|e| panic!("`{key}` is a legal metadata key: {e}"));
+        }
+        // The no-hyphen rule that keeps Deep symbols portable still holds.
+        validate_deep("(defsig {has-hyphen: x} f (t-var {} p))\n")
+            .expect_err("a hyphenated metadata key must still be rejected");
+    }
+
+    /// The whole path the red team exercised: desugar a bounded declaration
+    /// the way `chelis deep` does, print it, and validate the result. This is
+    /// the control whose absence let the grammar regression reach a green
+    /// gate — nothing else runs `validate --deep` over Deep carrying a
+    /// map-valued metadata key.
+    #[test]
+    fn a_bounded_declaration_survives_desugar_then_deep_validation() {
+        let source = "module Std.Planted\n\
+                      export (planted_pick)\n\
+                      sig planted_pick[p: Numeric]: p -> p -> p\n\
+                      def planted_pick(a, b) = a\n";
+        let decls = chelis_surf::parser::parse_str(source).expect("bounded Surf parses");
+        let printed =
+            chelis_deep::printer::print_canonical(&chelis_surf::desugar::desugar_program(&decls));
+        assert!(
+            printed.contains("dtype_bounds: {p: numeric}"),
+            "the fixture must actually carry a map-valued key: {printed}"
+        );
+        validate_deep(&printed)
+            .unwrap_or_else(|e| panic!("desugared bounded Deep must validate:\n{printed}\n{e}"));
     }
 }

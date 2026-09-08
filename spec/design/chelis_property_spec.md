@@ -461,6 +461,15 @@ from the verdict. Tier C (`proof_tier:"fuzz"`) validates concrete float
 samples and renders `fuzz_validated` (or, for a fuzz contract under an SMT
 base, contributes the `fuzz` qualifier); it carries no `arith_model` field.
 
+The real-arithmetic model does not license cvc5's partial operations outside
+their mathematical domains. In particular, Tier B lowers `sqrt(a)` only after
+an auxiliary obligation proves every exact argument `a >= 0` from independent,
+sqrt-free total-algebraic conjuncts in the user's preconditions. The derived
+domain facts are redundant assertions in the main query, never added user
+assumptions. If an argument is not proved non-negative, or the proof times out,
+is unknown, or lies outside that conservative fragment, Tier B returns a loud
+unsupported result and `auto` routes to Tier C (chelis#1475).
+
 ## Relationship To `chelis test`
 
 `chelis test` remains the deterministic assertion runner for `Std.Test`.

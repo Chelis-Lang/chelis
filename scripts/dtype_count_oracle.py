@@ -2,7 +2,7 @@
 """Authoritative chelis#1287 first-class Count acceptance oracle.
 
 The oracle covers the complete checker grammar, dedicated IR and evaluator,
-exact WireDag v6 boundary, compiled C execution, loud HIP/Metal receipts,
+exact current WireDag boundary, compiled C execution, loud HIP/Metal receipts,
 semantic/capacity registration, and the executable example corpus entry.
 
 Usage:
@@ -59,7 +59,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
-            "exact WireDag v6 and registered wire capacity",
+            "exact current WireDag and registered wire capacity",
             (
                 "cargo",
                 "nextest",

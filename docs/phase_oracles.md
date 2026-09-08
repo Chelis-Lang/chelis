@@ -8,11 +8,15 @@ identified a completion oracle and should be treated as a gap, not an implicit p
 Status legend:
 
 - **default gate** — runs as part of `cargo test --workspace` (the inner-loop suite)
+- **continuous gate** — runs through `scripts/gate.py` in hosted CI and the
+  documented local pre-push subset, but is not a workspace test binary
 - **nightly gate** — excluded from the `default`/`ci` nextest profiles for cost and
   run only in the nightly **Heavy E2E** workflow (`cargo nextest run --profile nightly`);
   the heavy set is enumerated in [`.config/nextest.toml`](../.config/nextest.toml)
 - **manual gate** — requires `#[ignore]` plus a documented prerequisite; see
   [`manual_gates.md`](manual_gates.md)
+- **dedicated CI gate** — runs as its own blocking workflow job and is aggregated
+  under a stable required status context
 - **aspirational** — oracle is named in the owning spec but not yet implemented as
   executable code; phase is not done until it exists
 
@@ -82,9 +86,14 @@ Status legend:
 
 | Campaign | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
+| Runtime representation hardening · Phase 0 | `uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0` | `spec/design/runtime_representation.md` §Phase 0 | continuous gate (frozen source list, structural seam scanner, release reproducers, and controlled mutations); needs `clang` on PATH for the C/Objective-C leg, as the capacity census already needs `cc` |
 | Deep substrate handover | `cargo test -p chelis-compiler-api --test deep_authoring` + `cargo test -p chelis-tide --test mcp replace_function_body` + `cargo test -p chelis-tide --test mcp add_function` + `cargo test -p chelis-tide --test api replace_function_body` + `cargo test -p chelis-tide --test api add_function` + `cargo test -p chelis-types duplicate_defsig` + `cargo test -p chelis-validate duplicate_defsig` + `cargo test -p chelis-cli --test surf_round_trip` | `spec/design/chelis_agent_editing_surface.md` | default gate |
 | Deep authoring L2 query/cascade + `.dp` SMT parity | `cargo test -p chelis-deep --test authoring` + `cargo test -p chelis-compiler-api --test deep_authoring` + `cargo test -p chelis-tide --test mcp deep_query_and_rename_tools_are_model_facing_contracts` + `cargo test -p chelis-tide --test api deep_query_and_rename_http_endpoints_lock_preimage_contract` + `cargo test -p chelis-prove --features smt property_runner::tests::f7_deep -- --nocapture` + `cargo test -p chelis-tide --features smt --test mcp deep_user_property_proves_at_smt_tier_through_tide -- --nocapture` | `spec/design/chelis_agent_editing_surface.md` + `spec/design/chelis_deep_authoring_handover.md` | default gate plus SMT feature gate |
 | Compiler-vs-interpreter closure follow-up | `cargo test -p chelis-cli --test cli cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend -- --exact` + `cargo test -p chelis-cli --test cli build_c_mnist_loss_tail_tensor_pipeline_compiles_object -- --exact` + `cargo test -p chelis-cli --test parity parity_mnist_library_only -- --exact --nocapture` (the `std_nn_build_acceptance cross_function_seed_stdlib` leg was removed with the ML-module cut to School, #331) | `spec/upstream-bugs/compiler-vs-interpreter-closure-2026-05-07.md` §Follow-up work | default gate |
+| Compiled value ownership Phase 0 | `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0` (final line `COMPILED VALUE OWNERSHIP PHASE 0: PASS`) | `spec/design/compiled_value_ownership.md` §Phase 0 | delivered and locally runnable; CI has advanced the stable `compiled-value-ownership-phase0-oracle` job identity to the inherited Phase 2 gate |
+| Compiled value ownership Phase 1 | `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 1` (final line `COMPILED VALUE OWNERSHIP PHASE 1: PASS`) | `spec/design/compiled_value_ownership.md` §Phase 1 | delivered and inherited by Phase 2; exact ownership-ledger execution receipts cover the heap-kind, Option-node, mapped-file, and guarded-write suites |
+| Compiled value ownership Phase 2 | `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2` (final line `COMPILED VALUE OWNERSHIP PHASE 2: PASS`) plus `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch` (final line `COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS`) | `spec/design/compiled_value_ownership.md` §Phase 2 | continuous dedicated CI gate under the stable `compiled-value-ownership-phase0-oracle` job identity; launch subset is #1362 Tier 1 item A |
+| Compiled value ownership Phase 3 | `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 3 --require-hip` (final line `COMPILED VALUE OWNERSHIP PHASE 3: PASS`) | `spec/design/compiled_value_ownership.md` §Phase 3 | hardware acceptance pending under #1286/#1214, separate from implementation delivery; manual `ownership-hip.yml` workflow on a configured AMD runner, with setup and receipt instructions in `docs/local_hip_environment.md`; absent from default PR CI |
 
 ## Phase A (Reef Distribution Unblock)
 
@@ -162,7 +171,7 @@ Track) are post-v1 extensions and do not appear here.
 | M0 | `grep -F "[MTLDevice newLibraryWithSource:]" spec/design/chelis_metal_backend_plan.md` returns at least one hit (proves §3.3 was rewritten away from the metal-rs Rust runtime to the string-emission-only model) | `spec/design/chelis_metal_backend_plan.md` §3.3 | default gate (doc grep) |
 | M1 | `cargo build --workspace` + `cargo test -p chelis-cli --test cli -- target_metal` + `cargo tree -p chelis-cli` no-Apple-SDK-deps guard | `spec/design/chelis_metal_backend_plan.md` §9 (M1) | default gate |
 | M2 | `cargo test -p chelis-backend-metal --test codegen_structure` | `spec/design/chelis_metal_backend_plan.md` §9 (M2) | default gate |
-| M3 | Dispatch `.github/workflows/ci.yml`.<br>Confirm that `macos-smoke` runs `python3 .github/scripts/smoke_macos_metal.py` and exits 0. | `spec/design/chelis_metal_backend_plan.md` §9 (M3) | manual gate (macOS CI) |
+| M3 | `.github/workflows/ci.yml` `macos-workspace-shard` job runs `python3 .github/scripts/smoke_macos_metal.py` on shard 2 and exits 0; the stable `macos-smoke` aggregate requires both workspace shards | `spec/design/chelis_metal_backend_plan.md` §9 (M3) | default gate (macOS CI) |
 | M4 | `cargo test -p chelis-backend-metal --test codegen_structure -- reduction` | `spec/design/chelis_metal_backend_plan.md` §9 (M4) | default gate |
 | M5 | `cargo test -p chelis-backend-metal --test codegen_structure -- matmul_tiled` | `spec/design/chelis_metal_backend_plan.md` §9 (M5) | default gate |
 | M6 | `cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1` | `spec/design/chelis_metal_backend_plan.md` §9 (M6) | manual gate (Apple Silicon Mac with Metal device available) |

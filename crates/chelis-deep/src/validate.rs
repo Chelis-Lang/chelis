@@ -110,6 +110,37 @@ pub enum WarningKind {
     Arity,
 }
 
+impl WarningKind {
+    /// The governed wire spelling for this kind (chelis#886).
+    ///
+    /// A wire spelling a consumer matches on, not a rendering of the Rust
+    /// identifier. `check_snippet` used `{:?}` here, which made the wire a
+    /// function of the variant's name: a rename moved it with nothing
+    /// objecting, which is the hazard chelis#886 exists to remove.
+    /// `every_warning_kind_projects_to_its_pinned_spelling` restates all four
+    /// spellings independently, so a rename fails by name instead.
+    ///
+    /// "Published" would overstate it: nothing normative governs these four
+    /// strings AS WIRE SPELLINGS. Two of them do occur in the spec as prose --
+    /// `spec/03-deep-syntax.md` §8.1 "Structural Validation" and §8.2 "Arity
+    /// Validation" name the categories these variants report -- but no text
+    /// anywhere enumerates the four as diagnostic identities a consumer may
+    /// match on. The repo's structural mechanism for exactly that concern
+    /// (`chelis-vocab::DiagnosticKind`, `[05-UNS-6]`, and the diagnostic-kind
+    /// mutation oracle, which targets only `chelis-compiler-api` and
+    /// `chelis-vocab`) does not cover `WarningKind`. Routing it there is the
+    /// real fix and is a separate change; this table plus its test is the
+    /// local one.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::UnknownTag => "UnknownTag",
+            Self::MissingMetadata => "MissingMetadata",
+            Self::Structural => "Structural",
+            Self::Arity => "Arity",
+        }
+    }
+}
+
 pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
     for expr in exprs {

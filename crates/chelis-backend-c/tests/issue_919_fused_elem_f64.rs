@@ -22,10 +22,13 @@
 //!   - `emit_fused_reduce`, which is still f32-only, likewise rejects
 //!     rather than panics
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
+use support::codegen;
+
+mod common;
 
 fn vec_ty(n: usize, precision: Prim) -> TensorType {
     TensorType {
@@ -127,8 +130,8 @@ fn f64_fused_chain_compiles() {
     let dag = exp_times_x_dag(Prim::F64);
     let result = codegen(&dag, "f64_fused_compile").expect("f64 fused codegen");
 
-    let dir = std::env::temp_dir().join("chelis_issue_919_f64_fused");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let probe = common::probe_dir("issue_919_f64_fused");
+    let dir = probe.path().to_path_buf();
     std::fs::write(dir.join("f64_fused_compile.c"), &result.c_source).expect("write c");
     std::fs::write(dir.join("f64_fused_compile.h"), &result.h_header).expect("write h");
 
@@ -165,11 +168,7 @@ fn f64_fused_chain_compiles() {
 }
 
 #[test]
-fn f32_fused_chain_emission_is_unchanged() {
-    // Negative parity for the widening: the f32 lane must keep the
-    // pre-#919 text exactly, cast-free. `fused_in_place_forall_alias`
-    // asserts these literal strings, so a stray unconditional cast
-    // would be a real regression rather than a cosmetic one.
+fn f32_fused_chain_uses_exact_float_pointer_casts() {
     let dag = exp_times_x_dag(Prim::F32);
     let src = codegen(&dag, "f32_fused_chain")
         .expect("f32 fused codegen")
@@ -188,8 +187,8 @@ fn f32_fused_chain_emission_is_unchanged() {
         "the f32 lane must not acquire any double-precision emission; got:\n{src}"
     );
     assert!(
-        !src.contains("(float*)t"),
-        "the f32 lane must keep the cast-free `t{{n}}->data` pointer form; got:\n{src}"
+        src.contains("(float*)t") && src.contains("(const float*)t"),
+        "the f32 lane must cast the exact public void payload before access; got:\n{src}"
     );
 }
 

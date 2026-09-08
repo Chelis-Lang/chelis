@@ -524,7 +524,7 @@ def forward(x: tensor[1, 2, f32]) = mul(x, w())
 #[test]
 fn prove_bare_file_still_rejects_forged_linker_name() {
     let dir = write_prop(
-        r#"def pkg__demo__Demo__Clf__sneaky() -> i64 = 7
+        r#"def pkg__demo__Demo__Clf__sneaky() -> int32 = 7
 
 @property forged forall(x: int32):
   {
