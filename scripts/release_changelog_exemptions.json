@@ -1,0 +1,15 @@
+{
+  "_comment": "Commits the triage flags that are deliberately absent from the changelog. Each needs a reason a reviewer can check. This is judgement made visible, not judgement removed: the script still fails on anything not listed here.",
+  "exemptions": {
+    "b2f0341e": {
+      "pr": 1403,
+      "reason": "False positive. This PR documents that merging no longer closes issues; its body QUOTES `Fixes #727, #703, #709, #728` as an example of the accident it is describing. It closes nothing.",
+      "closes_are_quoted": true
+    },
+    "ca0b1a5b": {
+      "pr": 1562,
+      "reason": "chelis#1333 is `nightly-failure, release blocking` — a failing SMT Full Prove nightly, not user-visible behaviour. The fix isolates cvc5 in the unit-test lane and changes no compiler output.",
+      "closes_are_quoted": false
+    }
+  }
+}

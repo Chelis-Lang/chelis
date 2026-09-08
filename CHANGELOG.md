@@ -10,6 +10,39 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING (checker/runtime): runtime extents travel as a typed value edge
+  (part of chelis#1277, chelis#1378, chelis#578).** The mixed symbolic-extent
+  path is replaced by a typed `RtDim` edge carried through evaluator, verifier,
+  lowerer, gradients, `vmap`, C, HIP, Metal and the **v7 Wire DAG**. A vmapped
+  movement extent that depends on tensor elements is now **rejected at the
+  public checker boundary**, including dependencies carried indirectly;
+  host-derived extents are exact `int64`; zero extents are admitted and
+  **negative or incorrectly typed runtime extents are rejected**. Closes
+  chelis#609 (the checker accepted a wrong-rank ascription on a Form-3 `expand`
+  result while eval silently returned a contradicting rank), chelis#1382 (the
+  checker accepted a bare in-scope dimension binder as an `expand` size that
+  the compiled lanes could not lower), chelis#592 (a `vmap(grad(f))` C build
+  tripped the symbolic-dim guard), and chelis#1367.
+
+- **`shrink` over an `expand`-produced broadcast view no longer emits a rank-0
+  output in the C backend (chelis#1137).** The host lowering actualized
+  `Pad`/`Shrink`/`Stride` shapes against the wrong operand shape, so the
+  generated C produced a silently wrong answer and undefined behaviour where
+  the evaluator was correct.
+
+- **A forward `fail` beside a `grad` call in one expression no longer returns
+  zeros from the C binary (chelis#662).** Reachability was exempted for the
+  whole expression when any part of it was transformed; it is now a
+  subtree-aware walk, so the compiled lane traps where the evaluator aborts
+  instead of silently substituting zeros.
+
+- **A deferred `expand` shape is selected when the consumer is a comparison
+  (chelis#1265, part of chelis#1277).** The three deferral actions are named
+  and the comparison route is included among them, so a shape that was never
+  selected — and therefore never checked — now resolves. One verdict changes
+  deliberately. The related early-return residue on unresolved operands is
+  chelis#1512 and remains open.
+
 - **BREAKING (Surf/shell): type binders take explicit dtype-family bounds, and
   `SHELL_FORMAT_VERSION` moves 2 -> 3 (chelis#1417, part of chelis#729).** A
   binder may bound itself to `Float`, `Int` or `Numeric` --
@@ -44,7 +77,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **BREAKING (checker): lexical precedence over compiler-provided names
   (chelis#1076, chelis#672).** A compiler-provided name no longer silently
-  replaces the callable ordinary lexical scope selected. Applied uppercase
+  replaces the callable that ordinary lexical scope selected. Applied uppercase
   heads resolve through a structural constructor scope, so lexical shadowing
   cannot erase constructor-position authority; constructor patterns resolve
   against the nominal scrutinee owner; and evaluator dispatch and C host
@@ -124,7 +157,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   objects. Serialized compiler state changes accordingly. Measured across the
   whole 0.18.7 cut rather than for this change alone: compiled-context cache
   11 -> 15, stdlib cache 7 -> 12, library cache 4 -> 8, and Reef prepared-graph
-  cache 2 -> 5; stale entries rebuild automatically.
+  cache 2 -> 5; stale entries rebuild automatically. The Wire DAG schema moves
+  6 -> 7, and `chelis-compiler-api` rejects missing, older and future versions
+  rather than migrating them, so a v6 artifact hard-fails.
   `PACKAGE_SCHEMA_FORMAT_VERSION` is unchanged at 2.
   `SHELL_FORMAT_VERSION` moves 2 -> 3 and does NOT rebuild automatically --
   see the dtype-family binder entry above.
@@ -145,17 +180,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   (chelis#1422).** `linspace(count=0)` is no longer accepted, and the
   published `int64` count contract applies at constructor fixtures.
 
-- **`Std.Sort` migrates to the canonical rank-polymorphic `sort` export.**
+- **`Std.Sort` migrates to the canonical rank-polymorphic `sort` export
+  (chelis#1422).**
   The stale self-tests and public docs move with it, and generic precision
   cast targets are specialized from checker-owned call, result, container,
   accumulator and callback types.
 
-- **Top-level eager values are sequential at both checker ingresses.** An
+- **Top-level eager values are sequential at both checker ingresses
+  (chelis#1134, part of chelis#731).** An
   earlier declaration cannot see a later value, even when the later value has
   a `defsig`, and that scope is decided from source position rather than from
   a binding timeline the inference schedule advances.
 
-- **Module scope is exact across check and test batches.** Checker value
+- **Module scope is exact across check and test batches (chelis#1264,
+  part of chelis#731).** Checker value
   lookup is exact after Reef rewriting, and unresolved value and constructor
   identifiers travel as structured checker data, so machine-facing diagnostic
   kinds stay stable across unrelated-module changes.
