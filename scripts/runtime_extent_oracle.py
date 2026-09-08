@@ -201,7 +201,7 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
             "expand.rank_ascription",
             "silent_unguarded",
             TERMINAL_CONTROL,
-            "cli.shape_sourced_expand_rejects_wrong_rank_ascription",
+            "cli.shape_sourced_insert_rejects_wrong_rank_ascription",
         ),
         _row(
             "grad.input_axis.runtime_movement_source.eval_c",
@@ -761,10 +761,21 @@ def phase_a_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
         TestTarget(
             "cli",
             ("cargo", "test", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
+            # `insert_def_body_wrong_rank_names_the_callee` is NOT a receipt
+            # for any phase-a row. The row it sits beside,
+            # `expand.rank_ascription`, asserts that a wrong-rank ascription is
+            # refused, which `shape_sourced_insert_rejects_wrong_rank_ascription`
+            # proves; the def-body test asserts something else, that on the
+            # route where a declared result reaches the call as an expected
+            # result the diagnostic names the callee, and it pins chelis#1277
+            # S2a's own seed extension. It is listed only because this target
+            # runs the whole file and the receipt check requires the observed
+            # test set to EQUAL the expected one.
             (
                 "bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice",
+                "insert_def_body_wrong_rank_names_the_callee",
                 "negative_extent_remains_a_static_type_error",
-                "shape_sourced_expand_rejects_wrong_rank_ascription",
+                "shape_sourced_insert_rejects_wrong_rank_ascription",
                 "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
                 "vmap_accepts_shape_and_shared_scalar_extent_sources",
                 "vmap_rejects_element_derived_extent_at_public_checker",
