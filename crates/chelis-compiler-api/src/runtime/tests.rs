@@ -2004,14 +2004,15 @@ y = insert(b, cast(1, int32), cast(2, int64))
 }
 
 #[test]
-fn host_runtime_expand_singleton_input_inserts_not_replicates() {
-    // Bucket 4a regression: `expand(b: tensor[1, f32], 0, count)` must
-    // produce shape `[count, 1]` (INSERT semantics), matching the
-    // typer's first-preference branch in
-    // `chelis-types::infer::check_expand_signature`. Previously the
-    // host runtime detected `in_shape[axis] == 1` and silently
-    // replicated the singleton in-place, producing `[count]` and
-    // diverging from `chelis check` on `examples/linreg.ch`.
+fn host_runtime_insert_singleton_input_adds_an_axis() {
+    // Bucket 4a regression: `insert(b: tensor[1, f32], 0, count)` must
+    // produce shape `[count, 1]`, matching the checker. Previously one
+    // host function served both names and detected `in_shape[axis] == 1`
+    // to replicate the singleton in-place, producing `[count]` and
+    // diverging from `chelis check` on `examples/linreg.ch`. With one
+    // result shape per operation the two names route to two host
+    // functions and neither guesses (spec/04-type-system.md section
+    // 4.7.2).
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(7.0, f32)])

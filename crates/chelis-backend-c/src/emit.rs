@@ -255,10 +255,73 @@ impl CEmitter {
         // class. Reading the declaration through the axis SOURCE rather than
         // through the stamped name is C4.4's remaining half and is what closes
         // chelis#665; it is not this change.
-        let local_dim_guard_sites: chelis_unord::UnordMap<
+        // Two claim KINDS reach this list: the equality classes and, since
+        // chelis#1277 S2b, the unit-extent claims (C2.9). They are keyed the
+        // same way, on the axis whose extent the guard reads, so two sites can
+        // land on one key. Collecting into a map would let the second REPLACE
+        // the first silently, and what would be lost is a guard.
+        //
+        // Whether that is a defect depends on whether the two AGREE, and the
+        // first cut of this check did not ask:
+        //
+        // - EQUAL sites coalesce. One locally computed unit axis feeding two
+        //   `expand` nodes produces the same claim, canonical and operation
+        //   twice, and one emitted guard satisfies both, so a second is
+        //   redundant rather than lost. Refusing there refused a program that
+        //   checks clean and evaluates exactly, which is what round 2 found.
+        // - DISAGREEING sites are still refused. Two different claims or two
+        //   different canonicals on one key cannot both be emitted from one
+        //   comparison, so emitting either would drop a real obligation.
+        //
+        // What separates the two producers is the `claim` field, not the
+        // canonical. The class producer's `operand` is
+        // `resolved.unwrap_or(name)`, so a `Name` class the checker resolved to
+        // 1 carries `"1"` as its canonical too; the canonicals can coincide.
+        // Its `claim` is a Surf identifier, a unit claim's `claim` is the
+        // literal `1`, and no Surf identifier is `1`. Since `LocalGuardClaim`
+        // derives `PartialEq` over all three fields, equality can only merge a
+        // pair agreeing in claim, canonical AND operation, which is exactly the
+        // set one comparison discharges.
+        //
+        // The check stays regardless: that is an argument about today's two
+        // producers, not an invariant the type system holds.
+        let mut local_dim_guard_sites: chelis_unord::UnordMap<
             chelis_ir::ownership::LocalGuardSite,
             chelis_ir::ownership::LocalGuardClaim,
-        > = dag.local_dim_guard_sites().into_iter().collect();
+        > = chelis_unord::UnordMap::new();
+        for (site, claim) in dag.local_dim_guard_sites() {
+            if let Some(existing) = local_dim_guard_sites.get(&site) {
+                if *existing == claim {
+                    continue;
+                }
+                let (node, axis) = site;
+                return Err(Unsupported::new(
+                    UnsupportedKind::Construct(
+                        "two disagreeing local extent guards on one axis".to_string(),
+                    ),
+                    format!(
+                        "node {node} axis {axis} carries two local guard sites that do \
+                         not agree: claim `{}` against `{}` under `{}`, and claim `{}` \
+                         against `{}` under `{}`. One comparison cannot satisfy both, \
+                         so emitting either would drop the other",
+                        existing.claim,
+                        existing.operand,
+                        existing.op,
+                        claim.claim,
+                        claim.operand,
+                        claim.op,
+                    ),
+                    Stage::Codegen("c"),
+                    chelis_types::deliberate_rejection!(
+                        "[04-NUM-9]",
+                        "every runtime extent guard section 4.7 places is emitted; two \
+                         sites on one key that disagree are refused rather than losing \
+                         one of them"
+                    ),
+                ));
+            }
+            local_dim_guard_sites.insert(site, claim);
+        }
 
         let mut e = CEmitter {
             lines: Vec::new(),
@@ -1736,6 +1799,40 @@ impl CEmitter {
                 self.indent -= 1;
                 self.line("}");
             }
+        }
+
+        // chelis#1277 S2b: the same-rank `expand`'s unit-extent claim. It is
+        // an operation PRECONDITION on an operand rather than an identity
+        // between output axes, so it is its own derivation, but it places and
+        // renders by the same rules: `spec/05-risc-primitives.md` section
+        // 2.4.1 sends a symbolic or runtime operand extent to "that claim's
+        // runtime extent guard", section 4.7 puts it at entry when the operand
+        // is an input tensor's axis, and the `<op>` slot is `load` for exactly
+        // that reason. The claimed side is the literal 1, so there is no
+        // canonical member to read it from.
+        for (load, read_axis) in dag.entry_unit_extent_reads() {
+            let Some(RiscOp::Load { name }) = dag.get(load).map(|node| &node.op) else {
+                continue;
+            };
+            let Some(&slot) = input_slots.get(name.as_str()) else {
+                continue;
+            };
+            let read_axis = read_axis as i32;
+            if !guarded.insert(("1".to_string(), slot, read_axis)) {
+                continue;
+            }
+            let label = &input_labels[slot];
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
+            self.line(&format!(
+                "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
+            ));
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.indent -= 1;
+            self.line("}");
         }
     }
 
@@ -6742,11 +6839,22 @@ impl CEmitter {
     /// Load-declared in the prologue or declared by an earlier op — the
     /// checker unified them, so a disagreement is a real shape error).
     fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
+        // Declaring and guarding are not exclusive. The legacy walk owns
+        // declarations and the derivation owns guards, so an axis that
+        // declares its own extent may ALSO be the axis another operation
+        // makes a claim about: chelis#1277 S2b's unit-extent claim is exactly
+        // that shape, since it asserts something about the `expand`'s
+        // OPERAND, whose own axis a producer such as `shrink` has already
+        // declared. Returning after the declaration made every such guard
+        // unreachable, which is how a compiled kernel came to broadcast
+        // element 0 of a two-element axis in silence.
         if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
             let name = name.clone();
             self.declared_dim_names.insert(name.clone());
             self.line(&format!("int64_t {name} = {extent_expr};"));
-            return;
+            if !self.local_dim_guard_sites.contains_key(&(id, axis)) {
+                return;
+            }
         }
         // The guard site and the claim it compares against are the
         // derivation's, and the rendering is [04-NUM-9]'s: the complete

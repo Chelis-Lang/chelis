@@ -19,7 +19,7 @@ const TENSOR: &str = "module Bind.Main\nexport (main)\n\
  def at_f64() -> tensor[1, f64] = scale(to_tensor([3.0f64]))\n\
  def main() -> tensor[1, f64] = at_f64()\n";
 const TENSOR_NATIVE: &str = "module Bind.Main\nexport (main)\n\
- def scale[p: Float](x: tensor[3, p]) -> tensor[3, p] = mul(x, expand(scalar_to_tensor(cast(0.1, p)), cast(0, int32), cast(3, int64)))\n\
+ def scale[p: Float](x: tensor[3, p]) -> tensor[3, p] = mul(x, insert(scalar_to_tensor(cast(0.1, p)), cast(0, int32), cast(3, int64)))\n\
  def at_f64() -> tensor[3, f64] = scale(to_tensor([3.0f64, 3.0f64, 3.0f64]))\n\
  def main() -> tensor[3, f64] = at_f64()\n";
 
@@ -178,7 +178,7 @@ const DUPLICATED_TYPE_STAMP_TENSOR: &str = "(module {surf_path: \"Bind.Main\"}\n
      (def {} addk\n\
        (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 1) (t-var {} p))}))\n\
          (app {} (var {} add) (var {} x)\n\
-           (app {} (var {} expand)\n\
+           (app {} (var {} insert)\n\
              (app {} (var {} scalar_to_tensor)\n\
                (cast {}\n\
                  (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p), type: (t-var {} p)} 16777217.0)\n\
@@ -324,7 +324,7 @@ fn numeric_cross_family_float_literal_preserves_source_default() {
     }
 
     let tensor = "module Bind.Main\nexport (main)\n\
-                  def addk[p: Numeric](x: tensor[1, p]) -> tensor[1, p] = add(x, expand(scalar_to_tensor(cast(16777217.0, p)), cast(0, int32), cast(1, int64)))\n\
+                  def addk[p: Numeric](x: tensor[1, p]) -> tensor[1, p] = add(x, insert(scalar_to_tensor(cast(16777217.0, p)), cast(0, int32), cast(1, int64)))\n\
                   def main() -> tensor[1, int64] = addk(to_tensor([0i64]))\n";
     assert_native(
         "tensor_cross_family",

@@ -3083,6 +3083,96 @@ mod tests {
         assert_eq!(grad.shape, vec![3]);
     }
 
+    /// The same-rank `Expand` adjoint, which a user program can reach for the
+    /// first time under `spec/04-type-system.md` section 4.7.2.
+    ///
+    /// Both forward forms have always had an adjoint here, keyed on the node's
+    /// output rank against its operand's, but the same-rank branch was
+    /// reachable only from `tier2::align_matmul_operand`'s synthesized nodes:
+    /// lowering rewrote every surface `expand` into the rank-increasing form.
+    /// With one meaning per operation a surface `expand` lowers to a same-rank
+    /// node, so this branch now carries user gradients and owes a test.
+    ///
+    /// Section 2.4 of `spec/05-risc-primitives.md` states the adjoint as
+    /// `insert(sum(g, axis), axis, 1i64)`: sum over the broadcast axis, then
+    /// restore the extent-1 slot so the cotangent keeps the operand's rank.
+    /// Each input element is read once per broadcast position, so a
+    /// `[2, 1] -> [2, 3]` broadcast summed to a scalar has gradient 3 at every
+    /// input element, at the operand's own shape.
+    ///
+    /// This is a DISPOSITION LOCK, not a regression test, and the diff is the
+    /// evidence: S2b adds no line to this file outside this test, so the
+    /// branch it exercises is byte-identical to the base and the row passes
+    /// there too. What changed is who can reach the branch.
+    #[test]
+    fn grad_same_rank_expand_sums_over_the_broadcast_axis() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let col_ty = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(1)],
+            precision: chelis_types::types::Prim::F32,
+        };
+        let wide_ty = TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: chelis_types::types::Prim::F32,
+        };
+        let rows_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: chelis_types::types::Prim::F32,
+        };
+
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            col_ty.clone(),
+            None,
+        );
+        let broadcast = dag.add_node(
+            RiscOp::Expand {
+                axis: 1,
+                size: crate::dag::RtDim::Lit(3),
+            },
+            vec![x],
+            wide_ty,
+            None,
+        );
+        let per_row = dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![broadcast],
+            rows_ty,
+            None,
+        );
+        let out = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: chelis_types::types::Prim::F32,
+            },
+            vec![per_row],
+            scalar_f32(),
+            None,
+        );
+
+        let grad_result = grad_dag(&dag, out, &[x]).unwrap();
+        let mut inputs = UnordMap::new();
+        inputs.insert(
+            "x".to_string(),
+            TensorValue::from_vec(vec![2, 1], vec![5.0, 7.0]),
+        );
+        let vals = eval_tensor(&grad_result.dag, &inputs).unwrap();
+        let grad = &vals[&grad_result.grad_nodes[&x]];
+        assert_eq!(grad.to_f64_lossy_vec(), vec![3.0, 3.0]);
+        assert_eq!(
+            grad.shape,
+            vec![2, 1],
+            "the adjoint restores the extent-1 slot, so the cotangent keeps the \
+             operand's rank"
+        );
+    }
+
     #[test]
     fn grad_mul_by_const() {
         // f(x) = 5 * x, df/dx = 5

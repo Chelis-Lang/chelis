@@ -344,6 +344,34 @@ impl<'a> VerifiedDagView<'a> {
                 ));
             }
         }
+
+        // chelis#1277 S2b: the unit-extent claims section 4.7 places LOCAL,
+        // beside the class members above and through the same emission.
+        //
+        // The site is keyed on the OPERAND's axis, because that is the extent
+        // the guard reads: the claim asserts something about the operand, not
+        // about the `expand`'s own output axis, and keying it on the `expand`
+        // would hand the emitter the width being broadcast TO rather than the
+        // extent being claimed. The claimed value is the literal 1, so both
+        // the reported claim and the comparison operand are `1`.
+        //
+        // `op` comes from the claim rather than from the operand's own
+        // operation. Section 4.7's `<op>` names "the operation that introduces
+        // the guarded extent", which is the `expand` making the claim, not
+        // whichever operation happened to produce the operand.
+        for claim in crate::axis_sources::derive_unit_extent_claims(self.dag) {
+            if claim.placement(self.dag) != crate::axis_sources::GuardPlacement::Local {
+                continue;
+            }
+            sites.push((
+                (claim.operand.0, claim.axis),
+                LocalGuardClaim {
+                    claim: "1".to_string(),
+                    operand: "1".to_string(),
+                    op: claim.trap_op(self.dag),
+                },
+            ));
+        }
         sites
     }
 
@@ -351,6 +379,34 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::derive_runtime_dim_classes(self.dag)
             .into_iter()
             .filter(|class| class.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
+            .collect()
+    }
+
+    /// The unit-extent claims whose guard section 4.7 places at entry.
+    ///
+    /// The sibling of [`Self::entry_dim_classes`], filtered by the same
+    /// placement rule through the same shared predicate.
+    pub fn entry_unit_extent_claims(self) -> Vec<crate::axis_sources::UnitExtentClaim> {
+        crate::axis_sources::derive_unit_extent_claims(self.dag)
+            .into_iter()
+            .filter(|claim| claim.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
+            .collect()
+    }
+
+    /// The `(Load, axis)` each entry-placed unit-extent claim reads.
+    ///
+    /// Both compiled lanes need the same three steps: derive the claims, keep
+    /// the ones section 4.7 places at entry, and resolve each to the input
+    /// tensor axis whose extent the guard compares. Doing it here rather than
+    /// twice is the same discipline `member_load_axis` records: the C
+    /// emitter's `member_input_slot` deliberately admits only the folded-read
+    /// spelling, because a `Load`'s own axis is already declared by the
+    /// binding loop, and reusing it here would silently drop every claim whose
+    /// operand IS an input tensor, which is the common case.
+    pub fn entry_unit_extent_reads(self) -> Vec<(NodeId, usize)> {
+        self.entry_unit_extent_claims()
+            .iter()
+            .filter_map(|claim| crate::axis_sources::member_load_axis(self.dag, &claim.member()))
             .collect()
     }
 

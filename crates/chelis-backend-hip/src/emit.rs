@@ -794,6 +794,38 @@ impl HipEmitter {
             }
         }
 
+        // chelis#1277 S2b: the same-rank `expand`'s unit-extent claim, on the
+        // host prologue. One derivation, three lanes: this reads the same
+        // `derive_unit_extent_claims` and the same `member_load_axis` the C
+        // emitter and the evaluator read.
+        //
+        // It renders [04-NUM-9] through `chelis_numeric_trap`, which
+        // `chelis_hip_runtime.h` reaches by including `chelis_runtime.h`. The
+        // `abort()` above is the LEGACY rendering for this lane's `Name`
+        // bindings and is chelis#1112's to move; this guard does not adopt it,
+        // because `spec/05-risc-primitives.md` section 2.4.1 sends a failed
+        // claim to a `Domain` trap "placed and rendered per
+        // `spec/04-type-system.md` section 4.7 and [04-NUM-9]".
+        for (load, read_axis) in dag.entry_unit_extent_reads() {
+            let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
+                continue;
+            };
+            let Some(&slot) = input_slots.get(label.as_str()) else {
+                continue;
+            };
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label.as_str());
+            self.line(&format!(
+                "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
+            ));
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.indent -= 1;
+            self.line("}");
+        }
+
         // Host allocation consumes the published runtime ABI's int64_t shape
         // carrier. Keep these declarations in the already-classified shape
         // preamble; device allocations below deliberately retain int[].

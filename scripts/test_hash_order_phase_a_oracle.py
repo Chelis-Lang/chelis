@@ -72,16 +72,6 @@ class HashOrderPhaseAOracleTests(unittest.TestCase):
                     "parity_hash_order_determinism",
                     "--no-fail-fast",
                 ),
-                (
-                    "cargo",
-                    "nextest",
-                    "run",
-                    "-p",
-                    "chelis-cli",
-                    "--test",
-                    "hash_order_stability",
-                    "--no-fail-fast",
-                ),
             ),
         )
 

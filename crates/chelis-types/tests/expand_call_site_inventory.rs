@@ -10,11 +10,11 @@
 //! else fails it, and so does a site that disappears without its row being
 //! removed, so the count cannot drift in either direction unnoticed.
 //!
-//! The two groups below have different futures. The deferral files go away with
-//! the mechanism, at which point their rows come out and the remaining
-//! inventory is the same-rank sites alone. The same-rank sites stay, and each
-//! one is a program whose declared result has the operand's own rank over a
-//! unit extent at the axis.
+//! The deferral group is gone. Those files tested the choice between two
+//! candidate shapes, which `spec/04-type-system.md` section 4.7.2 removed, so
+//! S2b deleted or pruned them and their rows came out with them. What is left
+//! is same-rank sites: each is a program whose operand carries a unit extent
+//! at the axis, which is what `expand` now means.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,11 +43,6 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     ),
     // Genuine same-rank broadcasts: the declared result has the operand's rank.
     // These are what `expand` means after the split, so they are not renamed.
-    (
-        "crates/chelis-cli/tests/issue_1544_binder_cast_precision.rs",
-        2,
-        "two binder-adoption witnesses broadcast a scalar_to_tensor [1] to [3] and to [1] at rank 1",
-    ),
     (
         "crates/chelis-types/tests/infer_module_parity.rs",
         1,
@@ -113,48 +108,35 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         1,
         "the stdlib entry for the same-rank broadcast, correct after the split",
     ),
-    // Deferral files: their subject is the choice between the two candidate
-    // forms, which `insert` does not have. The removal slices delete them, and
-    // these rows come out with them.
+    // Two files keep `expand` program text after the deferral rows were
+    // removed with the two-candidate model (chelis#1277 S2b). Their operands
+    // carry a unit extent at the axis, which is what `expand` means under
+    // `spec/04-type-system.md` section 4.7.2, so these are same-rank
+    // broadcasts and not migration debt.
+    // The Slice B and S2b CLI receipts. Every `expand` here broadcasts a unit
+    // axis, or is the negative row that refuses a non-unit one.
     (
-        "crates/chelis-cli/tests/hash_order_stability.rs",
-        13,
-        "deferral: hash-order settlement of coupled candidate choices",
+        "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
+        11,
+        "the same-rank broadcast fixture, the zero-extent fixture, the static and runtime non-unit refusals, the unit-extent control, the two locally placed claims over a runtime `shrink` extent, and the two-`expand`-over-one-operand pair with its refuted twin",
+    ),
+    // `expand`'s own runtime behaviour suite. It exists because the previous
+    // `expand.ch` was entirely rank-increasing and moved to `insert.ch`
+    // (chelis#1277 S2a), leaving the operation with no suite of its own.
+    (
+        "packages/chelis-std/tests/runtime/expand.ch",
+        6,
+        "the chelis-std runtime suite for the same-rank broadcast",
     ),
     (
         "crates/chelis-types/tests/issue5_cmp_broadcast_both_forms.rs",
-        10,
-        "deferral: the comparison family selecting a candidate",
-    ),
-    (
-        "crates/chelis-types/tests/issue_1380_matmul_candidate_elimination.rs",
-        12,
-        "deferral: candidate elimination",
+        2,
+        "one comparison over two unit-extent broadcasts of `to_tensor([0.5f32])`",
     ),
     (
         "crates/chelis-types/tests/issue_942_inferred_tensor_cast.rs",
-        44,
-        "deferral: which candidate a later consumer selects",
-    ),
-    (
-        "crates/chelis-types/tests/slice_c_builtin_settlement_tripwire.rs",
-        4,
-        "deferral: the per-builtin settlement registry",
-    ),
-    (
-        "crates/chelis-types/tests/slice_c_composite_carriers.rs",
-        19,
-        "deferral: carriers of an unmade choice",
-    ),
-    (
-        "crates/chelis-types/tests/slice_c_constrain_contexts.rs",
-        18,
-        "deferral: contexts that constrain a pending result",
-    ),
-    (
-        "crates/chelis-types/tests/slice_c_freeze_rows.rs",
-        13,
-        "deferral: the freeze default between two candidates",
+        14,
+        "unit-extent operands at a legal axis, plus one axis-out-of-range negative row",
     ),
 ];
 

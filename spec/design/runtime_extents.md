@@ -522,6 +522,59 @@ the defect class this slice removes.
   target keeps binding to its class's canonical value exactly as it does
   today. Best-effort identity recognition may survive only as refinement
   whose failure result is a fresh extent plus a guard.
+- **C2.8 The deferral mechanism leaves in one cut, not in pieces.** S2b's
+  single result shape per operation removes the only root producer of a
+  deferred tensor, and the exact consequence was measured rather than
+  estimated: `cargo clippy -p chelis-types` on the non-test build then reports
+  exactly one dead item, `Subst::record_deferred_expand_constraint`. Everything
+  else stays live, because the settlement runs unconditionally and now finds no
+  obligation. That recorder's only surviving callers are sixteen `unify.rs`
+  tests, ten of them the `hash_order_*` rows [#1341]'s Phase A oracle runs, so
+  deleting the method would drag the removal slice's test cut into S2b. It is
+  `#[cfg(test)]` instead: the production build carries no unreachable recording
+  path, the dead-code lint speaks up if one reappears, and the recorder, both
+  stores, `mod deferred_order`, `builtins.rs`'s `TensorSettlement` field and
+  those sixteen tests leave together in the removal slice as one cut.
+
+- **C2.9 The unit-extent claim is a second claim KIND, not a second answer.**
+  `spec/05` §2.4.1 makes the same-rank `expand` "a claim that the operand's
+  extent at `axis` is 1", which is an operation PRECONDITION on an operand, not
+  an identity between output axes. `derive_runtime_dim_classes` keys on a
+  node's output dims, so the claim cannot be a member of it: for a symbolic
+  operand it would be filed under that operand's own `Name` claim, a different
+  assertion about a different quantity. Nor may `is_member` be relaxed to admit
+  it, and that code says why: "Under a LITERAL claim an external `Load` axis is
+  not a member. A declared literal input extent is validated against the caller
+  at the C ABI boundary by the input shape preamble, which is a different
+  obligation from an extent class and covers programs containing no runtime
+  extent at all. Treating it as a member would mint a class for every
+  literal-shaped input." So `derive_unit_extent_claims` is a sibling derivation
+  consulted by the same three consumers the classes have, the C prologue and
+  its local sites, the HIP prologue, and the evaluator's pre-evaluation guard.
+  It shares everything else: `output_axis_sources` for the operand axis's
+  source, one `member_is_interface` predicate lifted out of
+  `RuntimeDimClass::placement` so a single rule answers what an interface value
+  is, and the [04-NUM-9] rendering, whose `<op>` slot follows §4.7 by operand
+  class - `load` at entry for an input operand's axis, the introducing `expand`
+  otherwise. One more claim kind, one placement rule, one renderer.
+
+  **Both placements ship, and the consumers are named because deriving one
+  without them is how the claim goes silent.** The first cut of this derivation
+  computed `Local` and wired only the `Entry` consumers, so `trap_op`'s
+  `expand` arm had exactly one caller, an inventory test, and a compiled kernel
+  broadcast element 0 of a two-element axis at exit 0. The consumers that ship:
+
+  | placement | C | HIP | eval |
+  |---|---|---|---|
+  | `Entry` | the input shape preamble | its host prologue | before the first node evaluates |
+  | `Local` | `local_dim_guard_sites`, emitted at the operand's declaring site | the same host lowering, shared with C | at the `Expand` node's execution |
+
+  Two consequences worth stating rather than rediscovering. A site may now
+  DECLARE and GUARD: the operand's axis is often declared by its own producer,
+  and returning after the declaration made every local claim unreachable. And
+  HIP needs no lane-specific work here, because a node-valued movement bound
+  never reaches HIP device codegen at all ([#616] refuses it) and the program
+  is routed to the shared host lowering, which is where the guard already is.
 
 ### C3 Positional expand uses one normative protocol
 
@@ -734,14 +787,13 @@ the properties below; the generator, not this document, enumerates rows.
    and compiled C path; and compares type, rank, shape, and value with the
    control. A negative fixture proves the typed-pipeline safety gate
    suppresses a rewrite that would not preserve the typed result.
-6. **Deferral stability.** Every positional candidate row runs in K fresh
-   processes and settles to the source-order verdict every time, including
-   [#1338]'s spelling and its operand-swapped form
-   `sub(expand(t1, 0, 3i64), reshape(expand(t0, 0, 6i64), [3i64, 2i64]))`,
-   which passes only when `reshape`'s literal target list counts as
-   independent evidence. [#1341]'s Phase A already runs both spellings at
-   K=24 (`crates/chelis-cli/tests/hash_order_stability.rs`), so this property
-   composes that harness rather than authoring one.
+6. **Deferral stability.** *Superseded, with the model it measured.* It asked
+   that every positional candidate row settle to the source-order verdict in K
+   fresh processes, which presupposes a choice to settle. `spec/04` §4.7.2
+   gives `expand` and `insert` one result shape each, so [#1338] is resolved by
+   construction and no row has a verdict to be unstable about. The K=24 harness
+   this property composed, `crates/chelis-cli/tests/hash_order_stability.rs`,
+   was deleted with the model, and [#1341]'s Phase A oracle no longer runs it.
 7. **Rebuild survival.** After each rebuild pass (vmap, grad, specialization,
    fusion, CSE, DCE, cloning, `splice_dag`), every bound slot and shifted
    axis is still present by `NodeId`, the stamped names survive on the
@@ -869,9 +921,13 @@ slice does not wait for them.
 (C4.1-C4.3 as a typed ratchet first, then C4.4); `derive_runtime_dim_classes`
 with the four C2.4 rules; removal of lowering's `fallback_expand_type`
 override of the stamped result type so the declared claim survives to
-derivation (what closes [#1374] and [#1376]), with the same-rank `expand`
-form's unit-source-extent guard placed in that same change and before any
-widening, per C2.7; guard placement per C1.3 on Eval, C, and HIP (and on
+derivation, with the same-rank `expand` form's unit-extent guard placed in
+that same change and before any widening, per C2.7. That guard is
+`derive_unit_extent_claims`, the sibling derivation C2.9 states, rather than a
+member of the class list; and the removal does not close [#1374] or [#1376],
+which b2a measured to stay at their baselines for an unrelated reason: the
+exported kernel does not contain the disagreement, because nothing in the body
+reads the parameter whose extent the result claims. guard placement per C1.3 on Eval, C, and HIP (and on
 Metal once [#1383] lands); replacement of `symbolic_occurrences`,
 `op_declared_output_axes`, `shape_source_for_axis`, and `symbolic_bindings`
 by the two derivations; then, in the same change, deletion of `SizeClass`,

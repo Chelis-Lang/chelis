@@ -22,8 +22,24 @@ SPEC.loader.exec_module(ORACLE)
 # The digest Slice A froze. The multi-phase plumbing keys each row's exit
 # state by its owning phase, so phase A's canonical bytes must be identical
 # to what the merged Slice A oracle produced.
+#
+# Moved once, deliberately, for chelis#1588. chelis#1277 S2a renamed the test
+# `shape_sourced_expand_rejects_wrong_rank_ascription` to its `insert`
+# spelling, because the program it checks spells `insert`, and left the phase-a
+# target list and the `expand.rank_ascription` row's receipt pointing at the
+# old name. That row is at an exit state, so `validate_receipt_coverage`
+# enforces its receipt and `--phase a` was RED on `main`.
+#
+# The receipt is inside the hashed bytes, so correcting the pointer moves the
+# digest. What moved was measured rather than asserted: canonicalizing both
+# corpora and comparing row by row gives 32 rows before and after, ONE row
+# differing, and that row differing only in its `receipt` string. No row id, no
+# baseline and no exit state changed, so the freeze still holds over everything
+# it was put there to protect.
+#
+# Was 29a3bf773f1637a70ec533b1d24ecfac7d0f7ce637af98a117f612abafa044e1.
 FROZEN_PHASE_A_DIGEST = (
-    "29a3bf773f1637a70ec533b1d24ecfac7d0f7ce637af98a117f612abafa044e1"
+    "cb8401a05a009c97450cb0eaf00b94e2686725a37304ec44d63ceba8e1b64320"
 )
 
 

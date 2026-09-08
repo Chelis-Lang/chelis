@@ -295,6 +295,13 @@ def convolve(\n\
 
 #[test]
 fn authored_deep_type_metadata_cannot_override_checker_owned_rank_facts() {
+    // The rank disagreement is `stride`'s rank-1 result against `insert`'s
+    // rank-2 one. It used to be spelled `expand`, which had two candidate
+    // result shapes; under `spec/04-type-system.md` section 4.7.2 `expand` is
+    // the same-rank broadcast, so that spelling now agrees with `stride` at
+    // rank 1 and the program has no rank fact left to forge. `insert` is the
+    // operation that raises the rank, and the forged metadata claims exactly
+    // the rank-2 shape `insert` produces.
     let control = "(def {}
   f
   (fn {}
@@ -307,7 +314,7 @@ fn authored_deep_type_metadata_cannot_override_checker_owned_rank_facts() {
         (bind {}
           e
           (app {}
-            (var {} expand)
+            (var {} insert)
             (var {} x)
             (lit {type: (t-prim {} int32)} 0)
             (lit {type: (t-prim {} int64)} 2)))
