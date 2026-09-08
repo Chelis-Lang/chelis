@@ -544,7 +544,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "ba1662900de06295d99f6b5fd00875a8eac6a7b8d9e3fc5d2806929d6cdf9469",
+        "0682f0bda1a857dff1b27a5f311cbb837ecc468f2b18f99815a2b76610e4ca0a",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
