@@ -468,9 +468,9 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
-                // A `shape(input, axis)` element may have selected the
-                // positional-expand replacement form while the shape list was
-                // inferred. Re-read the input before deriving the output.
+                // Inferring the shape list may have bound the input's own
+                // type through a `shape(input, axis)` element. Re-read the
+                // input before deriving the output.
                 if let Type::Tensor(input_dims, precision) = subst.apply(&input_ty) {
                     let dims = reshape_output_dims(
                         shape_expr,

@@ -23,13 +23,9 @@ pub(super) fn finish_unified_app(
     let checked_rule = checked_inference_rule(func_name.as_deref());
     let mut checked_route_observed = false;
 
-    // [04-TENSOR-EXPAND]: an expected tensor fixes whether positional expand
-    // replaces an existing axis (same rank) or inserts one (rank + 1).
-    // Without expected context, `check_expand_signature` records a deferred
-    // two-shape obligation that ordinary consumers can resolve.
-    //
-    // `insert` has one legal shape and needs no such disambiguation, but it
-    // needs the same seed for a different reason. Unseeded, the result is
+    // [04-TENSOR-EXPAND]: `expand` and `insert` each have one result shape,
+    // so an expected tensor selects nothing. Both still need the seed, for
+    // the same reason. Unseeded, the result is
     // still a variable when `check_expand_signature` runs, so the call takes
     // the `Type::Var(_) if inserts_only` arm, builds its one shape from the
     // operand and axis alone, and any disagreement with the declared result

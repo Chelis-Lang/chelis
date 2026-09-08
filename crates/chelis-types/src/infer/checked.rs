@@ -764,9 +764,9 @@ impl InferenceProduct {
     }
 
     /// Apply the complete program substitution to the frozen owner stamps.
-    /// Most stamps are already concrete when their root finishes. Deferred
-    /// positional-expand shapes are intentionally selected by later roots,
-    /// so their earlier stamps need one final resolution before annotation.
+    /// Most stamps are already concrete when their root finishes, but a
+    /// variable an earlier root left open can be bound by a later one, so
+    /// every stamp gets one final resolution before annotation.
     pub(super) fn resolve_owner_types(&mut self, subst: &Subst) {
         let keys = self
             .owner_types
