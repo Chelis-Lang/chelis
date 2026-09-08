@@ -204,12 +204,19 @@ fn runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt() {
         "eval refuses as C does through the routed kernel: {}",
         String::from_utf8_lossy(&evaluated.stdout)
     );
-    assert_eq!(evaluated.status.code(), Some(1), "a typed refusal, not a panic: {stderr}");
+    assert_eq!(
+        evaluated.status.code(),
+        Some(1),
+        "a typed refusal, not a panic: {stderr}"
+    );
     assert!(!stderr.contains("internal compiler error"), "{stderr}");
     assert!(stderr.contains("unsupported: "), "{stderr}");
     assert!(stderr.contains("unimplemented chelis#1482"), "{stderr}");
     assert!(stderr.contains("extent source(s) for"), "{stderr}");
-    assert!(stderr.contains("(runtime)"), "the receipt names the lane that refused: {stderr}");
+    assert!(
+        stderr.contains("(runtime)"),
+        "the receipt names the lane that refused: {stderr}"
+    );
 
     // The control that decides how narrow the rule had to be: an
     // elementwise fill under a DECLARED dimension is not a sourceless axis.
@@ -567,7 +574,10 @@ fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval() {
         "",
     );
     let (ok, out) = eval_result(&dir, "lit_claim.ch", &source);
-    assert!(!ok, "a declared tensor[4] over a read of 5 must not execute: {out}");
+    assert!(
+        !ok,
+        "a declared tensor[4] over a read of 5 must not execute: {out}"
+    );
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
         out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
@@ -586,7 +596,10 @@ fn a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval() {
         "",
     );
     let (ok, out) = eval_result(&dir, "lit_claim_ok.ch", &source);
-    assert!(ok, "a declared tensor[5] over a read of 5 must execute: {out}");
+    assert!(
+        ok,
+        "a declared tensor[5] over a read of 5 must execute: {out}"
+    );
     assert!(out.contains("widened = tensor(shape=[5]"), "{out}");
 }
 
@@ -692,10 +705,17 @@ fn effect_order_source(claim: u32, effect_first: bool) -> String {
 #[test]
 fn an_effect_before_the_guard_runs_when_the_guard_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = eval_result(&dir, "effect_before.ch", &effect_order_source(MISMATCHED, true));
+    let (ok, out) = eval_result(
+        &dir,
+        "effect_before.ch",
+        &effect_order_source(MISMATCHED, true),
+    );
     assert!(!ok, "the program must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
-    assert!(out.contains("extent `4`: claimed = 4, x axis 0 = 5"), "{out}");
+    assert!(
+        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        "{out}"
+    );
 }
 
 /// guard_order.effect_after.eval: an effect that follows the call is not
@@ -710,7 +730,11 @@ fn an_effect_before_the_guard_runs_when_the_guard_traps_on_eval() {
 #[test]
 fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = eval_result(&dir, "effect_after.ch", &effect_order_source(MISMATCHED, false));
+    let (ok, out) = eval_result(
+        &dir,
+        "effect_after.ch",
+        &effect_order_source(MISMATCHED, false),
+    );
     assert!(!ok, "the program must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
 }
@@ -727,9 +751,16 @@ fn an_effect_before_the_guard_runs_when_the_guard_traps_on_c() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(&dir, "effect_before_c", &effect_order_source(MISMATCHED, true));
+    let (ok, out) = c_run_result(
+        &dir,
+        "effect_before_c",
+        &effect_order_source(MISMATCHED, true),
+    );
     assert!(!ok, "the binary must fail: {out}");
-    assert!(out.contains("effect"), "the earlier effect is observed: {out}");
+    assert!(
+        out.contains("effect"),
+        "the earlier effect is observed: {out}"
+    );
     assert!(out.contains(&domain_trap_line("load")), "{out}");
 }
 
@@ -744,9 +775,16 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(&dir, "effect_after_c", &effect_order_source(MISMATCHED, false));
+    let (ok, out) = c_run_result(
+        &dir,
+        "effect_after_c",
+        &effect_order_source(MISMATCHED, false),
+    );
     assert!(!ok, "the binary must fail: {out}");
-    assert!(!out.contains("effect"), "the later effect must not run: {out}");
+    assert!(
+        !out.contains("effect"),
+        "the later effect must not run: {out}"
+    );
     assert!(out.contains(&domain_trap_line("load")), "{out}");
 }
 
@@ -792,5 +830,8 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
     );
     let (ok, out) = eval_result(&dir, "agree_class.ch", &agree);
     assert!(ok, "agreeing witnesses execute: {out}");
-    assert!(out.contains("out = tensor(shape=[2], data=[3.0, 6.0])"), "{out}");
+    assert!(
+        out.contains("out = tensor(shape=[2], data=[3.0, 6.0])"),
+        "{out}"
+    );
 }

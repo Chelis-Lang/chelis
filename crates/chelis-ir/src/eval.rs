@@ -2212,7 +2212,6 @@ where
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
 
-
     for node in bound_dag.nodes() {
         if let Some(cancel) = &cancel
             && cancel.is_cancelled()
