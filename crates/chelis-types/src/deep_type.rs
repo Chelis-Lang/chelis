@@ -120,9 +120,9 @@ pub(crate) enum BinderMode<'a> {
     /// User input outside a binder declaration. Only `_` is a legal inference
     /// hole; other `t-var` / `d-var` / `d-rank` names are unbound.
     ClosedInput,
-    /// A `deftype` or `typealias` parameter list explicitly names every legal
-    /// type, dimension, and rank binder.
-    Explicit(&'a UnordSet<String>),
+    /// References inside a declaration reuse its instantiated type binders.
+    /// Allocating a fresh variable here would discard [04-DTYPE-2]'s bound.
+    Lexical(&'a UnordSet<String>, &'a UnordMap<String, TypeVar>),
     /// A nominal declaration whose parameter kinds were fixed before any
     /// declaration body was resolved.
     ExplicitKinds(&'a UnordMap<String, NominalParamKind>),
@@ -242,14 +242,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             current_location: None,
             resolving_tensor_precision: false,
         };
-        if let BinderMode::Explicit(names) = binder_mode {
-            // Nominal parameters are type arguments even when their occurrence
-            // in a field is dimension- or rank-kinded.
-            for name in names.to_sorted() {
-                resolver
-                    .type_vars
-                    .insert(name.clone(), resolver.vg.fresh_tvar());
-            }
+        if let BinderMode::Lexical(_, variables) = binder_mode {
+            resolver.type_vars = variables.clone();
         }
         if let BinderMode::ExplicitKinds(kinds) = binder_mode {
             for (name, kind) in kinds.to_sorted() {
@@ -743,6 +737,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         if !self.allows_name(name) {
             return Err(self.unbound("type", name));
         }
+        if matches!(self.binder_mode, BinderMode::Lexical(..)) && !self.type_vars.contains_key(name)
+        {
+            return Err(self.unbound("type", name));
+        }
         let variable = *self
             .type_vars
             .entry(name.to_string())
@@ -821,17 +819,14 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     fn allows_name(&self, name: &str) -> bool {
         match self.binder_mode {
             BinderMode::ClosedInput => false,
-            BinderMode::Explicit(names) => names.contains(name),
+            BinderMode::Lexical(names, _) => names.contains(name),
             BinderMode::ExplicitKinds(kinds) => kinds.contains_key(name),
             BinderMode::ImplicitGeneric | BinderMode::TrustedCompilerMetadata => true,
         }
     }
 
     fn allows_hole(&self) -> bool {
-        !matches!(
-            self.binder_mode,
-            BinderMode::Explicit(_) | BinderMode::ExplicitKinds(_)
-        )
+        !matches!(self.binder_mode, BinderMode::ExplicitKinds(_))
     }
 
     /// Decode-once (chelis#731 Phase 3): the decoded tag drives dispatch;

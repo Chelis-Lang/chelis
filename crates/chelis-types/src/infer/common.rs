@@ -2313,6 +2313,7 @@ pub(super) fn infer_top_level(
             declared_signatures
                 .get(&name)
                 .map(|metadata| &metadata.binders),
+            &declared_type_names,
         );
         install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
 

@@ -19,7 +19,7 @@ pub(super) enum OwnedTypeMetadataResolution {
 /// exposes an explicit binder set.
 pub(super) fn annotation_binder_mode(env: &Env) -> BinderMode<'_> {
     env.type_resolution_binders()
-        .map(BinderMode::Explicit)
+        .map(|names| BinderMode::Lexical(names, env.type_resolution_variables()))
         .unwrap_or(BinderMode::ClosedInput)
 }
 

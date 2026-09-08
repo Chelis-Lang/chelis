@@ -463,43 +463,38 @@ pub(super) fn infer_app(
 
     let ret_tv = vg.fresh_type();
 
-    // `[05-OP-36]`: "Mixed surfaces, numeric dtypes, static structured types,
-    // or tensor dimensions are type errors." The seven comparison identities
-    // used to take a scalar beside a tensor by rewriting the scalar's type to
-    // the tensor's "for unification purposes only", which made the pair check
-    // clean and let the evaluator broadcast it. `spec/05-risc-primitives.md`
-    // section 1.2 and `spec/04-type-system.md` sections 4.2-4.3 call
-    // broadcasting a hard rule with no exception; section 4.3 lists the
-    // comparison rows as "tensor, tensor" only; and the section 2.1 prose
-    // above `[05-OP-40]` says the scalar form of `max_elem`/`min_elem` "is the
-    // rank-zero instance of the tensor rule, not scalar/tensor broadcasting".
-    // `add` and `max_elem` already reject the same pair. chelis#1506 removes
-    // the rewrite, and the diagnostic names the explicit replacement,
-    // following the `div`/`floor_div` precedent of a rejection that says what
-    // to write instead.
-    // This check recognizes concrete primitive operands. A bounded-binder cast
-    // can still present a type variable here and escape it (chelis#1621).
+    // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
+    // It therefore has a scalar surface even before specialization. Reject
+    // mixed surfaces before unification can emit an unrelated occurs-check
+    // error for p beside tensor[D, p]. Unrestricted variables remain unknown.
     if let Some(ref fname) = func_name
-        && builtins::COMPARISON_OPS.contains(&fname.as_str())
+        && (builtins::COMPARISON_OPS.contains(&fname.as_str())
+            || matches!(
+                fname.as_str(),
+                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
+            ))
         && arg_tys.len() == 2
     {
         let lhs = type_for_readonly_check(&arg_tys[0], subst);
         let rhs = type_for_readonly_check(&arg_tys[1], subst);
-        if matches!(
-            (&lhs, &rhs),
-            (Type::Tensor(..), Type::Prim(_)) | (Type::Prim(_), Type::Tensor(..))
-        ) {
+        let scalar = |ty: &Type| {
+            matches!(ty, Type::Prim(_))
+                || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some())
+        };
+        if (matches!(lhs, Type::Tensor(..)) && scalar(&rhs))
+            || (scalar(&lhs) && matches!(rhs, Type::Tensor(..)))
+        {
+            let authority = if builtins::COMPARISON_OPS.contains(&fname.as_str()) {
+                "spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error, and section 1.2 admits no broadcasting exception"
+            } else {
+                "spec/05-risc-primitives.md section 1.2 and spec/04-type-system.md section 4.3 require explicit shape construction"
+            };
             let mut error = CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                format!(
-                    "`{fname}` does not admit a scalar beside a tensor, got {lhs} and \
-                     {rhs}: spec/05-risc-primitives.md [05-OP-36] makes a mixed surface \
-                     a type error, and section 1.2 admits no broadcasting exception"
-                ),
+                format!("`{fname}` does not admit a scalar beside a tensor, got {lhs} and {rhs}: {authority}"),
                 vec![
-                    "Give the scalar the tensor's shape explicitly, as in \
-                     `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`."
-                        .to_string(),
+                    "Give the scalar the tensor's shape explicitly. For a rank-one tensor xs and a scalar c of the same dtype, use `insert(scalar_to_tensor(c), 0i32, shape(xs, 0i32))`; insert each axis for higher ranks.".to_string(),
+                    "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
                 ],
             );
             if let Some(id) = list_span_id(list) {

@@ -349,25 +349,25 @@ fn a_scalar_beside_a_tensor_is_refused_by_add_and_max_elem() {
             "add",
             "1.5f32",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
-            "type mismatch: f32 vs tensor[3, f32]",
+            "does not admit a scalar beside a tensor",
         ),
         (
             "add",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
             "1.5f32",
-            "type mismatch: tensor[3, f32] vs f32",
+            "does not admit a scalar beside a tensor",
         ),
         (
             "max_elem",
             "1.5f32",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
-            "type mismatch: f32 vs tensor[3, f32]",
+            "does not admit a scalar beside a tensor",
         ),
         (
             "max_elem",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
             "1.5f32",
-            "type mismatch: tensor[3, f32] vs f32",
+            "does not admit a scalar beside a tensor",
         ),
     ] {
         assert_rejects_with(

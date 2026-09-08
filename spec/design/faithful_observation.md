@@ -899,6 +899,13 @@ PR #1406 adds `parity_kinded_nominal_dimensions` and
 kinded nominal contract through `chelis check`, `chelis test`, Surf migration,
 evaluation, and generated C; the parity row remains the cross-lane receipt.
 
+PR #1638 adds `generic_explicit_shape.ch` and `parity_generic_explicit_shape`
+to the frozen inventory. The independently reviewed
+`issue_1621_scalar_surface_cli` suite requires the example's exact
+`[false, true, true]` result on eval/C and rejects implicit scalar/tensor
+mixing. The definition guard also rejects deleting or emptying the new row,
+changing it to library-only parity, or removing its corpus entry.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the
