@@ -76,6 +76,7 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
         self.assertIn("pub const ALL: [Self; 10]", mutated)
         self.assertIn("9 => Ok(Self::Phase2OracleDType)", mutated)
         self.assertIn('Self::Phase2OracleDType => "phase2-oracle-dtype"', mutated)
+        self.assertIn("Self::Phase2OracleDType => (Repr::Ieee754Binary32, Some(A::Ieee754Binary32))", mutated)
         self.assertNotIn(
             "_ =>", mutated.split("impl RuntimeDType", 1)[1].split("\n}\n", 1)[0]
         )

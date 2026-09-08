@@ -213,6 +213,26 @@ class BaselineTests(unittest.TestCase):
 
 
 class MutationContractTests(unittest.TestCase):
+    def test_vocabulary_final_forms_do_not_admit_new_variants_or_owners(self) -> None:
+        path = "crates/chelis-vocab/src/lib.rs"
+        for owner in oracle.VOCAB_FINAL_CONTRACT_OWNERS:
+            self.assertTrue(oracle.owner_module_final_form("dtype-contract", path, owner))
+            self.assertFalse(
+                oracle.owner_module_final_form("dtype-contract", path, owner + "New")
+            )
+            self.assertFalse(oracle.owner_module_final_form(
+                "dtype-contract", "crates/chelis-runtime/src/lib.rs", owner
+            ))
+        self.assertTrue(oracle.owner_module_final_form(
+            "width-arithmetic", path, "DTypeContract::byte_width"
+        ))
+        self.assertFalse(oracle.owner_module_final_form(
+            "width-arithmetic", path, "DTypeContract::other_width"
+        ))
+        self.assertFalse(oracle.owner_module_final_form(
+            "raw-element-pointer", path, "DTypeContract::byte_width"
+        ))
+
     def test_every_seam_kind_in_the_ledger_has_a_mutation(self) -> None:
         baseline = oracle.load_baseline()
         kinds = {
