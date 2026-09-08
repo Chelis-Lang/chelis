@@ -1085,7 +1085,9 @@ fn collect_top_level_fn_tensor_param_prec(
 /// Surf carry the precision as a `String` in `TypeExpr::Tensor`.
 fn tensor_element_prim_name(ty: &TypeExpr) -> Option<String> {
     match ty {
-        TypeExpr::Tensor(_, prec, _) => Some(prec.clone()),
+        TypeExpr::Tensor(_, prec, _) => {
+            Some(canonical_primitive_name(prec).unwrap_or(prec).to_owned())
+        }
         _ => None,
     }
 }
@@ -1842,6 +1844,9 @@ impl DesugarCtx {
             ),
 
             Expr::Cast(e, prec, mode, _) => {
+                // Normalize before choosing literal adoption as well as the
+                // target node: both denote the same primitive under §P10a.
+                let prec = canonical_primitive_name(prec).unwrap_or(prec);
                 // Position 4 (spec §P10b / §5.6): first argument of a
                 // `cast(literal, p)` expression. When the inner is a
                 // bare list literal, narrow numeric entries to `p` and
@@ -1919,15 +1924,10 @@ impl DesugarCtx {
                 let target = if binder.is_some() {
                     node(DeepTag::TVar, vec![sym(prec)])
                 } else {
-                    // A cast target is a type position too, so the short
-                    // integer spellings normalise here as well. A name that is
-                    // not a primitive at all is passed through unchanged, so
+                    // A name that is not a primitive is passed through, so
                     // the checker still surfaces its unknown-primitive
                     // diagnostic rather than this arm inventing one.
-                    node(
-                        DeepTag::TPrim,
-                        vec![sym(canonical_primitive_name(prec).unwrap_or(prec))],
-                    )
+                    node(DeepTag::TPrim, vec![sym(prec)])
                 };
                 let mut children = vec![inner, target];
                 if let Some(selector) = mode.deep_selector() {

@@ -108,3 +108,57 @@ fn formatting_the_alias_is_idempotent() {
     let twice = format_source(&once).expect("format twice");
     assert_eq!(once, twice, "formatter idempotence on an aliased source");
 }
+
+/// [02-P10b]: the alias must reach literal metadata, not just the signature.
+/// Regression: before normalization at contextual ingress these emit t-prim iN.
+#[test]
+fn contextual_tensor_literals_normalize_aliases_in_all_four_positions() {
+    for short in ["i8", "i16", "i32", "i64"] {
+        for source in [
+            format!("xs: tensor[2, {short}] = [1, -2]\n"),
+            format!("def f(x: tensor[2, {short}]) -> tensor[2, {short}] = x\nr = f([1, -2])\n"),
+            format!("def f() -> tensor[2, {short}] = [1, -2]\n"),
+            format!("xs = cast([1, -2], {short})\n"),
+            format!("def f() = {{\n  xs: tensor[2, {short}] = [1, -2]\n  xs\n}}\n"),
+            format!(
+                "sig f: tensor[2, {short}] -> tensor[2, {short}]\ndef f(x) = x\nr = f([1, -2])\n"
+            ),
+        ] {
+            let deep = deep_of(&source);
+            assert!(
+                !deep.contains(short),
+                "an input alias must not survive in literal type metadata: {source}\n{deep}"
+            );
+        }
+    }
+}
+
+/// [02-P10b]: an unsuffixed scalar adopts an aliased cast target too.
+/// Regression: before normalization the source retained its default int32.
+#[test]
+fn scalar_cast_literals_adopt_the_canonical_alias_target() {
+    for short in ["i8", "i16", "i32", "i64"] {
+        for literal in ["5", "-5"] {
+            let deep = deep_of(&format!("out = cast({literal}, {short})\n"));
+            assert!(
+                deep.contains("surf_literal_style") && !deep.contains(short),
+                "an unsuffixed scalar must adopt the canonical target: {deep}"
+            );
+        }
+    }
+}
+
+/// Negative parity: a suffix or truncating cast never adopts the target.
+#[test]
+fn alias_normalization_preserves_nonadopting_cast_sources() {
+    for (source, source_type) in [
+        ("out = cast(5i32, i64)\n", "int32"),
+        ("out = cast(1.5, i64)\n", "f32"),
+        ("out = cast_trunc(1.5, i64)\n", "f32"),
+    ] {
+        let deep = deep_of(source);
+        assert!(!deep.contains("unsuffixed"), "{source}\n{deep}");
+        assert!(deep.contains(source_type), "{source}\n{deep}");
+        assert!(deep.contains("int64"), "{source}\n{deep}");
+    }
+}
