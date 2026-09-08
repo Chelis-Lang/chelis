@@ -196,13 +196,15 @@ fn unbounded_cast_target_is_rejected_for_every_variable_source_form() {
     }
 }
 
-/// chelis#1558: **regression test** for ingress agreement. The verdict must not
-/// depend on the entry point, so this asserts equality of score and error list
-/// between `chelis check f.ch` and `chelis check f.dp`, not merely that each
-/// rejects.
+/// chelis#1558: **disposition lock**, green before and after, and deliberately
+/// so. The verdict must not depend on the entry point, so this asserts equality
+/// of score and error list between `chelis check f.ch` and `chelis check f.dp`,
+/// not merely that each rejects.
 ///
-/// Red before this change at both ingresses, which agreed on the wrong verdict;
-/// the score assertion in the test above is what turns red.
+/// It passed before this change too, because both ingresses agreed on the wrong
+/// verdict: 1.0 with no errors at each. Agreement was never the defect, and this
+/// row's job is to keep it that way while the shared verdict moves. The test
+/// above is what turns red.
 #[test]
 fn unbounded_cast_target_verdict_agrees_across_both_ingresses() {
     let dir = tempdir().expect("tempdir");
@@ -248,8 +250,11 @@ fn a_concrete_or_bounded_cast_target_still_checks_clean() {
     }
 }
 
-/// chelis#1558: **disposition lock** recording what a tensor source does, and
-/// deliberately deciding nothing about it.
+/// chelis#1558: labelled per assertion, because the two halves differ. The
+/// scalar-source assertion is a **disposition lock**, green before and after.
+/// The [04-DTYPE-1] assertion is a **regression test**, red before this change
+/// when the program carried only the scalar error. Together they record what a
+/// tensor source does, and deliberately decide nothing about it.
 ///
 /// A tensor cast to an unbounded binder was already rejected before this
 /// change, at 0.92 with `CastNonTensor`, "cast to a quantified scalar dtype
