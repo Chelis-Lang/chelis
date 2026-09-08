@@ -2,8 +2,9 @@
 
 **Status:** Design freeze and source/FFI ownership-contract freeze for [#1286].
 Phases 0 through 2 are implemented. The Phase 3 source implementation is
-present on the current draft change, but the mandatory AMD hardware gate has
-not run, so Phase 3 is not complete. Phase 4 remains unimplemented. The stable
+delivered separately from its pending AMD hardware acceptance under [#1286]
+and [#1214]; merging the implementation does not complete Phase 3. Phase 4
+remains unimplemented. The stable
 `compiled-value-ownership-phase0-oracle` CI job enforces the latest landed
 phase oracle.
 
@@ -885,8 +886,17 @@ planner collision controls, caller-owned C/HIP negatives, the isolated
 six-condition matrix, Metal's owning no-reuse boundary, and runtime repurpose
 positive/negative tests execute locally. The two HIP hardware rows are typed
 must-passes but have no local execution receipt; until the authoritative AMD
-command below passes on this exact head, this receipt is source-complete rather
+command below passes on the tested implementation commit, this receipt is source-complete rather
 than Phase 3 completion evidence.
+
+**Delivery boundary:** the implementation PR may land after its review, hosted
+CI, and local gate pass, with AMD execution retained as follow-up work under
+[#1286] and [#1214]. The hardware fixtures remain mandatory must-passes in the
+Phase 3 oracle; neither issue closure nor Phase 3 completion is authorized by
+that implementation merge. The manually dispatched `ownership-hip.yml`
+workflow runs this unchanged oracle and uploads its log and commit receipt.
+It requires a separately registered AMD runner; see
+[`docs/local_hip_environment.md`](../../docs/local_hip_environment.md#ownership-phase-3-in-ci).
 
 **Not this phase:** a backend-specific escape hatch or a caller-buffer copy-on-
 write compatibility mode.

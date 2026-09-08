@@ -1,0 +1,48 @@
+name: Ownership HIP hardware
+run-name: Ownership Phase 3 on ${{ inputs.commit }}
+
+# Trusted, manual dispatch only: this executes repository code on an AMD host.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ownership-hip-hardware
+  cancel-in-progress: false
+
+jobs:
+  phase3:
+    name: Compiled Value Ownership Phase 3 (AMD)
+    runs-on: [self-hosted, linux, x64, chelis-hip-gfx1151]
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_HUSKY_DONT_INSTALL_HOOKS: '1'
+      OWNERSHIP_HIP_COMMIT: ${{ inputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+      - name: Create uv-managed Python environment
+        run: uv run --managed-python --python 3.11 --no-project python scripts/ci_setup_uv_python.py
+      - name: Execute the authoritative hardware oracle
+        run: .venv/bin/python scripts/ownership_hip_ci.py
+      - name: Preserve oracle output and commit receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ownership-hip-${{ inputs.commit }}-${{ github.run_attempt }}
+          path: target/ownership-hip-ci/
+          if-no-files-found: error
