@@ -9,6 +9,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import shutil
 import tempfile
@@ -85,6 +86,7 @@ generalize-sweep-oracle = []
 }
 ''')
             env = {**os.environ, "CARGO_TARGET_DIR": str(root / "target"),
+                   "CARGO_TERM_COLOR": "always",
                    "CARGO_HUSKY_DONT_INSTALL_HOOKS": "1"}
 
             def invoke(command):
@@ -130,7 +132,7 @@ generalize-sweep-oracle = []
                                "stamp_to_typed", "--run-ignored", "only", "--test-threads", "1"]
                     result = invoke(archive.reuse_command(ignored, path))
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn("1 test run", result.stderr)
+                    self.assertIn("1 test run", re.sub(r"\x1b\[[0-9;]*m", "", result.stderr))
                     with path.open("ab") as stream:
                         stream.write(b"corruption")
                     with self.assertRaisesRegex(ValueError, "checksum"):
