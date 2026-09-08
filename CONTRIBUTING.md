@@ -52,6 +52,19 @@ hand-maintained copies.
 - Update the owning doc when a public language or compiler behavior changes.
 - Do not revert unrelated work already present in the repo.
 
+## Changelog Fragments
+
+Behavior-changing PRs add a Markdown fragment to `changelog.d/`. Use a filename
+such as `parser_errors.fixed.md` or `1625.changed.breaking.md`, and write the
+entry without its outer bullet. Correct pending fragments when later changes
+invalidate their claims. Reserve `CHANGELOG.md` for release assembly.
+
+The required `Changelog` CI check rejects missing or invalid fragments and
+direct changelog edits outside release assembly. Use `no-changelog` for internal
+work with no release-note value; this suppresses only the missing-fragment
+requirement. The [fragment contract](changelog.d/README.md) has authoring examples,
+the release commands, and the acceptance oracle.
+
 ## Declarative Naming
 
 Use declarative or informational names for branches, commits, plans, tests, files, and
