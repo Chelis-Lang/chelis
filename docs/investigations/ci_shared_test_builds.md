@@ -32,6 +32,12 @@ artifact. Nextest extracts into the checkout's `target` tree so compiled-in
 CLI paths remain valid. The producer and consumers install the same Python
 and C dependencies as the existing workers.
 
+Consumers run `cargo fetch --locked --target x86_64-unknown-linux-gnu` after
+restoring the dependency cache. Some test binaries execute offline Cargo compile
+controls, which still require registry metadata and sources. A restored cache
+may predate a dependency; executing an archive does not implicitly fetch it.
+The explicit fetch supplies that prerequisite without compiling the workspace.
+
 The runtime static library is an explicit extra archive input. A Cargo
 `test --no-run` build supplies the exact current `chelis_runtime` artifact
 filenames through JSON messages; nextest reuses that build and includes those
@@ -67,7 +73,9 @@ target, compares original and reused test lists, and runs passing,
 failing, absent, and explicitly ignored selections. It also rejects a different
 configuration and corrupted archive, and requires both the CLI and static
 library to work after extraction. The workspace producer runs this probe
-before building Chelis. Workflow tests reject missing producer dependencies
+before building Chelis. A cold-registry probe rejects offline compilation before
+the locked fetch, accepts it afterward, and still rejects an actual type error.
+Workflow tests reject missing or late dependency fetches, missing producer dependencies
 and cross-run downloads; existing gates still check exact partition coverage,
 support ownership, cache writers, docs-only gating, and aggregate failure.
 

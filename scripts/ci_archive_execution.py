@@ -20,6 +20,47 @@ from scripts import ci_test_archive as archive
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_locked_fetch_supplies_cold_registry_for_offline_compile_controls(self):
+        import tomllib
+
+        packages = tomllib.loads((archive.ROOT / "Cargo.lock").read_text())["package"]
+        half_version, = {package["version"] for package in packages if package["name"] == "half"}
+        host = next(line.removeprefix("host: ") for line in subprocess.check_output(
+            ["rustc", "-vV"], text=True).splitlines() if line.startswith("host: "))
+        target = archive.ROOT / "target"
+        target.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="registry-contract-", dir=target) as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "offline-control"\nversion = "0.0.0"\nedition = "2021"\n'
+                '[workspace]\n[dependencies]\n'
+                f'half = {{ version = "={half_version}", default-features = false }}\n')
+            source = root / "src/main.rs"
+            source.write_text('fn main() { let _: half::f16 = half::f16::ONE; }\n')
+            result = subprocess.run(["cargo", "generate-lockfile"], cwd=root, text=True,
+                                    capture_output=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env = {**os.environ, "CARGO_HOME": str(root / "cargo-home"),
+                   "CARGO_TARGET_DIR": str(root / "target"), "CARGO_TERM_COLOR": "never"}
+
+            def invoke(*args):
+                return subprocess.run(["cargo", *args], cwd=root, env=env,
+                                      text=True, capture_output=True, timeout=120)
+
+            cold = invoke("check", "--offline")
+            self.assertNotEqual(cold.returncode, 0)
+            self.assertIn("no matching package named `half`", cold.stderr)
+            fetched = invoke("fetch", "--locked", "--target", host)
+            self.assertEqual(fetched.returncode, 0, fetched.stderr)
+            self.assertFalse((root / "target").exists(), "fetch must not compile")
+            ready = invoke("check", "--offline")
+            self.assertEqual(ready.returncode, 0, ready.stderr)
+            source.write_text('fn main() { let _: bool = half::f16::ONE; }\n')
+            rejected = invoke("check", "--offline")
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("E0308", rejected.stderr)
+
     def test_failed_build_preserves_rust_diagnostics_without_a_manifest(self):
         target = archive.ROOT / "target"
         target.mkdir(exist_ok=True)

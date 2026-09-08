@@ -825,6 +825,11 @@ jobs:
         with:
           tool: cargo-nextest@0.9.136
 
+      # Offline compile controls still need the current lockfile's registry
+      # entries and sources even though nextest no longer builds this worker.
+      - name: Fetch dependencies for offline compile controls
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+
       - name: Download workspace test build
         uses: actions/download-artifact@v7
         with:
@@ -1211,6 +1216,9 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.136
+
+      - name: Fetch dependencies for offline compile controls
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
 
       - name: Download generalization test build
         uses: actions/download-artifact@v7

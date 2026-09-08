@@ -159,6 +159,14 @@ def check_workflow(jobs):
         assert uploads[0]["with"]["if-no-files-found"] == "error"
         runs = [s.get("run", "") for s in jobs[producer]["steps"]]
         assert any(f"create --configuration {configuration}" in cmd for cmd in runs)
+        steps = jobs[consumer]["steps"]
+        fetches = [i for i, step in enumerate(steps)
+                   if step.get("run") == "cargo fetch --locked --target x86_64-unknown-linux-gnu"]
+        assert len(fetches) == 1, "archive consumers must fetch locked dependencies for offline controls"
+        cache = next(i for i, step in enumerate(steps)
+                     if step.get("uses", "").startswith("Swatinem/rust-cache"))
+        download = steps.index(downloads[0])
+        assert cache < fetches[0] < download, "fetch must follow cache restore and precede execution"
 
 
 class WorkflowTests(unittest.TestCase):
@@ -181,6 +189,19 @@ class WorkflowTests(unittest.TestCase):
         download["with"]["run-id"] = "123"
         with self.assertRaisesRegex(AssertionError, "current run"):
             check_workflow(jobs)
+
+    def test_missing_or_late_fetch_cannot_leave_offline_controls_cold(self):
+        for consumer in ("workspace-tests-shard", "generalize-sweep-oracle-shard"):
+            for late in (False, True):
+                with self.subTest(consumer=consumer, late=late):
+                    jobs = self.jobs()
+                    steps = jobs[consumer]["steps"]
+                    fetch = next(step for step in steps if step.get("run", "").startswith("cargo fetch"))
+                    steps.remove(fetch)
+                    if late:
+                        steps.append(fetch)
+                    with self.assertRaisesRegex(AssertionError, "fetch"):
+                        check_workflow(jobs)
 
 
 if __name__ == "__main__":

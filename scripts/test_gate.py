@@ -600,6 +600,9 @@ GATE_WORKER_RUN_COMMANDS = {
         # gate asserts it rather than assuming it.
         "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
+        # Setup only: offline compile controls need registry entries/sources
+        # that archive execution no longer downloads through a workspace build.
+        "cargo fetch --locked --target x86_64-unknown-linux-gnu",
         "python3 scripts/gate.py integration --tests-only "
         "--partition hash:${{ matrix.shard }}/2 --test-archive target/ci-archives/workspace.tar.zst",
         "python3 scripts/gate.py integration --support-only --support-slice frontend",
