@@ -2048,6 +2048,117 @@ where
         &symbolic_dim_load_inputs,
         &mut load_input,
     )?;
+    // chelis#1277 B2h: both entry guards run BEFORE symbolic-binding
+    // inference. `infer_symbolic_bindings_from_inputs` rejects two `Load`s
+    // that disagree on one binder with its own wording, so with the guards
+    // after it a `Load`/`Load` class on one binder never reached [04-NUM-9]'s
+    // line on eval while the C kernel's prologue rendered it (C2.7). The
+    // inference check remains the backstop for a binder no class covers.
+    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
+    // grouping the C and HIP lanes read. Both derivations call
+    // `axis_sources::split_by_scope`: the prologues read
+    // `derive_dim_witnesses`, the guard sites and this lane read
+    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
+    // the scoping in the first alone, which is two derivations that can
+    // disagree. `spec/04-type-system.md` section 4.7 evaluates
+    // a class whose operands are all interface values "at function entry, in
+    // declared signature order, before any other operation of the function",
+    // so they run here, once every input is resolved and before the first
+    // node evaluates.
+    //
+    // The classes come from `dag`, not `bound_dag`: binding substitutes each
+    // resolved symbol into the types, so on the bound graph the claims are
+    // literals and no `Name` class survives to guard. The EXTENTS come from
+    // `resolved_inputs`, which is the point - a claim is checked against what
+    // the caller actually passed, and reading the inputs rather than the
+    // evaluated `values` keeps the guard independent of the live mask. A
+    // witness the caller did not supply is skipped: chelis#991 makes a dead
+    // generic declaration's input not a requirement of the selected root, and
+    // an absent witness cannot disagree with anything.
+    // chelis#1277 B2h: a declared LITERAL input extent is checked here too,
+    // in declared signature order, before any class guard and before the
+    // first node evaluates. The C lane checks it in the kernel's ABI
+    // preamble (`emit.rs`, the `known_dim_size` arm), which
+    // `spec/design/runtime_extents.md` Slice B narrows to exactly this
+    // complement: an axis whose literal came from a genuine declaration and
+    // that no class covers, because `is_member` keeps an external `Load`
+    // axis out of a `Literal` claim rather than mint a class per
+    // literal-shaped input. A literal result claim propagates onto the input
+    // it reads through inference (chelis#1377's `f(b, x: tensor[n]) ->
+    // tensor[4]` lowers `x` as `[4]`), so on both lanes the disagreement
+    // between the claim and the caller's tensor is visible only here. Before
+    // host-lane def applications were routed through this evaluator no
+    // caller could reach a literal-declared `Load` with a disagreeing
+    // extent; now `chelis eval` does, and without this check it printed the
+    // caller's extent where C traps. The rendering is C's: section 4.7's
+    // context line, then [04-NUM-9]'s complete line with `<op>` = `load`.
+    // The rank check mirrors the same preamble's `expected rank` abort for a
+    // declaration that names every axis; an empty `dims` is skipped because
+    // it is also the lowerer's untyped placeholder (`default_type()`), which
+    // an API binding of any rank legitimately fills.
+    for node in dag.nodes() {
+        let RiscOp::Load { name } = &node.op else {
+            continue;
+        };
+        let Some(value) = resolved_inputs.get(name.as_str()) else {
+            continue;
+        };
+        let dims = &node.output_type.dims;
+        let fully_ranked = !dims.is_empty()
+            && dims
+                .iter()
+                .all(|dim| matches!(dim, DimInfo::Lit(_) | DimInfo::Named(_, _)));
+        if fully_ranked && value.shape.len() != dims.len() {
+            return Err(format!(
+                "input `{name}` expected rank {}, got {}",
+                dims.len(),
+                value.shape.len()
+            ));
+        }
+        for (axis, dim) in dims.iter().enumerate() {
+            let DimInfo::Lit(declared) = dim else {
+                continue;
+            };
+            let Some(observed) = value.shape.get(axis).copied() else {
+                continue;
+            };
+            if observed != *declared {
+                return Err(format!(
+                    "extent `{declared}`: claimed = {declared}, {name} axis {axis} = {observed}\n\
+                     numeric trap: domain in load at int64"
+                ));
+            }
+        }
+    }
+
+    for (name, canonical, member) in entry_dim_guards(dag) {
+        let extent = |witness: (&str, usize)| {
+            resolved_inputs
+                .get(witness.0)
+                .and_then(|value| value.shape.get(witness.1).copied())
+        };
+        let (Some(left), Some(right)) = (
+            extent((canonical.0.as_str(), canonical.1)),
+            extent((member.0.as_str(), member.1)),
+        ) else {
+            continue;
+        };
+        if left == right {
+            continue;
+        }
+        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
+        // `load` because section 4.7 fixes it for a guard whose operands are
+        // all interface values: "the `load` primitive of the later witness in
+        // signature order". The context is its own line, as the same
+        // paragraph requires, and carries the disagreeing names, the axis and
+        // each observed value.
+        return Err(format!(
+            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
+             numeric trap: domain in load at int64",
+            canonical.0, canonical.1, member.0, member.1,
+        ));
+    }
+
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
         let mut bindings =
@@ -2101,54 +2212,6 @@ where
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
 
-    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
-    // grouping the C and HIP lanes read. Both derivations call
-    // `axis_sources::split_by_scope`: the prologues read
-    // `derive_dim_witnesses`, the guard sites and this lane read
-    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
-    // the scoping in the first alone, which is two derivations that can
-    // disagree. `spec/04-type-system.md` section 4.7 evaluates
-    // a class whose operands are all interface values "at function entry, in
-    // declared signature order, before any other operation of the function",
-    // so they run here, once every input is resolved and before the first
-    // node evaluates.
-    //
-    // The classes come from `dag`, not `bound_dag`: binding substitutes each
-    // resolved symbol into the types, so on the bound graph the claims are
-    // literals and no `Name` class survives to guard. The EXTENTS come from
-    // `resolved_inputs`, which is the point - a claim is checked against what
-    // the caller actually passed, and reading the inputs rather than the
-    // evaluated `values` keeps the guard independent of the live mask. A
-    // witness the caller did not supply is skipped: chelis#991 makes a dead
-    // generic declaration's input not a requirement of the selected root, and
-    // an absent witness cannot disagree with anything.
-    for (name, canonical, member) in entry_dim_guards(dag) {
-        let extent = |witness: (&str, usize)| {
-            resolved_inputs
-                .get(witness.0)
-                .and_then(|value| value.shape.get(witness.1).copied())
-        };
-        let (Some(left), Some(right)) = (
-            extent((canonical.0.as_str(), canonical.1)),
-            extent((member.0.as_str(), member.1)),
-        ) else {
-            continue;
-        };
-        if left == right {
-            continue;
-        }
-        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
-        // `load` because section 4.7 fixes it for a guard whose operands are
-        // all interface values: "the `load` primitive of the later witness in
-        // signature order". The context is its own line, as the same
-        // paragraph requires, and carries the disagreeing names, the axis and
-        // each observed value.
-        return Err(format!(
-            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
-             numeric trap: domain in load at int64",
-            canonical.0, canonical.1, member.0, member.1,
-        ));
-    }
 
     for node in bound_dag.nodes() {
         if let Some(cancel) = &cancel

@@ -1007,6 +1007,12 @@ naming here rather than leaving to the corpus file:
     with this slice: the exported kernel traps at entry under [04-NUM-9], and
     the input preamble's static-dim check, which emitted the identical
     comparison and aborted first, is narrowed away for exactly that overlap.
+    The complement the preamble keeps, a declared literal input extent no
+    class covers, has its eval analogue in B2h: the DAG evaluator checks
+    every literal-declared `Load` axis against the caller's tensor at entry,
+    in declared signature order and before any class guard, with the same
+    context line and [04-NUM-9] rendering, so a `def main()`-free application
+    such as `widened = f(seed, x)` traps on eval where its kernel traps on C.
     The rooted half is S2b's static rejection.
   - [#665]'s `.c` row stays at `ice`. b2.3 routed the interface BINDING
     consumers through the derived witnesses; `symbolic_occurrences` has a
