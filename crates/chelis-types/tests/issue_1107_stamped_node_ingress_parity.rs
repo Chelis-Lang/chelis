@@ -690,12 +690,24 @@ fn well_formed_tuple_get_is_accepted_on_both_ingresses() {
 /// "found a non-literal expression" for an index that is plainly the integer
 /// literal -1. Without this row, "reject every index carrier I cannot decode"
 /// would still satisfy the accepted-projection row above.
+///
+/// The expected substring was updated by chelis#874 Slice 2, which moved the
+/// `tuple-get` index read onto the shared role-slot seam. **This row's subject
+/// is unchanged**: both properties it protects still hold, and both are still
+/// what is asserted. The two ingresses must still agree (`assert_agree_and_reject`
+/// is untouched, and it is the agreement, not the wording, that fails first if
+/// they diverge), and the payload atom behind the `lit` wrapper must still be
+/// named -- which is exactly why Slice 2 kept the seam's caller-detail
+/// affordance, with `describe_tuple_index` as its only consumer. Only the
+/// surrounding wording moved, from "invalid tuple index: expected a
+/// non-negative integer literal, found integer literal -1" to the seam's form.
 #[test]
 fn negative_tuple_get_index_is_rejected_alike_on_both_ingresses() {
     assert_agree_and_reject(
         "(def {} x (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0) \
            (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} -1)))",
-        "expected a non-negative integer literal, found integer literal -1",
+        "malformed `tuple-get`: expected a non-negative integer index as child 1, \
+         found a `lit` form (integer literal -1)",
         "tuple-get with a negative literal index",
     );
 }
