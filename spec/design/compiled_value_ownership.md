@@ -575,10 +575,10 @@ failure: both annotated heap-capture shapes and the unannotated control report
 an unbound forward value before build, following [04-INF-4]'s source-order
 decision. Those three rows leave no emitted ownership behavior for the
 ownership phases to repair. [#1339]'s **indirect** shape remains outside this
-oracle: when an earlier value's initializer calls a function that reads a
-later-assigned value, the emitted `main` still assigns in source order and the
-compiled read of an unassigned global survives. [04-INF-8] now decides that it
-rejects at the checker after PP6 supplies the complete eager-reference graph.
+oracle: without [04-INF-8], an earlier value's initializer could call a
+function that reads a later-assigned value before source-ordered `main`
+assigns it. [04-INF-8] rejects that program at the checker using PP6's
+complete eager-reference graph; runtime initialization remains source ordered.
 It is not an ownership defect, and only [#1339]'s dedicated oracle can close
 it.
 
