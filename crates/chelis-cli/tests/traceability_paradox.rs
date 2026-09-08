@@ -9,9 +9,8 @@
 //! `examples/transformer_block.ch` and inspects the emitted C source. The
 //! recorded measurements are: number of span comments, share that are
 //! synthesized markers vs Surf parser byte-range spans, number of fused
-//! kernels, number of BLAS specializations actually fired, and the buffer
-//! allocation footprint in bytes (peak helper-side owned storage under the
-//! Phase 1 no-reuse baseline).
+//! kernels, number of BLAS specializations actually fired, and the verified
+//! Phase 3 buffer allocation/reuse footprint in bytes.
 //!
 //! Findings (locked here as assertions):
 //!   * Emitted `// span:` lines include Surf parser byte-range IDs of the
@@ -31,26 +30,25 @@
 //!
 //! | term | bytes | dominant source |
 //! |---|---|---|
-//! | `c2` (× seq²) | 788 B | attention score/probs and unfused per-head intermediates |
-//! | `c1` (× seq) | 30,008 B | Q/K/V/O, residual/LN, and FFN intermediates after symbolic BLAS and dedicated ReLU remove generic product/zero buffers |
+//! | `c2` (× seq²) | 780 B | attention score/probs and unfused per-head intermediates |
+//! | `c1` (× seq) | 18,716 B | Q/K/V/O, residual/LN, and FFN physical slots after symbolic BLAS, dedicated ReLU, and verified Phase 3 reuse |
 //! | `c0` | 0 | none — every allocation has at least one `seq` factor |
 //!
 //! Projected peak working set:
 //!
 //! | seq | peak | dominant term |
 //! |---|---|---|
-//! | 128 | 15.98 MiB | owned Phase 1 intermediates |
-//! | 512 | 211.65 MiB | `c2 × seq²` |
-//! | 2048 | **3.14 GiB** | `c2 × seq²` |
-//! | 4096 | 12.42 GiB | `c2 × seq²` |
+//! | 128 | 14.47 MiB | physical Phase 3 slots |
+//! | 512 | 204.14 MiB | `c2 × seq²` |
+//! | 2048 | **3.08 GiB** | `c2 × seq²` |
+//! | 4096 | 12.26 GiB | `c2 × seq²` |
 //!
 //! **Why this is still high:** symbolic BLAS removes the cubic generic matmul
 //! product buffers, and [05-OP-43]'s dedicated ReLU identity removes the old
-//! `[seq, 1024]` f32 zero tensor (4096 × `seq` bytes). Phase 1 deliberately
-//! keeps the remaining 49 produced tensors as
-//! independent owners until epilogue. Shared-storage reuse returns only after
-//! Phase 3's cross-backend proof. Vanilla attention also materializes
-//! `seq × seq` score/probability tensors.
+//! `[seq, 1024]` f32 zero tensor (4096 × `seq` bytes). The 49 produced tensors
+//! use 29 physical owned allocations and 20 proof-authorized descriptor
+//! repurposes under the shared Phase 3 plan. Vanilla attention also
+//! materializes `seq × seq` score/probability tensors.
 //!
 //! A follow-on FlashAttention-style pass would shrink this further by avoiding
 //! materialized score/probability tensors.
@@ -86,8 +84,8 @@ fn is_owned_tensor_release(line: &str) -> bool {
     !name_suffix.is_empty() && name_suffix.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Parse owned `tN = chelis_alloc(...)` calls and compute a polynomial in
-/// `seq` describing the Phase 1 peak. Returns
+/// Parse physical owned `tN = chelis_alloc(...)` calls and compute a polynomial
+/// in `seq` describing the Phase 3 peak. Returns
 /// (allocation_count, constant_bytes, seq1_bytes, seq2_bytes) such
 /// that total ≈ constant + seq * seq1 + seq * seq * seq2.
 ///
@@ -208,6 +206,7 @@ fn transformer_block_traceability_state_is_locked() {
         .lines()
         .filter(|line| is_owned_tensor_allocation(line))
         .count();
+    let storage_repurposes = source.matches("chelis_tensor_repurpose(").count();
     let slot_allocations = source.matches("chelis_tensor *chelis_slot").count();
     let legacy_view_allocations = source.matches("chelis_alloc_view").count();
     let blas_calls = source.matches("cblas_sgemm").count()
@@ -236,16 +235,27 @@ fn transformer_block_traceability_state_is_locked() {
          MHA+FFN block; got {fused_kernels}"
     );
     assert_eq!(
-        owned_allocations, 49,
-        "expected 49 independently owned tN allocations after dedicated ReLU \
-         removed one synthesized `[seq, 1024]` f32 zero buffer; got \
+        owned_allocations, 29,
+        "expected the verified Phase 3 plan to reduce 49 produced tensors to \
+         29 physical owned tN allocations; got \
          {owned_allocations}"
+    );
+    assert_eq!(
+        storage_repurposes, 20,
+        "expected the verified Phase 3 plan to repurpose exactly 20 physical \
+         slots for the remaining produced tensors; got {storage_repurposes}"
+    );
+    assert_eq!(
+        owned_allocations + storage_repurposes,
+        49,
+        "every transformer result must be accounted for by either a fresh \
+         physical allocation or a proof-authorized descriptor repurpose"
     );
     assert_eq!(
         (slot_allocations, legacy_view_allocations),
         (0, 0),
-        "Phase 1 must not synthesize borrowed chelis_slot wrappers or the \
-         removed chelis_alloc_view path; Phase 3 owns reuse"
+        "Phase 3 reuse must use proof-authorized tN aliases and descriptor \
+         repurposes, not borrowed chelis_slot wrappers or chelis_alloc_view"
     );
     assert_eq!(
         blas_calls, 7,
@@ -296,10 +306,10 @@ fn transformer_block_traceability_state_is_locked() {
     );
     assert_eq!(
         (alloc_count, c0, c1, c2),
-        (49, 0, 30_008, 788),
-        "unexpected transformer_block working-set polynomial; the ReLU identity \
-         must account for exactly one fewer 4096-byte-per-seq zero tensor. Update \
-         the locked cost profile only after inspecting the emitted C"
+        (29, 0, 18_716, 780),
+        "unexpected transformer_block Phase 3 physical working-set polynomial; \
+         update the locked cost profile only after inspecting the emitted C and \
+         its proof-authorized descriptor repurposes"
     );
 
     let final_owned_allocation = source
