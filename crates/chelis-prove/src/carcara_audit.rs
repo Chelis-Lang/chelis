@@ -507,8 +507,9 @@ fn capture_alethe_proof(
     timeout_ms: u64,
 ) -> Result<(String, String), CarcaraAudit> {
     use crate::tier_b::lower_to_cvc5;
+    use chelis_unord::UnordMap;
     use cvc5_rs::{Kind, ProofComponent, ProofFormat, Solver, TermManager};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     // Only the linear / EUF fragment has a cvc5 Alethe proof to re-check.
     // Outside it, there is nothing to audit (and rendering the SMT-LIB problem
@@ -542,8 +543,8 @@ fn capture_alethe_proof(
     solver.set_option("tlimit-per", &timeout_ms.to_string());
 
     // Declare variables exactly as the production lowering does.
-    let mut vars: HashMap<String, cvc5_rs::Term> = HashMap::new();
-    let mut sorts: HashMap<String, SmtSort> = HashMap::new();
+    let mut vars: BTreeMap<String, cvc5_rs::Term> = BTreeMap::new();
+    let mut sorts: UnordMap<String, SmtSort> = UnordMap::new();
     for (name, sort) in &property.variables {
         let cvc5_sort = match sort {
             SmtSort::Real => tm.real_sort(),

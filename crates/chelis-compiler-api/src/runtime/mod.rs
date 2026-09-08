@@ -1,10 +1,15 @@
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::BTreeMap;
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
-use chelis_types::{CheckedProgram, types::Prim};
+use chelis_types::{
+    CheckedProgram,
+    manifest::{RootEntry, RootPathStep},
+    types::Prim,
+};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorElements, TensorValue};
 
@@ -12,8 +17,8 @@ mod csv;
 mod eval;
 mod host_ops;
 mod invariant;
-mod json;
 mod named_axis;
+mod numeric_text;
 mod system;
 mod system_adapter;
 #[cfg(test)]
@@ -177,8 +182,22 @@ pub enum RuntimeValue {
         /// Consulted by the chelis#338 named-axis routing to recover a
         /// frame binding's static tensor type (named dims) at eval time.
         param_types: Vec<Option<Expr>>,
+        /// Declared result type from the owning `defsig`, when available.
+        /// Generic cast actualization matches this against the checker-owned
+        /// call expression result, including context-fixed empty containers.
+        return_type: Option<Expr>,
         body: Expr,
-        env: HashMap<String, RuntimeValue>,
+        env: UnordMap<String, RuntimeValue>,
+        /// Lexically captured concrete precision variables. A call derives a
+        /// fresh specialization from checked argument/result types and lets
+        /// the callee's own binders shadow same-spelled outer binders.
+        precision_env: UnordMap<String, Prim>,
+        /// chelis#1277 B2h: the top-level def this closure is the body of,
+        /// when it is one. Stamped where a def body resolves to its closure
+        /// (`stamp_def_closure`), never on a local `fn` literal, so applying
+        /// the closure can consult the kernel decision the C lane makes for
+        /// that def (`chelis_ir::host::host_def_kernel`).
+        def_name: Option<String>,
     },
     /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
     /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
@@ -190,38 +209,9 @@ pub enum RuntimeValue {
     Transform {
         kind: TransformKind,
         transform_expr: Expr,
-        captured_env: HashMap<String, RuntimeValue>,
+        captured_env: UnordMap<String, RuntimeValue>,
     },
     Unit,
-}
-
-/// Debug-render a runtime value for an error message, truncating huge
-/// payloads (tensors, long lists) so a shape diagnostic stays readable
-/// instead of dumping the whole value (chelis#903 review). Values whose
-/// debug form fits the cap render byte-identically to `{value:?}`, so
-/// small-value diagnostics read as before. Used by the chelis#890/#903
-/// JSON/CSV runtime modules only -- the crate-wide `expect_*_arg`
-/// diagnostics keep their existing rendering.
-pub(crate) fn truncated_debug(value: &RuntimeValue) -> String {
-    truncate_rendered(format!("{value:?}"))
-}
-
-/// String-level half of [`truncated_debug`], for call sites that render
-/// something other than a single value (e.g. an ADT's field list).
-pub(crate) fn truncate_rendered(full: String) -> String {
-    const MAX_LEN: usize = 160;
-    if full.len() <= MAX_LEN {
-        return full;
-    }
-    let mut cut = MAX_LEN;
-    while !full.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!(
-        "{}... ({} more bytes elided)",
-        &full[..cut],
-        full.len() - cut
-    )
 }
 
 impl RuntimeValue {
@@ -359,7 +349,7 @@ impl RuntimeValue {
 
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeOutcome {
-    pub(crate) host_bindings: HashMap<String, RuntimeValue>,
+    pub(crate) host_bindings: UnordMap<String, RuntimeValue>,
     /// Applied values of host-lane *zero-argument fn* top-level roots
     /// (the desugared shape of the arrow-form `def name() -> T = body`,
     /// which the Surf desugarer wraps as `(def name (fn () body))`).
@@ -370,16 +360,21 @@ pub(crate) struct RuntimeOutcome {
     /// the bare name would shadow the callable and break any `name()`
     /// call). Keyed by bare root name; consulted by `eval_compiled` as a
     /// fallback after `lookup_runtime_value_for_root`.
-    pub(crate) host_root_values: HashMap<String, RuntimeValue>,
+    pub(crate) host_root_values: UnordMap<String, RuntimeValue>,
+    /// Evaluation failures for those same applied nullary roots. Retained by
+    /// root name so the manifest consumer can report them through [05-UNS-1]
+    /// instead of either swallowing the cause or returning an unbranded host
+    /// evaluator error.
+    pub(crate) host_root_errors: UnordMap<String, String>,
     pub(crate) transcript: Vec<String>,
 }
 
 #[cfg(test)]
 pub(crate) fn evaluate_host_program(
     program: &CheckedProgram,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_filtered(program, tensor_bindings, None)
+    evaluate_host_program_filtered(program, tensor_bindings, None, None)
 }
 
 /// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
@@ -393,10 +388,19 @@ pub(crate) fn evaluate_host_program(
 /// running as module init.
 pub(crate) fn evaluate_host_program_filtered(
     program: &CheckedProgram,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_with_library(program, &[], None, tensor_bindings, selected_roots)
+    evaluate_host_program_with_library_and_types(
+        program,
+        &[],
+        &BTreeMap::new(),
+        None,
+        tensor_bindings,
+        selected_roots,
+        manifested_lowered_names,
+    )
 }
 
 /// Phase G' — host-runtime entry that seeds the `top_level_defs` table
@@ -417,36 +421,19 @@ pub(crate) fn evaluate_host_program_filtered(
 /// that the lowering pass identifies as "lives in the tensor DAG, not
 /// in the host runtime" stays out of the host runtime's eager-eval
 /// list. The new code's lowering map (computed locally below) merges
-/// on top.
-pub(crate) fn evaluate_host_program_with_library(
-    program: &CheckedProgram,
-    library_exprs: &[Expr],
-    library_lowered_names: Option<&HashMap<String, bool>>,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
-    selected_roots: Option<&[String]>,
-) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_with_library_and_types(
-        program,
-        library_exprs,
-        &HashMap::new(),
-        library_lowered_names,
-        tensor_bindings,
-        selected_roots,
-    )
-}
-
-/// Variant of [`evaluate_host_program_with_library`] that also takes the
-/// library's Deep type-env. Bucket 1 (`grad`/`vmap`/`realize` in the host
+/// on top. The function also takes the library's Deep type-env. Bucket 1
+/// (`grad`/`vmap`/`realize` in the host
 /// runtime) needs the merged type-env so the IR
 /// `lower_subexpr_program` call resolves library-name free vars in the
 /// inner fn body the same way the C backend does.
 pub(crate) fn evaluate_host_program_with_library_and_types(
     program: &CheckedProgram,
     library_exprs: &[Expr],
-    library_type_env: &HashMap<String, Expr>,
-    library_lowered_names: Option<&HashMap<String, bool>>,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    library_type_env: &BTreeMap<String, Expr>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> Result<RuntimeOutcome, String> {
     // Every public program-evaluation path routes through a FRESH
     // permissive boundary (OpenSpec `add-eval-system-boundary` task 2.10):
@@ -462,6 +449,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         library_lowered_names,
         tensor_bindings,
         selected_roots,
+        manifested_lowered_names,
         &mut system_boundary,
     )
 }
@@ -475,10 +463,11 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
 pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     program: &CheckedProgram,
     library_exprs: &[Expr],
-    library_type_env: &HashMap<String, Expr>,
-    library_lowered_names: Option<&HashMap<String, bool>>,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    library_type_env: &BTreeMap<String, Expr>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
     system_boundary: &mut system::EvalSystemBoundary,
 ) -> Result<RuntimeOutcome, String> {
     // Lowered classification. A new-code value binding that references a
@@ -497,12 +486,19 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // top for names the combined walk doesn't cover.
     let mut combined_exprs: Vec<Expr> = library_exprs.to_vec();
     combined_exprs.extend(program.exprs().iter().cloned());
-    let mut combined_type_env: HashMap<String, Expr> = library_type_env.clone();
+    let mut combined_type_env: BTreeMap<String, Expr> = library_type_env.clone();
     for (name, ty_expr) in program.type_env() {
         combined_type_env.insert(name.clone(), ty_expr.clone());
     }
-    let new_lowered_names = top_level_lowering_map(&combined_exprs, &combined_type_env);
-    let mut lowered_names: HashMap<String, bool> = HashMap::new();
+    let mut new_lowered_names = top_level_lowering_map(&combined_exprs, &combined_type_env);
+    if let Some(manifested) = manifested_lowered_names {
+        new_lowered_names.extend(
+            manifested
+                .iter()
+                .map(|(name, lowered)| (name.clone(), *lowered)),
+        );
+    }
+    let mut lowered_names: BTreeMap<String, bool> = BTreeMap::new();
     if let Some(lib) = library_lowered_names {
         lowered_names.extend(lib.iter().map(|(k, v)| (k.clone(), *v)));
     }
@@ -512,12 +508,14 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // record-pattern match on a library ADT in new code resolves field
     // names correctly.
     let mut adt_fields = collect_adt_ctor_fields(library_exprs);
-    adt_fields.extend(collect_adt_ctor_fields(program.exprs()));
-    let adt_grad_rejections =
-        host_ops::collect_adt_grad_rejections(&[library_exprs, program.exprs()]);
+    adt_fields.merge(collect_adt_ctor_fields(program.exprs()));
 
-    let mut top_level_defs = HashMap::new();
+    let mut top_level_defs = UnordMap::new();
     let mut top_level_order = Vec::new();
+    let mut declared_signatures = UnordMap::new();
+
+    register_declared_signatures(library_exprs, &mut declared_signatures);
+    register_declared_signatures(program.exprs(), &mut declared_signatures);
 
     // Register library defs FIRST. New-code defs will overwrite on
     // name collision below — matching the Phase C type-env shadow rule
@@ -549,21 +547,28 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // We need this for grad/vmap/realize routing through
     // `lower_subexpr_program`: the IR lowerer's `lower_subexpr_program`
     // resolves free names against `full_type_env`.
-    let mut type_env: HashMap<String, Expr> = library_type_env.clone();
+    let mut type_env = library_type_env
+        .iter()
+        .map(|(name, ty_expr)| (name.clone(), ty_expr.clone()))
+        .collect::<UnordMap<String, Expr>>();
     for (name, ty_expr) in program.type_env() {
         type_env.insert(name.clone(), ty_expr.clone());
     }
 
     let mut ctx = EvalContext {
-        bindings: HashMap::new(),
-        binding_types: HashMap::new(),
-        named_axis_route_cache: HashMap::new(),
-        named_axis_route_visiting: HashSet::new(),
+        bindings: UnordMap::new(),
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
         top_level_defs,
+        declared_signatures,
+        adt_registry: program.adt_registry().clone(),
         type_env,
         adt_fields,
-        adt_grad_rejections,
         tensor_bindings,
+        program: Some(program),
+        def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),
         random_seed: None,
@@ -576,7 +581,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         let _ = ctx.resolve_top_level(&name)?;
     }
 
-    // Surface host-lane *zero-argument fn* roots. The arrow-form
+    // Surface host-lane selected callable roots. The arrow-form
     // `def priced() -> T = body` desugars to `(def priced (fn () body))`,
     // a nullary thunk of type `() -> T`. `register_top_level_defs`'
     // `is_fn` guard skips it from the eager value-binding order (it looks
@@ -587,42 +592,37 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
     // in-context library call like `bs_call_f64_vector(...)` returned
     // `{"roots":[]}` instead of its value (chelis blocker2).
     //
-    // We evaluate the value here by APPLYING the thunk (zero args) rather
-    // than binding it in `ctx.bindings`, so the call-resolution frame is
-    // untouched and a `name()` call elsewhere still resolves the callable.
-    // Only host-lane roots are applied — a tensor-lane (lowered) nullary
-    // def surfaces through the DAG/`tensor_bindings` path instead. Apply
-    // failures are swallowed (the root stays unsurfaced, exactly as
-    // before) so this can only add values, never regress.
-    let mut host_root_values = HashMap::new();
+    // We evaluate the value here by APPLYING the callable rather than binding
+    // it in `ctx.bindings`, so the call-resolution frame is untouched and an
+    // explicit `name()` call elsewhere still resolves the callable. A
+    // parameterized definition reaches this pass only after the manifest
+    // consumer has selected it and verified all live tensor inputs; unused
+    // authored parameters receive Unit placeholders solely to satisfy the
+    // closure's declared arity. Only Host-lane roots are applied — a
+    // Tensor-lane callable surfaces through the DAG/`tensor_bindings` path.
+    // Failures stay attached to the root and become [05-UNS-1]; no partial
+    // root is fabricated.
+    let mut host_root_values = UnordMap::new();
+    let mut host_root_errors = UnordMap::new();
     for expr in top_level_items(program.exprs()) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         let Some(body) = kids.get(1) else {
             continue;
         };
-        // Zero-argument fn wrapper only: `(fn (params-empty) inner)`.
-        let Expr::List(fn_list, _) = body else {
+        let Some((DeepTag::Fn, fn_children)) = tagged_expr_children(body) else {
             continue;
         };
-        let is_zero_arg_fn = tag(fn_list) == Some(DeepTag::Fn)
-            && matches!(
-                children(fn_list).first(),
-                Some(Expr::List(params, _))
-                    if tag(params) == Some(DeepTag::Params)
-                        && children(params).is_empty()
-            );
-        if !is_zero_arg_fn {
-            continue;
-        }
+        // Distinguish an automatic nullary observation from an explicitly
+        // selected parameterized call.
+        let is_zero_arg_fn = fn_children.first().is_some_and(|params| {
+            tagged_expr_children(params)
+                .is_some_and(|(tag, children)| tag == DeepTag::Params && children.is_empty())
+        });
         // Effect-free guard (chelis blocker2 red-team). Only surface a
         // root whose body carries NO effect row. The effects checker
         // (`chelis_effects::check_effects_with_context`, run in
@@ -636,7 +636,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         // stays unsurfaced: status quo, no regression, no display-time
         // effect. Purity is decided by the checker's annotation, not by
         // re-inferring here, so a library-inherited effect is honored too.
-        if carries_effect_row(fn_list) {
+        if is_zero_arg_fn && carries_effect_row(body) {
             continue;
         }
         // Host-lane only; tensor-lane roots come through the DAG.
@@ -655,49 +655,107 @@ pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
         if !selected {
             continue;
         }
-        // If a host binding for this name already exists, the
-        // `lookup_runtime_value_for_root` path already surfaces it and
-        // this fallback would be dead. Skip so we do NOT re-apply the
-        // thunk a second time: another root may have called `name()`,
-        // binding its closure here, and a second application would re-run
-        // any effects in the body (e.g. `print`/`debug`) and waste the
-        // whole computation, whose value is then discarded anyway
-        // (chelis blocker2 red-team: double-execution of body effects).
-        if ctx.bindings.contains_key(name) {
-            continue;
-        }
-        // Apply the thunk: build the closure, call it with no args.
-        let applied = ctx
-            .eval_expr(body)
-            .and_then(|closure| ctx.apply_resolved_callable(closure, Vec::new()));
-        if let Ok(value) = applied {
-            host_root_values.insert(name.to_string(), value);
+        // Apply the selected callable. A missing authored parameter can only
+        // be dead here: live tensor parameters were part of the manifest's
+        // required-input set, and the compiler would not have selected this
+        // call without their bindings. Unit therefore supplies arity without
+        // inventing a numeric value; an incorrect reachability decision still
+        // fails loudly when the body tries to use it. If another root already
+        // resolved this declaration, `ctx.bindings[name]` is the callable
+        // closure, not its result. Reuse that closure but still apply it: an
+        // owed [05-OBS-7] root can never be represented by `<closure>`, and
+        // the effect-row guard above proves the automatic application pure.
+        let callable = ctx.bindings.get(name).cloned().map(Ok).unwrap_or_else(|| {
+            ctx.eval_expr(body)
+                .map(|value| stamp_def_closure(value, name, body))
+        });
+        let applied = callable.and_then(|closure| {
+            let args = match &closure {
+                RuntimeValue::Closure { params, .. } => params
+                    .iter()
+                    .map(|param| {
+                        tensor_bindings
+                            .get(param)
+                            .cloned()
+                            .map(RuntimeValue::Tensor)
+                            .unwrap_or(RuntimeValue::Unit)
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            ctx.apply_resolved_callable(closure, args)
+        });
+        match applied {
+            Ok(value) => {
+                host_root_values.insert(name.to_string(), value);
+            }
+            Err(error) => {
+                host_root_errors.insert(name.to_string(), error);
+            }
         }
     }
 
     Ok(RuntimeOutcome {
         host_bindings: ctx.bindings,
         host_root_values,
+        host_root_errors,
         transcript: ctx.transcript,
     })
 }
 
+fn register_declared_signatures(exprs: &[Expr], signatures: &mut UnordMap<String, Expr>) {
+    for expr in top_level_items(exprs) {
+        let Some((DeepTag::Defsig, kids)) = tagged_expr_children(expr) else {
+            continue;
+        };
+        let (Some(name), Some(signature)) = (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        signatures.insert(name.to_string(), signature.clone());
+    }
+}
+
+/// chelis#1277 B2h: a def whose body is a `(fn ...)` literal resolves to a
+/// closure that IS the def; record its name so an application can take the
+/// kernel the C lane emits for that def. A local `fn` literal inside a body
+/// never passes through here and keeps `def_name: None`.
+fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeValue {
+    let body_is_fn = tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn);
+    match value {
+        RuntimeValue::Closure {
+            params,
+            param_types,
+            return_type,
+            body: closure_body,
+            env,
+            precision_env,
+            def_name: None,
+        } if body_is_fn => RuntimeValue::Closure {
+            params,
+            param_types,
+            return_type,
+            body: closure_body,
+            env,
+            precision_env,
+            def_name: Some(name.to_string()),
+        },
+        other => other,
+    }
+}
+
 fn register_top_level_defs(
     exprs: &[Expr],
-    lowered_names: &HashMap<String, bool>,
+    lowered_names: &BTreeMap<String, bool>,
     selected_roots: Option<&[String]>,
-    top_level_defs: &mut HashMap<String, Expr>,
+    top_level_defs: &mut UnordMap<String, Expr>,
     top_level_order: &mut Vec<String>,
     register_runtime_order: bool,
 ) {
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -708,7 +766,7 @@ fn register_top_level_defs(
         if !register_runtime_order {
             continue;
         }
-        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some(DeepTag::Fn));
+        let is_fn = tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn);
         if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
             // chelis#614: a tuple- or ADT-valued binding `out = ...` owns
             // FLATTENED root names (`out.0`, `out.1`, ...) in the caller's
@@ -742,8 +800,8 @@ fn register_top_level_defs(
 /// builtins.
 pub(crate) fn library_lowered_names(
     library_exprs: &[Expr],
-    library_type_env: &HashMap<String, Expr>,
-) -> HashMap<String, bool> {
+    library_type_env: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, bool> {
     top_level_lowering_map(library_exprs, library_type_env)
 }
 
@@ -880,51 +938,45 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
     })
 }
 
-pub(crate) fn lookup_runtime_value_for_root(
-    name: &str,
-    host_bindings: &HashMap<String, RuntimeValue>,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+pub(crate) fn lookup_runtime_value_for_manifest_root(
+    entry: &RootEntry,
+    host_bindings: &UnordMap<String, RuntimeValue>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Option<RuntimeValue> {
-    if let Some(value) = tensor_bindings.get(name) {
+    if let Some(value) = tensor_bindings.get(entry.name.as_str()) {
         return Some(RuntimeValue::Tensor(value.clone()));
     }
 
-    let mut parts = name.split('.');
-    let head = parts.next()?;
-    let mut value = host_bindings.get(head)?.clone();
-    for part in parts {
-        value = match value {
-            // Tuple components are keyed by positional index.
-            RuntimeValue::Tuple(items) => {
-                let index = part.parse::<usize>().ok()?;
-                items.into_iter().nth(index)?
-            }
-            // chelis#614/#520 D2: an ADT-valued component (e.g. the
-            // params slot of a multi-target `grad` result, or a field-wise
-            // gradient struct) is keyed by field NAME for a record
-            // constructor and by positional index for a positional one.
-            // Descend into it the same way `flatten_binding_into` /
-            // `add_named_roots` build the dotted key, so a nested ADT root
-            // reconstructs its value instead of being silently dropped.
-            RuntimeValue::Adt {
-                fields,
-                field_names,
-                ..
-            } => {
-                let index = field_names
-                    .as_ref()
-                    .and_then(|names| names.iter().position(|n| n == part))
-                    .or_else(|| part.parse::<usize>().ok())?;
-                fields.into_iter().nth(index)?
-            }
-            _ => return None,
-        };
+    let mut value = host_bindings
+        .get(entry.def_name.as_str())
+        .or_else(|| host_bindings.get(entry.name.as_str()))?
+        .clone();
+    for step in &entry.path {
+        value = descend_manifest_path(value, *step)?;
     }
     Some(value)
 }
 
+fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<RuntimeValue> {
+    match (step, value) {
+        (RootPathStep::Tuple(index), RuntimeValue::Tuple(items)) => items.into_iter().nth(index),
+        (RootPathStep::Adt(index), RuntimeValue::Adt { fields, .. }) => {
+            fields.into_iter().nth(index)
+        }
+        // Lists are the runtime representation of the prelude's recursive
+        // `Cons(head, tail)` / `Nil` ADT. Manifest construction sees the
+        // checked constructor tree, so preserve its structural indexing:
+        // field 0 is the head and field 1 is the remaining list.
+        (RootPathStep::Adt(0), RuntimeValue::List(items)) => items.into_iter().next(),
+        (RootPathStep::Adt(1), RuntimeValue::List(items)) => {
+            (!items.is_empty()).then(|| RuntimeValue::List(items.into_iter().skip(1).collect()))
+        }
+        _ => None,
+    }
+}
+
 struct EvalContext<'a> {
-    bindings: HashMap<String, RuntimeValue>,
+    bindings: UnordMap<String, RuntimeValue>,
     /// Declared/static Deep type expression for names in `bindings`,
     /// maintained in lockstep with `bindings` (saved/swapped/restored at
     /// every frame boundary). Every locally-bound name gets a key here:
@@ -932,27 +984,42 @@ struct EvalContext<'a> {
     /// `None` otherwise. The explicit `None` marker matters: it masks a
     /// same-named top-level `type_env` entry so a local shadow is never
     /// typed with the outer binding's type (chelis#338 named-axis routing).
-    binding_types: HashMap<String, Option<Expr>>,
+    binding_types: UnordMap<String, Option<Expr>>,
+    /// Call-frame actualizations for precision variables used by generic
+    /// casts. Values come only from checker-owned call-site argument/result
+    /// types matched against the callee's declared signature.
+    precision_bindings: UnordMap<String, Prim>,
     /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
-    named_axis_route_cache: HashMap<String, bool>,
+    named_axis_route_cache: UnordMap<String, bool>,
     /// Cycle guard for the recursive routing detection walk.
-    named_axis_route_visiting: HashSet<String>,
-    top_level_defs: HashMap<String, Expr>,
+    named_axis_route_visiting: UnordSet<String>,
+    top_level_defs: UnordMap<String, Expr>,
+    /// Authored `defsig` function types, including source binder spellings.
+    /// The inferred `type_env` intentionally freshens those binders, so the
+    /// evaluator keeps this separate map for generic cast targets in bodies.
+    declared_signatures: UnordMap<String, Expr>,
+    /// Checker-owned nominal definitions used when the executed constructor
+    /// alone cannot reveal whether the parameter type has a float leaf.
+    adt_registry: chelis_types::adt::AdtRegistry,
     /// Combined library + new-code Deep type-env. Threaded into
     /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
     /// hits a `grad` / `vmap` form so the lowerer can resolve free names
     /// the same way the C backend does. Empty when no library context is
     /// present (e.g. unit tests that don't need transform support).
-    type_env: HashMap<String, Expr>,
-    adt_fields: HashMap<String, Vec<String>>,
-    /// chelis#520 D2: constructor -> rejection reason for ADT types
-    /// outside the field-wise gradient slice (mixed fields in any
-    /// variant, or no fields at all). Consulted by the grad argument
-    /// marshalling so the eval lane rejects exactly the arguments the
-    /// checker types as non-differentiable, instead of fabricating a
-    /// gradient value the static type does not admit.
-    adt_grad_rejections: HashMap<String, String>,
-    tensor_bindings: &'a HashMap<String, RuntimeTensorValue>,
+    type_env: UnordMap<String, Expr>,
+    adt_fields: UnordMap<String, Vec<String>>,
+    tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
+    /// The checked program under evaluation. The kernel decision for a def
+    /// application is read off it through `chelis_ir::host::host_def_kernel`
+    /// (chelis#1277 B2h), so eval and C answer "is this def a kernel" from one
+    /// function. `None` only for the invariant-predicate evaluator, which has
+    /// no program and therefore no kernels: it interprets every application.
+    program: Option<&'a CheckedProgram>,
+    /// Per-def kernel decision: `None` is the host lane, `Some` a kernel whose
+    /// DAG draws no Random and is reused across applications. A Random-drawing
+    /// kernel is re-lowered per application and never cached (see
+    /// `EvalContext::def_kernel`).
+    def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
     transcript: Vec<String>,
     resolving_top_levels: Vec<String>,
     random_seed: Option<u64>,
@@ -993,19 +1060,28 @@ fn get_meta(list: &List) -> Option<&MetaMap> {
 /// signal that the body is effectful. The host-root surfacing pass uses
 /// this to keep effectful roots unsurfaced — an effectful zero-arg root
 /// must not run its effect at display time.
-fn carries_effect_row(list: &List) -> bool {
-    let Some(meta) = get_meta(list) else {
+fn carries_effect_row(expr: &Expr) -> bool {
+    let meta = match expr {
+        Expr::List(list, _) => get_meta(list),
+        Expr::Node(node, _) => Some(node.meta()),
+        _ => None,
+    };
+    let Some(meta) = meta else {
         return false;
     };
     meta.entries.iter().any(|(key, value)| {
         key == "effects"
-            && matches!(
-                value,
-                Expr::List(effects, _)
-                    if tag(effects) == Some(DeepTag::Effects)
-                        && !children(effects).is_empty()
-            )
+            && tagged_expr_children(value)
+                .is_some_and(|(tag, children)| tag == DeepTag::Effects && !children.is_empty())
     })
+}
+
+fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
+    match expr {
+        Expr::List(list, _) => tag(list).map(|tag| (tag, children(list))),
+        Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        _ => None,
+    }
 }
 
 /// Extract the primitive dtype written into a `(lit {type: ...})` meta
@@ -1015,6 +1091,12 @@ fn carries_effect_row(list: &List) -> bool {
 fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
     let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
     extract_prim_from_type_expr(ty_expr)
+}
+
+/// Binder name from a `(lit {type: (t-var {} p)} ...)` stamp (#1544).
+fn lit_meta_type_var_name(meta: &MetaMap) -> Option<&str> {
+    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+    chelis_deep::exact_type_variable_name(ty_expr)
 }
 
 fn children(list: &List) -> &[Expr] {

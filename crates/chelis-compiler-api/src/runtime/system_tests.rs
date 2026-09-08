@@ -8,8 +8,9 @@
 //! Source-guard fixtures live in `scripts/test_eval_system_guard.py`, not
 //! here -- the guard is a Python source scan, not Rust.
 
+use chelis_unord::UnordMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -189,9 +190,10 @@ process = process_run("virtual-program", ["--flag", "value"])
     let outcome = super::evaluate_host_program_with_library_and_types_and_system(
         &checked,
         &[],
-        &HashMap::new(),
+        &BTreeMap::new(),
         None,
-        &HashMap::new(),
+        &UnordMap::new(),
+        None,
         None,
         &mut boundary,
     )
@@ -484,28 +486,34 @@ fn default_adapter_load_mapped_file_bytes_matches_source_bytes() {
 }
 
 #[test]
-fn default_adapter_list_dir_preserves_read_dir_order_without_sorting() {
+fn default_adapter_list_dir_orders_by_host_name_bytes() {
     let dir = tempfile::tempdir().expect("tempdir");
     for name in ["zeta.txt", "alpha.txt", "mid.txt"] {
         std::fs::write(dir.path().join(name), "x").expect("seed file");
     }
-    // The oracle order IS whatever `std::fs::read_dir` yields -- the
-    // parity claim under test is "no sort ADDED", not "any particular
-    // order", so compare against a second independent `read_dir` pass
-    // rather than a hard-coded ordering.
-    let expected: Vec<String> = std::fs::read_dir(dir.path())
-        .expect("read_dir")
-        .map(|entry| {
-            entry
-                .expect("entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
+    // [05-HOST-4]: the listing is ordered by the host's own name bytes,
+    // independent of `std::fs::read_dir`'s arrival order. The adapter is the
+    // only module that reads the directory, so the ordering is applied here
+    // rather than in `runtime/eval.rs`.
     let mut adapter = DefaultEvalSystem;
     let actual = adapter.list_dir(dir.path()).expect("list_dir succeeds");
-    assert_eq!(actual, expected);
+    assert_eq!(actual, vec!["alpha.txt", "mid.txt", "zeta.txt"]);
+}
+
+#[test]
+fn default_adapter_list_dir_orders_before_the_lossy_conversion() {
+    // [05-HOST-4] orders on the host bytes, before `to_string_lossy` can
+    // collapse distinct names onto U+FFFD. Sorting after that conversion
+    // would leave such names tie-broken by directory order.
+    let dir = tempfile::tempdir().expect("tempdir");
+    for name in ["b.txt", "a.txt"] {
+        std::fs::write(dir.path().join(name), "x").expect("seed file");
+    }
+    let mut adapter = DefaultEvalSystem;
+    let listed = adapter.list_dir(dir.path()).expect("list_dir succeeds");
+    let mut sorted = listed.clone();
+    sorted.sort();
+    assert_eq!(listed, sorted, "the listing is already ordered");
 }
 
 #[test]

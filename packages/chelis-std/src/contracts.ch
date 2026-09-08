@@ -1,17 +1,16 @@
 module Std.Contracts
 export (normal_cdf, normal_cdf_implementation_symbol, normal_cdf_range_contract, normal_cdf_reflection_contract, normal_cdf_monotonicity_contract, exp_positivity_contract, exp_monotonicity_contract, exp_zero_contract, log_monotonicity_contract, log_one_contract, standard_contract_tolerance, normal_cdf_contract_samples, normal_cdf_contract_seed)
-def abs_f32(x: f32) -> f32 = if lt(x, cast(0.0, f32)) then neg(x) else x
-def erf_approx(x: f32) -> f32 = {
-  ax = abs_f32(x)
-  if lt(ax, cast(0.00001, f32)) then mul(x, cast(1.1283791670955126, f32)) else {
-    t = div(cast(1.0, f32), add(cast(1.0, f32), mul(cast(0.3275911, f32), ax)))
-    poly = mul(t, add(cast(0.254829592, f32), mul(t, add(cast(-0.284496736, f32), mul(t, add(cast(1.421413741, f32), mul(t, add(cast(-1.453152027, f32), mul(t, cast(1.061405429, f32))))))))))
-    y = sub(cast(1.0, f32), mul(poly, exp(neg(mul(ax, ax)))))
-    if lt(x, cast(0.0, f32)) then neg(y) else y
+def abs_float[p: Float](x: p) -> p = if lt(x, cast(0.0, p)) then neg(x) else x
+def erf_approx[p: Float](x: p) -> p = {
+  ax = abs_float(x)
+  if lt(ax, cast(0.00001, p)) then mul(x, cast(1.1283791670955126, p)) else {
+    t = div(cast(1.0, p), add(cast(1.0, p), mul(cast(0.3275911, p), ax)))
+    poly = mul(t, add(cast(0.254829592, p), mul(t, add(cast(-0.284496736, p), mul(t, add(cast(1.421413741, p), mul(t, add(cast(-1.453152027, p), mul(t, cast(1.061405429, p))))))))))
+    y = sub(cast(1.0, p), mul(poly, exp(neg(mul(ax, ax)))))
+    if lt(x, cast(0.0, p)) then neg(y) else y
   }
 }
-def erfc_approx(x: f32) -> f32 = sub(cast(1.0, f32), erf_approx(x))
-def normal_cdf(x: f32) -> f32 = mul(cast(0.5, f32), erfc_approx(neg(mul(x, cast(0.7071067811865475, f32)))))
+def normal_cdf[p: Float](x: p) -> p = mul(cast(0.5, p), sub(cast(1.0, p), erf_approx(neg(mul(x, cast(0.7071067811865475, p))))))
 def normal_cdf_implementation_symbol() -> string = "Std.Contracts.normal_cdf"
 def normal_cdf_range_contract() -> string = "std.normal_cdf.range"
 def normal_cdf_reflection_contract() -> string = "std.normal_cdf.reflection"

@@ -8,7 +8,7 @@ in `examples/illustrative/`.
 Use these files when you want examples that should survive the normal CLI loop:
 
 - `examples/hello_tensor.ch`: tensor construction and elementwise addition.
-- `examples/linreg.ch`: matmul, expand, copy, and reductions.
+- `examples/linreg.ch`: matmul, insert, copy, and reductions.
 - `examples/vmap_relu.ch`: transform-oriented tensor flow.
 - `examples/tensor_structural_ops.ch`: reshape, permute, pad, and related shape helpers.
 - `examples/transformer_block.ch`: larger model-style composition.

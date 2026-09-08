@@ -19,7 +19,7 @@
 //! `expand` node carries the requested size and that the full
 //! constant-broadcast idiom lowers to a verify-clean DAG.
 
-use chelis_ir::dag::{DimExpr, DimInfo, RiscOp};
+use chelis_ir::dag::{DimInfo, RiscOp};
 use chelis_ir::lower::lower_program;
 use chelis_ir::verify;
 use chelis_types::check_ir_program;
@@ -53,7 +53,7 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 fn issue_288_expand_with_cast_size_lowers_to_requested_size() {
     let src = r#"
 sig run: tensor[2, f32] -> tensor[2, f32]
-def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64)))
+def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64)))
 "#;
     let dag = lower_surf(src).expect("expand-with-cast-size must lower");
     assert!(
@@ -72,7 +72,7 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cas
     assert_eq!(expand.0, 0, "expand axis must be the cast-wrapped 0");
     assert_eq!(
         expand.1,
-        DimExpr::Concrete(2),
+        chelis_ir::dag::RtDim::Lit(2),
         "expand size must be the cast-wrapped 2, not the default 1",
     );
     assert_eq!(
@@ -89,7 +89,7 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cas
 fn issue_288_expand_with_plain_size_still_lowers() {
     let src = r#"
 sig run: tensor[2, f32] -> tensor[2, f32]
-def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
+def run(x) = mul(x, insert(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
 "#;
     let dag = lower_surf(src).expect("expand-with-plain-size must lower");
     assert!(
@@ -102,7 +102,7 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
     });
     assert_eq!(
         size,
-        Some(DimExpr::Concrete(2)),
+        Some(chelis_ir::dag::RtDim::Lit(2)),
         "plain size 2 must still extract"
     );
 }
@@ -115,7 +115,7 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
 fn issue_288_constant_broadcast_forward_lowers_clean() {
     let src = r#"
 sig f: tensor[2, f32] -> f32
-def f(x) = tensor_to_scalar(sum(mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))), cast(0, int32)))
+def f(x) = tensor_to_scalar(sum(mul(x, insert(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))), cast(0, int32)))
 "#;
     let dag = lower_surf(src).expect("issue #288 forward must lower");
     let errors = verify::verify(&dag);
@@ -140,7 +140,7 @@ fn assert_form3_reject_before_lowering(src: &str, label: &str) {
         .err()
         .unwrap_or_else(|| panic!("{label}: sourceless inline expand size must reject at check"));
     assert!(
-        err.contains("expand")
+        err.contains("insert")
             && err.contains("no tensor in scope carries it")
             && err.contains("chelis#469"),
         "{label}: expected the Form-3 sourceless-size reject citing #469, got: {err}"
@@ -154,7 +154,7 @@ fn assert_form3_reject_before_lowering(src: &str, label: &str) {
 #[test]
 fn issue_530_tuple_get_size_rejected_before_lowering() {
     assert_form3_reject_before_lowering(
-        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = expand(b, 0, t.0)\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, t.0)\n",
         "tuple-get size",
     );
 }
@@ -162,7 +162,7 @@ fn issue_530_tuple_get_size_rejected_before_lowering() {
 #[test]
 fn issue_530_cast_wrapped_tuple_get_size_rejected_before_lowering() {
     assert_form3_reject_before_lowering(
-        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = expand(b, 0, cast(t.0, int64))\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, cast(t.0, int64))\n",
         "cast(tuple-get) size",
     );
 }
@@ -170,7 +170,7 @@ fn issue_530_cast_wrapped_tuple_get_size_rejected_before_lowering() {
 #[test]
 fn issue_530_arith_over_tuple_get_size_rejected_before_lowering() {
     assert_form3_reject_before_lowering(
-        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = expand(b, 0, add(t.0, cast(0, int64)))\n",
+        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = insert(b, 0, add(t.0, cast(0, int64)))\n",
         "add(tuple-get, ...) size",
     );
 }
@@ -181,7 +181,7 @@ fn issue_530_arith_over_tuple_get_size_rejected_before_lowering() {
 /// over-rejected by the #530 gate.
 #[test]
 fn issue_530_shape_sourced_size_still_lowers_clean() {
-    let src = "def g(b: &tensor[n, f32], c: &tensor[a, f32]) -> tensor[a, n, f32] = expand(b, 0, shape(c, cast(0, int32)))\n\
+    let src = "def g(b: &tensor[n, f32], c: &tensor[a, f32]) -> tensor[a, n, f32] = insert(b, 0, shape(c, cast(0, int32)))\n\
          xs = to_tensor([1.0, 2.0])\n\
          cs = to_tensor([10.0, 20.0, 30.0])\n\
          out = g(&xs, &cs)\n";

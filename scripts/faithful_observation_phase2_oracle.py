@@ -256,9 +256,7 @@ CROSS_LANE_REQUIRED_ASSERTIONS: tuple[str, ...] = (
 RUNTIME_SOURCE = Path("crates/chelis-runtime/src/lib.rs")
 RUNTIME_HEADER = Path("crates/chelis-runtime/include/chelis_runtime.h")
 # The retired-export scan reads the WHOLE crate, not just `lib.rs`: an
-# export re-added in any module is the same public exit returning, and a
-# scan scoped to one file would miss it (`chelis_format_shortest` itself
-# lives in `format_shortest.rs`, which is how this gap surfaced).
+# export re-added in any module is the same public exit returning.
 RUNTIME_SRC_DIR = Path("crates/chelis-runtime/src")
 
 # The observation lane's DECODE table: which pointer view each dtype's
@@ -308,12 +306,9 @@ OBSERVATION_DECODE_TABLE: tuple[tuple[str, str, str], ...] = (
     ("I8", "i8::data_ptr_unchecked", "typed accessor"),
     (
         "Bool",
-        "data_as_f32_const",
-        "DECLARED EXCEPTION: bool storage IS f32-encoded today "
-        "(`read_index_slot` keeps `F32 | Bool` on the same view). "
-        "chelis#894 migrates it to `Repr::Bool8`; this arm moves WITH "
-        "that change - a 1-byte read against 4-byte writers is a "
-        "misdecode in the other direction",
+        "Bool8::data_ptr_unchecked",
+        "canonical Repr::Bool8 storage is decoded through its typed "
+        "one-byte accessor",
     ),
     (
         "Bf16",
@@ -384,15 +379,18 @@ PERMITTED_RUST_DEBUG_FORMAT_PATHS: frozenset[str] = frozenset(
         "crates/chelis-compiler-api/src/runtime/named_axis.rs",
         "crates/chelis-compiler-api/src/runtime/tests.rs",
         "crates/chelis-compiler-api/src/runtime/transforms.rs",
-        # 2026-08-02 (chelis#890/#903, chelis#997): the JSON/CSV I/O
-        # runtime modules join the declared derived-Debug residue-carrier
-        # class (Err(format!) parse/shape diagnostics over Json ADT
-        # fields and document shapes), plus the shared truncated_debug
-        # helper in runtime/mod.rs those modules route through. Same
-        # render_value sweep debt as eval.rs/host_ops.rs.
+        # 2026-08-21 (chelis#997, the FO-DIAG migration): the JSON/CSV I/O
+        # runtime modules' PRODUCT diagnostics no longer Debug-print a
+        # payload. They route through the crate-private diagnostic
+        # boundary beside `render_value`
+        # (`runtime/host_ops.rs::describe_value` / `describe_argument` /
+        # `describe_fields`), and `runtime/mod.rs`'s shared
+        # `truncated_debug` helper is deleted, so that path leaves this
+        # set entirely. What survives in these two rows is cfg(test)
+        # assertion messages Debug-QUOTING &str document/cell text - the
+        # same non-exit class as `runtime/tests.rs`.
         "crates/chelis-compiler-api/src/runtime/json.rs",
         "crates/chelis-compiler-api/src/runtime/csv.rs",
-        "crates/chelis-compiler-api/src/runtime/mod.rs",
     }
 )
 
@@ -983,6 +981,7 @@ _TYPED_ACCESSORS: tuple[str, ...] = (
     "i16::data_ptr_unchecked",
     "i32::data_ptr_unchecked",
     "i64::data_ptr_unchecked",
+    "Bool8::data_ptr_unchecked",
 )
 
 
@@ -1067,19 +1066,19 @@ def observation_decode_violations(source: str) -> list[str]:
                 "other; a foreign accessor here renders one dtype's bytes as "
                 "another's, which is the whole defect class."
             )
-    # The f32 view is the exact mechanism of the int32 defect class; only
-    # the declared exception may reach for it.
+    # The f32 view is the exact mechanism of the int32 defect class. Every
+    # active dtype now has an exact typed accessor, so no arm may reach it.
     for name, arm in arms.items():
-        if "data_as_f32_const" in strip_comments(arm) and name != "Bool":
+        if "data_as_f32_const" in strip_comments(arm):
             violations.append(
                 f"tensor_elem_to_string: the {name} arm reaches for the "
-                "untyped f32 view. Only the declared Bool exception may, and "
-                "only until chelis#894's `Repr::Bool8` migration."
+                "untyped f32 view. Exact typed access is required for every "
+                "active dtype."
             )
     return violations
 
 
-RETIRED_EXPORTS: tuple[str, ...] = ("chelis_print_f32",)
+RETIRED_EXPORTS: tuple[str, ...] = ("chelis_print_f32", "chelis_format_shortest")
 
 
 def rust_exported_symbols(source: str) -> set[str]:
@@ -1536,11 +1535,11 @@ def known_red_run_violations(
 # ---------------------------------------------------------------------------
 
 
-def oracle_environment() -> dict[str, str]:
+def oracle_environment(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault(
         "CARGO_TARGET_DIR",
-        str(Path(tempfile.gettempdir()) / "chelis-faithful-observation-phase2-target"),
+        str(repo_root / "target" / "oracles" / "faithful-observation-phase2"),
     )
     return env
 

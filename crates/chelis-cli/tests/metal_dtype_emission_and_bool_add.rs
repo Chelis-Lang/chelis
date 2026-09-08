@@ -5,13 +5,14 @@
 //! locks that: rank-1 kernels are HONESTLY TYPED per dtype (`long*` for
 //! int64, `int*` for int32, `bool*` for bool, `half`/`bfloat` for f16/bf16;
 //! the narrow-float rows live in narrow_dtype_matrix.rs), f64 is rejected
-//! with a specific diagnostic, and rank-2+ falls back to a LOUD abort stub
-//! that names itself. No F32 substitution anywhere (contrast chelis#689).
+//! with a specific diagnostic, and unsupported rank-2+ lowering fails through
+//! the typed codegen channel. No F32 substitution anywhere (contrast
+//! chelis#689).
 //!
 //! The #699 Metal symptom is also settled here: an int64 `abs` no longer
 //! lowers to a pre-planted `Const 0`. Until Phase 3 supplies a typed,
-//! trapping Metal kernel, emission falls back to the backend's named abort
-//! stub carrying the branded unsupported reason.
+//! trapping Metal kernel, emission returns the branded typed unsupported
+//! reason without writing an artifact.
 //!
 //! chelis#726: `add` on bool tensors - the checker accepts it, both host
 //! lanes store the out-of-domain value 2 in a bool-typed tensor (prints
@@ -141,19 +142,21 @@ fn metal_rejects_f64_with_a_specific_diagnostic() {
     );
 }
 
-/// Rank-2+ falls back to an abort stub that NAMES ITSELF in the emitted
-/// source - the loud fallback shape #703 asks for (contrast the silent
-/// substitutions elsewhere in the audit).
+/// Rank-2+ fails through the typed codegen channel before any artifact exists.
 #[test]
-fn metal_rank2_fallback_is_a_named_abort_stub() {
+fn metal_rank2_is_a_typed_error_without_an_artifact() {
     let (ok, stderr, emitted) = build_metal(
         "def f(a: tensor[2, 2, f32], b: tensor[2, 2, f32]) -> tensor[2, 2, f32] = add(a, b)\n",
         "metal_rank2",
     );
-    assert!(ok, "{stderr}");
+    assert!(!ok, "rank-2 Metal must fail the build");
     assert!(
-        emitted.contains("fallback stub") && emitted.contains("abort()"),
-        "the rank-2 fallback must be a self-naming abort, not a silent stub"
+        stderr.contains("unsupported:") && stderr.contains("codegen:metal"),
+        "the rank-2 rejection must use the typed codegen channel: {stderr}"
+    );
+    assert!(
+        emitted.is_empty(),
+        "a rejected build wrote an artifact: {emitted}"
     );
 }
 
@@ -161,31 +164,30 @@ fn metal_rank2_fallback_is_a_named_abort_stub() {
 /// `abs` def used to arrive with a pre-planted `Const 0` node from
 /// `lower_transcendental` and Metal emitted a zero-filled buffer. Phase 2
 /// now preserves a typed integer `Abs` node. Metal's public DAG emitter
-/// rejects that node, and the build surface materializes its established
-/// named-abort fallback with the branded reason. Replace this with a
+/// rejects that node through the typed error channel without materializing
+/// an abort artifact. Replace this with a
 /// correctness row when the chelis#699 Phase 3 kernel lands.
 #[test]
-fn metal_int64_abs_is_a_named_abort_not_pre_planted_zero() {
+fn metal_int64_abs_is_a_typed_error_not_pre_planted_zero() {
     let (ok, stderr, emitted) = build_metal(
         "def f(a: tensor[4, int64]) -> tensor[4, int64] = abs(a)\n",
         "metal_i64_abs",
     );
-    assert!(
-        ok,
-        "the Metal build surface emits loud fallback stubs: {stderr}"
-    );
+    assert!(!ok, "the Metal build must reject integer abs");
     assert!(
         !emitted.contains("node 0 = Const 0"),
         "no pre-planted zero emission may be left behind"
     );
     assert!(
-        emitted.contains("fallback stub")
-            && emitted.contains("abort()")
-            && emitted.contains("unsupported:")
-            && emitted.contains(
+        stderr.contains("unsupported:")
+            && stderr.contains(
                 "integer abs code generation waits for the typed, trapping Phase 3 kernel"
             ),
-        "integer abs must produce the named abort fallback with its branded reason; got:\n{emitted}"
+        "integer abs must return its branded typed reason; got:\n{stderr}"
+    );
+    assert!(
+        emitted.is_empty(),
+        "a rejected build wrote an artifact: {emitted}"
     );
 }
 

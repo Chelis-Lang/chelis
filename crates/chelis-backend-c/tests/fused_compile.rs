@@ -1,8 +1,12 @@
 //! Red team: verify C backend fused codegen compiles with gcc -fsyntax-only.
 
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
+use support::codegen;
+
+mod common;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -31,11 +35,11 @@ fn c_fused_codegen_compiles() {
 
     // Fuse and codegen
     let fused = fuse(&dag);
-    let result = chelis_backend_c::codegen(&fused, "test_fused").unwrap();
+    let result = codegen(&fused, "test_fused").unwrap();
 
     // Write to temp file and syntax-check with gcc
-    let dir = std::env::temp_dir().join("chelis_redteam_c_fused");
-    std::fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir("redteam_c_fused");
+    let dir = probe.path().to_path_buf();
 
     std::fs::write(dir.join("test_fused.c"), &result.c_source).unwrap();
     std::fs::write(dir.join("test_fused.h"), &result.h_header).unwrap();
@@ -135,7 +139,7 @@ fn c_fused_reduce_sum_no_intermediate() {
     dag.add_root(summed);
 
     let fused = fuse(&dag);
-    let result = chelis_backend_c::codegen(&fused, "test_fused_reduce").unwrap();
+    let result = codegen(&fused, "test_fused_reduce").unwrap();
     let src = &result.c_source;
 
     // The fused reduction should contain the elementwise step variables (v0 etc.)
@@ -192,7 +196,7 @@ fn c_fused_reduce_max_no_intermediate() {
     dag.add_root(maxed);
 
     let fused = fuse(&dag);
-    let result = chelis_backend_c::codegen(&fused, "test_fused_maxred").unwrap();
+    let result = codegen(&fused, "test_fused_maxred").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -242,10 +246,10 @@ fn c_fused_reduce_compiles() {
     dag.add_root(summed);
 
     let fused = fuse(&dag);
-    let result = chelis_backend_c::codegen(&fused, "test_fused_reduce_compile").unwrap();
+    let result = codegen(&fused, "test_fused_reduce_compile").unwrap();
 
-    let dir = std::env::temp_dir().join("chelis_redteam_c_fused_reduce");
-    std::fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir("redteam_c_fused_reduce");
+    let dir = probe.path().to_path_buf();
 
     std::fs::write(dir.join("test.c"), &result.c_source).unwrap();
     std::fs::write(dir.join("test.h"), &result.h_header).unwrap();

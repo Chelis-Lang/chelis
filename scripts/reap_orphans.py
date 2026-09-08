@@ -150,14 +150,18 @@ def proc_cwd(pid: int) -> str | None:
     return None
 
 
-def _path_is_under(path: str, root: Path) -> bool:
+def path_is_under(path: str, root: Path) -> bool:
+    """Whether `path` resolves to somewhere inside `root`. Public
+    because `scripts/worktree_status.py` scopes its own process
+    matching the same way, and a second copy of a boundary check is a
+    second chance to get the boundary wrong."""
     try:
         return Path(path).resolve().is_relative_to(root)
     except (OSError, ValueError):
         return False
 
 
-def _command_mentions_path(command: str, path_str: str) -> bool:
+def command_mentions_path(command: str, path_str: str) -> bool:
     """Path-boundary-aware containment check. A raw substring test would
     let a sibling checkout match (`<repo>-165` contains `<repo>`), and
     this script sends SIGKILL, so `path_str` counts only when followed
@@ -212,7 +216,7 @@ def match_repo_processes(
         if proc.pid == own_pid:
             continue
         is_tool = proc.basename in BUILD_TOOL_NAMES
-        mentions_repo = _command_mentions_path(proc.command, repo_str)
+        mentions_repo = command_mentions_path(proc.command, repo_str)
         if is_tool and mentions_repo:
             matched.append(proc)
             continue
@@ -226,7 +230,7 @@ def match_repo_processes(
             continue
         if is_tool:
             cwd = cwd_lookup(proc.pid)
-            if cwd is not None and _path_is_under(cwd, repo_root):
+            if cwd is not None and path_is_under(cwd, repo_root):
                 matched.append(proc)
     return matched
 

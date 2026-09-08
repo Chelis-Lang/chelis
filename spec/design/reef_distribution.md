@@ -61,7 +61,17 @@ not designed in this round.
 The validation step at install time is the same regardless of source. It
 runs entirely on bytes already on disk; no code from the artifact executes.
 CHB decoding consumes the complete input and re-encodes to the same canonical
-bytes. It rejects appended bytes, truncation, malformed field encodings,
+bytes. CHB format 2 begins with the `CHELCHB\0` magic and an explicit little-
+endian format version; predecessor and unknown-version layouts are rejected
+rather than interpreted through bincode field coincidence. Each exported
+function carries a canonical `type_variable_restrictions` ledger keyed to the
+alpha-canonical type-variable identity in its printed type. `reef schema` JSON
+uses schema `format_version: 2` and the same ledger, so the machine-readable
+authoring ABI and the installable CHB describe the same constrained scheme.
+The ledger is derived from the checker Scheme by structural traversal across
+separate type, dimension, and rank namespaces.
+
+Decoding rejects appended bytes, truncation, malformed field encodings,
 noncanonical metadata ordering, duplicate module/export/dependency entries,
 invalid exact compiler pins, and invalid embedded SHA-256 text before checking
 the paired archive digest. These checks cover fields the installer does not
@@ -284,8 +294,14 @@ Two consequences:
    (`crates/chelis-std-bundle/dist/chelis-std-<version>.{tar.zst,chb}`)
    are committed to the repo. The pipeline is "regenerate artifacts ->
    commit -> build"; `scripts/regenerate_chelis_std_bundle.py` is the
-   canonical regen entry. The bundle crate's build.rs verifies the
-   dist files exist and emits `cargo:rerun-if-changed=` so cargo
+   canonical regen entry. It pins `SOURCE_DATE_EPOCH=0` for every subprocess
+   so the committed bundle identity does not depend on an ambient Devenv or
+   release-shell value; general `chelis reef build` invocations continue to
+   honor the caller's epoch. Its `--check` mode compares all five committed
+   outputs with a first generation, compares that first generation with a
+   second, and restores the exact committed inputs; it is part of both the
+   hosted `lint-rust` worker and `gate.py --local`. The bundle crate's build.rs
+   verifies the dist files exist and emits `cargo:rerun-if-changed=` so cargo
    invalidates the bundle when the bytes change.
 3. **No registry seeding required.** `chelis reef build` against a
    project that depends on chelis-std (implicitly or explicitly)

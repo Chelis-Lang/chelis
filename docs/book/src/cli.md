@@ -152,6 +152,22 @@ When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
 
+### Targeted evaluation and root manifests
+
+`chelis eval --target eval|c|hip|metal` computes the root manifest against the
+selected backend's capabilities. The default is `eval`. This is useful when a
+program must be compared with a generated artifact: for example, an f64 root
+can use the Tensor lane under `eval` while the same root routes through the
+Host lane under `c`. An unknown target is an error; it never falls back to a
+different capability set.
+
+Every successful `chelis eval --json` response includes a `manifest` object:
+the selected `target`, ordered `entries` (`name`, `lane`, and
+`required_inputs`), and `requires_main`. The `roots` array has exactly the
+selected manifest names in the same order. Tuple roots and statically fixed
+ADT roots use dotted component names. If a lane cannot produce an owed root,
+evaluation exits nonzero instead of returning a partial JSON document.
+
 ### Bounding a slow evaluation
 
 Interactively, Ctrl-C stops a running `chelis eval` immediately. For
@@ -179,11 +195,22 @@ top-level declaration inside the passes that dominate a large compile
 (chelis#930), so both a compile-bound and an evaluation-bound program
 unwind cleanly rather than being killed mid-write.
 
-A backstop still terminates the process a few seconds after the deadline
-if nothing has unwound. It is defence in depth, not the mechanism: the
-polling above is not exhaustive — the style gate, Reef graph resolution,
-and lowering's whole-program walk do not poll, and a compiler pass that
-genuinely wedges would never reach a check point. `--timeout` promises an
+If cooperative unwinding does complete, that is the whole message. If it
+does not, a backstop terminates the process and says so:
+
+```text
+error: evaluation timed out after 30s (--timeout); cancellation did not complete within 5s, forced exit
+```
+
+The suffix is worth reading. It means the process was killed rather than
+unwound, so destructors did not run and buffered output was not flushed.
+The usual cause is a machine under heavy load, where the cooperative
+unwind competes for CPU against a fixed wall-clock grace period.
+
+That backstop is defence in depth, not the mechanism: the polling above is
+not exhaustive — the style gate, Reef graph resolution, and lowering's
+whole-program walk do not poll, and a compiler pass that genuinely wedges
+would never reach a check point. `--timeout` promises an
 unconditional loud failure, so the process-level stop remains.
 
 The same cancellation mechanism is what makes `KeyboardInterrupt` work
@@ -207,8 +234,28 @@ chelis test tests_blocked/ --expect blocked
 Directory runs use `--batch-mode auto` by default: eligible files are compiled
 as one suite batch so the fixed Reef context and test-source compile costs are
 paid once. Files with top-level module-init bindings or top-level name
-collisions use the per-file worker path. If a batch worker crashes, times out,
-or emits incomplete rows, the parent falls back to per-file workers.
+collisions use the per-file worker path.
+
+The batch is one compilation unit with one top-level scope, so a name
+collision is any way two batched files can disagree about what a name means:
+both declaring it, one declaring what another explicitly imported (in either
+order), both importing it from different modules, or a wildcard import whose
+names cannot be enumerated without resolving the package graph. Importing the
+same name from the same module is not a collision. Demotion is not reported by
+default, because the per-file path gives the same rows and the same exit code.
+Set `CHELIS_TEST_EXPLAIN_BATCHING=1` to print one stderr line per demoted file
+naming its reason, which is what to reach for when a suite has quietly lost the
+batch path and you need to know which names to rename.
+
+If a batch worker cannot be started, crashes, times out, or exits without
+usable rows, the parent falls back to per-file workers and says so on every
+channel that a reader might be capturing: an attributed stderr note naming the
+reason and every file the batch had claimed, a ` (batch abandoned: ran
+per-file)` marker on the plain summary line, and under `--json` a
+`batch_fallback` record before the rows plus a `batch_fallback` flag on the
+summary. All three are absent when the batch completes, and a clean run's
+summary line and summary record are unchanged. The exit code still tracks test
+outcomes only, because every selected test still ran.
 
 Use `--batch-mode file` to force per-file subprocess isolation while debugging.
 `--jobs auto` caps worker concurrency on file-worker paths; pass `--jobs 1` for
@@ -355,7 +402,8 @@ chelis reef verify-artifact \
 
 Verification strictly consumes the complete CHB, requires its bytes and
 metadata ordering to be canonical, validates structural invariants across the
-envelope, and checks the archive bytes against the CHB's embedded SHA-256.
+versioned `CHELCHB` envelope, including canonical quantified type-variable
+restriction metadata, and checks the archive bytes against the CHB's embedded SHA-256.
 Appended bytes, truncation, malformed metadata, and a mismatched archive fail
 before any registry state is written. `reef install` uses this same verifier.
 

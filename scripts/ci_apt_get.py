@@ -19,11 +19,17 @@ for a required check, blocks the PR until someone manually re-runs).
 
 This helper wraps the update+install in a bounded retry loop with backoff so
 a transient reset self-heals within the step instead of failing the job. It
-is intentionally NARROW: it only retries the apt-get pair, it does not retry
-the cargo build or any test, and a genuine non-transient failure (an
-unknown package, a held broken dep) still surfaces after the attempts are
-exhausted -- the retries cannot turn a real packaging error green, only ride
-out a flaky download.
+also has one narrow reproducibility mode for the Debian Bullseye/glibc-2.31
+lanes: ``--debian-bullseye-snapshot`` replaces every moving apt source with
+one immutable snapshot before the first update. That prevents the mirror race
+where a freshly downloaded index names a package version that its selected
+CDN edge no longer serves (a persistent 404 which retries cannot heal).
+
+The retry loop is intentionally NARROW: it only retries the apt-get pair, it
+does not retry the cargo build or any test, and a genuine non-transient
+failure (an unknown package, a held broken dep) still surfaces after the
+attempts are exhausted -- the retries cannot turn a real packaging error
+green, only ride out a flaky download.
 
 Each individual `apt-get` invocation runs under a per-command WALL-CLOCK
 TIMEOUT. A connection *reset* returns a non-zero exit that the retry loop
@@ -69,10 +75,10 @@ is satisfied and the step stays Python, not shell, per repo policy):
     python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
 By default it runs `apt-get` under `sudo`; pass `--no-sudo` for container
-jobs (e.g. the debian:11 glibc-2.31 lane) that already run as root and have
-no `sudo`. `--no-install-recommends` is forwarded to the install when
-passed. Everything after a literal `--` (or every bare token) is treated as
-a package name.
+jobs (e.g. the Bullseye glibc-2.31 lane) that already run as root and have no
+`sudo`. `--no-install-recommends` is forwarded to the install when passed.
+Everything after a literal `--` (or every bare token) is treated as a package
+name.
 
 Per repo policy this is Python, not a shell script.
 """
@@ -83,6 +89,7 @@ import argparse
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # apt-get's own documented "transient failure" exit code is 100, but a
 # connection reset can also surface as a generic non-zero. We retry on ANY
@@ -121,6 +128,60 @@ KILL_AFTER_SECONDS = 30
 # matter for control flow: the retry loop fires on ANY non-zero exit, so these
 # are special-cased purely to print a more accurate diagnostic.
 TIMEOUT_EXIT_CODES = (124, 137)
+
+# A timestamp after Bullseye's final LTS updates but before these jobs were
+# repaired. snapshot.debian.org resolves this timestamp to the latest import
+# at or before it and keeps both the indices and referenced package pool
+# immutable. Update this deliberately, with the workflow contract test and a
+# successful hosted glibc-2.31 run as evidence.
+BULLSEYE_SNAPSHOT_TIMESTAMP = "20260901T000000Z"
+
+
+def bullseye_snapshot_sources() -> str:
+    """Return the complete immutable apt source set for the Bullseye lanes."""
+    main = (
+        "https://snapshot.debian.org/archive/debian/"
+        f"{BULLSEYE_SNAPSHOT_TIMESTAMP}/"
+    )
+    security = (
+        "https://snapshot.debian.org/archive/debian-security/"
+        f"{BULLSEYE_SNAPSHOT_TIMESTAMP}/"
+    )
+    option = "[check-valid-until=no]"
+    return (
+        f"deb {option} {main} bullseye main\n"
+        f"deb {option} {main} bullseye-updates main\n"
+        f"deb {option} {security} bullseye-security main\n"
+    )
+
+
+def configure_bullseye_snapshot(apt_root: Path = Path("/etc/apt")) -> None:
+    """Replace moving Debian sources with the pinned Bullseye snapshot.
+
+    Both traditional ``*.list`` files and deb822 ``*.sources`` fragments are
+    removed so a future base-image source-layout change cannot silently
+    reintroduce a moving mirror beside the pinned source. The directory must
+    already be an apt configuration root; refusing to create an arbitrary
+    path makes a wrong container fail loudly.
+    """
+    if not apt_root.is_dir():
+        raise FileNotFoundError(
+            f"apt configuration directory does not exist: {apt_root}"
+        )
+
+    fragments = apt_root / "sources.list.d"
+    if fragments.is_dir():
+        for pattern in ("*.list", "*.sources"):
+            for source in fragments.glob(pattern):
+                source.unlink()
+
+    (apt_root / "sources.list").write_text(
+        bullseye_snapshot_sources(), encoding="utf-8"
+    )
+    print(
+        "ci_apt_get: configured immutable Debian Bullseye snapshot "
+        f"{BULLSEYE_SNAPSHOT_TIMESTAMP}"
+    )
 
 
 def _run(cmd: list[str]) -> int:
@@ -246,6 +307,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="forward --no-install-recommends to apt-get install.",
     )
     parser.add_argument(
+        "--debian-bullseye-snapshot",
+        action="store_true",
+        help=(
+            "replace all apt sources with the repository-pinned immutable "
+            "Debian Bullseye snapshot before updating"
+        ),
+    )
+    parser.add_argument(
         "--attempts",
         type=int,
         default=DEFAULT_ATTEMPTS,
@@ -271,6 +340,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
+    if args.debian_bullseye_snapshot:
+        configure_bullseye_snapshot()
     # A non-positive --timeout disables the ceiling: _timeout_wrapper returns
     # no `timeout` prefix and apt-get runs unbounded.
     timeout = args.timeout if args.timeout and args.timeout > 0 else None

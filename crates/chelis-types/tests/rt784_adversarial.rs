@@ -153,11 +153,15 @@ const SUM_SRC: &str = r#"
            (var {} sum) (var {} x) (lit {} 1)))
 "#;
 
+// A rank-increasing call, so it spells `insert`: `expand` leaves the rank
+// alone (spec/04-type-system.md section 4.7.2). The subject is the write-back
+// of a concrete annotation over an error operand, which the operation's
+// identity does not affect.
 const EXPAND_SRC: &str = r#"
     (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
     (def {} e
       (app {type: (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))}
-           (var {} expand) (var {} x) (lit {} 0) 4i64))
+           (var {} insert) (var {} x) (lit {} 0) 4i64))
 "#;
 
 #[test]
@@ -181,12 +185,12 @@ fn sum_error_operand_does_not_clobber_concrete_annotation() {
 }
 
 #[test]
-fn expand_error_operand_does_not_clobber_concrete_annotation() {
-    let tags = writeback_type_tags(EXPAND_SRC, "expand");
-    assert!(!tags.is_empty(), "expected an expand app node type");
+fn insert_error_operand_does_not_clobber_concrete_annotation() {
+    let tags = writeback_type_tags(EXPAND_SRC, "insert");
+    assert!(!tags.is_empty(), "expected an insert app node type");
     assert!(
         tags.iter().all(|t| t == "t-tensor"),
-        "expand written-back type must stay concrete t-tensor, got {tags:?}",
+        "insert written-back type must stay concrete t-tensor, got {tags:?}",
     );
 }
 
@@ -290,7 +294,7 @@ fn sum_unbound_operand_single_diagnostic_no_accept() {
 #[test]
 fn expand_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver() -> f32 = {\n  e = expand(missing_x, 0, 4i64)\n  cast(0.0, f32)\n}\n",
+        "def driver() -> f32 = {\n  e = insert(missing_x, 0, 4i64)\n  cast(0.0, f32)\n}\n",
         "missing_x",
         "expand main-pass",
     );
@@ -305,7 +309,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
     // `Error`; the unbound-var diagnostic still fires. Exactly ONE diagnostic
     // — no silent accept, no ICE.
     assert_single_unbound(
-        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = expand(x, 0, add(missing_v, cast(1, int64)))\n  cast(0.0, f32)\n}\n",
+        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = insert(x, 0, add(missing_v, cast(1, int64)))\n  cast(0.0, f32)\n}\n",
         "missing_v",
         "expand error-size main-pass",
     );

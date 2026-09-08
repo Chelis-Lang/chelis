@@ -345,7 +345,7 @@ fn max_elem_is_exact_at_two_pow_53_boundary() {
     );
 }
 
-/// Sibling of `max_elem`; `min_elem` lowers via `neg(max_elem(neg, neg))`.
+/// Sibling of `max_elem`; direct `min_elem` compares the stored int64 operands.
 #[test]
 fn min_elem_is_exact_at_two_pow_53_boundary() {
     assert_eq!(
@@ -641,15 +641,13 @@ fn unsupported_builtin_never_silently_emits_a_zero_stub() {
 // Group 8: front-end literal range.
 // ---------------------------------------------------------------------------
 
-/// Verified: `cast(-9223372036854775808, int64)` dies with
-/// `lex error: invalid number '9223372036854775808'`, because the lexer parses
-/// the magnitude as a positive `i64` before the parser applies negation, and
-/// `2^63` overflows `i64`. Fails loudly rather than silently, so it is a
-/// usability gap rather than a correctness hole.
+/// chelis#683, FIXED and un-ignored: `cast(-9223372036854775808, int64)` used
+/// to die with `lex error: invalid number '9223372036854775808'`, because the
+/// Surf lexer read the bare magnitude and the parser applied negation
+/// separately, so `2^63` overflowed `i64` before the sign was known. The
+/// `IntMinMagnitude` sentinel (`chelis-surf/src/lexer.rs`) closed that: the
+/// magnitude is now carried to the negation site and folded into `i64::MIN`.
 #[test]
-#[ignore = "i64::MIN is not writable as a literal (lexer parses the magnitude \
-            as a positive i64 before negation, crates/chelis-surf/src/lexer.rs:717). \
-            Not yet filed; unignore when it is fixed."]
 fn i64_min_is_writable_as_a_literal() {
     let program = "module Probe.Main\nout = print(cast(-9223372036854775808, int64))\n";
     let (ok, stdout, stderr) = eval_lane(program);
@@ -657,6 +655,44 @@ fn i64_min_is_writable_as_a_literal() {
     assert_eq!(
         stdout.lines().next().unwrap_or("").trim(),
         "-9223372036854775808"
+    );
+}
+
+/// chelis#683, Deep lane: the same boundary through a `.dp` source.
+///
+/// Deep never had the Surf defect and needs no `IntMinMagnitude` mirror,
+/// because `chelis-deep`'s `lex_number` slices the token from a `start` taken
+/// before the sign, so `parse::<i64>()` receives the signed string and the bare
+/// `2^63` magnitude is never parsed on its own. That
+/// asymmetry was previously untested in either crate, which is how the Deep
+/// half of chelis#683 came to be reported as still broken. The exactness is
+/// pinned here end to end, and the lexer-level reasoning is pinned by
+/// `chelis-deep`'s `i64_boundary_literals_lex_exactly`.
+#[test]
+fn i64_min_is_writable_as_a_deep_literal() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("probe.dp");
+    write_file(
+        &path,
+        "(module {}\n  Probe.Main\n  (def {} out (app {} (var {} print) \
+         (lit {} -9223372036854775808i64))))\n",
+    );
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "i64::MIN must be writable as a Deep literal, got: {stderr}"
+    );
+    assert_eq!(
+        stdout.lines().next().unwrap_or("").trim(),
+        "-9223372036854775808",
+        "the Deep lane must print i64::MIN exactly, got:\n{stdout}"
     );
 }
 

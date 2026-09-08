@@ -1077,7 +1077,24 @@ where
             }
             return;
         }
-        Expr::BareList(..) | Expr::UnknownForm(..) => return,
+        // chelis#1087: mirror the read-only walker above — skipping these
+        // silently drops references inside transitional variants and
+        // desynchronizes rename's cascade accounting.
+        Expr::BareList(children, _) => {
+            for child in children.iter_mut() {
+                f(child, scope);
+            }
+            return;
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &mut data.meta.entries {
+                f(value, scope);
+            }
+            for child in &mut data.children {
+                f(child, scope);
+            }
+            return;
+        }
     };
     let tag = list_tag(list);
     if let Some(meta) = list.elements.get_mut(1) {
@@ -1713,4 +1730,92 @@ fn render_path(path: &DeepPath) -> String {
         })
         .collect::<Vec<_>>()
         .join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::UnknownFormData;
+
+    fn sp() -> Span {
+        Span::new(0, 0)
+    }
+
+    /// A tree exercising both transitional variants, with material at every
+    /// position a walker can skip: a BareList element, an UnknownForm
+    /// metadata value, an UnknownForm child, and a nested BareList interior.
+    /// Deliberately Node-free: the mutating walker bridges `Node` to `List`
+    /// in place, which would make the two visit logs differ by
+    /// representation rather than by coverage.
+    fn transitional_fixture() -> Expr {
+        Expr::BareList(
+            vec![
+                Expr::Atom(Atom::Name("a".to_string()), sp()),
+                Expr::UnknownForm(Box::new(UnknownFormData {
+                    head: "mystery".to_string(),
+                    meta: MetaMap {
+                        entries: vec![(
+                            "note".to_string(),
+                            Expr::Atom(Atom::Name("m".to_string()), sp()),
+                        )],
+                    },
+                    children: vec![
+                        Expr::Atom(Atom::Name("b".to_string()), sp()),
+                        Expr::BareList(vec![Expr::Atom(Atom::Name("c".to_string()), sp())], sp()),
+                    ],
+                    span: sp(),
+                })),
+            ],
+            sp(),
+        )
+    }
+
+    fn read_walk(expr: &Expr, out: &mut Vec<String>) {
+        fn go(expr: &Expr, scope: &mut BTreeSet<String>, out: &mut Vec<String>) {
+            walk_children(expr, scope, String::new(), |child, scope, _path| {
+                out.push(format!("{child:?}"));
+                go(child, scope, out);
+            });
+        }
+        go(expr, &mut BTreeSet::new(), out);
+    }
+
+    fn mut_walk(expr: &mut Expr, out: &mut Vec<String>) {
+        fn go(expr: &mut Expr, scope: &mut BTreeSet<String>, out: &mut Vec<String>) {
+            let mut f = |child: &mut Expr, scope: &mut BTreeSet<String>| {
+                out.push(format!("{child:?}"));
+                go(child, scope, out);
+            };
+            walk_children_mut(expr, scope, &mut f);
+        }
+        go(expr, &mut BTreeSet::new(), out);
+    }
+
+    /// chelis#1087: the mutating walker must traverse exactly what the
+    /// read-only walker traverses over the transitional variants. Before
+    /// the fix it returned early on both, so `rename_local_vars` silently
+    /// skipped references the read-only cascade accounting had counted.
+    #[test]
+    fn walk_children_mut_matches_walk_children_over_transitional_variants() {
+        let fixture = transitional_fixture();
+        let mut read_visits = Vec::new();
+        read_walk(&fixture, &mut read_visits);
+
+        let mut mutable = fixture.clone();
+        let mut mut_visits = Vec::new();
+        mut_walk(&mut mutable, &mut mut_visits);
+
+        assert_eq!(
+            read_visits, mut_visits,
+            "the walkers must visit the same children in the same order"
+        );
+        assert!(
+            read_visits.iter().any(|visit| visit.contains("\"c\"")),
+            "traversal reaches the nested BareList interior: {read_visits:?}"
+        );
+        assert_eq!(
+            mutable, fixture,
+            "a no-op visitor leaves the tree unchanged"
+        );
+    }
 }

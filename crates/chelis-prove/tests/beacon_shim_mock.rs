@@ -18,6 +18,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256};
 
+use chelis_compiler_api::schema::WIRE_DAG_SCHEMA_VERSION;
 use chelis_prove::composition::{CompositeVerdict, base_verdict_from_discharge};
 use chelis_prove::discharge::{
     Goal, GoalShape, IntervalBox, IrHandle, OutputRange, Qualifier, Soundness,
@@ -48,10 +49,10 @@ fn with_scenario(scenario: &str) -> MutexGuard<'static, ()> {
     guard
 }
 
-/// Synthetic serialized `WireDag` v1 bytes. The shim treats these opaquely
+/// Synthetic serialized exact-version `WireDag` bytes. The shim treats these opaquely
 /// (base64 + sha256); any deterministic byte string exercises transport.
 fn fake_wire_dag_bytes() -> Vec<u8> {
-    br#"{"schema_version":1,"nodes":[],"roots":[0]}"#.to_vec()
+    format!(r#"{{"schema_version":{WIRE_DAG_SCHEMA_VERSION},"nodes":[],"roots":[0]}}"#).into_bytes()
 }
 
 /// Lowercase-hex sha256 of `bytes` — the content-address key, computed the same
@@ -508,14 +509,14 @@ fn request_carries_exact_base64_bytes_and_expected_hash() {
     );
     assert_eq!(
         request.get("schema_version").and_then(|v| v.as_u64()),
-        Some(1)
+        Some(2)
     );
     assert_eq!(request.get("root_index").and_then(|v| v.as_u64()), Some(0));
 
     let b64 = request
-        .get("wire_dag_v1_base64")
+        .get("wire_dag_v6_base64")
         .and_then(|v| v.as_str())
-        .expect("wire_dag_v1_base64 present");
+        .expect("wire_dag_v6_base64 present");
     let decoded = BASE64.decode(b64).expect("base64 decodes");
     assert_eq!(
         decoded,

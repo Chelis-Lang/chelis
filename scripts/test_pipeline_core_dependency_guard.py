@@ -13,6 +13,7 @@ APPROVED_DEPENDENCIES = (
     "chelis-types",
     "chelis-effects",
     "chelis-ir",
+    "chelis-unord",
 )
 
 
@@ -36,6 +37,7 @@ def approved_graph() -> dict[str, list[str]]:
         "chelis-types": ["chelis-deep"],
         "chelis-effects": ["chelis-deep", "chelis-types"],
         "chelis-ir": ["chelis-deep", "chelis-types"],
+        "chelis-unord": [],
     }
 
 

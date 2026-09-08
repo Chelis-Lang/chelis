@@ -47,6 +47,7 @@ fn fuse_grad_result(grad_result: GradResult) -> GradResult {
     let fused = fuse_with_remap(&grad_result.dag);
     let grad_nodes = grad_result
         .grad_nodes
+        .into_sorted()
         .into_iter()
         .map(|(wrt_id, grad_id)| {
             let remapped = *fused
@@ -79,7 +80,7 @@ mod tests {
     use crate::dag::{DimInfo, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
     use chelis_types::types::Prim;
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -92,7 +93,7 @@ mod tests {
         }
     }
 
-    fn eval_roots(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+    fn eval_roots(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
         let roots = dag.roots().to_vec();
         let values = eval_tensor_roots_with_strict(dag, &roots, |name| inputs.get(name).cloned())
             .expect("evaluation should succeed");
@@ -142,7 +143,7 @@ mod tests {
         let unfused_grad = grad_dag(&dag, sum, &[x]).expect("grad should succeed");
         let fused_grad = grad_then_fuse(&dag, sum, &[x]).expect("grad_then_fuse should succeed");
 
-        let inputs = HashMap::from([(
+        let inputs = UnordMap::from([(
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![1.0, -2.0, 3.5, 0.25]),
         )]);

@@ -407,15 +407,26 @@ pub fn run_surf_source_obligations(
 
 /// Run obligations directly from Deep module SOURCE (`.dp` text). This is
 /// the Deep sibling of [`run_surf_source_obligations`]: it is the entry the
-/// chelis-tide MCP tool calls for a `source_kind:"deep"` module so a prove
-/// through tide is identical to the CLI `chelis prove foo.dp` path
-/// (`run_deep_obligations`). A `.dp` is already Deep, so it is parsed but NOT
-/// desugared; the checker then runs for inferred return types (a type-broken
-/// module surfaces a `CheckFailed`, never a silent zero-obligation pass --
-/// RT3-F2 parity), and the SAME `run_module_obligations` the Surf source
-/// entry reaches verifies each obligation. Returns `Err` if the source does
-/// not parse; `Ok(CheckFailed)` if it does not type-check; `Ok(Ran(..))`
-/// otherwise.
+/// chelis-tide MCP tool calls for a `source_kind:"deep"` module. A `.dp` is
+/// already Deep, so it is parsed but NOT desugared; the checker then runs for
+/// inferred return types (a type-broken module surfaces a `CheckFailed`, never
+/// a silent zero-obligation pass -- RT3-F2 parity), and the SAME
+/// `run_module_obligations` the Surf source entry reaches verifies each
+/// obligation. Returns `Err` if the source does not parse; `Ok(CheckFailed)`
+/// if it does not type-check; `Ok(Ran(..))` otherwise.
+///
+/// This entry and the CLI's `chelis prove foo.dp` path (`run_deep_obligations`)
+/// reach the same engine but do NOT hand it the same representation, and this
+/// comment used to claim they were the identical path (chelis#1125 PP7): the
+/// route below normalizes through `deep_compat::parse_file_to_lists`, so the
+/// engine sees `Expr::List`, while the CLI passes `parse_and_stamp_file`
+/// output straight through, so the engine sees `Expr::Node`. That difference
+/// used to change the answer -- the engine's readers decoded only the list
+/// carrier, so the CLI's obligation could not lower and fell through to Tier
+/// C while tide's proved at Tier B. Those readers now decode both carriers
+/// ([04-TOT-5]), so the two routes agree on the outcome; they are still two
+/// routes, and neither this comment nor a reader in the engine may assume
+/// which carrier arrives.
 pub fn run_deep_source_obligations(
     source: &str,
     options: &ObligationRunOptions,

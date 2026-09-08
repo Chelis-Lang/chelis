@@ -7,9 +7,10 @@
 //! M1 ships the stub-output assertions. M2 fills in elementwise structural
 //! coverage; M4 reductions; M5 matmul.
 
-use chelis_backend_metal::codegen_metal;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+mod support;
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::{codegen_metal, try_codegen_metal};
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -68,7 +69,7 @@ fn m1_emits_extern_c_signature_and_runtime_import() {
 }
 
 #[test]
-fn m1_stub_carries_link_flags_for_metal_and_foundation() {
+fn codegen_result_carries_link_flags_for_metal_and_foundation() {
     let dag = build_simple_add_dag();
     let result = codegen_metal(&dag, "f");
 
@@ -88,7 +89,7 @@ fn m1_stub_carries_link_flags_for_metal_and_foundation() {
 }
 
 #[test]
-fn m1_stub_extracts_input_and_output_labels_from_loads_and_stores() {
+fn codegen_result_extracts_input_and_output_labels_from_loads_and_stores() {
     let dag = build_simple_add_dag();
     let result = codegen_metal(&dag, "f");
     assert_eq!(result.input_labels, vec!["a".to_string(), "b".to_string()]);
@@ -121,14 +122,6 @@ fn m2_simple_add_emits_msl_kernel_void_and_thread_position() {
     let dag = build_simple_add_dag();
     let result = codegen_metal(&dag, "f");
     let src = &result.mm_source;
-
-    // M2 emission MUST replace the M1 stub. abort() in the stub body is the
-    // signal the emitter fell through to the fallback; for a supported
-    // shape we should emit real kernels and dispatch sites.
-    assert!(
-        !src.contains("M1 fallback stub"),
-        "M2 should emit real code for a simple rank-1 add, but fell back to the stub:\n{src}"
-    );
 
     // MSL kernel signature shape.
     assert!(
@@ -191,7 +184,8 @@ fn m2_simple_add_emits_raw_string_literal_and_dispatch_site() {
     );
     // Output is materialized via the host-side chelis_alloc + device->host copy.
     assert!(
-        src.contains("chelis_metal_device_to_host(outputs[0]->data,"),
+        src.contains("chelis_tensor_write *store_guard_0 = chelis_tensor_begin_write(outputs[0]);")
+            && src.contains("chelis_metal_device_to_host(store_view_0.data,"),
         "expected device->host copy into outputs[0]: {src}"
     );
 }
@@ -215,11 +209,6 @@ fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
 
     let result = codegen_metal(&dag, "chain");
     let src = &result.mm_source;
-    assert!(
-        !src.contains("M1 fallback stub"),
-        "M2 should emit real code: {src}"
-    );
-
     let kernel_void_count = src.matches("kernel void").count();
     assert_eq!(
         kernel_void_count, 2,
@@ -292,11 +281,6 @@ fn m4_sum_reduction_emits_threadgroup_memory_and_barriers() {
     );
     let result = codegen_metal(&dag, "sumv");
     let src = &result.mm_source;
-    assert!(
-        !src.contains("M1 fallback stub"),
-        "M4 should emit a real reduction kernel for Sum: {src}"
-    );
-
     // Reduction kernel hallmarks.
     assert!(
         src.contains("threadgroup float shared[256]"),
@@ -336,10 +320,6 @@ fn m4_max_reduction_uses_neg_infinity_identity() {
     let result = codegen_metal(&dag, "maxv");
     let src = &result.mm_source;
     assert!(
-        !src.contains("M1 fallback stub"),
-        "M4 should emit a real reduction kernel for Max: {src}"
-    );
-    assert!(
         src.contains("float acc = -INFINITY;"),
         "expected max identity -INFINITY: {src}"
     );
@@ -366,10 +346,10 @@ fn m4_min_reduction_uses_positive_infinity_identity() {
 }
 
 #[test]
-fn m4_oversize_reduction_falls_through_to_stub_until_two_pass_lands() {
+fn m4_oversize_reduction_returns_typed_unsupported_until_two_pass_lands() {
     // n>4096 exceeds the single-threadgroup wrap-loop limit. Two-pass
-    // reduction lands in a follow-up phase; until then, fall through to
-    // the stub so we never silently emit a wrong reduction.
+    // reduction lands in a follow-up phase; until then, reject before
+    // artifact emission so we never silently emit a wrong reduction.
     let dag = build_reduce_dag(
         RiscOp::Sum {
             axis: 0,
@@ -377,12 +357,12 @@ fn m4_oversize_reduction_falls_through_to_stub_until_two_pass_lands() {
         },
         4097,
     );
-    let result = codegen_metal(&dag, "big");
-    let src = &result.mm_source;
-    assert!(
-        src.contains("M1 fallback stub"),
-        "M4 should fall through to stub for n>4096 until two-pass lands. Source:\n{src}"
+    let error = try_codegen_metal(&dag, "big").unwrap_err();
+    assert_eq!(
+        error.stage,
+        chelis_types::unsupported::Stage::Codegen("metal")
     );
+    assert!(error.to_string().contains("n=4097"), "{error}");
 }
 
 #[test]
@@ -409,12 +389,16 @@ fn m2_root_without_store_writes_output_back() {
     // The function MUST write outputs[0]. Without this, the C ABI is
     // silently violated and downstream callers see uninitialized output.
     assert!(
-        src.contains("outputs[0] = chelis_alloc(") && src.contains("outputs[0]->data,"),
+        src.contains("outputs[0] = chelis_alloc(")
+            && src.contains(
+                "chelis_tensor_write *root_guard_0 = chelis_tensor_begin_write(outputs[0]);"
+            )
+            && src.contains("chelis_metal_device_to_host(root_view_0.data,"),
         "no-Store root must write outputs[0] via chelis_alloc + device->host. Source:\n{src}"
     );
     // And the chelis_metal_device_to_host call must reference outputs[0].
     assert!(
-        src.contains("chelis_metal_device_to_host(outputs[0]->data,"),
+        src.contains("chelis_metal_device_to_host(root_view_0.data,"),
         "no-Store root must call chelis_metal_device_to_host into outputs[0]: {src}"
     );
 }
@@ -422,8 +406,8 @@ fn m2_root_without_store_writes_output_back() {
 #[test]
 fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
     // Reduction returns a scalar. The output_specs+root_writeback path
-    // must emit `chelis_alloc(0, NULL, CHELIS_F32)` for a true rank-0
-    // scalar — not `chelis_alloc(1, {1}, CHELIS_F32)` which would lie
+    // must emit `chelis_alloc(0, NULL, CHELIS_DTYPE_F32)` for a true rank-0
+    // scalar — not `chelis_alloc(1, {1}, CHELIS_DTYPE_F32)` which would lie
     // about ndim to the host.
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -446,7 +430,7 @@ fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
     let result = codegen_metal(&dag, "sumv");
     let src = &result.mm_source;
     assert!(
-        src.contains("outputs[0] = chelis_alloc(0, NULL, CHELIS_F32);"),
+        src.contains("outputs[0] = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);"),
         "scalar reduce output must allocate as rank-0 (ndim=0, NULL shape): {src}"
     );
 }
@@ -482,7 +466,6 @@ fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
 }
 
 fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
-    use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Load { name: "a".into() },
@@ -499,7 +482,7 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(n),
+            size: chelis_ir::dag::RtDim::Lit(n),
         },
         vec![a],
         tensor3_f32(m, k, n),
@@ -508,7 +491,7 @@ fn build_matmul_dag(m: usize, k: usize, n: usize) -> Dag {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(m),
+            size: chelis_ir::dag::RtDim::Lit(m),
         },
         vec![b],
         tensor3_f32(m, k, n),
@@ -587,7 +570,6 @@ fn tensor3_prec(a: usize, b: usize, c: usize, p: Prim) -> TensorType {
 }
 
 fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
-    use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::Load { name: "a".into() },
@@ -604,7 +586,7 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(n),
+            size: chelis_ir::dag::RtDim::Lit(n),
         },
         vec![a],
         tensor3_prec(m, k, n, prec),
@@ -613,7 +595,7 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(m),
+            size: chelis_ir::dag::RtDim::Lit(m),
         },
         vec![b],
         tensor3_prec(m, k, n, prec),
@@ -631,17 +613,29 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
             accumulator: acc,
         },
         vec![mul],
-        mat_prec(m, n, prec),
+        mat_prec(m, n, acc),
         None,
     );
-    dag.add_root(sum);
+    let root = if acc == prec {
+        sum
+    } else {
+        dag.add_node(
+            RiscOp::Cast {
+                new_precision: prec,
+            },
+            vec![sum],
+            mat_prec(m, n, prec),
+            None,
+        )
+    };
+    dag.add_root(root);
     dag
 }
 
 #[test]
-fn m4_axis_nonzero_reduction_falls_through_to_stub() {
+fn m4_axis_nonzero_reduction_is_rejected_before_codegen() {
     // The M4 first cut handles full-axis reduce only (axis=0 on rank-1).
-    // axis-nonzero falls through to the stub.
+    // axis-nonzero is rejected before artifact emission.
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
     // Construct an axis=1 sum even though our input is rank-1; this
@@ -663,11 +657,12 @@ fn m4_axis_nonzero_reduction_falls_through_to_stub() {
     );
     dag.add_root(stored);
 
-    let result = codegen_metal(&dag, "axisone");
+    let error = chelis_ir::ownership::lower_dag_ownership(dag)
+        .expect_err("out-of-range reduction axis must not cross the verified boundary");
     assert!(
-        result.mm_source.contains("M1 fallback stub"),
-        "axis-nonzero reduce should fall through to stub: {}",
-        result.mm_source
+        error
+            .to_string()
+            .contains("axis 1 but input has 1 dimensions")
     );
 }
 
@@ -902,7 +897,10 @@ fn ws8a_pad_emits_msl_kernel_and_two_uniform_launch() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -941,7 +939,7 @@ fn ws8a_shrink_emits_msl_kernel_and_single_uniform_launch() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -984,8 +982,8 @@ fn ws8a_pad_2d_uses_movement_dims() {
         RiscOp::zero_pad(
             Prim::F32,
             vec![
-                (RtDim::Lit(1), RtDim::Lit(0)),
-                (RtDim::Lit(0), RtDim::Lit(2)),
+                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(0)),
+                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
             ],
         ),
         vec![x],

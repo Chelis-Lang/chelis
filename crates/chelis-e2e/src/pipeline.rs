@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, NodeId};
 
 pub struct PipelineResult {
     pub dag: Dag,
     pub deep_text: String,
-    pub root_nodes: HashMap<String, NodeId>,
+    pub root_nodes: UnordMap<String, NodeId>,
 }
 
 /// Parse Surf source through the canonical compiler-API pipeline.

@@ -109,26 +109,36 @@ inspecting element zero.
 | Role | Name atom? | List at this slot? |
 |------|-----------|-------------------|
 | RuntimeExpr | **StampError** | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (checker rung, scored) |
-| Type | Permitted | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (type resolver diagnoses) |
+| Type | Permitted | Vocabulary head → Node. Undecodable head → **StampError** (`UndecodableTypeHead`; see the 2026-08-24 amendment) |
 | EffectHandler | Permitted | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (form-expecting) |
-| Syntax | Permitted | → **BareList** without head decode |
-| Binder | Permitted | → **BareList** without head decode |
-| Selector | Permitted | → **BareList** without head decode |
+| Syntax | Permitted | Known tag head + metadata map → Node ([03-ROLE-3]). Any other list → **BareList** |
+| Binder | Permitted | Known tag head + metadata map → Node ([03-ROLE-3]). Any other list → **BareList** |
+| Selector | Permitted | Known tag head + metadata map → Node ([03-ROLE-3]). Any other list → **BareList** |
 | Bypass | Permitted | **Per-tag child expectation** (see below) |
 
 ### Strict/Lenient Reasoning Per Row
 
-- **RuntimeExpr, Type, EffectHandler** — lenient (→ UnknownForm). A
-  typo'd head does not produce a vacuous pass; the checker/type-resolver
-  scores it and the rest of the program is assessed. Leniency preserves
-  the fitness gradient.
+- **RuntimeExpr, EffectHandler** — lenient (→ UnknownForm). A typo'd
+  head does not produce a vacuous pass; the checker scores it and the
+  rest of the program is assessed. Leniency preserves the fitness
+  gradient.
+- **Type** — strict as shipped (→ StampError `UndecodableTypeHead`).
+  This diverges from the original lenient row; the 2026-08-24 amendment
+  records why the shipped rule stands and the table was corrected
+  rather than the code.
 - **Bypass with declared expectation** — strict (→ StampError). A wrong
   child in these slots gets **skipped** rather than scored — the walker
   doesn't enter it and the invariant is satisfied vacuously. That is
   #858, and hard rejection is the only disposition that prevents it.
-- **Syntax/Binder/Selector** — structural. Content is names or
-  structural data (params lists, import name lists). No head decode
-  attempted.
+- **Syntax/Binder/Selector** — structural, with vocabulary decode. A
+  list whose head is a known tag word AND whose element 1 is a metadata
+  map is a vocabulary node wherever it sits and decodes to Node;
+  [03-ROLE-3]'s conjunction is the disambiguator, at any depth. Every
+  other list stays BareList, because each half of the conjunction alone
+  is legitimate structural data: a tag-word head without a map is an
+  import name list (`(copy fill)`), and a map behind an ordinary name
+  head is an annotated parameter (`(x {type: ...})`). Neither half may
+  reinterpret the list on its own.
 
 ### Per-Tag Bypass Child Expectation
 
@@ -304,6 +314,19 @@ parse rung (to be filled during implementation):
 | `dp_bare_keyword_toplevel_def` | check | parse | same |
 | `dp_bare_keyword_unused_let_binding` | check | parse | same |
 
+## Symbol Ladder Argument
+
+The three bare-symbol corpus members moved rungs the same way when the
+role-directed stamp landed ([03-ROLE-2]); recorded per case beside the
+keyword table, and locked by the corpus test
+`bare_atom_expression_position_rejects_at_parse`:
+
+| Corpus case | Old rung | New rung | Reason |
+|-------------|----------|----------|--------|
+| `dp_bare_symbol_body_no_defsig` | check | parse (ingress) | a name is not an expression; the stamp rejection identifies the name and the `(var {} ...)` remediation |
+| `dp_bare_symbol_body_unit_defsig` | check | parse (ingress) | same |
+| `dp_bare_symbol_toplevel_def` | check | parse (ingress) | same |
+
 ## Unknown-Head Ladder Argument
 
 Per-case enumeration of programs with unrecognized heads — fitness
@@ -415,8 +438,14 @@ This file. All design forks resolved before implementation.
 
 ### Task 9: Wire the Oracle
 
-- Python `scripts/unrepresentable_domain_oracle.py` (behavioral)
-- Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests)
+- Python `scripts/unrepresentable_domain_oracle.py` (behavioral) - the
+  authoritative oracle, run by `scripts/gate.py`'s `integration` stage
+  (hosted CI's `workspace-tests-shard` matrix) and its `--local` subset, and locked
+  there by `scripts/test_gate.py`. Acceptance is exit 0 with a final
+  `ORACLE: PASS` line.
+- Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests).
+  These patch the command runners, so they are evidence about the script's
+  decision logic and never a substitute for running the oracle.
 - trybuild (Task 3): API surface
 - deny-lint (Tasks 6-8): exhaustiveness
 
@@ -447,4 +476,96 @@ This file. All design forks resolved before implementation.
 
 ## Amendments
 
-(To be recorded here if implementation diverges from the above.)
+**2026-08-24 (chelis#1088), Task 7's compiler-api half and one stale
+evidence line.** Every public Deep text boundary in `chelis-compiler-api`
+now consumes the role-stamped carrier, each field stamped in the role it
+occupies: `parse_and_stamp_file` for a `.dp` program (the generic
+`parse`/`check`/`decompile` door, the `prepare_source` pipeline door, and
+every authoring `module` field), `parse_and_stamp` for a declaration
+bundle, `parse_and_stamp_runtime_exprs` for a replacement body, and
+`parse_and_stamp_tagged` for a field whose contract names one tag. The
+named non-compiler-API readers moved with it
+(`chelis-validate::validate_deep`, the `opaque-domain-construction` lint
+rule, `chelis-e2e`'s snippet checker, `chelis-lsp`'s Deep document
+analysis, and the `chelis-cli` style-gate fallback), so
+`parse_str`/`parse_str_strict` are test-only spellings in the workspace.
+
+The top-level rule this enforces is decided in the numbered spec, not
+here: `spec/03-deep-syntax.md` §7.1 [03-PROG-1] enumerates the admissible
+top-level forms, and [03-PROG-2] states the rejection contract. Chapter
+03's PEG previously read `Program <- Spacing Node+ EOF`, which imposed no
+top-level role restriction at all.
+
+**The oracle is `scripts/unrepresentable_domain_oracle.py`**, wired into
+`scripts/gate.py`'s `integration` stage and its `--local` pre-push subset.
+Hosted CI runs that stage in the `workspace-tests-shard` matrix
+(`Workspace Tests (Linux)`), on every pull request that is not docs-only.
+That stage rather than `lint-and-unit` because two obligations run `cargo
+nextest`, which the `lint-rust` worker deliberately does not install.
+Acceptance is exit 0 with a final `ORACLE: PASS` line. Its obligations cover the compiler-API ingress:
+obligation 3 drives [03-PROG-1] and [03-PROG-2] through the built `chelis`
+binary over `.dp` fixtures, and obligation 5 executes the compiled
+`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` parity suite.
+That Rust suite is evidence the oracle executes, not a second oracle;
+`scripts/test_gate.py` locks the wiring so a future CI edit cannot drop
+it silently.
+
+The Evidence Record line "Macros Surf-only: `.dp` path uses
+`parse_str_strict` which rejects unknown tags" states a true conclusion on
+a reason that no longer holds, and did not hold for the pipeline door even
+when it was written: the compile path's `.dp` ingress ran no
+tag-vocabulary sweep. The conclusion stands for a different reason. `.dp`
+ingress produces `PreparedProgram` without invoking
+`chelis_macros::expand_program`, which only `prepare_surf_decls` calls, so
+no `.dp` path runs expansion regardless of what its parser accepts. An
+unknown head below a declaration is deliberately preserved as
+`Expr::UnknownForm` on the generic parse door so the wire AST keeps its
+identity and the checker owns the rejection; the authoring doors keep the
+vocabulary sweep, so an unknown head still cannot reach a rewriter.
+
+**2026-08-24 (chelis#885 / chelis#1023 §B row 1): the Type row diverged,
+and the shipped strict rule stands.** The Per-Role table originally made an
+undecodable head at a Type slot lenient (`UnknownForm`, "type resolver
+diagnoses"). The implementation shipped strict: `stamp_type` rejects an
+undecodable non-empty list head with `StampErrorKind::UndecodableTypeHead`
+at ingress. The strict rule is the right one, and the table above now
+records it: type syntax is a closed vocabulary with no user-extensible
+heads, so unlike an expression head there is no later consumer whose
+scoring the leniency would preserve — the type resolver's only possible
+verdict on an unknown head is the same rejection, later and with less
+location context. The table row and the reasoning bullet were corrected
+rather than the code.
+
+The same change set recorded four related decisions:
+
+- **The Keyword design choice is RESOLVED.** #885's Form left "Keyword
+  either becomes metadata-position-only or joins Name" open. `Atom::Keyword`
+  is deleted; a colon-prefixed keyword is metadata-key syntax only,
+  rejected by the parser outside metadata-key position (spec/03 §8.1). It
+  did not join `Name`.
+- **`Atom::Tag` deletion (Task 5 names it) is DEFERRED to chelis#1029**
+  (blocked on chelis#1082): `Node::to_list` constructs it, 39 production
+  `.to_list(` call sites and three normalize bridges consume it, so the
+  deletion belongs to the same atomic change that removes `Expr::List`
+  (#1023 §B row 5), not to the #885 contract slice.
+- **`spec/03-deep-syntax.md` §7.2 now owns the role contract** as
+  numbered-spec text: [03-ROLE-1] (total (tag, index) → role
+  classification; a bare identifier at a structural/type/effect-handler
+  position is a name even when it spells a tag), [03-ROLE-2] (a bare
+  identifier at an expression position rejects at ingress, identified per
+  [03-PROG-2] with the `(var {} ...)` remediation), and [03-ROLE-3] (the
+  metadata-map-at-element-1 disambiguator for lists at structural
+  positions — neither the head alone nor the map alone reinterprets a
+  structural list). The Per-Role Stamp Table above states the same rule;
+  its Syntax/Binder/Selector rows shipped still reading "BareList without
+  head decode" and were corrected to the decode conjunction in the PR
+  #1319 review round.
+- **The continuous oracle gained obligation 7** (`NAME_IN_EXPR_FIXTURES`):
+  a bare identifier at def-body / fn-body / app-argument / bind-RHS
+  positions rejects with the [03-ROLE-2] identification and remediation
+  spelling, and the structural-name score-one controls extend to
+  record-head / kv-key / access-field / export / deftype positions as the
+  over-application guard. This closes #885's demand that its oracle not
+  repeat the manual scratch-variant shape.
+
+(Further divergences to be recorded here.)

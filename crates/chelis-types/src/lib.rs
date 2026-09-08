@@ -1,4 +1,11 @@
 //! Type checker for the Chelis language.
+//!
+//! Closed effect identity is owned by [`chelis_vocab::EffectKind`]; this crate
+//! does not provide a compatibility re-export.
+//!
+//! ```compile_fail
+//! use chelis_types::EffectKind;
+//! ```
 
 pub mod adt;
 pub mod agreement;
@@ -50,7 +57,6 @@ pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
     cancellation_requested, current_cancel_token, install_cancel_token, is_cancellation,
 };
-pub use chelis_vocab::EffectKind;
 pub use context::{LibraryProofId, TypeEnv};
 pub use dtype_semantics::{
     ArgReduceOp, CheckedCastKind, CheckedCastPlan, CheckedCastPlanError, CompareOp, FloatBinOp,
@@ -60,8 +66,8 @@ pub use dtype_semantics::{
     NumericTrap, RawScalar, RawTensor, ReduceWindowGradOp, ScalarValue, StorageView,
     TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, bf16_from_f64_rne, cast_raw,
     cast_scalar, cast_trunc_raw, cast_trunc_scalar, cast_trunc_tensor, compare_scalar_tensor,
-    compare_scalars, compare_tensor_scalar, compare_tensors, f16_from_f64_rne, finalize_scalar,
-    finalize_tensor, float_binop, float_scalar_tensor_binop, float_tensor_binop,
+    compare_scalars, compare_tensor_scalar, compare_tensors, count_tensor_groups, f16_from_f64_rne,
+    finalize_scalar, finalize_tensor, float_binop, float_scalar_tensor_binop, float_tensor_binop,
     float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
     int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
     reduce_window_grad_tensor_groups, scalar_from_f64, scalar_from_i64, tensor_from_scalars,
@@ -75,9 +81,9 @@ pub use fitness::{
 pub use infer::{
     CheckedProgram, InferResult, InferStats, build_compiled_library_context,
     build_compiled_library_context_with_base, build_type_env_from_library, check_ir_program,
-    check_ir_with_context, check_ir_with_signature_context, check_typed_program, infer_ir_program,
-    infer_program, reset_grow_segment_bytes_for_test, run_on_grown_stack,
-    set_grow_segment_bytes_for_test,
+    check_ir_with_context, check_ir_with_signature_context, check_typed_program,
+    fold_static_int_expr, infer_ir_program, infer_program, reset_grow_segment_bytes_for_test,
+    run_on_grown_stack, set_grow_segment_bytes_for_test,
 };
 pub use linearity::{LinearityInfo, check_linearity, check_linearity_with_context};
 pub use observation::{ElementRef, format_element};

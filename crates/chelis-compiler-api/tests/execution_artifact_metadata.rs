@@ -447,9 +447,9 @@ fn scalar_global_multi_def_is_a_loud_error_on_the_callable_surface() {
 /// LEGACY surface pin: the same program still compiles whole-program via
 /// `compile()` (tide's `/compile`, cove, `chelis.compile()`), where the
 /// whole-program emission IS the product contract, and `glb`'s computation
-/// survives as a DAG root instead of vanishing. The C body does not carry
-/// binding names, so pin the computation by its value: a fill with the f32
-/// bit pattern of 2.0 (0x40000000).
+/// survives instead of vanishing. [05-OBS-4] keeps a scalar root scalar, so
+/// pin the exact f32 construction rather than the old rank-zero tensor fill:
+/// the bit pattern of 2.0 is 0x40000000.
 #[test]
 fn scalar_global_multi_def_still_emits_whole_program_via_compile() {
     let result = compile(CompileRequest {
@@ -466,8 +466,8 @@ fn scalar_global_multi_def_still_emits_whole_program_via_compile() {
         .expect("emitted C present")
         .contents;
     assert!(
-        c.contains("chelis_fill_f32_bits") && c.contains("0x40000000"),
-        "`glb`'s computation (2.0f fill) must not vanish from the compiled \
+        c.contains("chelis_f32_from_bits") && c.contains("0x40000000"),
+        "`glb`'s exact scalar computation (2.0f) must not vanish from the compiled \
          output, got:\n{c}"
     );
 }

@@ -272,7 +272,7 @@ fn every_self_recursive_deep_walker_carries_stack_guard() {
     // The allowlist must not rot: every exempt name must STILL be a flagged
     // walker. If a guard was added (or the function deleted/renamed), the stale
     // entry must be removed so the exemption set stays minimal and honest.
-    let flagged: std::collections::HashSet<&str> = walkers
+    let flagged: chelis_unord::UnordSet<&str> = walkers
         .iter()
         .filter(|w| w.must_be_guarded() && !w.has_stack_guard)
         .map(|w| w.name.as_str())

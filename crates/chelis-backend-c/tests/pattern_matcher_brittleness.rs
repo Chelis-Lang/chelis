@@ -19,10 +19,19 @@
 //!    cleanup first. The user-facing contract is that identity `Cast(f32)`
 //!    no longer hides a matmul from BLAS specialization.
 
-use chelis_backend_c::blas::detect_matmul_pattern;
+use chelis_backend_c::blas::detect_matmul_pattern as detect_verified_matmul_pattern;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_ir::specialize::specialize_for_blas;
 use chelis_types::types::Prim;
+mod support;
+
+fn detect_matmul_pattern(
+    dag: &Dag,
+    sum: chelis_ir::dag::NodeId,
+) -> Option<chelis_backend_c::blas::MatmulInfo> {
+    let verified = support::verified_dag(dag, chelis_backend_c::CodegenOptions::default());
+    detect_verified_matmul_pattern(verified.emission(), sum)
+}
 
 fn mat(r: usize, c: usize) -> TensorType {
     TensorType {
@@ -69,7 +78,7 @@ fn canonical_matmul_pattern_is_detected() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(2, 3, 4),
@@ -78,7 +87,7 @@ fn canonical_matmul_pattern_is_detected() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(2, 3, 4),
@@ -125,7 +134,7 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(2, 3, 4),
@@ -134,7 +143,7 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         t3(2, 3, 4),
@@ -225,7 +234,7 @@ fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
     let expanded_one_hot = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![one_hot],
         t3(4, 3, 2),
@@ -234,7 +243,7 @@ fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
     let expanded_values = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![values],
         t3(4, 3, 2),

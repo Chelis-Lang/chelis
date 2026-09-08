@@ -167,7 +167,10 @@ def _adt_to_canonical(node: dict) -> str | None:
         return None
     rendered = []
     for a in args:
-        r = _node_to_canonical(a)
+        if isinstance(a, dict) and a.get("kind") == "dimension":
+            r = _dim_to_canonical(a.get("dim"))
+        else:
+            r = _node_to_canonical(a)
         if r is None:
             return None
         rendered.append(r)

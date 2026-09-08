@@ -217,7 +217,7 @@ fn issue_631_guarded_forward_avgpool_matches_c_at_n6() {
 /// whose `fail` branch fires while the OTHER branch computes cleanly
 /// must abort in the C lane too. The DAG lane lowers `fail` to a
 /// mask-selected zero placeholder (grad-lane semantics); before the
-/// `expr_reaches_fail` host-lane gate, this program's compiled binary
+/// `expr_reaches_forward_fail` host-lane gate, this program's compiled binary
 /// exited 0 printing ZEROS where eval aborts with the user's message —
 /// silent-wrong, not just a message mismatch. Fail-reaching bodies must
 /// stay in the host lane, whose `if`/`fail` are real control flow.

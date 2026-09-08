@@ -276,7 +276,7 @@ def my_loader(p: string) -> string ! {} = lib_load(p)
 #[test]
 fn new_code_inherits_test_via_library_wrapper() {
     let library = r#"
-def lib_assert_eq(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, "lib_assert_eq")
+def lib_assert_eq(a: int64, b: int64) -> unit = test_assert_eq(a, b, "lib_assert_eq")
 "#;
     let snippet = r#"
 def my_check(x: int64) -> unit = lib_assert_eq(x, cast(1, int64))
@@ -489,7 +489,7 @@ def caller(y: int64) -> int64 = emit(y)
 fn snippet_composing_two_library_helpers_picks_up_both_effects() {
     let library = r#"
 def lib_emit(x: int64) -> int64 = debug(x)
-def lib_assert(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, "lib_assert")
+def lib_assert(a: int64, b: int64) -> unit = test_assert_eq(a, b, "lib_assert")
 "#;
     let snippet = r#"
 def my_op(x: int64) -> unit ! {IO, Test} = {

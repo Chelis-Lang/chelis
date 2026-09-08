@@ -57,7 +57,7 @@
 
 use chelis_deep::Expr;
 
-use crate::schema::Span;
+use crate::schema::DiagnosticSpan;
 
 /// A whole-module edit rejected by the compiler-owned validation pipeline.
 ///
@@ -70,7 +70,7 @@ pub enum EditValidationError {
     /// rejected the rewritten module.
     Type {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0.
         deep_path: Option<DeepErrorPath>,
@@ -78,7 +78,7 @@ pub enum EditValidationError {
     /// The effect pass (`check_program`) rejected the rewritten module.
     Effect {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0.
         deep_path: Option<DeepErrorPath>,
@@ -86,7 +86,7 @@ pub enum EditValidationError {
     /// The linearity pass (`check_linearity`) rejected the rewritten module.
     Linearity {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0.
         deep_path: Option<DeepErrorPath>,
@@ -128,7 +128,7 @@ pub enum ReplacementError {
     /// binding rather than a function).
     NameResolution {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
     },
     /// The fitness or type pass (`check_ir_fitness` or `check_typed_program`)
     /// rejected the rewritten module. This covers cross-def structural
@@ -137,7 +137,7 @@ pub enum ReplacementError {
     /// reports.
     Type {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0; populating it later adds no new field.
         deep_path: Option<DeepErrorPath>,
@@ -148,7 +148,7 @@ pub enum ReplacementError {
     /// held caller declared not to perform it.
     Effect {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0; populating it later adds no new field.
         deep_path: Option<DeepErrorPath>,
@@ -156,7 +156,7 @@ pub enum ReplacementError {
     /// The linearity pass (`check_linearity`) rejected the rewritten module.
     Linearity {
         message: String,
-        location: Option<Span>,
+        location: Option<DiagnosticSpan>,
         /// Reserved for the L2 Deep-address of the offending node. Always
         /// `None` in L0; populating it later adds no new field.
         deep_path: Option<DeepErrorPath>,
@@ -455,7 +455,7 @@ mod tests {
         // `chelis check` re-infers `f`'s signature from the rewritten body, and
         // a well-typed identity body checks clean. No special rejection is
         // needed; the tool's verdict equals full check by construction.
-        let module = chelis_deep::parser::parse_str(
+        let module = chelis_deep::parse_and_stamp_file(
             "(module {} m \
                (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
         )

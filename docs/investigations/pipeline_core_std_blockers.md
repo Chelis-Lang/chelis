@@ -2,18 +2,18 @@
 
 `chelis-pipeline-core` requires `std`.
 
-This inventory records direct core use and transitive blockers in its four direct dependencies. It does not claim current `#![no_std]` support.
+This inventory records direct core use and transitive blockers in its five direct dependencies. It does not claim current `#![no_std]` support.
 
 ## Direct Core Use
 
 | Blocker class | Confirmed use |
 |---|---|
-| Collections and allocation | Core artifacts use `Vec`, `String`, `Box`, `BTreeMap`, and `HashMap`. |
+| Collections and allocation | Core artifacts use `Vec`, `String`, `Box`, `BTreeMap`, and the order-free `chelis-unord` hash collections. |
 | Global state | The core declares no global mutable state. |
 | Stack support | The core calls lower crates that use stack growth. |
 | Panic behavior | Core errors implement `std::error::Error`. Core tests use `panic!` for failed fixtures. |
 | Operating-system use | Core production code does not use files, processes, sockets, or environment variables. |
-| Dependency features | The crate uses the default feature sets of all four lower crates. |
+| Dependency features | The crate uses the default feature sets of all five lower crates. |
 
 ## Transitive Lower-Crate Blockers
 
@@ -40,6 +40,10 @@ The checker also retains panic paths for internal invariant failures. Its defaul
 Lowering uses `stacker::grow` and `stacker::maybe_grow`. The IR crate also retains panic paths for internal compiler invariants.
 
 The default dependencies include `serde`, `thiserror`, and `stacker`. `chelis-ir` also inherits blockers from `chelis-types` and `chelis-effects`.
+
+### `chelis-unord`
+
+`chelis-unord` wraps standard-library hash collections behind an order-free API and uses `serde` for canonical cache serialization. Its storage therefore requires `std` even though observable iteration is unavailable.
 
 ## Scope
 

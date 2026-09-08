@@ -106,7 +106,10 @@ pub enum PreparationError {
         source: String,
         error: chelis_surf::parser::ParseError,
     },
-    DeepParse(chelis_deep::parser::ParseError),
+    /// A Deep text ingress rejection: a lex/parse failure, or a role-stamp
+    /// failure that means the text never denoted a well-formed AST
+    /// (chelis#1088).
+    DeepParse(chelis_deep::StampOrParseError),
     Expansion(chelis_macros::ExpansionError),
 }
 
@@ -320,8 +323,12 @@ pub fn prepare_source(
             prepare_surf_decls(&decls, entry)
         }
         SourceKind::Deep => {
+            // chelis#1088: the checked/compiled/evaluated Deep path shares the
+            // stamped `.dp` ingress with the CLI. A top-level form that is
+            // neither a `(module ...)` wrapper nor a declaration is rejected
+            // here rather than reaching the checker as an untyped carrier.
             let exprs =
-                chelis_deep::parser::parse_str(source).map_err(PreparationError::DeepParse)?;
+                chelis_deep::parse_and_stamp_file(source).map_err(PreparationError::DeepParse)?;
             Ok(prepare_deep(exprs, entry))
         }
     }

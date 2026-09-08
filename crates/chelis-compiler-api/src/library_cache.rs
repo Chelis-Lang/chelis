@@ -51,8 +51,12 @@
 //!
 //! ## Unbounded growth (chelis#1183)
 //!
-//! Unlike Layer 1 — whose cardinality is bounded by toolchain identity
-//! (`chelis-std-<ver>-<hash>.tc`, one per stdlib build) — Layer 2's key is a
+//! Layer 1 (`chelis-std-<ver>-<hash>.tc`) is bounded by toolchain identity,
+//! but since chelis#1156 that identity is the compiler BUILD, not the stdlib
+//! build: its key folds `build_fingerprint()`, so each locally built compiler
+//! mints its own entry and the ones belonging to superseded builds are dead
+//! weight (see [`evict_typecheck_cache`], which reclaims them first).
+//! Layer 2's key is a
 //! hash of USER source, and for a single-package project the "dependency
 //! prefix" is the developer's own non-entry modules. So every save of a
 //! sibling module mints a new multi-MiB `chelis-lib-*.tc`, and nothing reclaims
@@ -82,12 +86,31 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
 /// Mixed into the content-addressed key.
 ///
+/// V3 accounts for the serialized type-checker generalization-level state in
+/// `TypeEnv`; a V2 dependency-library payload is a clean miss.
+/// V4 adds quantified type-variable restrictions and their live substitution
+/// ledger.
+/// V7 combines two independent V6 formats: chelis#1341 canonicalizes every
+/// unordered collection that can reach payload and key bytes, while
+/// chelis#1247 adds checker-owned nominal parameter kinds and kinded nominal
+/// arguments. Either V6 payload clean-misses.
+///
+/// V5 records canonical source positions on deferred positional-expand and
+/// reshape obligations inside `TypeEnv`.
 /// V2: the sub-context now stores a proof-bound `CheckedLibrary`, and decode
 /// reruns effect/linearity checks to rebind the proof (mirroring the stdlib
 /// and compiled-context caches). The wire `CheckedProgram` also grew the
 /// library-proof-identity fields. A V1 `chelis-lib-*.tc` written by a
 /// pre-extraction binary at the same compiler version is a clean miss.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 2;
+///
+/// V9 removes both deferred-shape ledgers from the serialized `Subst`: under
+/// `spec/04-type-system.md` section 4.7.2 nothing is deferred. Bincode is
+/// positional, so a V8 entry carries two fields where the following ones are
+/// now expected.
+///
+/// V8: the serialized positional-expand ledger grew the
+/// `DeferredShapeObligation` enum for comparison shape mirrors.
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 9;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -205,24 +228,68 @@ impl<'de> Deserialize<'de> for LibraryContext {
 /// change flips this key without re-deriving those inputs here. Folding
 /// the dependency decl bytes flips it on any dependency edit. The entry
 /// file is intentionally absent, so an entry-only edit keeps the key
-/// stable and warm-hits. `COMPILER_VERSION` is also folded directly (in
-/// addition to being inside `stdlib_key`) so the key still pins the
-/// compiler build if the stdlib key derivation ever changes.
+/// stable and warm-hits. The build fingerprint is also folded directly
+/// (in addition to reaching this key inside `stdlib_key`) so the key still
+/// pins the compiler build if the stdlib key derivation ever changes.
+///
+/// chelis#1156: this input used to be `COMPILER_VERSION`, whose whole
+/// point as a defence-in-depth layer was void, since a release string does
+/// not change between two builds of one unreleased version. It is the
+/// build fingerprint now, so the fallback actually holds.
 pub fn library_cache_key(
     dependency_decls: &[chelis_surf::ast::Decl],
     stdlib_key: [u8; 32],
 ) -> [u8; 32] {
+    library_cache_key_at_version(dependency_decls, stdlib_key, LIBRARY_CACHE_FORMAT_VERSION)
+}
+
+/// Exact ordered byte stream hashed by [`library_cache_key`].
+///
+/// This is exposed for the Phase B cache-root oracle. Callers must treat it
+/// as diagnostic evidence, not as a separately versioned wire format.
+#[doc(hidden)]
+pub fn library_cache_key_input_bytes(
+    dependency_decls: &[chelis_surf::ast::Decl],
+    stdlib_key: [u8; 32],
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    visit_library_cache_key_inputs(
+        dependency_decls,
+        stdlib_key,
+        LIBRARY_CACHE_FORMAT_VERSION,
+        |part| bytes.extend_from_slice(part),
+    );
+    bytes
+}
+
+fn library_cache_key_at_version(
+    dependency_decls: &[chelis_surf::ast::Decl],
+    stdlib_key: [u8; 32],
+    format_version: u32,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"chelis_library_typecheck_v");
-    hasher.update(LIBRARY_CACHE_FORMAT_VERSION.to_le_bytes());
-    let compiler_version = crate::COMPILER_VERSION;
-    hasher.update(b"compiler_version");
-    hasher.update((compiler_version.len() as u64).to_le_bytes());
-    hasher.update(compiler_version.as_bytes());
+    visit_library_cache_key_inputs(dependency_decls, stdlib_key, format_version, |part| {
+        hasher.update(part)
+    });
+    hasher.finalize().into()
+}
+
+fn visit_library_cache_key_inputs(
+    dependency_decls: &[chelis_surf::ast::Decl],
+    stdlib_key: [u8; 32],
+    format_version: u32,
+    mut append: impl FnMut(&[u8]),
+) {
+    append(b"chelis_library_typecheck_v");
+    append(&format_version.to_le_bytes());
+    let compiler_version = crate::build_fingerprint();
+    append(b"compiler_version");
+    append(&(compiler_version.len() as u64).to_le_bytes());
+    append(compiler_version.as_bytes());
     // The Layer-1 stdlib sub-context identity. Fixed width, appended
     // directly.
-    hasher.update(b"stdlib_key");
-    hasher.update(stdlib_key);
+    append(b"stdlib_key");
+    append(&stdlib_key);
     // The dependency decls actually being checked. `bincode` is a
     // deterministic encoding, so this is a stable content hash. A `serialize`
     // failure is unreachable for a well-formed `Decl` slice (bincode of `Decl`
@@ -234,15 +301,14 @@ pub fn library_cache_key(
     // chelis#1176 review (F2).
     match bincode::serialize(dependency_decls) {
         Ok(decl_bytes) => {
-            hasher.update(b"decls");
-            hasher.update((decl_bytes.len() as u64).to_le_bytes());
-            hasher.update(&decl_bytes);
+            append(b"decls");
+            append(&(decl_bytes.len() as u64).to_le_bytes());
+            append(&decl_bytes);
         }
         Err(_) => {
-            hasher.update(b"decls-unserializable");
+            append(b"decls-unserializable");
         }
     }
-    hasher.finalize().into()
 }
 
 /// The on-disk path for a dependency sub-context cache entry.
@@ -313,7 +379,13 @@ pub fn load_or_build_library_context(
                 // chelis#1183: keep the cache dir bounded. Only on the miss
                 // path, after a successful write, never evicting what we just
                 // wrote. Best-effort.
-                evict_typecheck_cache(&cache_dir, &cache_path);
+                let live_stdlib = crate::stdlib_cache::stdlib_cache_path(&cache_dir, stdlib_key);
+                evict_typecheck_cache(
+                    &cache_dir,
+                    &cache_path,
+                    Some(&live_stdlib),
+                    typecheck_cache_max_bytes(),
+                );
             }
             Err(e) => {
                 eprintln!(
@@ -343,21 +415,42 @@ fn typecheck_cache_max_bytes() -> u64 {
 /// user source and churns ~MiB per sibling/entry edit with nothing reclaiming
 /// it. Called only on the miss path, after a successful write.
 ///
-/// Policy: evict oldest-first by mtime, but `chelis-lib-*` BEFORE `chelis-std-*`
-/// — the stdlib entry is written once and hit forever, so it would otherwise be
-/// the oldest file and the first casualty, forcing a costly re-inference. The
-/// just-written entry is never evicted. Also sweeps `.tmp.*` orphans older than
-/// an hour (age-gated so it never races an in-flight `save`'s rename). Every
-/// filesystem error is ignored: eviction must never fail a build, and a reader
-/// that loses the unlink race falls through to a clean recompute.
-fn evict_typecheck_cache(cache_dir: &Path, just_written: &Path) {
-    let max_bytes = typecheck_cache_max_bytes();
+/// Policy: oldest-first by mtime within three tiers, evicted in this order.
+///
+/// 1. **Superseded `chelis-std-*`** - Layer-1 entries that are not the running
+///    build's. Before chelis#1156 there was only ever one, because the key
+///    folded `COMPILER_VERSION`; now it folds `build_fingerprint()`, so every
+///    compiler build a developer or CI matrix produces mints its own multi-MiB
+///    entry and the previous one is never read again. Reclaiming these first is
+///    the only tier where eviction costs nothing at all.
+/// 2. **`chelis-lib-*`** - keyed on user source, churns per sibling edit.
+/// 3. **The running build's `chelis-std-*`** - written once and hit forever, so
+///    evicting it forces a costly re-inference. Last resort.
+///
+/// Without tier 1 the old two-tier policy would protect every superseded stdlib
+/// entry ahead of live Layer-2 entries, which inverts the intent on exactly the
+/// machines chelis#1156 serves: those that build the compiler repeatedly.
+///
+/// The just-written entry is never evicted. Also sweeps `.tmp.*` orphans older
+/// than an hour (age-gated so it never races an in-flight `save`'s rename).
+/// Every filesystem error is ignored: eviction must never fail a build, and a
+/// reader that loses the unlink race falls through to a clean recompute.
+///
+/// `max_bytes` is passed in rather than read from the environment here so the
+/// tiering is testable without mutating process-global state, which
+/// `#![forbid(unsafe_code)]` rules out in this crate anyway.
+fn evict_typecheck_cache(
+    cache_dir: &Path,
+    just_written: &Path,
+    live_stdlib: Option<&Path>,
+    max_bytes: u64,
+) {
     let Ok(read_dir) = std::fs::read_dir(cache_dir) else {
         return;
     };
     let now = std::time::SystemTime::now();
-    // (path, size, mtime, is_lib)
-    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime, bool)> = Vec::new();
+    // (path, size, mtime, tier)
+    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime, u8)> = Vec::new();
     let mut total: u64 = 0;
     for entry in read_dir.flatten() {
         let Ok(meta) = entry.metadata() else {
@@ -385,15 +478,23 @@ fn evict_typecheck_cache(cache_dir: &Path, just_written: &Path) {
             continue;
         }
         total += meta.len();
-        let is_lib = name.starts_with("chelis-lib-");
-        entries.push((entry.path(), meta.len(), mtime, is_lib));
+        let path = entry.path();
+        // 0 = superseded stdlib entry, 1 = library entry, 2 = the running
+        // build's stdlib entry. See the doc comment for why this order.
+        let tier: u8 = if name.starts_with("chelis-lib-") {
+            1
+        } else if live_stdlib.is_some_and(|live| live == path) {
+            2
+        } else {
+            0
+        };
+        entries.push((path, meta.len(), mtime, tier));
     }
     if total <= max_bytes {
         return;
     }
-    // `chelis-lib-*` first (b.is_lib vs a.is_lib puts true first), then
-    // oldest-first by mtime within each group.
-    entries.sort_by(|a, b| b.3.cmp(&a.3).then(a.2.cmp(&b.2)));
+    // Lowest tier first, then oldest-first by mtime within a tier.
+    entries.sort_by(|a, b| a.3.cmp(&b.3).then(a.2.cmp(&b.2)));
     for (path, size, _, _) in entries {
         if total <= max_bytes {
             break;
@@ -506,8 +607,111 @@ mod tests {
     use crate::stdlib_cache::build_stdlib_context;
 
     #[test]
-    fn cache_format_version_tracks_deferred_reshape_relations() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 2);
+    fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 9);
+    }
+
+    #[test]
+    fn preceding_payload_version_is_a_clean_cache_miss() {
+        let stdlib_context = build_stdlib_context(&[]).expect("empty stdlib context");
+        let decls = sample_decls("preceding_version");
+        let stdlib_key = key(5);
+        let current_key = library_cache_key(&decls, stdlib_key);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 6);
+        assert_ne!(current_key, preceding_key);
+
+        let context = build_library_context(&stdlib_context, &decls)
+            .expect("sample context must build")
+            .expect("sample dependency must compose");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let preceding_path = library_cache_path(dir.path(), preceding_key);
+        cache_envelope::save(&preceding_path, preceding_key, &context)
+            .expect("preceding-version fixture must save");
+
+        let current_path = library_cache_path(dir.path(), current_key);
+        let loaded: Option<LibraryContext> = cache_envelope::load(&current_path, current_key)
+            .expect("a preceding-version fixture must be a clean miss");
+        assert!(loaded.is_none());
+        assert!(
+            preceding_path.exists(),
+            "negative-control fixture must exist"
+        );
+        assert_ne!(current_path, preceding_path);
+    }
+
+    /// chelis#1156 (PR #1161 review, F5): eviction must reclaim a
+    /// SUPERSEDED Layer-1 entry before a live Layer-2 entry.
+    ///
+    /// Layer 1 is now one entry per compiler BUILD, not one per stdlib
+    /// build, so a machine that rebuilds the compiler accumulates dead
+    /// multi-MiB `chelis-std-*` files. The pre-#1161 two-tier policy
+    /// protected all of them ahead of every `chelis-lib-*`, which inverts
+    /// the intent on exactly the machines this change serves.
+    #[test]
+    fn eviction_reclaims_superseded_stdlib_entries_before_library_entries() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let write = |name: &str, bytes: usize| -> PathBuf {
+            let p = root.join(name);
+            std::fs::write(&p, vec![b'x'; bytes]).expect("write");
+            p
+        };
+        // The live entry is the NEWEST so that a pure oldest-first policy
+        // would not reach it anyway; the discriminator under test is the
+        // tier, not the mtime.
+        let stale_std = write("chelis-std-0.4.0-aaaaaaaaaaaaaaaa.tc", 4096);
+        let live_lib = write("chelis-lib-bbbbbbbbbbbbbbbb.tc", 4096);
+        let live_std = write("chelis-std-0.4.0-cccccccccccccccc.tc", 4096);
+        let just_written = write("chelis-lib-dddddddddddddddd.tc", 4096);
+
+        // Cap below the total so eviction must free exactly one file.
+        evict_typecheck_cache(root, &just_written, Some(&live_std), 12288);
+
+        assert!(
+            !stale_std.exists(),
+            "the superseded stdlib entry must be reclaimed first"
+        );
+        assert!(
+            live_lib.exists(),
+            "a live library entry outranks a dead stdlib entry"
+        );
+        assert!(
+            live_std.exists(),
+            "the running build's stdlib entry is the last resort"
+        );
+        assert!(
+            just_written.exists(),
+            "the just-written entry is never evicted"
+        );
+    }
+
+    /// The last-resort tier still holds: with no superseded stdlib entry
+    /// to reclaim, library entries go before the running build's Layer-1
+    /// entry, which is the pre-#1161 behaviour and must not regress.
+    #[test]
+    fn eviction_still_protects_the_live_stdlib_entry_over_library_entries() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        let write = |name: &str, bytes: usize| -> PathBuf {
+            let p = root.join(name);
+            std::fs::write(&p, vec![b'x'; bytes]).expect("write");
+            p
+        };
+        let live_std = write("chelis-std-0.4.0-cccccccccccccccc.tc", 4096);
+        let old_lib = write("chelis-lib-bbbbbbbbbbbbbbbb.tc", 4096);
+        let just_written = write("chelis-lib-dddddddddddddddd.tc", 4096);
+
+        evict_typecheck_cache(root, &just_written, Some(&live_std), 8192);
+
+        assert!(
+            !old_lib.exists(),
+            "the library entry is the eviction candidate here"
+        );
+        assert!(
+            live_std.exists(),
+            "the running build's stdlib entry must survive"
+        );
+        assert!(just_written.exists());
     }
 
     /// A minimal well-formed dependency `Decl` slice. The exact shape is
@@ -555,11 +759,17 @@ mod tests {
         );
     }
 
+    /// Regression for the compiler-build-identity gap, mirroring the stdlib
+    /// cache: recompute the key with the compiler-identity component perturbed
+    /// and confirm the real key differs.
+    ///
+    /// chelis#1156 (PR #1161 review, F7): that component used to be
+    /// `COMPILER_VERSION`, which made this key's documented defence-in-depth
+    /// role ("still pins the compiler build if the stdlib key derivation ever
+    /// changes") vacuous, since a release string is shared by every build of
+    /// an unreleased version. It is `build_fingerprint()` now.
     #[test]
-    fn cache_key_depends_on_the_compiler_version() {
-        // Regression for the compiler-build-identity gap, mirroring the
-        // stdlib cache: recompute the key with the compiler-version
-        // component perturbed and confirm the real key differs.
+    fn cache_key_depends_on_the_build_fingerprint() {
         let decls = sample_decls("a");
         let real = library_cache_key(&decls, key(9));
 
@@ -585,13 +795,19 @@ mod tests {
 
         assert_eq!(
             real,
+            recompute_with_compiler_version(crate::build_fingerprint()),
+            "recompute mirror must match the real key for the running build fingerprint"
+        );
+        assert_ne!(
+            real,
             recompute_with_compiler_version(crate::COMPILER_VERSION),
-            "recompute mirror must match the real key for the real compiler version"
+            "the library cache key must fold the BUILD fingerprint, not the bare \
+             release version; two builds of one version must not share this cache"
         );
         assert_ne!(
             real,
             recompute_with_compiler_version("0.0.0-some-other-compiler-build"),
-            "a different compiler version must produce a different library cache key"
+            "a different compiler identity must produce a different library cache key"
         );
     }
 
@@ -608,7 +824,7 @@ mod tests {
     }
 
     /// Order-independent semantic equality of two composed library
-    /// programs. `CheckedProgram` and `TypeEnv` carry `HashMap`/`HashSet`
+    /// programs. `CheckedProgram` and `TypeEnv` carry `UnordMap`/`UnordSet`
     /// state whose bincode order is nondeterministic, so compare the
     /// substantive typed content (annotated exprs + type env as a set)
     /// rather than raw bytes.

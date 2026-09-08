@@ -34,3 +34,6 @@ tempfile = "3"
 # the `install` path is exercised fully offline.
 flate2 = "1"
 tar = "0.4"
+
+[lints]
+workspace = true

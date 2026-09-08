@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "corpus_sha256": "cb8401a05a009c97450cb0eaf00b94e2686725a37304ec44d63ceba8e1b64320",
+  "rows": [
+    {
+      "id": "expand.binder.eval_c",
+      "baseline": "ice",
+      "phase_a": "executes_exactly",
+      "receipt": "cli.bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice"
+    },
+    {
+      "id": "expand.diagnostic.extent_guidance",
+      "baseline": "nonconforming_rejection",
+      "phase_a": "executes_exactly",
+      "receipt": "cli.stale_extent_guidance_is_removed_but_axis_guidance_stays_int32"
+    },
+    {
+      "id": "expand.input_axis.eval",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "ir.input_axis_expand_verifies_and_evaluates_from_shape_metadata"
+    },
+    {
+      "id": "expand.input_axis.hip_codegen",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "hip_codegen.s5_input_axis_expand_reads_witness_metadata"
+    },
+    {
+      "id": "expand.input_axis.hip_execute",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "hip_manual_inventory.g5_input_axis_expand_executes_from_witness_metadata"
+    },
+    {
+      "id": "expand.input_axis.metadata_only",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "ir.input_axis_eval_does_not_read_tensor_elements"
+    },
+    {
+      "id": "expand.input_axis.metal_device",
+      "baseline": "lane_divergent",
+      "phase_a": "lane_divergent",
+      "receipt": "metal_accept.compiler::metal_runtime_dim_reject_tests::metal_seam_accepts_input_axis_expand_extent"
+    },
+    {
+      "id": "expand.input_axis.owner_matrix",
+      "baseline": "rejects_exactly",
+      "phase_a": "rejects_exactly",
+      "receipt": "ir.input_axis_owner_and_slot_validation_fail_closed"
+    },
+    {
+      "id": "expand.literal.hip_execute",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "hip_manual_inventory.g5_expand_add_stride_zero"
+    },
+    {
+      "id": "expand.literal_zero.eval_c",
+      "baseline": "nonconforming_rejection",
+      "phase_a": "executes_exactly",
+      "receipt": "cli.zero_extent_is_check_clean_and_evaluates_to_empty_tensor"
+    },
+    {
+      "id": "expand.literal_zero.eval_ir",
+      "baseline": "nonconforming_rejection",
+      "phase_a": "executes_exactly",
+      "receipt": "ir.zero_literal_expand_is_valid_and_empty"
+    },
+    {
+      "id": "expand.negative.static",
+      "baseline": "rejects_exactly",
+      "phase_a": "rejects_exactly",
+      "receipt": "cli.negative_extent_remains_a_static_type_error"
+    },
+    {
+      "id": "expand.node.eval",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "ir.node_expand_verifies_and_evaluates_from_int64_scalar_input"
+    },
+    {
+      "id": "expand.node.hip_device",
+      "baseline": "lane_divergent",
+      "phase_a": "typed_unsupported(#1298)",
+      "receipt": "hip_reject.compiler::tests::hip_seam_rejects_node_valued_expand_with_issue_1298_receipt"
+    },
+    {
+      "id": "expand.node.metal_device",
+      "baseline": "lane_divergent",
+      "phase_a": "typed_unsupported(#1383)",
+      "receipt": "metal_reject.compiler::metal_runtime_dim_reject_tests::metal_seam_rejects_node_valued_expand_with_issue_1383_receipt"
+    },
+    {
+      "id": "expand.rank_ascription",
+      "baseline": "silent_unguarded",
+      "phase_a": "rejects_exactly",
+      "receipt": "cli.shape_sourced_insert_rejects_wrong_rank_ascription"
+    },
+    {
+      "id": "grad.input_axis.runtime_movement_source.eval_c",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "symbolic_window.issue_368_runtime_symbolic_window_grad_is_half_everywhere"
+    },
+    {
+      "id": "grad_vmap.backward_expand.eval_c",
+      "baseline": "ice",
+      "phase_a": "executes_exactly",
+      "receipt": "rank_poly.issue_383_vmap_two_stage_named_reduce_regression_matrix"
+    },
+    {
+      "id": "ir.movement_input_cardinality",
+      "baseline": "silent_unguarded",
+      "phase_a": "rejects_exactly",
+      "receipt": "ir.movement_ops_reject_unowned_runtime_extent_inputs"
+    },
+    {
+      "id": "reshape.negative.runtime_eval_c",
+      "baseline": "rejects_exactly",
+      "phase_a": "rejects_exactly",
+      "receipt": "runtime_negative.issue_616_runtime_reshape_negative_extent_errs_in_both_lanes"
+    },
+    {
+      "id": "vmap.element_derived_extent",
+      "baseline": "silent_unguarded",
+      "phase_a": "rejects_exactly",
+      "receipt": "cli.vmap_rejects_element_derived_extent_at_public_checker"
+    },
+    {
+      "id": "vmap.input_axis_shift",
+      "baseline": "silent_unguarded",
+      "phase_a": "executes_exactly",
+      "receipt": "ir.input_axis_vmap_shifts_literal_axis"
+    },
+    {
+      "id": "vmap.shared_shape_bound",
+      "baseline": "silent_unguarded",
+      "phase_a": "executes_exactly",
+      "receipt": "ir.vmap_keeps_shape_bound_shared_and_shifts_its_axis"
+    },
+    {
+      "id": "vmap.shared_shape_bound.concrete_c_emit",
+      "baseline": "silent_unguarded",
+      "phase_a": "silent_unguarded",
+      "receipt": "cli.vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice"
+    },
+    {
+      "id": "vmap.shared_shape_bound_ordinary_use",
+      "baseline": "silent_unguarded",
+      "phase_a": "executes_exactly",
+      "receipt": "ir.vmap_shares_shape_extent_across_bound_and_ordinary_uses"
+    },
+    {
+      "id": "wire.capacity_census",
+      "baseline": "executes_exactly",
+      "phase_a": "executes_exactly",
+      "receipt": "wire_capacity.wire_schema_numeric_fields_match_the_reviewed_baseline"
+    },
+    {
+      "id": "wire.input_axis.invalid_owner_axis",
+      "baseline": "rejects_exactly",
+      "phase_a": "rejects_exactly",
+      "receipt": "wire.v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners"
+    },
+    {
+      "id": "wire.input_axis.round_trip",
+      "baseline": "nonconforming_rejection",
+      "phase_a": "executes_exactly",
+      "receipt": "wire.v7_input_axis_round_trips_as_typed_structure"
+    },
+    {
+      "id": "wire.legacy_v6.rejected",
+      "baseline": "rejects_exactly",
+      "phase_a": "rejects_exactly",
+      "receipt": "wire.v6_display_string_expand_payload_is_rejected_before_op_decode"
+    },
+    {
+      "id": "wire.movement_input_cardinality",
+      "baseline": "silent_unguarded",
+      "phase_a": "rejects_exactly",
+      "receipt": "wire.v7_movement_ops_reject_unowned_runtime_extent_inputs"
+    },
+    {
+      "id": "wire.node.invalid_carrier",
+      "baseline": "rejects_exactly",
+      "phase_a": "rejects_exactly",
+      "receipt": "wire.v7_expand_rejects_forbidden_carriers_slots_and_cardinality"
+    },
+    {
+      "id": "wire.node.round_trip",
+      "baseline": "nonconforming_rejection",
+      "phase_a": "executes_exactly",
+      "receipt": "wire.v7_node_extent_round_trips_only_from_rank_zero_int64"
+    }
+  ]
+}

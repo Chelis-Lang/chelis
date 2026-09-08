@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-types.workspace = true
 chelis-vocab.workspace = true
@@ -13,3 +14,6 @@ chelis-vocab.workspace = true
 [dev-dependencies]
 chelis-macros.workspace = true
 chelis-surf.workspace = true
+
+[lints]
+workspace = true

@@ -50,6 +50,8 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
+      # The Devenv shell supplies gcc/g++, cmake, libclang, m4, make, and z3,
+      # so this lane installs no apt packages.
       - name: Set up portable Devenv
         uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
@@ -101,6 +103,21 @@ jobs:
 
       - name: Build smt feature
         run: devenv-retry --profile smt shell --no-tui -- cargo build -p chelis-cli --features smt
+
+      # This runner is the only one that provisions every solver toolchain, so
+      # it is the only place `--all-features` can compile. It closes Clippy's
+      # `disallowed_types` coverage over the `z3`, `carcara`, and `arb`
+      # features, whose per-pull-request cost this repository has declined.
+      # Registered in scripts/check_configuration_closure.py CLIPPY_MATRIX.
+      - name: Clippy over every declared feature
+        run: devenv-retry --profile smt shell --no-tui -- cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # With every feature compiled, the nightly-only allowance is dropped: the
+      # reconciliation must account for every repository source from dep-info
+      # alone. This is what keeps NIGHTLY_ONLY_SOURCES from becoming a place to
+      # park an uncovered file.
+      - name: Reconcile every source against dep-info
+        run: devenv-retry --profile smt shell --no-tui -- python scripts/check_configuration_closure.py --require-complete
 
       - name: Run smt-gated chelis-prove tests
         run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features smt

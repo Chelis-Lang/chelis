@@ -64,6 +64,9 @@ These principles determine the following rules:
 - broadcasting and precision conversion are explicit
 - compiler stages should remain mechanically understandable
 - the core IR stays small even when the user-facing language grows
+- for fixed program text, compiler build, target, and declared inputs, every
+  check, evaluation, and build result is a function of those inputs; feedback
+  that varies between identical runs is a defect, not an implementation freedom
 
 ## 6. Dual Syntax
 

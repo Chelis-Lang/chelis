@@ -6,6 +6,175 @@
 use super::*;
 use crate::context::LibraryProofId;
 
+/// Transactional owner for one cyclic full-reference component's inference
+/// level, provisional visibility capability, and temporary bindings. It
+/// snapshots every member binding before provisional prebinding so normal and
+/// cancelled exits both restore the surrounding environment exactly.
+struct ComponentLevelScope {
+    level: crate::unify::LevelToken,
+    members: Vec<(String, Option<Scheme>)>,
+    prior_active_component: UnordSet<String>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecursiveAbortObservation {
+    current_level: u32,
+    group_state_counts: (usize, usize),
+    member_count: usize,
+    prior_binding_count: usize,
+    all_prior_bindings_restored: bool,
+    all_temporary_bindings_removed: bool,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PRIMARY_RECURSIVE_CANCEL_COUNTDOWN: Cell<Option<usize>> = const { Cell::new(None) };
+    static RECURSIVE_ABORT_OBSERVATION: RefCell<Option<RecursiveAbortObservation>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct PrimaryRecursiveCancelGuard;
+
+#[cfg(test)]
+impl Drop for PrimaryRecursiveCancelGuard {
+    fn drop(&mut self) {
+        PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| countdown.set(None));
+    }
+}
+
+#[cfg(test)]
+fn cancel_primary_recursive_after_members(count: usize) -> PrimaryRecursiveCancelGuard {
+    assert!(
+        count > 0,
+        "the test hook must allow at least one SCC member"
+    );
+    PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
+        assert!(
+            countdown.replace(Some(count)).is_none(),
+            "the primary recursive cancellation hook is already armed"
+        );
+    });
+    RECURSIVE_ABORT_OBSERVATION.with(|observation| *observation.borrow_mut() = None);
+    PrimaryRecursiveCancelGuard
+}
+
+#[cfg(test)]
+fn primary_recursive_member_finished_for_test() {
+    PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
+        let Some(remaining) = countdown.get() else {
+            return;
+        };
+        if remaining == 1 {
+            countdown.set(None);
+            crate::cancel::current_cancel_token()
+                .expect("the cancellation test hook requires an installed token")
+                .cancel();
+        } else {
+            countdown.set(Some(remaining - 1));
+        }
+    });
+}
+
+#[cfg(test)]
+fn take_recursive_abort_observation() -> Option<RecursiveAbortObservation> {
+    RECURSIVE_ABORT_OBSERVATION.with(|observation| observation.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
+    left.tvars == right.tvars
+        && left.tvar_restrictions == right.tvar_restrictions
+        && left.dvars == right.dvars
+        && left.rvars == right.rvars
+        && left.body == right.body
+}
+
+impl ComponentLevelScope {
+    fn enter(
+        indices: &[usize],
+        items: &[(Option<String>, &deep::Expr)],
+        cycle_precedence_names: &[String],
+        env: &mut Env,
+        var_gen: &VarGen,
+        subst: &mut Subst,
+    ) -> Self {
+        let mut seen = UnordSet::new();
+        let members = indices
+            .iter()
+            .filter_map(|index| top_level_decl_name(items[*index].1))
+            .filter(|name| seen.insert((*name).to_string()))
+            .map(|name| (name.to_string(), env.lookup(name).cloned()))
+            .collect::<Vec<_>>();
+        let mut active_component = members
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<UnordSet<_>>();
+        active_component.extend(cycle_precedence_names.iter().cloned());
+        let prior_active_component = env.replace_active_top_level_component(active_component);
+        Self {
+            level: subst.enter_level(var_gen),
+            members,
+            prior_active_component,
+        }
+    }
+
+    fn remove_temporary_bindings(&self, env: &mut Env) {
+        for (name, _) in &self.members {
+            env.remove_binding(name);
+        }
+    }
+
+    /// Normal completion deliberately does not restore prior defsig/metadata
+    /// bindings: completed generalized member schemes replace them below.
+    fn complete(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+        self.remove_temporary_bindings(env);
+        let _finished_component = env
+            .replace_active_top_level_component(std::mem::take(&mut self.prior_active_component));
+        subst.leave_level(self.level, var_gen);
+    }
+
+    fn abort(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+        #[cfg(test)]
+        let prior_members = self.members.clone();
+        super::recursion::abort_group();
+        self.remove_temporary_bindings(env);
+        for (name, prior) in self.members {
+            if let Some(scheme) = prior {
+                env.bind(name, scheme);
+            }
+        }
+        let _aborted_component = env
+            .replace_active_top_level_component(std::mem::take(&mut self.prior_active_component));
+        subst.leave_level(self.level, var_gen);
+        #[cfg(test)]
+        RECURSIVE_ABORT_OBSERVATION.with(|observation| {
+            let prior_binding_count = prior_members
+                .iter()
+                .filter(|(_, prior)| prior.is_some())
+                .count();
+            let all_prior_bindings_restored = prior_members.iter().all(|(name, prior)| {
+                prior.as_ref().is_none_or(|prior| {
+                    env.lookup(name)
+                        .is_some_and(|restored| schemes_match(restored, prior))
+                })
+            });
+            let all_temporary_bindings_removed = prior_members
+                .iter()
+                .filter(|(_, prior)| prior.is_none())
+                .all(|(name, _)| env.lookup(name).is_none());
+            *observation.borrow_mut() = Some(RecursiveAbortObservation {
+                current_level: subst.current_level(),
+                group_state_counts: super::recursion::group_state_counts(),
+                member_count: prior_members.len(),
+                prior_binding_count,
+                all_prior_bindings_restored,
+                all_temporary_bindings_removed,
+            });
+        });
+    }
+}
+
 /// Front-end cancellation gate for a check unit (chelis#930).
 ///
 /// Placed between the passes of every public check entry. When the thread's
@@ -97,12 +266,52 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    let metadata_prebound_names = HashSet::new();
-    let inference_groups = primary_inference_groups(exprs, &items);
+    validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
+    let external_input_types = collect_literal_external_input_types(&items);
+    let metadata_prebound_names = UnordSet::new();
+    let top_level_references = TopLevelReferenceGraph::build(&items);
+    product.function_inference_plan =
+        FunctionInferencePlan::build_from_reference_graph(&top_level_references);
+    let inference_groups = primary_inference_groups_with_reference_graph(
+        &product.function_inference_plan,
+        &items,
+        &top_level_references,
+    );
+    // Match the persisted-state driver: cache the TLS token once and poll at
+    // declaration granularity. In particular, an incomplete cyclic component
+    // must consume its structured scope through `abort` before this schedule
+    // returns; finishing or generalizing a partially inferred group would
+    // leak its pins, temporary bindings, and child level.
+    let cancel = crate::cancel::current_cancel_token();
+    let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
-    for group in inference_groups {
-        let provisional_types = if group.recursive {
-            prebind_recursive_function_schemes(
+    'schedule: for group in inference_groups {
+        if cancelled() {
+            break;
+        }
+        let cyclic = group.cyclic;
+        let recursion_active = !group.recursive_function_indices.is_empty();
+        let cycle_precedence_names = if cyclic {
+            top_level_references
+                .cycle_precedence_targets(&group.indices)
+                .into_iter()
+                .map(|target| top_level_references.definition(target).name.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut component_scope = cyclic.then(|| {
+            ComponentLevelScope::enter(
+                &group.indices,
+                &items,
+                &cycle_precedence_names,
+                &mut env,
+                &vg,
+                &mut subst,
+            )
+        });
+        let provisional_types = if cyclic {
+            prebind_cyclic_component_schemes(
                 &group.indices,
                 &items,
                 &declared_signatures,
@@ -111,32 +320,53 @@ pub(super) fn infer_program_with_product_in_session(
                 &mut vg,
             )
         } else {
-            HashMap::new()
+            UnordMap::new()
         };
-        // spec/04 §3.1.1: record in-group instantiations while this
-        // recursive group's bodies are inferred; validated in
-        // `finish_group` below.
-        if group.recursive {
+        // spec/04 §3.1.1: recursive-instantiation validation remains the
+        // function-plan projection. A mixed reference cycle alone must not
+        // activate it.
+        if recursion_active {
             super::recursion::begin_group(
-                group.indices.iter().filter_map(|&index| {
-                    top_level_decl_name(items[index].1).map(|name| {
-                        let authored = declared_signatures
-                            .get(name)
-                            .is_some_and(|metadata| !metadata.binders.is_empty());
-                        (name, authored)
-                    })
-                }),
+                group
+                    .recursive_function_indices
+                    .iter()
+                    .filter_map(|&index| {
+                        top_level_decl_name(items[index].1).map(|name| {
+                            let authored = declared_signatures
+                                .get(name)
+                                .is_some_and(|metadata| !metadata.binders.is_empty());
+                            (name, authored)
+                        })
+                    }),
                 &env,
             );
         }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
+            if cancelled() {
+                if let Some(scope) = component_scope.take() {
+                    scope.abort(&mut env, &vg, &mut subst);
+                }
+                break 'schedule;
+            }
             let (module, expr) = &items[declaration_index];
             product.begin_root(expr);
             let decl_name = top_level_decl_name(expr);
             crate::opacity::set_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
+            );
+            env.set_current_declaration_ordinal(Some(declaration_index));
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
             );
             if let Some(binding) = infer_top_level(
                 expr,
@@ -146,9 +376,9 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
                 &mut product,
-                None,
+                external_input_failure.as_ref(),
                 provisional_types.get(&declaration_index),
-                group.recursive,
+                cyclic,
                 &user_def_names,
                 &declared_signatures,
             ) {
@@ -158,19 +388,36 @@ pub(super) fn infer_program_with_product_in_session(
             product.finish_root(&subst, errors);
             // Issue #256 round 2: re-check each deferred borrow against the
             // now-complete substitution (see `validate_deferred_borrow_vars`).
-            validate_deferred_borrow_vars(&subst, &adt_reg, errors);
+            validate_deferred_borrow_vars(
+                &subst,
+                &adt_reg,
+                env.active_declared_type_names(),
+                errors,
+            );
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
-        }
-        if group.recursive {
-            // Uniform-recursive-instantiation validation must run before the
-            // deferred generalization: it clears the instantiation-variable
-            // pins, which would otherwise block quantification here.
-            super::recursion::finish_group(&subst, errors);
-            for (name, _) in &deferred_bindings {
-                env.remove_binding(name);
+            #[cfg(test)]
+            if cyclic {
+                primary_recursive_member_finished_for_test();
             }
+        }
+        if cancelled() {
+            if let Some(scope) = component_scope.take() {
+                scope.abort(&mut env, &vg, &mut subst);
+            }
+            break 'schedule;
+        }
+        if cyclic {
+            // Function-recursion validation, when independently active, must
+            // clear its pins before component-wide generalization.
+            if recursion_active {
+                super::recursion::finish_group(&subst, errors);
+            }
+            component_scope
+                .take()
+                .expect("cyclic component owns an inference-level scope")
+                .complete(&mut env, &vg, &mut subst);
             let schemes = deferred_bindings
                 .into_iter()
                 .map(|(name, ty)| {
@@ -184,14 +431,11 @@ pub(super) fn infer_program_with_product_in_session(
         }
     }
     crate::opacity::set_current_item(None, None);
+    env.set_current_declaration_ordinal(None);
 
-    // [04-TENSOR-EXPAND]: later roots get the first opportunity to select a
-    // positional expand's legal output shape. At the whole-program freeze
-    // point, materialize the documented context-free default for every
-    // still-unconstrained result, then refresh stamps written by earlier
-    // roots so no unresolved type escapes into checked annotations.
-    if let Err(error) = subst.materialize_deferred_expand_defaults() {
-        errors.push(error.into());
+    if cancelled() {
+        errors.push(crate::cancel::cancellation_check_error());
+        return product;
     }
     product.resolve_owner_types(&subst);
 
@@ -212,6 +456,7 @@ pub(super) fn infer_program_with_product_in_session(
     // surface it as a hard located failure (covered-or-rejected).
     stack_scope.drain_into(errors);
 
+    product.top_level_references = top_level_references;
     product
 }
 
@@ -281,7 +526,12 @@ pub(crate) fn build_type_env_from_library_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(library_exprs, &library_ir, errors);
+    validate_ir_program(
+        library_exprs,
+        &library_ir,
+        &product.top_level_references,
+        errors,
+    );
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
@@ -297,7 +547,7 @@ pub(crate) fn build_type_env_from_library_in_session(
 
     // Capture library def names — needed by new-code cycle / unbound
     // suppression to distinguish library refs from new-code refs.
-    let mut library_def_names = std::collections::HashSet::new();
+    let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
         if let deep::Expr::List(list, _) = expr
             && get_tag(list) == Some(DeepTag::Def)
@@ -367,7 +617,7 @@ pub(crate) fn build_type_env_from_library_in_session(
 ///
 /// Behavior contract:
 /// - The returned `TypeEnv` is identical (modulo non-determinism in
-///   `HashMap` iteration) to `build_type_env_from_library(library_exprs)`.
+///   `UnordMap` iteration) to `build_type_env_from_library(library_exprs)`.
 /// - The returned `CheckedProgram` has the same `annotated_exprs()` and
 ///   `type_env()` shapes that
 ///   `check_ir_with_context(&TypeEnv::empty(), library_exprs)`
@@ -422,7 +672,12 @@ pub(crate) fn build_compiled_library_context_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(library_exprs, &library_ir, errors);
+    validate_ir_program(
+        library_exprs,
+        &library_ir,
+        &product.top_level_references,
+        errors,
+    );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
@@ -434,7 +689,7 @@ pub(crate) fn build_compiled_library_context_in_session(
     }
 
     // Capture library def names before consuming `state` into `TypeEnv`.
-    let mut library_def_names = std::collections::HashSet::new();
+    let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
         if let deep::Expr::List(list, _) = expr
             && get_tag(list) == Some(DeepTag::Def)
@@ -486,8 +741,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         library_annotated,
         library_ir_annotated,
         &SignatureInferenceMetadata::default(),
-        &product.type_headers,
-        &product.adt_registry,
+        &product,
         stats,
         errors,
     );
@@ -552,11 +806,11 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // `check_ir_with_signature_context`.
     let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
-    let mut state = base.inner().clone();
+    let mut state = base.resume_for_new_check();
 
     // `library_exprs` declared types (IR), layered on top of the base's.
     let new_ir = build_ir_type_env(library_exprs);
-    let combined_ir: HashMap<String, deep::Expr> = state
+    let combined_ir: BTreeMap<String, deep::Expr> = state
         .ir_types
         .iter()
         .chain(new_ir.iter())
@@ -581,7 +835,12 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(library_exprs, &combined_ir, errors);
+    validate_ir_program(
+        library_exprs,
+        &combined_ir,
+        &product.top_level_references,
+        errors,
+    );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     validate_polymorphic_op_constraints(library_exprs, &combined_ir, errors);
@@ -658,8 +917,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         library_annotated,
         checked_type_env,
         &SignatureInferenceMetadata::default(),
-        &product.type_headers,
-        &product.adt_registry,
+        &product,
         stats,
         errors,
     );
@@ -746,11 +1004,11 @@ pub(crate) fn check_ir_with_signature_context_in_session(
             *t = std::time::Instant::now();
         }
     };
-    let mut state = context.inner().clone();
+    let mut state = context.resume_for_new_check();
 
     // New-code declared types (IR) layered on top of library's.
     let new_ir = build_ir_type_env(new_exprs);
-    let combined_ir: HashMap<String, deep::Expr> = state
+    let combined_ir: BTreeMap<String, deep::Expr> = state
         .ir_types
         .iter()
         .chain(new_ir.iter())
@@ -775,19 +1033,16 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    // A reusable library context deliberately carries unresolved positional
-    // expand obligations into this cloned state. New code gets the first
-    // opportunity to select a legal shape; only now, when producing the final
-    // CheckedProgram, do otherwise-unselected results take the documented
-    // context-free default.
-    if let Err(error) = state.subst.materialize_deferred_expand_defaults() {
-        errors.push(error.into());
-    }
     product.resolve_owner_types(&state.subst);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
-    validate_ir_program(new_exprs, &combined_ir, errors);
+    validate_ir_program(
+        new_exprs,
+        &combined_ir,
+        &product.top_level_references,
+        errors,
+    );
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
@@ -829,8 +1084,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         annotated_exprs,
         annotated_type_env,
         signature_context,
-        &product.type_headers,
-        &product.adt_registry,
+        &product,
         stats,
         errors,
     );
@@ -859,6 +1113,14 @@ pub(crate) fn check_typed_program_in_session(
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
     let product = infer_program_with_product_in_session(exprs, errors);
+    // [04-INF-4] makes eager value cycles an ingress-independent checker
+    // error. Reuse the canonical graph that scheduled inference rather than
+    // repeating its lexical walk. Keep reporting after inference to preserve
+    // the shared diagnostic order: body-inference errors first, then
+    // `CycleDetected`.
+    product
+        .top_level_references
+        .report_initialization_errors(errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -877,8 +1139,7 @@ pub(crate) fn check_typed_program_in_session(
             annotated_exprs,
             annotated_type_env,
             &SignatureInferenceMetadata::default(),
-            &product.type_headers,
-            &product.adt_registry,
+            &product,
             stats,
             errors,
         );
@@ -907,7 +1168,8 @@ pub(crate) fn infer_ir_program_in_session(
     let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
-    let stats = infer_ir_program_with_env(exprs, &type_env, errors);
+    let product = infer_ir_program_with_env(exprs, &type_env, errors);
+    let stats = product.stats();
     // chelis#930 review: this was the one `*_in_session` entry with no gate.
     // Without it, a tripped token let every pass below stop early and the
     // walk's truncated counts flow into a clean-looking report -- compiler::
@@ -919,7 +1181,7 @@ pub(crate) fn infer_ir_program_in_session(
         stack_scope.drain_into(errors);
         return stats;
     }
-    validate_ir_program(exprs, &type_env, errors);
+    validate_ir_program(exprs, &type_env, &product.top_level_references, errors);
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
     validate_polymorphic_op_constraints(exprs, &type_env, errors);
@@ -932,7 +1194,7 @@ pub(super) fn infer_ir_program_with_env(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
     errors: &mut DiagnosticSink<'_>,
-) -> InferStats {
+) -> InferenceProduct {
     // Backwards-compat wrapper. Callers (like `infer_ir_program` and
     // `check_typed_program` callers) run `validate_ir_program`
     // separately, so we pass `None` here to skip the embedded validate.
@@ -941,7 +1203,6 @@ pub(super) fn infer_ir_program_with_env(
     infer_ir_program_with_state(
         exprs, &mut state, type_env, /* run_validate_passes_on = */ None, errors,
     )
-    .stats()
 }
 
 /// Run the inference / IR binding / shape-validation passes against
@@ -1005,16 +1266,20 @@ pub(super) fn infer_ir_program_with_state(
     // `state.env` by `collect_all_declarations` above. The prebind below reads
     // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
     // rebinds the name to it — the mechanism that lets a `defsig`-less def be
-    // resolved by cross-references before its body is inferred. But letting a
-    // body stamp overwrite a defsig binding replaces the declared signature
-    // with the body's own type, so `infer_top_level`'s body-vs-defsig
+    // resolved by cross-references before its body is inferred. It may bind an
+    // eager value's name too: chelis#1134 scope is decided by
+    // `Env::top_level_value_visibility`, so a binding that exists early can no
+    // longer make a later value readable, and the two ingresses stay in
+    // agreement without this ingress withholding anything. Letting a body stamp
+    // overwrite a defsig binding replaces the declared signature with the
+    // body's own type, so `infer_top_level`'s body-vs-defsig
     // unification (which the IR ingress DOES run) then compares the body
     // against itself and silently accepts a `defsig`/body mismatch. The typed
     // ingress (`infer_program_with_product_in_session`) has no such rebind and
     // rejects the mismatch; keeping the defsig binding here restores parity.
     // For every well-typed program the defsig type and the body stamp agree, so
     // this skip is a no-op except on exactly the mismatch that must be rejected.
-    let defsig_names: std::collections::HashSet<&str> = items
+    let defsig_names: chelis_unord::UnordSet<&str> = items
         .iter()
         .filter_map(|(_, expr)| match stamped_parts(expr) {
             Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
@@ -1022,16 +1287,19 @@ pub(super) fn infer_ir_program_with_state(
         })
         .collect();
 
-    let mut prebound_type_failures = HashMap::new();
+    let mut prebound_type_failures = UnordMap::new();
     for (name, ty_expr) in &collected_ir_types.type_env {
-        match resolve_deep_type(
+        let metadata_level = state.subst.enter_level(&state.var_gen);
+        let resolved = resolve_deep_type(
             ty_expr,
             &mut state.var_gen,
             &state.adt_reg,
             TypeUseSite::CompilerMetadata,
             BinderMode::TrustedCompilerMetadata,
             errors,
-        ) {
+        );
+        state.subst.leave_level(metadata_level, &state.var_gen);
+        match resolved {
             Ok(ty) => {
                 if defsig_names.contains(name.as_str()) {
                     // Preserve the defsig-derived binding (chelis#1124); do not
@@ -1060,12 +1328,20 @@ pub(super) fn infer_ir_program_with_state(
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let metadata_prebound_names = collected_ir_types
         .type_env
         .keys()
         .cloned()
-        .collect::<HashSet<_>>();
-    let inference_groups = primary_inference_groups(exprs, &items);
+        .collect::<UnordSet<_>>();
+    let top_level_references = TopLevelReferenceGraph::build(&items);
+    product.function_inference_plan =
+        FunctionInferencePlan::build_from_reference_graph(&top_level_references);
+    let inference_groups = primary_inference_groups_with_reference_graph(
+        &product.function_inference_plan,
+        &items,
+        &top_level_references,
+    );
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity. Body inference is one of the two front-end passes whose
     // cost scales with declaration count, so an abandoned compile has to be
@@ -1077,8 +1353,25 @@ pub(super) fn infer_ir_program_with_state(
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
     'schedule: for group in inference_groups {
-        let provisional_types = if group.recursive {
-            prebind_recursive_function_schemes(
+        let cyclic = group.cyclic;
+        let recursion_active = !group.recursive_function_indices.is_empty();
+        let mut component_scope = cyclic.then(|| {
+            let cycle_precedence_names = top_level_references
+                .cycle_precedence_targets(&group.indices)
+                .into_iter()
+                .map(|target| top_level_references.definition(target).name.clone())
+                .collect::<Vec<_>>();
+            ComponentLevelScope::enter(
+                &group.indices,
+                &items,
+                &cycle_precedence_names,
+                &mut state.env,
+                &state.var_gen,
+                &mut state.subst,
+            )
+        });
+        let provisional_types = if cyclic {
+            prebind_cyclic_component_schemes(
                 &group.indices,
                 &items,
                 &declared_signatures,
@@ -1087,27 +1380,33 @@ pub(super) fn infer_ir_program_with_state(
                 &mut state.var_gen,
             )
         } else {
-            HashMap::new()
+            UnordMap::new()
         };
-        // spec/04 §3.1.1: record in-group instantiations while this
-        // recursive group's bodies are inferred; validated in
-        // `finish_group` below.
-        if group.recursive {
+        // spec/04 §3.1.1: recursive-instantiation validation remains the
+        // function-plan projection. A mixed reference cycle alone must not
+        // activate it.
+        if recursion_active {
             super::recursion::begin_group(
-                group.indices.iter().filter_map(|&index| {
-                    top_level_decl_name(items[index].1).map(|name| {
-                        let authored = declared_signatures
-                            .get(name)
-                            .is_some_and(|metadata| !metadata.binders.is_empty());
-                        (name, authored)
-                    })
-                }),
+                group
+                    .recursive_function_indices
+                    .iter()
+                    .filter_map(|&index| {
+                        top_level_decl_name(items[index].1).map(|name| {
+                            let authored = declared_signatures
+                                .get(name)
+                                .is_some_and(|metadata| !metadata.binders.is_empty());
+                            (name, authored)
+                        })
+                    }),
                 &state.env,
             );
         }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
             if cancelled() {
+                if let Some(scope) = component_scope.take() {
+                    scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
+                }
                 break 'schedule;
             }
             let (module, expr) = &items[declaration_index];
@@ -1122,6 +1421,15 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            state
+                .env
+                .set_current_declaration_ordinal(Some(declaration_index));
+            // An explicitly typed self-reference (`x = (x : T)`) needs no
+            // separate external-input prebind at this ingress: its body stamp
+            // is in `collected_ir_types`, so the loop above already bound it
+            // or recorded its resolution failure. Resolving the same type
+            // expression again here would report that failure twice and
+            // split the ingresses on exactly the input [04-INF-4] aligns.
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut state.env,
@@ -1132,7 +1440,7 @@ pub(super) fn infer_ir_program_with_state(
                 &mut product,
                 prebound_type_failures.get(&declaration_index),
                 provisional_types.get(&declaration_index),
-                group.recursive,
+                cyclic,
                 &user_def_names,
                 &declared_signatures,
             ) {
@@ -1149,19 +1457,32 @@ pub(super) fn infer_ir_program_with_state(
             // def and re-check each recorded variable against the now-complete
             // substitution. Draining per-def keeps error attribution local and
             // prevents one def's deferrals from leaking into the next.
-            validate_deferred_borrow_vars(&state.subst, &state.adt_reg, errors);
+            validate_deferred_borrow_vars(
+                &state.subst,
+                &state.adt_reg,
+                state.env.active_declared_type_names(),
+                errors,
+            );
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
-        if group.recursive {
-            // Uniform-recursive-instantiation validation must run before the
-            // deferred generalization: it clears the instantiation-variable
-            // pins, which would otherwise block quantification here.
-            super::recursion::finish_group(&state.subst, errors);
-            for (name, _) in &deferred_bindings {
-                state.env.remove_binding(name);
+        if cancelled() {
+            if let Some(scope) = component_scope.take() {
+                scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
             }
+            break 'schedule;
+        }
+        if cyclic {
+            // Function-recursion validation, when independently active, must
+            // clear its pins before component-wide generalization.
+            if recursion_active {
+                super::recursion::finish_group(&state.subst, errors);
+            }
+            component_scope
+                .take()
+                .expect("cyclic component owns an inference-level scope")
+                .complete(&mut state.env, &state.var_gen, &mut state.subst);
             let schemes = deferred_bindings
                 .into_iter()
                 .map(|(name, ty)| {
@@ -1175,6 +1496,7 @@ pub(super) fn infer_ir_program_with_state(
         }
     }
     crate::opacity::set_current_item(None, None);
+    state.env.set_current_declaration_ordinal(None);
 
     if cancelled() {
         // Abandoned mid-schedule. The remaining declarations were never
@@ -1199,165 +1521,499 @@ pub(super) fn infer_ir_program_with_state(
     }
 
     if let Some(target_exprs) = run_validate_passes_on {
-        validate_ir_program(target_exprs, combined_ir, errors);
+        validate_ir_program(target_exprs, combined_ir, &top_level_references, errors);
     }
 
+    product.top_level_references = top_level_references;
     product
 }
 
-/// Primary body-inference schedule. Function declarations inside a lexical
-/// module use the same dependency/SCC planner as signature inference, so a
-/// forward helper's body-derived scheme is available to its caller. Bare defs
-/// and every non-function declaration retain textual order. The returned
-/// values are original flattened ordinals: scheduling never changes diagnostic
-/// ownership, collected-type origins, or output order.
-pub(super) fn primary_inference_schedule(
-    exprs: &[deep::Expr],
-    items: &[(Option<String>, &deep::Expr)],
+/// The hoist order: the total order the body-inference schedule used before
+/// chelis#1134 and still uses as its priority. Every module function is
+/// spliced at the earliest module-function ordinal in the planner's
+/// callee-first order, and every other item keeps textual order.
+///
+/// This order is a linear extension of every precedence edge
+/// [`primary_inference_schedule`] builds except a barrier into a hoisted
+/// function (an eager value declared before a module function that reads it),
+/// which is exactly the [04-INF-4] defect the schedule exists to repair. The
+/// schedule therefore reproduces this order on every program that carries no
+/// such barrier, up to the contiguity of a contracted recursive component, so
+/// the grouped order [`primary_inference_groups`] infers is identical.
+fn hoist_order(
+    function_plan: &FunctionInferencePlan,
+    item_count: usize,
+    module_fn_indices: &BTreeSet<usize>,
 ) -> Vec<usize> {
-    let module_fn_by_key = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (module, expr))| {
-            module.as_ref()?;
-            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
-                return None;
-            };
-            kids.get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn))?;
-            Some((expr_key(expr), index))
-        })
-        .collect::<HashMap<_, _>>();
-    if module_fn_by_key.is_empty() {
-        return (0..items.len()).collect();
-    }
-
-    let ordered_module_fns = signature_inference_def_order(exprs)
-        .into_iter()
-        .filter_map(|expr| module_fn_by_key.get(&expr_key(expr)).copied())
+    let Some(&insertion) = module_fn_indices.first() else {
+        return (0..item_count).collect();
+    };
+    let ordered_module_fns = function_plan
+        .ordered_members()
+        .map(|member| member.item_index)
+        .filter(|index| module_fn_indices.contains(index))
         .collect::<Vec<_>>();
-    let module_fn_indices = module_fn_by_key.values().copied().collect::<HashSet<_>>();
-    let insertion = module_fn_indices.iter().copied().min().unwrap_or(0);
-    let mut schedule = Vec::with_capacity(items.len());
-    for index in 0..items.len() {
+    let mut order = Vec::with_capacity(item_count);
+    for index in 0..item_count {
         if index == insertion {
-            schedule.extend(ordered_module_fns.iter().copied());
+            order.extend(ordered_module_fns.iter().copied());
         }
         if !module_fn_indices.contains(&index) {
-            schedule.push(index);
+            order.push(index);
         }
     }
+    order
+}
+
+/// Eager (non-function) top-level value `def`s, as name -> flattened ordinal.
+/// The first `def` of a duplicated name owns the position, matching
+/// `Env::note_top_level_value_ordinal`; the duplicate is already an error.
+fn eager_value_definition_ordinals(
+    items: &[(Option<String>, &deep::Expr)],
+) -> BTreeMap<String, usize> {
+    let mut ordinals = BTreeMap::new();
+    for (index, (_, expr)) in items.iter().enumerate() {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        if definition_owns_function_metadata_prebind(expr) {
+            continue;
+        }
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        ordinals.entry(name.to_string()).or_insert(index);
+    }
+    ordinals
+}
+
+/// Does this Deep TYPE expression contain an inference hole?
+///
+/// chelis#1486 / [04-INF-5]: a wildcard slot is `(t-var {} _)` in a type
+/// position, `(d-var {} _)` in a dimension position, and `(d-rank {} _)` in a
+/// rank position. `DeepTypeResolver::resolve_type_var`, `resolve_dim_var`, and
+/// `resolve_rank_var` are the three places that mint a fresh variable for the
+/// name `_`, so these are exactly the spellings that can produce a hole.
+///
+/// The scan is syntactic on purpose: the schedule runs before any signature is
+/// resolved, so it cannot ask the resolver. A bail on a nearly-exhausted stack
+/// answers `true`, which can only ADD a precedence edge and never drop one;
+/// the guard's record still turns the bail into a hard failure at the check
+/// boundary, so the over-approximation is never observed on a passing program.
+fn deep_type_contains_hole(expr: &deep::Expr) -> bool {
+    stack_guard!("deep_type_contains_hole", expr, true);
+    if let Some((tag, _, kids)) = stamped_parts(expr) {
+        if matches!(tag, DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
+            && kids.first().and_then(symbol_name) == Some("_")
+        {
+            return true;
+        }
+        return kids.iter().any(deep_type_contains_hole);
+    }
+    match expr {
+        deep::Expr::List(list, _) => list.elements.iter().any(deep_type_contains_hole),
+        deep::Expr::BareList(elements, _) => elements.iter().any(deep_type_contains_hole),
+        deep::Expr::MetaExpr(meta, _) => deep_type_contains_hole(&meta.expr),
+        _ => false,
+    }
+}
+
+/// The declared-signature facts the schedule needs about each name, from a
+/// syntactic scan of the unit's `defsig` items (chelis#1486).
+///
+/// `signed` is every name that carries a `defsig` at all; `holed` is the
+/// subset whose signature contains an inference hole. The two answer the two
+/// halves of [04-INF-5] and [04-INF-6]: a `defsig`-less function has no header
+/// for a reader to use at all, and a hole header is not honest until the body
+/// has filled it, while a complete or authored-binder header is honest before
+/// the body and needs no edge.
+struct DeclaredSignatureScan {
+    signed: UnordSet<String>,
+    holed: UnordSet<String>,
+}
+
+fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> DeclaredSignatureScan {
+    let mut signed = UnordSet::new();
+    let mut holed = UnordSet::new();
+    for (_, expr) in items {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        signed.insert(name.to_string());
+        if kids.get(1).is_some_and(deep_type_contains_hole) {
+            holed.insert(name.to_string());
+        }
+    }
+    DeclaredSignatureScan { signed, holed }
+}
+
+/// Primary body-inference schedule: the order in which top-level declaration
+/// bodies are inferred. The returned values are original flattened ordinals,
+/// so scheduling never changes diagnostic ownership, collected-type origins,
+/// or output order.
+///
+/// The schedule is the [`hoist_order`]-least linear extension of a
+/// precedence graph whose every edge is a real reference in the program:
+///
+/// - a module function is inferred after every module function it calls,
+///   so a forward helper's body-derived scheme is available to its caller
+///   (the planner's callee-first order);
+/// - an item is inferred after every eager value it reads that is declared
+///   before it ([04-INF-4] makes exactly those reads legal; an unannotated
+///   value has no header anywhere, so its type exists only once its own
+///   `def` has been inferred). For a module function this is the barrier
+///   that keeps the hoist from carrying it across the value;
+/// - an item at or after the earliest module-function ordinal is inferred
+///   after every `defsig`-LESS module function it reads (the mirror edge). A
+///   declared signature is in the global header environment from the first
+///   pass, and under [04-INF-6] an authored binder is rigid, so a complete or
+///   authored-binder header IS the function's scheme before its body runs and
+///   a reader needs no edge. A `defsig`-less function has no header at all,
+///   which is the availability role this edge keeps; it mirrors what the hoist
+///   supplied implicitly, bounded to the same region, so function visibility
+///   ([04-INF-2]/[04-INF-3]) is neither narrowed nor widened;
+/// - an item is inferred after every declaration it references whose `defsig`
+///   contains a wildcard slot (the hole edge, chelis#1486 / [04-INF-5]). A
+///   hole is not a binder and is not quantified as one: the slot's type is
+///   whatever the body determines, so a reader that instantiates the header
+///   early observes a variable the body has not filled and accepts programs
+///   the checker rejects when the body is inferred first. Unlike the mirror
+///   edge this one is bounded by no region: it holds below the hoist floor and
+///   in a bare unit, because the dishonest header is global from the first
+///   pass. Kahn's priority keeps the displacement minimal, so the function
+///   holds its hoist position and only its readers slide after it;
+/// - every strongly connected component of the full syntactic reference graph
+///   is one vertex. This includes mixed function/value components as well as
+///   ordinary recursive function groups, so an edge one member earns
+///   constrains them all.
+///
+/// Bare functions keep textual availability (no call or mirror edge), and a
+/// forward value reference produces no edge because the scope rule leaves it
+/// unbound. Nothing else orders the graph: in particular there is no textual
+/// chain over non-function items and no chain over the planner order. Such
+/// chains are not dependencies, and they close cycles on legal programs.
+/// The canonical reference collector follows lambda bodies and both read and
+/// application edges. Contracting all of its SCCs therefore makes the
+/// remaining precedence graph acyclic by construction; the old
+/// hoist-order-least stall release is unnecessary and deliberately absent.
+/// A cyclic component containing an eager value is still rejected as
+/// `CycleDetected`, but its bodies co-infer under provisional bindings so the
+/// checker reaches that one ingress-independent verdict without first leaking
+/// an inference-order `UnboundVariable` (chelis#1485).
+///
+/// This is availability, not ordinary source visibility. Whether a name is in
+/// scope is decided by `Env::top_level_value_visibility` from source position.
+/// The sole extra capability is owned by the exact active cyclic component:
+/// its provisional members see one another, and [04-INF-8] precedence targets
+/// that the graph scheduled first remain visible, only while that rejected
+/// component is co-inferred. The component scope restores the prior capability
+/// on every exit. No schedule position can otherwise widen or narrow
+/// [04-INF-4].
+/// `crates/chelis-types/src/infer/tests/schedule_invariants.rs` asserts the
+/// invariants above directly on the returned order.
+#[cfg(test)]
+pub(super) fn primary_inference_schedule(
+    function_plan: &FunctionInferencePlan,
+    items: &[(Option<String>, &deep::Expr)],
+) -> Vec<usize> {
+    let references = TopLevelReferenceGraph::build(items);
+    primary_inference_schedule_with_reference_graph(function_plan, items, &references)
+}
+
+fn primary_inference_schedule_with_reference_graph(
+    function_plan: &FunctionInferencePlan,
+    items: &[(Option<String>, &deep::Expr)],
+    references: &TopLevelReferenceGraph,
+) -> Vec<usize> {
+    let reference_components = references.inference_components();
+    if !function_plan.complete || !reference_components.complete {
+        return Vec::new();
+    }
+    let module_fn_indices = function_plan
+        .ordered_members()
+        .filter(|member| items[member.item_index].0.is_some())
+        .map(|member| member.item_index)
+        .collect::<BTreeSet<_>>();
+    let mut key = vec![0usize; items.len()];
+    for (position, index) in hoist_order(function_plan, items.len(), &module_fn_indices)
+        .into_iter()
+        .enumerate()
+    {
+        key[index] = position;
+    }
+
+    // Contract every SCC of the full reference graph to one vertex, named by
+    // its lowest member ordinal and carrying its lowest hoist key. This
+    // includes mixed function/value components, not only recursive functions.
+    let mut vertex_of = (0..items.len()).collect::<Vec<_>>();
+    let mut component_members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for component in &reference_components.components {
+        let members = component.members.clone();
+        let Some(&representative) = members.iter().min() else {
+            continue;
+        };
+        for &member in &members {
+            vertex_of[member] = representative;
+        }
+        component_members.insert(representative, members);
+    }
+    let vertex_key = |vertex: usize| -> usize {
+        component_members
+            .get(&vertex)
+            .map_or(key[vertex], |members| {
+                members
+                    .iter()
+                    .map(|member| key[*member])
+                    .min()
+                    .unwrap_or(key[vertex])
+            })
+    };
+
+    // Reference edges, `(before, after)`, deduplicated and self-edge free.
+    let eager_value_ordinals = eager_value_definition_ordinals(items);
+    let mut module_fn_by_name: BTreeMap<String, usize> = BTreeMap::new();
+    for &index in &module_fn_indices {
+        if let Some(name) = top_level_decl_name(items[index].1) {
+            module_fn_by_name.entry(name.to_string()).or_insert(index);
+        }
+    }
+    // chelis#1486: the hole edge is not bounded by the planner's region, so it
+    // needs every `def`'s ordinal, not only a module function's.
+    let signatures = scan_declared_signatures(items);
+    let mut hole_signature_definitions: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, (_, expr)) in items.iter().enumerate() {
+        let Some((DeepTag::Def, _, _)) = stamped_parts(expr) else {
+            continue;
+        };
+        if let Some(name) = top_level_decl_name(expr)
+            && signatures.holed.contains(name)
+        {
+            hole_signature_definitions
+                .entry(name.to_string())
+                .or_insert(index);
+        }
+    }
+    let floor = module_fn_indices.first().copied();
+    let mut edges: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for (index, item_references) in references.item_references.iter().enumerate() {
+        let reader = vertex_of[index];
+        let reader_is_module_fn = module_fn_indices.contains(&index);
+        for reference in item_references {
+            let name = &references.definition(reference.target).name;
+            if let Some(&value) = eager_value_ordinals.get(name)
+                && value < index
+            {
+                edges.insert((vertex_of[value], reader));
+            }
+            if let Some(&function) = module_fn_by_name.get(name)
+                && (reader_is_module_fn
+                    || (floor.is_some_and(|floor| index >= floor)
+                        && !signatures.signed.contains(name)))
+            {
+                edges.insert((vertex_of[function], reader));
+            }
+            // The hole edge, in every region and in a bare unit too: a
+            // header with a wildcard slot is honest only after its body.
+            if let Some(&declaration) = hole_signature_definitions.get(name) {
+                edges.insert((vertex_of[declaration], reader));
+            }
+        }
+    }
+
+    // [04-INF-8] cycle precedence: an eager root that occurs in its own
+    // full-reference component is rejected by CycleDetected alone. Infer any
+    // later eager value referenced from that exact component first, so the
+    // component's narrow visibility capability can resolve the real scheme
+    // instead of leaking an earlier [04-INF-4] UnboundVariable. These edges
+    // cannot cycle after SCC contraction: a target with a path back into the
+    // component would already be one of its members.
+    for component in &reference_components.components {
+        if !component.cyclic {
+            continue;
+        }
+        let Some(&representative) = component.members.iter().min() else {
+            continue;
+        };
+        for target in references.cycle_precedence_targets(&component.members) {
+            edges.insert((
+                vertex_of[references.definition(target).item_index],
+                vertex_of[representative],
+            ));
+        }
+    }
+    edges.retain(|(before, after)| before != after);
+
+    // Kahn's algorithm, releasing the hoist-order-least ready component. Full
+    // reference SCC contraction makes this graph a DAG, so there is no
+    // user-program stall and no arbitrary release path.
+    let mut successors: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut remaining_predecessors: BTreeMap<usize, usize> = BTreeMap::new();
+    for &(before, after) in &edges {
+        successors.entry(before).or_default().push(after);
+        *remaining_predecessors.entry(after).or_default() += 1;
+    }
+    let mut pending = (0..items.len())
+        .filter(|index| vertex_of[*index] == *index)
+        .map(|vertex| (vertex_key(vertex), vertex))
+        .collect::<BTreeSet<_>>();
+    let mut ready = pending
+        .iter()
+        .copied()
+        .filter(|(_, vertex)| remaining_predecessors.get(vertex).copied().unwrap_or(0) == 0)
+        .collect::<BTreeSet<_>>();
+    let mut emitted = vec![false; items.len()];
+    let mut schedule = Vec::with_capacity(items.len());
+    while let Some(&(key, vertex)) = ready.first() {
+        ready.remove(&(key, vertex));
+        pending.remove(&(key, vertex));
+        if emitted[vertex] {
+            continue;
+        }
+        emitted[vertex] = true;
+        match component_members.get(&vertex) {
+            Some(members) => schedule.extend(members.iter().copied()),
+            None => schedule.push(vertex),
+        }
+        for &successor in successors.get(&vertex).into_iter().flatten() {
+            if emitted[successor] {
+                continue;
+            }
+            let remaining = remaining_predecessors
+                .get_mut(&successor)
+                .expect("every successor was counted when its edge was added");
+            *remaining -= 1;
+            if *remaining == 0 {
+                ready.insert((vertex_key(successor), successor));
+            }
+        }
+    }
+    debug_assert!(
+        pending.is_empty(),
+        "reference-component DAG must schedule every item"
+    );
     schedule
 }
 
 #[derive(Debug)]
 pub(super) struct PrimaryInferenceGroup {
     indices: Vec<usize>,
-    recursive: bool,
+    cyclic: bool,
+    recursive_function_indices: Vec<usize>,
 }
 
-/// Group the flat primary schedule into recursive SCC inference units.
-/// Acyclic bare functions stay in textual order; acyclic module functions
-/// retain dependency order. Only a genuine recursive component is grouped
-/// and prebound, so a bare acyclic forward helper remains unavailable.
-pub(super) fn primary_inference_groups(
-    exprs: &[deep::Expr],
+fn primary_inference_groups_with_reference_graph(
+    function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
+    references: &TopLevelReferenceGraph,
 ) -> Vec<PrimaryInferenceGroup> {
-    let schedule = primary_inference_schedule(exprs, items);
-    let item_by_key = items
-        .iter()
-        .enumerate()
-        .map(|(index, (_, expr))| (expr_key(expr), index))
-        .collect::<HashMap<_, _>>();
-    let recursive_components = function_inference_sccs(exprs)
-        .into_iter()
-        .filter(|component| component.recursive)
-        .map(|component| {
-            component
-                .members
-                .into_iter()
-                .filter_map(|expr| item_by_key.get(&expr_key(expr)).copied())
-                .collect::<Vec<_>>()
-        })
-        .filter(|indices| !indices.is_empty())
-        .collect::<Vec<_>>();
-    let mut component_by_index = HashMap::new();
-    for (component_index, indices) in recursive_components.iter().enumerate() {
-        for index in indices {
-            component_by_index.insert(*index, component_index);
-        }
-    }
+    let schedule =
+        primary_inference_schedule_with_reference_graph(function_plan, items, references);
+    primary_inference_groups_for_schedule(function_plan, references, schedule)
+}
 
-    let mut emitted_components = HashSet::new();
+/// Group one explicit schedule: every full-reference component is emitted
+/// whole in source order. Function recursive-instantiation membership stays a
+/// separate projection and is never inferred from a mixed component's cycle.
+pub(super) fn primary_inference_groups_for_schedule(
+    function_plan: &FunctionInferencePlan,
+    references: &TopLevelReferenceGraph,
+    schedule: Vec<usize>,
+) -> Vec<PrimaryInferenceGroup> {
+    let reference_components = references.inference_components();
+    if !reference_components.complete {
+        return Vec::new();
+    }
+    let recursive_function_indices = function_plan
+        .components
+        .iter()
+        .filter(|component| component.recursive)
+        .flat_map(|component| component.members.iter().map(|member| member.item_index))
+        .collect::<UnordSet<_>>();
+
+    let mut emitted_components = UnordSet::new();
     let mut groups = Vec::new();
     for index in schedule {
-        let Some(component_index) = component_by_index.get(&index).copied() else {
+        let Some(component_index) = reference_components.component_by_item[index] else {
             groups.push(PrimaryInferenceGroup {
                 indices: vec![index],
-                recursive: false,
+                cyclic: false,
+                recursive_function_indices: Vec::new(),
             });
             continue;
         };
         if emitted_components.insert(component_index) {
+            let component = &reference_components.components[component_index];
             groups.push(PrimaryInferenceGroup {
-                indices: recursive_components[component_index].clone(),
-                recursive: true,
+                indices: component.members.clone(),
+                cyclic: component.cyclic,
+                recursive_function_indices: component
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|index| recursive_function_indices.contains(index))
+                    .collect(),
             });
         }
     }
     groups
 }
 
-/// Install monomorphic arity-shaped types for the un-signed members of one
-/// recursive SCC. The component is removed and generalized as a unit after
-/// every body has unified with its provisional type.
-pub(super) fn prebind_recursive_function_schemes(
+/// Install monomorphic types for the un-signed members of one cyclic
+/// full-reference component. Functions receive arity-shaped function types;
+/// eager values receive one fresh type variable. The component is removed and
+/// generalized as a unit after every body has unified with its provisional.
+pub(super) fn prebind_cyclic_component_schemes(
     indices: &[usize],
     items: &[(Option<String>, &deep::Expr)],
-    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
-    metadata_prebound_names: &HashSet<String>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    metadata_prebound_names: &UnordSet<String>,
     env: &mut Env,
     vg: &mut VarGen,
-) -> HashMap<usize, Type> {
-    let mut provisional = HashMap::new();
+) -> UnordMap<usize, Type> {
+    let mut provisional = UnordMap::new();
     for index in indices {
         let expr = items[*index].1;
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        let (Some(name), Some(fn_kids)) = (
-            kids.first().and_then(symbol_name),
-            kids.get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn)),
-        ) else {
+        let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };
         if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
             continue;
         }
-        let Some(params) = fn_kids.first() else {
-            continue;
-        };
-        let arity = match params {
-            deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.child_count(),
-            deep::Expr::List(params, _) if get_tag(params) == Some(DeepTag::Params) => {
-                children(params).len()
+        let ty = match tagged_children(body, DeepTag::Fn) {
+            Some(fn_kids) => {
+                let Some(params) = fn_kids.first() else {
+                    continue;
+                };
+                let arity = match params {
+                    deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => {
+                        node.child_count()
+                    }
+                    deep::Expr::List(params, _) if get_tag(params) == Some(DeepTag::Params) => {
+                        children(params).len()
+                    }
+                    deep::Expr::BareList(elements, _) => elements.len(),
+                    _ => continue,
+                };
+                Type::Fn(
+                    (0..arity).map(|_| vg.fresh_type()).collect(),
+                    Box::new(vg.fresh_type()),
+                )
             }
-            deep::Expr::BareList(elements, _) => elements.len(),
-            _ => continue,
+            None => vg.fresh_type(),
         };
-        let ty = Type::Fn(
-            (0..arity).map(|_| vg.fresh_type()).collect(),
-            Box::new(vg.fresh_type()),
-        );
         env.bind(name.to_string(), Scheme::mono(ty.clone()));
         provisional.insert(*index, ty);
     }
     provisional
 }
 
-pub(super) type IrTypeEnv = HashMap<String, deep::Expr>;
+pub(super) type IrTypeEnv = BTreeMap<String, deep::Expr>;
 
 /// Canonical IR type collection result. The type environment retains the
 /// historical last-declaration-wins behavior for duplicate names; the paired
@@ -1365,7 +2021,69 @@ pub(super) type IrTypeEnv = HashMap<String, deep::Expr>;
 /// final entry.
 pub(super) struct CollectedIrTypes {
     type_env: IrTypeEnv,
-    final_origin_by_name: HashMap<String, usize>,
+    final_origin_by_name: UnordMap<String, usize>,
+}
+
+fn collect_literal_external_input_types(
+    items: &[(Option<String>, &deep::Expr)],
+) -> UnordMap<usize, deep::Expr> {
+    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    collected
+        .type_env
+        .iter()
+        .filter_map(|(name, ty_expr)| {
+            let declaration_index = collected.final_origin_by_name[name];
+            let expr = items[declaration_index].1;
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            let body = kids.get(1)?;
+            body_is_type_stamped_literal_self_ref(body, name)
+                .then(|| (declaration_index, ty_expr.clone()))
+        })
+        .collect()
+}
+
+/// [04-INF-4]'s typed literal self-reference declares an external input. Its
+/// own type must therefore be visible while that declaration is inferred,
+/// but never to an earlier declaration. Bind exactly the current ordinal just
+/// before its body check; ordinary values and future external inputs remain
+/// source-ordered at both checker ingresses.
+#[allow(clippy::too_many_arguments)]
+fn prebind_literal_external_input_for_declaration(
+    declaration_index: usize,
+    expr: &deep::Expr,
+    external_input_types: &UnordMap<usize, deep::Expr>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<ErrorWitness> {
+    let ty_expr = external_input_types.get(&declaration_index)?;
+    let name = top_level_decl_name(expr)?;
+    if declared_signatures.contains_key(name) {
+        return None;
+    }
+    let metadata_level = subst.enter_level(vg);
+    let resolved = resolve_deep_type(
+        ty_expr,
+        vg,
+        adt_reg,
+        TypeUseSite::CompilerMetadata,
+        BinderMode::TrustedCompilerMetadata,
+        errors,
+    );
+    subst.leave_level(metadata_level, vg);
+    match resolved {
+        Ok(ty) => {
+            let scheme = env.generalize(&ty, subst);
+            env.bind(name.to_string(), scheme);
+            None
+        }
+        Err(witness) => Some(witness),
+    }
 }
 
 pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
@@ -1375,8 +2093,8 @@ pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
 pub(super) fn collect_ir_types_with_origins<'a>(
     items: impl IntoIterator<Item = &'a deep::Expr>,
 ) -> CollectedIrTypes {
-    let mut type_env = HashMap::new();
-    let mut final_origin_by_name = HashMap::new();
+    let mut type_env = BTreeMap::new();
+    let mut final_origin_by_name = UnordMap::new();
     for (declaration_index, expr) in items.into_iter().enumerate() {
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -1593,4 +2311,230 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
         "one normalization root produces exactly one expression"
     );
     values.pop().expect("normalization produced its root")
+}
+
+#[cfg(test)]
+mod component_level_scope_tests {
+    use super::*;
+
+    fn mutual_defs() -> Vec<deep::Expr> {
+        chelis_deep::parser::parse_str(
+            "(def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
+             (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+        )
+        .expect("mutual fixture parses")
+    }
+
+    #[test]
+    fn component_scope_mints_provisionals_and_restores_visibility_on_completion() {
+        let exprs = mutual_defs();
+        let items = top_level_decl_items_with_modules(&exprs);
+        let indices = vec![0, 1];
+        let mut env = Env::new();
+        env.bind("left".to_string(), Scheme::mono(Type::Prim(Prim::Int32)));
+        env.bind(
+            "precedence".to_string(),
+            Scheme::mono(Type::Prim(Prim::Int64)),
+        );
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+
+        env.note_top_level_value_ordinal("right".to_string(), 1, None);
+        env.note_top_level_value_ordinal("outside".to_string(), 2, None);
+        env.note_top_level_value_ordinal("precedence".to_string(), 3, None);
+        env.set_current_declaration_ordinal(Some(0));
+        let _empty_component =
+            env.replace_active_top_level_component(["outside".to_string()].into_iter().collect());
+        let scope = ComponentLevelScope::enter(
+            &indices,
+            &items,
+            &["precedence".to_string()],
+            &mut env,
+            &var_gen,
+            &mut subst,
+        );
+        assert!(matches!(
+            env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::Visible
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
+            TopLevelValueVisibility::Visible
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("outside"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        let provisional = prebind_cyclic_component_schemes(
+            &indices,
+            &items,
+            &UnordMap::new(),
+            &UnordSet::new(),
+            &mut env,
+            &mut var_gen,
+        );
+        for (_, ty) in provisional.to_sorted() {
+            for var in crate::env::free_tvars(ty) {
+                assert_eq!(subst.level_of_tvar(var), 1);
+            }
+        }
+        scope.complete(&mut env, &var_gen, &mut subst);
+
+        assert_eq!(subst.current_level(), 0);
+        assert!(env.lookup("left").is_none());
+        assert!(env.lookup("right").is_none());
+        assert_eq!(
+            env.lookup("precedence").map(|scheme| &scheme.body),
+            Some(&Type::Prim(Prim::Int64)),
+            "an already-inferred precedence target is visibility-only"
+        );
+        assert!(matches!(
+            env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("outside"),
+            TopLevelValueVisibility::Visible
+        ));
+        assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
+    }
+
+    #[test]
+    fn component_scope_abort_restores_bindings_levels_pins_and_visibility() {
+        let exprs = mutual_defs();
+        let items = top_level_decl_items_with_modules(&exprs);
+        let indices = vec![0, 1];
+        let mut env = Env::new();
+        let prior = Scheme::mono(Type::Prim(Prim::Bool));
+        env.bind("left".to_string(), prior.clone());
+        env.bind(
+            "precedence".to_string(),
+            Scheme::mono(Type::Prim(Prim::Int64)),
+        );
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        env.note_top_level_value_ordinal("right".to_string(), 1, None);
+        env.note_top_level_value_ordinal("outside".to_string(), 2, None);
+        env.note_top_level_value_ordinal("precedence".to_string(), 3, None);
+        env.set_current_declaration_ordinal(Some(0));
+        let _empty_component =
+            env.replace_active_top_level_component(["outside".to_string()].into_iter().collect());
+        let scope = ComponentLevelScope::enter(
+            &indices,
+            &items,
+            &["precedence".to_string()],
+            &mut env,
+            &var_gen,
+            &mut subst,
+        );
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
+            TopLevelValueVisibility::Visible
+        ));
+        prebind_cyclic_component_schemes(
+            &indices,
+            &items,
+            &UnordMap::new(),
+            &UnordSet::new(),
+            &mut env,
+            &mut var_gen,
+        );
+        super::super::recursion::begin_group(
+            ["left", "right"].into_iter().map(|name| (name, false)),
+            &env,
+        );
+        let pinned = var_gen.fresh_tvar();
+        let _caller = super::super::recursion::begin_caller("left", None, &[]);
+        super::super::recursion::record_occurrence(
+            "right",
+            &[(pinned, Type::Var(pinned))],
+            None,
+            None,
+        );
+        assert_eq!(super::super::recursion::group_state_counts(), (2, 1));
+
+        scope.abort(&mut env, &var_gen, &mut subst);
+        assert_eq!(subst.current_level(), 0);
+        assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
+        assert!(!super::super::recursion::tvar_pinned(pinned));
+        let restored = env.lookup("left").expect("shadowed prior binding restored");
+        assert_eq!(restored.tvars, prior.tvars);
+        assert_eq!(restored.tvar_restrictions, prior.tvar_restrictions);
+        assert_eq!(restored.dvars, prior.dvars);
+        assert_eq!(restored.rvars, prior.rvars);
+        assert_eq!(restored.body, prior.body);
+        assert!(env.lookup("right").is_none());
+        assert_eq!(
+            env.lookup("precedence").map(|scheme| &scheme.body),
+            Some(&Type::Prim(Prim::Int64)),
+            "abort must not roll back an already-inferred precedence target"
+        );
+        assert!(matches!(
+            env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("outside"),
+            TopLevelValueVisibility::Visible
+        ));
+
+        let follow_up = infer_program(
+            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
+                .expect("follow-up parses"),
+        );
+        assert!(follow_up.errors.is_empty());
+    }
+
+    #[test]
+    fn primary_driver_mid_scc_cancellation_aborts_before_return() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(defsig {} left (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+             (defsig {} right (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+             (def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
+             (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+        )
+        .expect("authored mutual-recursion fixture parses");
+
+        let observation = {
+            let token = crate::cancel::CancelToken::new();
+            let _cancel_guard = crate::cancel::install_cancel_token(token);
+            let _hook_guard = cancel_primary_recursive_after_members(1);
+            let result = infer_program(&exprs);
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| crate::cancel::is_cancellation(&error.message)),
+                "mid-SCC cancellation must be a hard checker error: {:?}",
+                result.errors
+            );
+            take_recursive_abort_observation()
+                .expect("the primary driver must abort the incomplete recursive scope")
+        };
+
+        assert_eq!(observation.current_level, 0);
+        assert_eq!(observation.group_state_counts, (0, 0));
+        assert_eq!(observation.member_count, 2);
+        assert_eq!(observation.prior_binding_count, 2);
+        assert!(observation.all_prior_bindings_restored);
+        assert!(observation.all_temporary_bindings_removed);
+
+        let follow_up = infer_program(
+            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
+                .expect("follow-up parses"),
+        );
+        assert!(
+            follow_up.errors.is_empty(),
+            "a cancelled recursive check must not contaminate its successor: {:?}",
+            follow_up.errors
+        );
+    }
 }

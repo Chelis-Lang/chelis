@@ -7,14 +7,15 @@
 //! code.
 
 use chelis_deep::ast::{Atom, Expr as DeepExpr, MetaMap};
-use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of};
+use chelis_deep::{DeepTag, DtypeFamily, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
+use chelis_unord::UnordMap;
 use chelis_vocab::{EffectKind, EffectKindInput};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::ast::{
     BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
-    Pattern, PropertyOption, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
+    Pattern, PropertyOption, TypeBinder, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
 };
 
 /// Failure to structurally resugar a Deep expression.
@@ -66,6 +67,11 @@ pub enum ResugarError {
     NonFiniteFloat,
 
     #[error(
+        "[04-INF-6] Deep literal type variable `{binder}` is not the operand of an exact cast to the same declared dtype-family binder"
+    )]
+    InvalidBinderLiteralAdoption { binder: String },
+
+    #[error(
         "Deep property `{name}` carries `{key}` = {value:?}, which canonical Surf cannot represent without changing property provenance"
     )]
     UnrepresentablePropertyProvenance {
@@ -90,6 +96,7 @@ struct NodeRef<'a> {
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
+    validate_binder_literal_adoption(expr, &[], &[])?;
     resugar_expression_inner(expr)
 }
 
@@ -827,8 +834,13 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                     index += 2;
                     continue;
                 }
+                // Only bounded binders are reconstructed: an unbounded name
+                // in a sig is implicitly quantified (§P4b), so listing it
+                // would add a binder list the author never wrote.
+                let type_binders = resugar_dtype_bound_binders(node.meta, &[])?;
                 declarations.push(Decl::Sig {
                     name,
+                    type_binders,
                     ty: resugar_type(&node.children[1])?,
                     effects: resugar_effect_metadata(&node.children[1])?,
                     span: node.span,
@@ -959,6 +971,21 @@ fn resugar_definition(
     }
     let declared_type = outer_type.or(function_type);
 
+    // Validate binder-literal provenance before context-free resugaring can
+    // erase the parent relation that makes it representable in Surf.
+    let bound_source = signature.map_or(definition.meta, |signature| signature.meta);
+    let dtype_bounds = decode_resugar_dtype_bounds(bound_source)?;
+    let mut declared_binders = Vec::new();
+    if let Some(declared_type) = declared_type {
+        collect_quantified_variables(declared_type, &mut declared_binders)?;
+    }
+    for (binder, _) in &dtype_bounds {
+        if !declared_binders.contains(binder) {
+            declared_binders.push(binder.clone());
+        }
+    }
+    validate_binder_literal_adoption(&definition.children[1], &declared_binders, &dtype_bounds)?;
+
     if meta_string(definition.meta, "chelis_role") == Some("property") {
         return resugar_property(declared_type, definition, name);
     }
@@ -970,7 +997,7 @@ fn resugar_definition(
         let raw_params = node_ref(&function.children[0])?;
         let mut ret_ty = None;
         let mut effects = None;
-        let mut dim_params = Vec::new();
+        let mut quantifiers = Vec::new();
         if let Some(declared_type) = declared_type {
             let type_node = node_ref(declared_type)?;
             if type_node.tag != DeepTag::TFn || type_node.children.is_empty() {
@@ -1008,11 +1035,15 @@ fn resugar_definition(
             let result = resugar_type(type_node.children.last().expect("nonempty checked"))?;
             ret_ty = (!is_infer_type(&result)).then_some(result);
             effects = resugar_effect_metadata(declared_type)?;
-            collect_quantified_variables(declared_type, &mut dim_params)?;
+            collect_quantified_variables(declared_type, &mut quantifiers)?;
         }
+        // A def's bound rides on its `defsig`; the `def` node carries one only
+        // when a standalone `sig` already owns the binders, which the checker
+        // rejects (`spec/03-deep-syntax.md` §2.2).
+        let type_binders = resugar_dtype_bound_binders(bound_source, &quantifiers)?;
         return Ok(Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -1652,15 +1683,15 @@ fn validate_surface_declarations(declarations: &[Decl]) -> Result<(), ResugarErr
             }
             Decl::FunDef {
                 name,
-                dim_params,
+                type_binders,
                 params,
                 ret_ty,
                 body,
                 ..
             } => {
                 require_name(name, "function", is_lower_identifier)?;
-                for param in dim_params {
-                    require_name(param, "function-quantifier", is_value_identifier)?;
+                for binder in type_binders {
+                    require_name(&binder.name, "function-quantifier", is_value_identifier)?;
                 }
                 validate_surface_params(params)?;
                 if let Some(ty) = ret_ty {
@@ -1889,6 +1920,7 @@ fn validate_surface_type(ty: &TypeExpr) -> Result<(), ResugarError> {
             let valid = name != "_" && (is_lower_identifier(name) || is_qualified_type_name(name));
             require_name(name, "type", |_| valid)?;
         }
+        TypeExpr::DimensionLiteral(_, _) => {}
         TypeExpr::Tensor(dimensions, precision, _) => {
             for dimension in dimensions {
                 validate_surface_dimension(dimension)?;
@@ -1905,7 +1937,10 @@ fn validate_surface_type(ty: &TypeExpr) -> Result<(), ResugarError> {
         TypeExpr::App(name, arguments, _) => {
             require_name(name, "type-constructor", is_qualified_type_name)?;
             for argument in arguments {
-                validate_surface_type(argument)?;
+                match argument {
+                    TypeExpr::DimensionLiteral(_, _) => {}
+                    _ => validate_surface_type(argument)?,
+                }
             }
         }
         TypeExpr::Tuple(types, _) => {
@@ -1924,6 +1959,7 @@ fn validate_surface_type(ty: &TypeExpr) -> Result<(), ResugarError> {
 fn validate_surface_dimension(dimension: &TypeExpr) -> Result<(), ResugarError> {
     match dimension {
         TypeExpr::Named(name, _) if name == "*" => Ok(()),
+        TypeExpr::DimensionLiteral(_, _) => Ok(()),
         TypeExpr::Named(name, _)
             if !name.is_empty()
                 && name.bytes().all(|byte| byte.is_ascii_digit())
@@ -2113,14 +2149,18 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 2,
                 expected: "the optional cast mode selector `trunc`",
             })?;
-            let precision =
-                primitive_type_name(&node.children[1]).ok_or(ResugarError::InvalidChild {
-                    tag: node.tag.as_str(),
-                    index: 1,
-                    expected: "a `(t-prim {} precision)` node",
-                })?;
+            // A target is a primitive `t-prim` or declared-binder `t-var`.
+            let target = cast_target_name(&node.children[1]).ok_or(ResugarError::InvalidChild {
+                tag: node.tag.as_str(),
+                index: 1,
+                expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
+            })?;
+            // Binder adoption re-applies on re-desugaring; only concrete
+            // targets can require an explicit default suffix.
+            let precision_target = primitive_type_name(&node.children[1]);
             let operand = if let Ok(literal) = node_ref(&node.children[0])
                 && literal.tag == DeepTag::Lit
+                && let Some(precision) = precision_target
                 && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
             {
                 resugar_literal_with_default_suffix(literal)?
@@ -2129,7 +2169,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             };
             Ok(Expr::Cast(
                 Box::new(operand),
-                precision.to_string(),
+                target.to_string(),
                 mode,
                 node.span,
             ))
@@ -2534,6 +2574,12 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
             }),
         (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TPrim) => primitive_type_name(ty)
             .is_some_and(|name| !integer_source && matches!(name, "f16" | "bf16" | "f32" | "f64")),
+        // Binder-typed literals are validated against their adopting cast and
+        // declared family by `validate_binder_literal_adoption`.
+        (DeepExpr::Atom(Atom::Int(_), _), DeepTag::TVar)
+        | (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TVar) => {
+            !integer_source && cast_target_name(ty).is_some()
+        }
         (DeepExpr::BareList(items, _), DeepTag::TUnit) => !integer_source && items.is_empty(),
         (DeepExpr::List(list, _), DeepTag::TUnit) => !integer_source && list.elements.is_empty(),
         _ => false,
@@ -2646,7 +2692,7 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         });
     }
     let mut bindings = Vec::with_capacity(binding_node.children.len() / 2);
-    for pair in binding_node.children.chunks_exact(2) {
+    for pair in binding_node.children.as_chunks::<2>().0 {
         let value_node = node_ref(&pair[1])?;
         let binding_style = match meta_value(value_node.meta, "surf_binding_type") {
             None => None,
@@ -2705,8 +2751,8 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
     }
     exact(&root_bind, 2)?;
     let root_name = name_child(&root_bind, 0)?.to_string();
-    let mut temp_paths = HashMap::from([(root_name, Vec::<usize>::new())]);
-    let mut pattern_nodes = HashMap::<Vec<usize>, Option<String>>::from([(Vec::new(), None)]);
+    let mut temp_paths = UnordMap::from([(root_name, Vec::<usize>::new())]);
+    let mut pattern_nodes = BTreeMap::<Vec<usize>, Option<String>>::from([(Vec::new(), None)]);
     let mut current = &node.children[1];
 
     while let Ok(let_node) = node_ref(current) {
@@ -2780,7 +2826,7 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
 
 fn build_destructuring_pattern(
     path: &[usize],
-    nodes: &HashMap<Vec<usize>, Option<String>>,
+    nodes: &BTreeMap<Vec<usize>, Option<String>>,
     span: Span,
 ) -> Result<LetPattern, ResugarError> {
     let name = nodes.get(path).ok_or(ResugarError::InvalidChild {
@@ -3115,6 +3161,9 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
             expected: "a one-parameter call-first stage",
         });
     };
+    if let Some(stage) = resugar_call_first_stage_application(&node.children[1], &param.name)? {
+        return Ok(stage);
+    }
     let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
     match *body {
         Expr::Apply(function, mut arguments, apply_span)
@@ -3145,6 +3194,163 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
             expected: "a call-first stage body using its parameter as the first argument",
         }),
     }
+}
+
+/// Rebuild the `|> f(args)` stage sugar from the Deep application a
+/// call-first stage was desugared from, holding the operator and
+/// finite-list sugars back at that one position.
+///
+/// Those sugars rewrite an `app` into `Binary`, `Unary`, or `List`, and
+/// none of the three can carry the stage sugar, so a stage calling an
+/// operator-named primitive or `Cons` would otherwise fail closed on Deep
+/// the desugarer itself emits (chelis#1197). Operands are resugared
+/// normally and keep their operator spelling.
+///
+/// `None` means the application cannot carry the stage sugar, which leaves
+/// the ordinary body resugaring to decide the shape and, for an operator or
+/// finite-list body, to fail closed. Two conditions have to hold.
+///
+/// The stage parameter must lead an application that still has a further
+/// argument. Stripping it from a lone-argument application would produce
+/// `f()`, which desugars back to a bare zero-argument call rather than to
+/// this stage.
+///
+/// No free occurrence of the stage parameter may remain in the application.
+/// The sugar drops the binder along with the leading occurrence, so a
+/// surviving reference would be captured by whatever `param` names in the
+/// enclosing scope: `fn (p) -> add(p, p)` applied to `3.0` would print as
+/// `3.0 |> add(p)`, which is a different program wherever an outer `p`
+/// exists.
+///
+/// `deep_mentions_free_name` reads the Deep children rather than their
+/// resugared forms, because resugaring is exactly what can hide the
+/// occurrence it looks for. The operator and finite-list sugars erase the
+/// callee name, so a parameter named `mul` reused as the callee of
+/// `(app {} (var {} mul) a b)` in an operand survives a Surf-side test: that
+/// operand comes back as `(a * b)`, mentioning no `mul` at all, and the
+/// stage prints as `x |> add((a * b))` with the second occurrence silently
+/// rebound to the builtin.
+fn resugar_call_first_stage_application(
+    body: &DeepExpr,
+    param: &str,
+) -> Result<Option<Expr>, ResugarError> {
+    let Ok(application) = node_ref(body) else {
+        return Ok(None);
+    };
+    if application.tag != DeepTag::App || application.children.len() < 3 {
+        return Ok(None);
+    }
+    let Expr::Var(carried, _) = resugar_expression_inner(&application.children[1])? else {
+        return Ok(None);
+    };
+    if carried != param {
+        return Ok(None);
+    }
+    if deep_mentions_free_name(&application.children[0], param)
+        || application.children[2..]
+            .iter()
+            .any(|argument| deep_mentions_free_name(argument, param))
+    {
+        return Ok(None);
+    }
+    let function = resugar_expression_inner(&application.children[0])?;
+    let arguments = application.children[2..]
+        .iter()
+        .map(resugar_expression_inner)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(Expr::Apply(
+        Box::new(function),
+        arguments,
+        application.span,
+    )))
+}
+
+/// Report whether `name` occurs free anywhere in `expr` as a Deep name atom.
+///
+/// `resugar_call_first_stage_application` is asking whether deleting a binder
+/// would strand a reference to it, so the answer leans pessimistic: every
+/// name position counts, patterns and names carried in metadata included, and
+/// a false positive only costs a stage its sugar while a false negative
+/// prints a program that means something else.
+///
+/// `fn` is the one binder the walk models, because it is the one the
+/// desugarer can put in the way. Nested pipe stages each mint a parameter
+/// through `fresh_pipe_param_name`, which only avoids the names visible in
+/// the Surf stage handed to it, so an inner stage desugared separately
+/// reuses the same `__chelis_pipe` spelling. Those inner occurrences are
+/// bound by the inner `fn` and are not the outer stage's to strand. A binder
+/// this does not model, or a `params` child it cannot read, leaves the walk
+/// searching rather than assuming a binding it never confirmed.
+fn deep_mentions_free_name(expr: &DeepExpr, name: &str) -> bool {
+    if let Ok(node) = node_ref(expr)
+        && node.tag == DeepTag::Fn
+        && node.children.len() == 2
+        && params_bind_name(&node.children[0], name)
+    {
+        return meta_mentions_free_name(&node.meta.entries, name);
+    }
+    match expr {
+        DeepExpr::Atom(Atom::Name(found), _) => found == name,
+        DeepExpr::Atom(..) => false,
+        DeepExpr::Node(node, _) => {
+            meta_mentions_free_name(&node.meta().entries, name)
+                || node
+                    .children_slice()
+                    .iter()
+                    .any(|child| deep_mentions_free_name(child, name))
+        }
+        DeepExpr::List(list, _) => list
+            .elements
+            .iter()
+            .any(|element| deep_mentions_free_name(element, name)),
+        DeepExpr::Map(meta, _) => meta_mentions_free_name(&meta.entries, name),
+        DeepExpr::MetaExpr(meta, _) => {
+            meta_mentions_free_name(&meta.entries, name)
+                || deep_mentions_free_name(&meta.expr, name)
+        }
+        DeepExpr::BareList(items, _) => {
+            items.iter().any(|item| deep_mentions_free_name(item, name))
+        }
+        DeepExpr::UnknownForm(data) => {
+            meta_mentions_free_name(&data.meta.entries, name)
+                || data
+                    .children
+                    .iter()
+                    .any(|child| deep_mentions_free_name(child, name))
+        }
+    }
+}
+
+/// Report whether `name` occurs free in any metadata value.
+///
+/// Keys are drawn from a closed vocabulary rather than from the program, so
+/// a key that happens to spell the parameter is not an occurrence of it.
+fn meta_mentions_free_name(entries: &[(String, DeepExpr)], name: &str) -> bool {
+    entries
+        .iter()
+        .any(|(_, value)| deep_mentions_free_name(value, name))
+}
+
+/// Report whether a Deep `params` child binds `name`.
+///
+/// A parameter is either a bare name atom or a `MetaExpr` carrying the name
+/// alongside its type, matching what `resugar_param` accepts. Anything else
+/// is not a binding this can vouch for, so it reports `false` and the walk
+/// keeps searching.
+fn params_bind_name(params: &DeepExpr, name: &str) -> bool {
+    let Ok(params) = node_ref(params) else {
+        return false;
+    };
+    if params.tag != DeepTag::Params {
+        return false;
+    }
+    params.children.iter().any(|child| {
+        let bound = match child {
+            DeepExpr::MetaExpr(meta, _) => atom_name(&meta.expr),
+            other => atom_name(other),
+        };
+        bound == Some(name)
+    })
 }
 
 fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
@@ -3259,6 +3465,9 @@ fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, Resu
         "eq" => BinOp::Eq,
         "neq" => BinOp::Ne,
         "cmplt" => BinOp::Lt,
+        // `>` desugars to `gt` with authored operand order (chelis#1180);
+        // hand-written `cmplt(b, a)` keeps resugaring faithfully as `b < a`.
+        "gt" => BinOp::Gt,
         "lte" => BinOp::Le,
         "gte" => BinOp::Ge,
         "and" => BinOp::And,
@@ -3355,6 +3564,24 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             let name = name_child(&node, 0)?;
             if node.tag == DeepTag::TVar && name == "_" {
                 Ok(TypeExpr::Infer(node.span))
+            } else if node.tag == DeepTag::TVar && crate::desugar::is_reserved_dtype_name(name) {
+                // chelis#1593 round 1. Surf has no way to write "a type
+                // variable named `u8`": every spelling [04-DTYPE-1] rejects
+                // desugars to `t-prim`, whatever binder list surrounds it. So
+                // this node has no Surf representation, and printing `u8`
+                // anyway broke `spec/02-surf-syntax.md` §0.1's first law:
+                // `resugar` gave `def f[u8](x: u8) -> u8 = x`, which
+                // `desugar` maps to `t-prim`, not back to the `t-var` it
+                // started from. §0.1 says a well-formed public Deep node HAS a
+                // Surf representation, so a node with none is not well-formed
+                // public Deep and the decompiler fails closed on it, exactly as
+                // chelis#1031 requires for an invalid surface identifier.
+                // Failing closed removes the node from the law's domain rather
+                // than leaving the law false.
+                Err(ResugarError::InvalidSurfaceIdentifier {
+                    name: name.to_string(),
+                    role: "type variable",
+                })
             } else {
                 Ok(TypeExpr::Named(name.to_string(), node.span))
             }
@@ -3368,7 +3595,17 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             let name = name_child(&node, 0)?.to_string();
             let arguments = node.children[1..]
                 .iter()
-                .map(resugar_type)
+                .map(|argument| {
+                    let tag = node_ref(argument)?.tag;
+                    if matches!(
+                        tag,
+                        DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank
+                    ) {
+                        resugar_dimension(argument)
+                    } else {
+                        resugar_type(argument)
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             if arguments.is_empty() {
                 Ok(TypeExpr::Named(name, node.span))
@@ -3391,6 +3628,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
         DeepTag::TTensor => {
             at_least(&node, 1)?;
             let (precision, dimensions) = node.children.split_last().expect("nonempty checked");
+            reject_reserved_type_variable(precision)?;
             let precision = type_name(precision).ok_or(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
                 index: node.children.len() - 1,
@@ -3437,9 +3675,10 @@ fn resugar_dimension(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             node.span,
         )),
         DeepTag::DLit => match &node.children[0] {
-            DeepExpr::Atom(Atom::Int(value), _) => {
-                Ok(TypeExpr::Named(value.to_string(), node.span))
-            }
+            DeepExpr::Atom(Atom::Int(value), _) => Ok(TypeExpr::DimensionLiteral(
+                crate::ast::DimensionLiteral::new(*value),
+                node.span,
+            )),
             _ => Err(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
                 index: 0,
@@ -3458,6 +3697,41 @@ fn resugar_dimension(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
     }
 }
 
+/// `(t-var {} <name>)` whose name is a dtype spelling `[04-DTYPE-1]` rejects has
+/// no Surf representation, so the decompiler fails closed on it (chelis#1593).
+///
+/// Surf has no way to write "a type variable named `u8`": every rejected
+/// spelling desugars to `t-prim`, whatever binder list surrounds it. Printing
+/// `u8` anyway broke `spec/02-surf-syntax.md` §0.1's first law, because
+/// `resugar` gave `def f[u8](x: u8) -> u8 = x` and `desugar` maps that to
+/// `t-prim`, not back to the `t-var` it started from. §0.1 says a well-formed
+/// public Deep node HAS a Surf representation, so a node with none is not
+/// well-formed public Deep. Failing closed takes it out of the law's domain
+/// instead of leaving the law false, and matches chelis#1031's contract for an
+/// invalid surface identifier.
+///
+/// Both call sites are needed: `resugar_type` handles a scalar type position,
+/// and the `t-tensor` arm reads its precision child through `type_name` without
+/// going back through `resugar_type`.
+fn reject_reserved_type_variable(expr: &DeepExpr) -> Result<(), ResugarError> {
+    let Ok(node) = node_ref(expr) else {
+        return Ok(());
+    };
+    if node.tag != DeepTag::TVar {
+        return Ok(());
+    }
+    let Ok(name) = name_child(&node, 0) else {
+        return Ok(());
+    };
+    if crate::desugar::is_reserved_dtype_name(name) {
+        return Err(ResugarError::InvalidSurfaceIdentifier {
+            name: name.to_string(),
+            role: "type variable",
+        });
+    }
+    Ok(())
+}
+
 fn type_name(expr: &DeepExpr) -> Option<&str> {
     let node = node_ref(expr).ok()?;
     matches!(node.tag, DeepTag::TPrim | DeepTag::TVar)
@@ -3467,6 +3741,78 @@ fn type_name(expr: &DeepExpr) -> Option<&str> {
 
 fn is_infer_type(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::Infer(_))
+}
+
+/// Rebuild binders in first-occurrence order without dropping unused bounds.
+fn resugar_dtype_bound_binders(
+    meta: &MetaMap,
+    quantifiers: &[String],
+) -> Result<Vec<TypeBinder>, ResugarError> {
+    let bounds = decode_resugar_dtype_bounds(meta)?;
+    let mut binders: Vec<TypeBinder> = quantifiers
+        .iter()
+        .map(|name| TypeBinder {
+            name: name.clone(),
+            bound: bounds
+                .iter()
+                .find(|(binder, _)| binder == name)
+                .map(|(_, family)| *family),
+        })
+        .collect();
+    for (binder, family) in bounds {
+        if !binders.iter().any(|existing| existing.name == binder) {
+            binders.push(TypeBinder::bounded(binder, family));
+        }
+    }
+    Ok(binders)
+}
+
+fn decode_resugar_dtype_bounds(meta: &MetaMap) -> Result<Vec<(String, DtypeFamily)>, ResugarError> {
+    decode_dtype_bounds(meta).map_err(|_| ResugarError::InvalidChild {
+        tag: "defsig",
+        index: 1,
+        expected: "a well-formed `dtype_bounds` metadata map",
+    })
+}
+
+/// Reject a Deep tree that would lose type-binder provenance when printed as
+/// Surf. The only producer of a literal whose `type` is `(t-var {} p)` is the
+/// direct operand of `cast(literal, p)` under a dtype-family-bounded `p`.
+fn validate_binder_literal_adoption(
+    expr: &DeepExpr,
+    declared_binders: &[String],
+    dtype_bounds: &[(String, DtypeFamily)],
+) -> Result<(), ResugarError> {
+    let mut invalid = None;
+    chelis_deep::visit_binder_literal_uses(expr, &mut |usage| {
+        use chelis_deep::BinderLiteralUse;
+        let binder = match usage {
+            BinderLiteralUse::CastTarget { binder, .. }
+                if !declared_binders.iter().any(|name| name == binder) =>
+            {
+                binder
+            }
+            BinderLiteralUse::Literal {
+                binder,
+                source,
+                adopting_binder,
+            } if adopting_binder != Some(binder)
+                || !source.is_some_and(|source| {
+                    dtype_bounds
+                        .iter()
+                        .find_map(|(name, family)| (name == binder).then_some(*family))
+                        .is_some_and(|family| source.admitted_by(family))
+                }) =>
+            {
+                binder
+            }
+            _ => return,
+        };
+        invalid.get_or_insert_with(|| ResugarError::InvalidBinderLiteralAdoption {
+            binder: binder.to_string(),
+        });
+    });
+    invalid.map_or(Ok(()), Err)
 }
 
 fn collect_quantified_variables(
@@ -3552,6 +3898,10 @@ fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError>
     if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TUnit) {
         return Ok(None);
     }
+    // Binder-typed literals print bare; binder adoption restores their type.
+    if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TVar) {
+        return Ok(None);
+    }
     let Some(name) = primitive_type_name(value) else {
         return Err(ResugarError::InvalidChild {
             tag: DeepTag::Lit.as_str(),
@@ -3578,6 +3928,11 @@ fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError>
         }
     };
     Ok(Some(suffix))
+}
+
+/// Name a primitive or declared-binder cast target; `_` is not printable.
+fn cast_target_name(expr: &DeepExpr) -> Option<&str> {
+    primitive_type_name(expr).or_else(|| chelis_deep::exact_type_variable_name(expr))
 }
 
 fn primitive_type_name(expr: &DeepExpr) -> Option<&str> {

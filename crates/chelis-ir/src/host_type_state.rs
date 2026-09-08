@@ -494,7 +494,21 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
     let name = symbol_name(name_expr).ok_or_else(|| malformed("t-adt name is not a symbol"))?;
     let args = args
         .iter()
-        .map(decode_host_type)
+        .map(|argument| {
+            let (tag, _, _) = stamped_parts(argument)?;
+            if matches!(
+                tag,
+                DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank
+            ) {
+                // Nominal dimensions constrain checking but have no host value
+                // representation. Preserve their nominal argument slot with
+                // the existing private layout witness so constructor arity
+                // remains aligned while the value itself is erased.
+                Ok(HostTypeTerm::Unit)
+            } else {
+                decode_host_type(argument)
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     match (name, args.as_slice()) {
         ("Option", [inner]) => Ok(HostTypeTerm::Option(Box::new(inner.clone()))),

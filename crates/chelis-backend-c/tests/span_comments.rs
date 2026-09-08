@@ -9,13 +9,16 @@
 //! grep alone is insufficient because malformed comment emission could pass
 //! the grep but break the C source.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
+
+mod common;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -104,8 +107,8 @@ fn runtime_lib_path() -> PathBuf {
 /// Compile generated C source standalone (no harness). Returns Ok(()) on
 /// successful compile, Err(stderr) otherwise.
 fn compile_kernel_only(test_name: &str, c_source: &str) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("chelis_s4c_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("s4c_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
 
     let include_dir = runtime_include_dir();

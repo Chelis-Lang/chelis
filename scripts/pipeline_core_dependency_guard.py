@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CORE_PACKAGE = "chelis-pipeline-core"
 CORE_MANIFEST = REPO_ROOT / "crates" / CORE_PACKAGE / "Cargo.toml"
 APPROVED_DIRECT_DEPENDENCIES = frozenset(
-    {"chelis-deep", "chelis-types", "chelis-effects", "chelis-ir"}
+    {"chelis-deep", "chelis-types", "chelis-effects", "chelis-ir", "chelis-unord"}
 )
 APPROVED_WORKSPACE_CLOSURE = frozenset(
     {CORE_PACKAGE, *APPROVED_DIRECT_DEPENDENCIES, "chelis-pred", "chelis-vocab"}

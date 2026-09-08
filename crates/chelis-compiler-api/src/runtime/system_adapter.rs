@@ -9,8 +9,8 @@
 //!
 //! The adapter preserves the exact pre-boundary behavior (design D4):
 //! `Path::exists` semantics including its `false` result for an
-//! inaccessible-metadata path, `list_dir`'s unsorted `std::fs::read_dir`
-//! iteration order with abort-on-first-error, and `process_run`'s
+//! inaccessible-metadata path, `list_dir`'s abort-on-first-error with the
+//! [05-HOST-4] host-name-byte ordering, and `process_run`'s
 //! shell-free, direct-argv `Command` construction. Pure transformations
 //! (line splitting, output decoding, exit-code conversion, `RuntimeValue`
 //! construction) do not live here — they stay in `runtime/eval.rs` per D2.
@@ -70,7 +70,7 @@ impl EvalSystem for DefaultEvalSystem {
             path_or_program: path.display().to_string(),
             source,
         })?;
-        let mut out = Vec::new();
+        let mut names = Vec::new();
         for entry in entries {
             // Abort on the first directory-entry error (D4), sharing the
             // same `list_dir failed for ...` template as a directory-open
@@ -80,11 +80,19 @@ impl EvalSystem for DefaultEvalSystem {
                 path_or_program: path.display().to_string(),
                 source,
             })?;
-            // No sort: preserve `std::fs::read_dir`'s source iteration
-            // order (D4).
-            out.push(entry.file_name().to_string_lossy().into_owned());
+            names.push(entry.file_name());
         }
-        Ok(out)
+        // [05-HOST-4]: order by the host's own name bytes, before the lossy
+        // conversion below. `to_string_lossy` maps every invalid UTF-8
+        // sequence to U+FFFD, so two distinct names can collapse to one
+        // string; sorting after it would leave those tie-broken by directory
+        // order, which is the order the atom forbids. The adapter is the only
+        // module that reads the directory, so the ordering belongs here.
+        names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+        Ok(names
+            .into_iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect())
     }
 
     fn load_mapped_file_bytes(&mut self, path: &Path) -> Result<Vec<u8>, EvalSystemError> {

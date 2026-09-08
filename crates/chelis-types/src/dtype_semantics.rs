@@ -491,6 +491,20 @@ pub enum FloatBinOp {
     Min,
 }
 
+/// Extrema selector used by the direct forward and reverse typed kernels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatExtremaOp {
+    Max,
+    Min,
+}
+
+/// Operand whose cotangent an extrema adjoint materializes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtremaOperand {
+    Left,
+    Right,
+}
+
 impl FloatBinOp {
     pub const fn name(self) -> &'static str {
         match self {
@@ -904,6 +918,44 @@ pub fn int_unop(op: IntUnOp, value: ScalarValue) -> Result<ScalarValue, NumericK
     }
 }
 
+fn select_float_max_first<T: Copy + PartialOrd>(lhs: T, rhs: T, is_nan: impl Fn(T) -> bool) -> T {
+    if is_nan(lhs) {
+        lhs
+    } else if is_nan(rhs) || rhs > lhs {
+        rhs
+    } else {
+        lhs
+    }
+}
+
+fn select_float_min_first<T: Copy + PartialOrd>(lhs: T, rhs: T, is_nan: impl Fn(T) -> bool) -> T {
+    if is_nan(lhs) {
+        lhs
+    } else if is_nan(rhs) || rhs < lhs {
+        rhs
+    } else {
+        lhs
+    }
+}
+
+fn extrema_selects_left<T: Copy + PartialOrd>(
+    op: FloatExtremaOp,
+    lhs: T,
+    rhs: T,
+    is_nan: impl Fn(T) -> bool,
+) -> bool {
+    if is_nan(lhs) {
+        true
+    } else if is_nan(rhs) {
+        false
+    } else {
+        match op {
+            FloatExtremaOp::Max => rhs <= lhs,
+            FloatExtremaOp::Min => rhs >= lhs,
+        }
+    }
+}
+
 fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
     match op {
         FloatBinOp::Add => lhs + rhs,
@@ -911,8 +963,8 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
-        FloatBinOp::Max => lhs.max(rhs),
-        FloatBinOp::Min => lhs.min(rhs),
+        FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
+        FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
     }
 }
 
@@ -923,8 +975,8 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::Mul => lhs * rhs,
         FloatBinOp::Div => lhs / rhs,
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
-        FloatBinOp::Max => lhs.max(rhs),
-        FloatBinOp::Min => lhs.min(rhs),
+        FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
+        FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
     }
 }
 
@@ -938,18 +990,21 @@ pub fn float_binop(
     require_family(op.name(), lhs, NumericFamily::Float)?;
     require_family(op.name(), rhs, NumericFamily::Float)?;
     require_same_dtype(op.name(), lhs, rhs)?;
-    let bits =
-        match (lhs.bits, rhs.bits) {
-            (Bits::F64(lhs), Bits::F64(rhs)) => Bits::F64(apply_float_binop_f64(op, lhs, rhs)),
-            (Bits::F32(lhs), Bits::F32(rhs)) => Bits::F32(apply_float_binop_f32(op, lhs, rhs)),
-            (Bits::F16(lhs), Bits::F16(rhs)) => Bits::F16(half::f16::from_f32(
-                apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32()),
-            )),
-            (Bits::Bf16(lhs), Bits::Bf16(rhs)) => Bits::Bf16(half::bf16::from_f32(
-                apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32()),
-            )),
-            _ => unreachable!("family and dtype checks make the float match exhaustive"),
-        };
+    let bits = match (lhs.bits, rhs.bits) {
+        (Bits::F64(lhs), Bits::F64(rhs)) => Bits::F64(apply_float_binop_f64(op, lhs, rhs)),
+        (Bits::F32(lhs), Bits::F32(rhs)) => Bits::F32(apply_float_binop_f32(op, lhs, rhs)),
+        (Bits::F16(lhs), Bits::F16(rhs)) => Bits::F16(match op {
+            FloatBinOp::Max => select_float_max_first(lhs, rhs, half::f16::is_nan),
+            FloatBinOp::Min => select_float_min_first(lhs, rhs, half::f16::is_nan),
+            _ => half::f16::from_f32(apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32())),
+        }),
+        (Bits::Bf16(lhs), Bits::Bf16(rhs)) => Bits::Bf16(match op {
+            FloatBinOp::Max => select_float_max_first(lhs, rhs, half::bf16::is_nan),
+            FloatBinOp::Min => select_float_min_first(lhs, rhs, half::bf16::is_nan),
+            _ => half::bf16::from_f32(apply_float_binop_f32(op, lhs.to_f32(), rhs.to_f32())),
+        }),
+        _ => unreachable!("family and dtype checks make the float match exhaustive"),
+    };
     Ok(ScalarValue { bits })
 }
 
@@ -1738,7 +1793,7 @@ pub fn int_tensor_unop(
     }
 }
 
-fn float_vec_binop_f32<T: Copy>(
+fn float_vec_binop_f32<T: Copy + PartialOrd>(
     op: FloatBinOp,
     lhs: &[T],
     rhs: &[T],
@@ -1753,8 +1808,12 @@ fn float_vec_binop_f32<T: Copy>(
         FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
             from_f32((to_f32(lhs) / to_f32(rhs)).floor())
         }),
-        FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs).max(to_f32(rhs)))),
-        FloatBinOp::Min => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs).min(to_f32(rhs)))),
+        FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
+            select_float_max_first(lhs, rhs, |value| to_f32(value).is_nan())
+        }),
+        FloatBinOp::Min => zip_map(lhs, rhs, |lhs, rhs| {
+            select_float_min_first(lhs, rhs, |value| to_f32(value).is_nan())
+        }),
     }
 }
 
@@ -1765,8 +1824,12 @@ fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
         FloatBinOp::Mul => zip_map(lhs, rhs, |lhs, rhs| lhs * rhs),
         FloatBinOp::Div => zip_map(lhs, rhs, |lhs, rhs| lhs / rhs),
         FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| (lhs / rhs).floor()),
-        FloatBinOp::Max => zip_map(lhs, rhs, f64::max),
-        FloatBinOp::Min => zip_map(lhs, rhs, f64::min),
+        FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
+            select_float_max_first(lhs, rhs, f64::is_nan)
+        }),
+        FloatBinOp::Min => zip_map(lhs, rhs, |lhs, rhs| {
+            select_float_min_first(lhs, rhs, f64::is_nan)
+        }),
     }
 }
 
@@ -1812,6 +1875,149 @@ pub fn float_tensor_binop(
         _ => unreachable!("family and dtype checks make the float buffers exhaustive"),
     };
     Ok(TensorStorage { buf })
+}
+
+/// Materialize one operand cotangent for the exact [05-OP-40] extrema
+/// selection rule. Each output element is the complete incoming cotangent
+/// when that operand was selected, otherwise exact positive zero at the
+/// stored dtype. Selection reads the forward operands without re-encoding
+/// them, including NaN payloads and signed-zero ties.
+pub fn float_extrema_adjoint(
+    op: FloatExtremaOp,
+    operand: ExtremaOperand,
+    lhs: &TensorStorage,
+    rhs: &TensorStorage,
+    cotangent: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    const NAME: &str = "extrema_adjoint";
+    for value in [lhs, rhs, cotangent] {
+        if !value.prim().is_float() {
+            return Err(NumericKernelError::WrongFamily {
+                op: NAME,
+                expected: NumericFamily::Float,
+                actual: value.prim(),
+            });
+        }
+    }
+    require_same_storage_shape(NAME, lhs, rhs)?;
+    require_same_storage_shape(NAME, lhs, cotangent)?;
+
+    macro_rules! route {
+        ($lhs:expr, $rhs:expr, $g:expr, $variant:ident, $zero:expr, $is_nan:expr) => {{
+            let values = $lhs
+                .iter()
+                .copied()
+                .zip($rhs.iter().copied())
+                .zip($g.iter().copied())
+                .map(|((lhs, rhs), g)| {
+                    let left = extrema_selects_left(op, lhs, rhs, $is_nan);
+                    if (operand == ExtremaOperand::Left) == left {
+                        g
+                    } else {
+                        $zero
+                    }
+                })
+                .collect();
+            Ok(TensorStorage {
+                buf: Buf::$variant(values),
+            })
+        }};
+    }
+
+    match (&lhs.buf, &rhs.buf, &cotangent.buf) {
+        (Buf::F16(lhs), Buf::F16(rhs), Buf::F16(g)) => {
+            route!(lhs, rhs, g, F16, half::f16::ZERO, half::f16::is_nan)
+        }
+        (Buf::Bf16(lhs), Buf::Bf16(rhs), Buf::Bf16(g)) => {
+            route!(lhs, rhs, g, Bf16, half::bf16::ZERO, half::bf16::is_nan)
+        }
+        (Buf::F32(lhs), Buf::F32(rhs), Buf::F32(g)) => {
+            route!(lhs, rhs, g, F32, 0.0_f32, f32::is_nan)
+        }
+        (Buf::F64(lhs), Buf::F64(rhs), Buf::F64(g)) => {
+            route!(lhs, rhs, g, F64, 0.0_f64, f64::is_nan)
+        }
+        _ => unreachable!("same-dtype checks make float extrema adjoint exhaustive"),
+    }
+}
+
+/// Evaluate [05-OP-43] ReLU without re-encoding retained elements. Negative
+/// values become exact positive zero; positive values, both signed zeros, and
+/// NaNs retain their stored bits exactly.
+pub fn float_relu(input: &TensorStorage) -> Result<TensorStorage, NumericKernelError> {
+    const NAME: &str = "relu";
+    if !input.prim().is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: NAME,
+            expected: NumericFamily::Float,
+            actual: input.prim(),
+        });
+    }
+
+    macro_rules! apply {
+        ($values:expr, $variant:ident, $zero:expr) => {{
+            let values = $values
+                .iter()
+                .copied()
+                .map(|value| if value < $zero { $zero } else { value })
+                .collect();
+            Ok(TensorStorage {
+                buf: Buf::$variant(values),
+            })
+        }};
+    }
+
+    match &input.buf {
+        Buf::F16(values) => apply!(values, F16, half::f16::ZERO),
+        Buf::Bf16(values) => apply!(values, Bf16, half::bf16::ZERO),
+        Buf::F32(values) => apply!(values, F32, 0.0_f32),
+        Buf::F64(values) => apply!(values, F64, 0.0_f64),
+        _ => unreachable!("family check makes float relu exhaustive"),
+    }
+}
+
+/// Evaluate [05-OP-43]'s dedicated ReLU adjoint. The complete incoming
+/// cotangent is selected only where `0 < input`; every other row constructs
+/// exact positive zero, including both input zeros and NaN. Selection rather
+/// than multiplication is required so rejected infinite and NaN cotangents do
+/// not contaminate zero rows.
+pub fn float_relu_adjoint(
+    input: &TensorStorage,
+    cotangent: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    const NAME: &str = "relu_adjoint";
+    for value in [input, cotangent] {
+        if !value.prim().is_float() {
+            return Err(NumericKernelError::WrongFamily {
+                op: NAME,
+                expected: NumericFamily::Float,
+                actual: value.prim(),
+            });
+        }
+    }
+    require_same_storage_shape(NAME, input, cotangent)?;
+
+    macro_rules! route {
+        ($input:expr, $g:expr, $variant:ident, $zero:expr) => {{
+            let values = $input
+                .iter()
+                .copied()
+                .zip($g.iter().copied())
+                .map(|(input, g)| if $zero < input { g } else { $zero })
+                .collect();
+            Ok(TensorStorage {
+                buf: Buf::$variant(values),
+            })
+        }};
+    }
+
+    match (&input.buf, &cotangent.buf) {
+        (Buf::F16(input), Buf::F16(g)) => route!(input, g, F16, half::f16::ZERO),
+        (Buf::Bf16(input), Buf::Bf16(g)) => route!(input, g, Bf16, half::bf16::ZERO),
+        (Buf::F32(input), Buf::F32(g)) => route!(input, g, F32, 0.0_f32),
+        (Buf::F64(input), Buf::F64(g)) => route!(input, g, F64, 0.0_f64),
+        _ => unreachable!("same-dtype checks make float relu adjoint exhaustive"),
+    }
 }
 
 fn float_vec_unop_f32<T: Copy>(
@@ -1890,7 +2096,6 @@ trait ActivationElement: Copy {
     fn recip(self) -> Self;
     fn add(self, rhs: Self) -> Self;
     fn mul(self, rhs: Self) -> Self;
-    fn max(self, rhs: Self) -> Self;
 }
 
 macro_rules! impl_native_activation_element {
@@ -1918,10 +2123,6 @@ macro_rules! impl_native_activation_element {
 
             fn mul(self, rhs: Self) -> Self {
                 self * rhs
-            }
-
-            fn max(self, rhs: Self) -> Self {
-                self.max(rhs)
             }
         }
     };
@@ -1956,10 +2157,6 @@ macro_rules! impl_reduced_activation_element {
             fn mul(self, rhs: Self) -> Self {
                 Self::from_f32(self.to_f32() * rhs.to_f32())
             }
-
-            fn max(self, rhs: Self) -> Self {
-                Self::from_f32(self.to_f32().max(rhs.to_f32()))
-            }
         }
     };
 }
@@ -1978,14 +2175,7 @@ fn activation_tanh<T: ActivationElement>(value: T, one: T, two: T, neg_one: T) -
 
 fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Vec<T> {
     match op {
-        FloatUnOp::Relu => {
-            let zero = T::constant(0.0);
-            values
-                .iter()
-                .copied()
-                .map(|value| value.max(zero))
-                .collect()
-        }
+        FloatUnOp::Relu => unreachable!("ReLU routes through the stored-bit selector"),
         FloatUnOp::Sigmoid => {
             let one = T::constant(1.0);
             values
@@ -2047,6 +2237,9 @@ pub fn float_tensor_unop(
             expected: NumericFamily::Float,
             actual: value.prim(),
         });
+    }
+    if op == FloatUnOp::Relu {
+        return float_relu(value);
     }
     if op.is_activation() {
         let buf = match &value.buf {
@@ -2469,6 +2662,81 @@ fn reduction_result_scalar(
             result,
         })
     }
+}
+
+/// Fold one level at a time by combining adjacent pairs and carrying an odd
+/// final element unchanged. This is the canonical balanced reduction tree for
+/// [05-OP-29]; leaf order is exactly the caller-provided group order.
+fn checked_adjacent_pair_fold<T, E>(
+    mut level: Vec<T>,
+    mut combine: impl FnMut(T, T) -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    while level.len() > 1 {
+        let mut source = level.into_iter();
+        let mut next = Vec::with_capacity(source.len().div_ceil(2));
+        while let Some(left) = source.next() {
+            let value = match source.next() {
+                Some(right) => combine(left, right)?,
+                None => left,
+            };
+            next.push(value);
+        }
+        level = next;
+    }
+    Ok(level.pop())
+}
+
+fn checked_count_add(left: i64, right: i64) -> Result<i64, NumericKernelError> {
+    left.checked_add(right)
+        .ok_or(NumericKernelError::Trap(NumericTrap::Overflow {
+            op: "count",
+            prim: Prim::Int64,
+        }))
+}
+
+/// Count true elements in explicitly ordered groups through the closed typed
+/// kernel boundary. The input must use exact Bool storage and the result is
+/// exact int64. Empty groups produce the specified zero identity.
+pub fn count_tensor_groups(
+    input: &TensorStorage,
+    groups: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    if input.prim() != Prim::Bool {
+        return Err(NumericKernelError::InvalidReductionSignature {
+            op: "count",
+            input: input.prim(),
+            accumulator: Prim::Int64,
+            result: Prim::Int64,
+        });
+    }
+
+    let mut values = Vec::with_capacity(groups.len());
+    for group in groups {
+        let leaves = group
+            .iter()
+            .map(|&index| {
+                i64::from(
+                    input
+                        .scalar_at(index)
+                        .as_bool_exact()
+                        .expect("sealed Bool storage contains exact bool elements"),
+                )
+            })
+            .collect();
+        // This is the [05-OP-29] empty selected-extent identity, not a
+        // permissive fallback. Keep the branch explicit and auditable.
+        #[allow(
+            clippy::manual_unwrap_or,
+            clippy::manual_unwrap_or_default,
+            reason = "Count's explicit empty-group identity must remain auditable"
+        )]
+        let value = match checked_adjacent_pair_fold(leaves, checked_count_add)? {
+            Some(value) => value,
+            None => 0,
+        };
+        values.push(value);
+    }
+    finalize_tensor("count", Prim::Int64, RawTensor::Int(values)).map_err(Into::into)
 }
 
 /// Reduce explicitly ordered groups of input indices through one closed,
@@ -4561,6 +4829,56 @@ mod tests {
     }
 
     #[test]
+    fn count_tensor_groups_uses_bool_input_int64_output_and_empty_identity() {
+        let input =
+            finalize_tensor("test", Prim::Bool, RawTensor::Int(vec![1, 0, 1, 1, 0])).unwrap();
+        let groups = vec![vec![0, 2, 3], vec![1, 4], vec![]];
+        let output = count_tensor_groups(&input, &groups).expect("typed Count kernel");
+        assert_eq!(output.prim(), Prim::Int64);
+        assert_eq!(output.to_i64_exact_vec(), Some(vec![3, 0, 0]));
+    }
+
+    #[test]
+    fn count_tensor_groups_rejects_non_bool_storage_before_arithmetic() {
+        let input = finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![0, 1])).unwrap();
+        assert_eq!(
+            count_tensor_groups(&input, &one_group(2)),
+            Err(NumericKernelError::InvalidReductionSignature {
+                op: "count",
+                input: Prim::Int64,
+                accumulator: Prim::Int64,
+                result: Prim::Int64,
+            })
+        );
+    }
+
+    #[test]
+    fn adjacent_pair_fold_preserves_canonical_tree() {
+        let leaves = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let tree = checked_adjacent_pair_fold(leaves, |left, right| {
+            Ok::<_, std::convert::Infallible>(format!("({left}+{right})"))
+        })
+        .expect("infallible trace fold")
+        .expect("non-empty trace");
+        assert_eq!(tree, "(((a+b)+(c+d))+e)");
+    }
+
+    #[test]
+    fn count_add_traps_int64_overflow() {
+        assert_eq!(checked_count_add(3, 4), Ok(7));
+        assert_eq!(
+            checked_count_add(i64::MAX, 1),
+            Err(NumericKernelError::Trap(NumericTrap::Overflow {
+                op: "count",
+                prim: Prim::Int64,
+            }))
+        );
+    }
+
+    #[test]
     fn window_reductions_compute_at_each_declared_arithmetic_width() {
         let cases = [
             (Prim::F16, vec![2048.0, 1.0, -2048.0], 1.0),
@@ -5103,5 +5421,598 @@ mod tests {
             narrowed.to_string(),
             "numeric trap: overflow in cast at int32"
         );
+    }
+
+    #[test]
+    fn direct_subtraction_uses_the_exact_stored_width_at_every_signed_dtype() {
+        macro_rules! assert_width {
+            ($prim:expr, $variant:ident, $min:expr, $max:expr) => {{
+                let representable = int_binop(
+                    IntBinOp::Sub,
+                    ScalarValue {
+                        bits: Bits::$variant(-1),
+                    },
+                    ScalarValue {
+                        bits: Bits::$variant($min),
+                    },
+                )
+                .expect("-1 - MIN is representable as MAX at the same width");
+                assert_eq!(
+                    representable,
+                    ScalarValue {
+                        bits: Bits::$variant($max),
+                    },
+                    "{} representable boundary",
+                    $prim.name()
+                );
+
+                let overflow = int_binop(
+                    IntBinOp::Sub,
+                    ScalarValue {
+                        bits: Bits::$variant($min),
+                    },
+                    ScalarValue {
+                        bits: Bits::$variant(1),
+                    },
+                )
+                .expect_err("MIN - 1 must trap as direct subtraction overflow");
+                assert_eq!(
+                    overflow,
+                    NumericKernelError::Trap(NumericTrap::Overflow {
+                        op: "sub",
+                        prim: $prim,
+                    }),
+                    "{} true overflow",
+                    $prim.name()
+                );
+            }};
+        }
+
+        assert_width!(Prim::Int8, I8, i8::MIN, i8::MAX);
+        assert_width!(Prim::Int16, I16, i16::MIN, i16::MAX);
+        assert_width!(Prim::Int32, I32, i32::MIN, i32::MAX);
+        assert_width!(Prim::Int64, I64, i64::MIN, i64::MAX);
+    }
+
+    #[test]
+    fn scalar_extrema_preserve_first_nan_and_lhs_signed_zero_bits_at_every_float_width() {
+        fn assert_same_bits(actual: ScalarValue, expected: ScalarValue) {
+            match (actual.bits, expected.bits) {
+                (Bits::F16(actual), Bits::F16(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::Bf16(actual), Bits::Bf16(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::F32(actual), Bits::F32(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::F64(actual), Bits::F64(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                _ => panic!("float extrema must preserve the expected dtype"),
+            }
+        }
+
+        macro_rules! assert_width {
+            ($variant:ident, $float:ty, $left_nan:expr, $right_nan:expr) => {{
+                let left_nan = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_bits($left_nan)),
+                };
+                let right_nan = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_bits($right_nan)),
+                };
+                let one = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_f32(1.0)),
+                };
+                assert_same_bits(
+                    float_binop(FloatBinOp::Max, left_nan, one).unwrap(),
+                    left_nan,
+                );
+                assert_same_bits(
+                    float_binop(FloatBinOp::Min, left_nan, one).unwrap(),
+                    left_nan,
+                );
+                assert_same_bits(
+                    float_binop(FloatBinOp::Max, one, right_nan).unwrap(),
+                    right_nan,
+                );
+                assert_same_bits(
+                    float_binop(FloatBinOp::Min, one, right_nan).unwrap(),
+                    right_nan,
+                );
+                assert_same_bits(
+                    float_binop(FloatBinOp::Max, left_nan, right_nan).unwrap(),
+                    left_nan,
+                );
+                assert_same_bits(
+                    float_binop(FloatBinOp::Min, left_nan, right_nan).unwrap(),
+                    left_nan,
+                );
+
+                let negative_zero = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_f32(-0.0)),
+                };
+                let positive_zero = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_f32(0.0)),
+                };
+                assert_same_bits(
+                    float_binop(FloatBinOp::Max, negative_zero, positive_zero).unwrap(),
+                    negative_zero,
+                );
+                assert_same_bits(
+                    float_binop(FloatBinOp::Min, positive_zero, negative_zero).unwrap(),
+                    positive_zero,
+                );
+            }};
+        }
+
+        assert_width!(F16, half::f16, 0xfe01, 0x7e55);
+        assert_width!(Bf16, half::bf16, 0xffc1, 0x7fe5);
+
+        let left_nan = ScalarValue {
+            bits: Bits::F32(f32::from_bits(0xffc1_2345)),
+        };
+        let right_nan = ScalarValue {
+            bits: Bits::F32(f32::from_bits(0x7fc5_4321)),
+        };
+        let one = ScalarValue {
+            bits: Bits::F32(1.0),
+        };
+        assert_same_bits(
+            float_binop(FloatBinOp::Max, left_nan, one).unwrap(),
+            left_nan,
+        );
+        assert_same_bits(
+            float_binop(FloatBinOp::Min, one, right_nan).unwrap(),
+            right_nan,
+        );
+        assert_same_bits(
+            float_binop(FloatBinOp::Max, left_nan, right_nan).unwrap(),
+            left_nan,
+        );
+        assert_same_bits(
+            float_binop(
+                FloatBinOp::Max,
+                ScalarValue {
+                    bits: Bits::F32(-0.0),
+                },
+                ScalarValue {
+                    bits: Bits::F32(0.0),
+                },
+            )
+            .unwrap(),
+            ScalarValue {
+                bits: Bits::F32(-0.0),
+            },
+        );
+
+        let left_nan = ScalarValue {
+            bits: Bits::F64(f64::from_bits(0xfff8_1234_5678_9abc)),
+        };
+        let right_nan = ScalarValue {
+            bits: Bits::F64(f64::from_bits(0x7ff8_abcd_1234_5678)),
+        };
+        let one = ScalarValue {
+            bits: Bits::F64(1.0),
+        };
+        assert_same_bits(
+            float_binop(FloatBinOp::Max, left_nan, one).unwrap(),
+            left_nan,
+        );
+        assert_same_bits(
+            float_binop(FloatBinOp::Min, one, right_nan).unwrap(),
+            right_nan,
+        );
+        assert_same_bits(
+            float_binop(FloatBinOp::Min, left_nan, right_nan).unwrap(),
+            left_nan,
+        );
+        assert_same_bits(
+            float_binop(
+                FloatBinOp::Min,
+                ScalarValue {
+                    bits: Bits::F64(0.0),
+                },
+                ScalarValue {
+                    bits: Bits::F64(-0.0),
+                },
+            )
+            .unwrap(),
+            ScalarValue {
+                bits: Bits::F64(0.0),
+            },
+        );
+    }
+
+    #[test]
+    fn tensor_extrema_select_stored_operands_without_reencoding_payloads() {
+        macro_rules! assert_width {
+            ($variant:ident, $float:ty, $left_nan:expr, $right_nan:expr) => {{
+                let left = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        <$float>::from_bits($left_nan),
+                        <$float>::from_f32(-0.0),
+                        <$float>::from_f32(4.0),
+                    ]),
+                };
+                let right = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        <$float>::from_bits($right_nan),
+                        <$float>::from_f32(0.0),
+                        <$float>::from_f32(2.0),
+                    ]),
+                };
+                let max = float_tensor_binop(FloatBinOp::Max, &left, &right).unwrap();
+                let min = float_tensor_binop(FloatBinOp::Min, &left, &right).unwrap();
+                match (max.buf, min.buf) {
+                    (Buf::$variant(max), Buf::$variant(min)) => {
+                        assert_eq!(max[0].to_bits(), $left_nan);
+                        assert_eq!(min[0].to_bits(), $left_nan);
+                        assert_eq!(max[1].to_bits(), <$float>::from_f32(-0.0).to_bits());
+                        assert_eq!(min[1].to_bits(), <$float>::from_f32(-0.0).to_bits());
+                        assert_eq!(max[2], <$float>::from_f32(4.0));
+                        assert_eq!(min[2], <$float>::from_f32(2.0));
+                    }
+                    _ => unreachable!("same-dtype kernels preserve their storage variant"),
+                }
+            }};
+        }
+
+        assert_width!(F16, half::f16, 0xfe01, 0x7e55);
+        assert_width!(Bf16, half::bf16, 0xffc1, 0x7fe5);
+
+        let left = TensorStorage {
+            buf: Buf::F32(vec![f32::from_bits(0xffc1_2345), -0.0, 4.0]),
+        };
+        let right = TensorStorage {
+            buf: Buf::F32(vec![f32::from_bits(0x7fc5_4321), 0.0, 2.0]),
+        };
+        let max = float_tensor_binop(FloatBinOp::Max, &left, &right).unwrap();
+        let min = float_tensor_binop(FloatBinOp::Min, &left, &right).unwrap();
+        match (max.buf, min.buf) {
+            (Buf::F32(max), Buf::F32(min)) => {
+                assert_eq!(max[0].to_bits(), 0xffc1_2345);
+                assert_eq!(min[0].to_bits(), 0xffc1_2345);
+                assert_eq!(max[1].to_bits(), (-0.0_f32).to_bits());
+                assert_eq!(min[1].to_bits(), (-0.0_f32).to_bits());
+                assert_eq!(max[2], 4.0);
+                assert_eq!(min[2], 2.0);
+            }
+            _ => unreachable!("f32 kernels preserve f32 storage"),
+        }
+
+        let left = TensorStorage {
+            buf: Buf::F64(vec![f64::from_bits(0xfff8_1234_5678_9abc), -0.0, 4.0]),
+        };
+        let right = TensorStorage {
+            buf: Buf::F64(vec![f64::from_bits(0x7ff8_abcd_1234_5678), 0.0, 2.0]),
+        };
+        let max = float_tensor_binop(FloatBinOp::Max, &left, &right).unwrap();
+        let min = float_tensor_binop(FloatBinOp::Min, &left, &right).unwrap();
+        match (max.buf, min.buf) {
+            (Buf::F64(max), Buf::F64(min)) => {
+                assert_eq!(max[0].to_bits(), 0xfff8_1234_5678_9abc);
+                assert_eq!(min[0].to_bits(), 0xfff8_1234_5678_9abc);
+                assert_eq!(max[1].to_bits(), (-0.0_f64).to_bits());
+                assert_eq!(min[1].to_bits(), (-0.0_f64).to_bits());
+                assert_eq!(max[2], 4.0);
+                assert_eq!(min[2], 2.0);
+            }
+            _ => unreachable!("f64 kernels preserve f64 storage"),
+        }
+    }
+
+    #[test]
+    fn extrema_adjoint_routes_complete_cotangents_by_the_exact_forward_rule() {
+        macro_rules! assert_width {
+            (
+                $variant:ident,
+                $left_nan:expr,
+                $right_nan:expr,
+                $zero:expr,
+                $one:expr,
+                $two:expr,
+                $three:expr,
+                $four:expr
+            ) => {{
+                let lhs = TensorStorage {
+                    buf: Buf::$variant(vec![$left_nan, $one, $four, $zero]),
+                };
+                let rhs = TensorStorage {
+                    buf: Buf::$variant(vec![$right_nan, $right_nan, $two, $zero]),
+                };
+                let g = TensorStorage {
+                    buf: Buf::$variant(vec![$one, $two, $three, $four]),
+                };
+
+                assert_eq!(
+                    float_extrema_adjoint(
+                        FloatExtremaOp::Max,
+                        ExtremaOperand::Left,
+                        &lhs,
+                        &rhs,
+                        &g,
+                    )
+                    .unwrap(),
+                    TensorStorage {
+                        buf: Buf::$variant(vec![$one, $zero, $three, $four]),
+                    }
+                );
+                assert_eq!(
+                    float_extrema_adjoint(
+                        FloatExtremaOp::Max,
+                        ExtremaOperand::Right,
+                        &lhs,
+                        &rhs,
+                        &g,
+                    )
+                    .unwrap(),
+                    TensorStorage {
+                        buf: Buf::$variant(vec![$zero, $two, $zero, $zero]),
+                    }
+                );
+                assert_eq!(
+                    float_extrema_adjoint(
+                        FloatExtremaOp::Min,
+                        ExtremaOperand::Left,
+                        &lhs,
+                        &rhs,
+                        &g,
+                    )
+                    .unwrap(),
+                    TensorStorage {
+                        buf: Buf::$variant(vec![$one, $zero, $zero, $four]),
+                    }
+                );
+                assert_eq!(
+                    float_extrema_adjoint(
+                        FloatExtremaOp::Min,
+                        ExtremaOperand::Right,
+                        &lhs,
+                        &rhs,
+                        &g,
+                    )
+                    .unwrap(),
+                    TensorStorage {
+                        buf: Buf::$variant(vec![$zero, $two, $three, $zero]),
+                    }
+                );
+            }};
+        }
+
+        assert_width!(
+            F16,
+            half::f16::from_bits(0xfe01),
+            half::f16::from_bits(0x7e55),
+            half::f16::ZERO,
+            half::f16::ONE,
+            half::f16::from_f32(2.0),
+            half::f16::from_f32(3.0),
+            half::f16::from_f32(4.0)
+        );
+        assert_width!(
+            Bf16,
+            half::bf16::from_bits(0xffc1),
+            half::bf16::from_bits(0x7fe5),
+            half::bf16::ZERO,
+            half::bf16::ONE,
+            half::bf16::from_f32(2.0),
+            half::bf16::from_f32(3.0),
+            half::bf16::from_f32(4.0)
+        );
+        assert_width!(
+            F32,
+            f32::from_bits(0xffc1_2345),
+            f32::from_bits(0x7fc5_4321),
+            0.0_f32,
+            1.0_f32,
+            2.0_f32,
+            3.0_f32,
+            4.0_f32
+        );
+        assert_width!(
+            F64,
+            f64::from_bits(0xfff8_1234_5678_9abc),
+            f64::from_bits(0x7ff8_abcd_1234_5678),
+            0.0_f64,
+            1.0_f64,
+            2.0_f64,
+            3.0_f64,
+            4.0_f64
+        );
+    }
+
+    #[test]
+    fn relu_preserves_positive_nan_and_negative_zero_bits_at_every_float_width() {
+        macro_rules! assert_width {
+            ($variant:ident, $nan:expr, $neg_zero:expr, $negative:expr, $positive:expr, $zero:expr) => {{
+                let input = TensorStorage {
+                    buf: Buf::$variant(vec![$nan, $neg_zero, $negative, $positive]),
+                };
+                let output = float_relu(&input).unwrap();
+                let expected = [$nan, $neg_zero, $zero, $positive];
+                let Buf::$variant(actual) = &output.buf else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+
+                let legacy = float_tensor_unop(FloatUnOp::Relu, &input).unwrap();
+                let Buf::$variant(legacy) = &legacy.buf else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    legacy
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "the legacy activation entry must route through the exact selector"
+                );
+
+                for (index, expected) in expected.iter().enumerate() {
+                    let ScalarValue {
+                        bits: Bits::$variant(scalar),
+                    } = float_unop(FloatUnOp::Relu, input.scalar_at(index)).unwrap()
+                    else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        scalar.to_bits(),
+                        expected.to_bits(),
+                        "the scalar activation entry must keep selected operand bits"
+                    );
+                }
+            }};
+        }
+
+        assert_width!(
+            F16,
+            half::f16::from_bits(0xfe01),
+            half::f16::NEG_ZERO,
+            half::f16::from_f32(-1.0),
+            half::f16::from_bits(1),
+            half::f16::ZERO
+        );
+        assert_width!(
+            Bf16,
+            half::bf16::from_bits(0xffc1),
+            half::bf16::NEG_ZERO,
+            half::bf16::from_f32(-1.0),
+            half::bf16::from_bits(1),
+            half::bf16::ZERO
+        );
+        assert_width!(
+            F32,
+            f32::from_bits(0xffc1_2345),
+            -0.0_f32,
+            -1.0_f32,
+            f32::from_bits(1),
+            0.0_f32
+        );
+        assert_width!(
+            F64,
+            f64::from_bits(0xfff8_1234_5678_9abc),
+            -0.0_f64,
+            -1.0_f64,
+            f64::from_bits(1),
+            0.0_f64
+        );
+    }
+
+    #[test]
+    fn relu_adjoint_selects_complete_cotangent_only_for_strictly_positive_inputs() {
+        macro_rules! assert_width {
+            ($variant:ident, $nan:expr, $neg_zero:expr, $negative:expr, $positive:expr, $subnormal:expr, $g_nan:expr, $g_inf:expr, $g_neg_zero:expr, $zero:expr) => {{
+                let input = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        $nan, $neg_zero, $zero, $negative, $positive, $subnormal,
+                    ]),
+                };
+                let cotangent = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        $g_nan,
+                        $g_inf,
+                        $g_neg_zero,
+                        $g_nan,
+                        $g_neg_zero,
+                        $g_inf,
+                    ]),
+                };
+                assert_eq!(
+                    float_relu_adjoint(&input, &cotangent).unwrap(),
+                    TensorStorage {
+                        buf: Buf::$variant(vec![$zero, $zero, $zero, $zero, $g_neg_zero, $g_inf]),
+                    }
+                );
+            }};
+        }
+
+        assert_width!(
+            F16,
+            half::f16::from_bits(0xfe01),
+            half::f16::NEG_ZERO,
+            half::f16::from_f32(-1.0),
+            half::f16::ONE,
+            half::f16::from_bits(1),
+            half::f16::from_bits(0x7e55),
+            half::f16::INFINITY,
+            half::f16::NEG_ZERO,
+            half::f16::ZERO
+        );
+        assert_width!(
+            Bf16,
+            half::bf16::from_bits(0xffc1),
+            half::bf16::NEG_ZERO,
+            half::bf16::from_f32(-1.0),
+            half::bf16::ONE,
+            half::bf16::from_bits(1),
+            half::bf16::from_bits(0x7fe5),
+            half::bf16::INFINITY,
+            half::bf16::NEG_ZERO,
+            half::bf16::ZERO
+        );
+        assert_width!(
+            F32,
+            f32::from_bits(0xffc1_2345),
+            -0.0_f32,
+            -1.0_f32,
+            1.0_f32,
+            f32::from_bits(1),
+            f32::from_bits(0x7fc5_4321),
+            f32::INFINITY,
+            -0.0_f32,
+            0.0_f32
+        );
+        assert_width!(
+            F64,
+            f64::from_bits(0xfff8_1234_5678_9abc),
+            -0.0_f64,
+            -1.0_f64,
+            1.0_f64,
+            f64::from_bits(1),
+            f64::from_bits(0x7ff8_abcd_1234_5678),
+            f64::INFINITY,
+            -0.0_f64,
+            0.0_f64
+        );
+    }
+
+    #[test]
+    fn relu_kernels_reject_non_float_and_mismatched_cotangent_storage() {
+        let integers = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![1])).unwrap();
+        let floats = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![1.0])).unwrap();
+        let doubles = finalize_tensor("test", Prim::F64, RawTensor::Float(vec![1.0])).unwrap();
+
+        assert!(matches!(
+            float_relu(&integers),
+            Err(NumericKernelError::WrongFamily { op: "relu", .. })
+        ));
+        assert!(matches!(
+            float_relu_adjoint(&integers, &integers),
+            Err(NumericKernelError::WrongFamily {
+                op: "relu_adjoint",
+                ..
+            })
+        ));
+        assert!(matches!(
+            float_relu_adjoint(&floats, &doubles),
+            Err(NumericKernelError::DtypeMismatch {
+                op: "relu_adjoint",
+                ..
+            })
+        ));
     }
 }

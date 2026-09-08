@@ -200,21 +200,42 @@ School exemplar: [`docs/CHELIS_SURFACE.md`](https://github.com/Chelis-Lang/schoo
   already in the pin the PR was built on. Before filing, search the
   upstream tracker by symptom keywords — the same incident also nearly
   produced a duplicate filing.
+- **A sibling-shell blocker cites the sibling.** When the blocking artifact
+  is another shell's issue or PR rather than a compiler defect, cite it as
+  `<repo>#NNN` for any repo in the shell-ecosystem registry — `nautilus#43`,
+  `coral#27`, `shoals#52`. The registry is the machine-readable §Shell
+  Ecosystem set (`chelis_conformance::registry::REGISTRY`), and membership
+  in it is exactly the liveness the cite-by-number rule buys: the reference
+  resolves in the org, dedupes across sibling shells, and can be re-probed
+  at the next bump. Write a sibling citation **tight**: `coral#27`, with no
+  space around the `#`. Four shells are also ordinary English nouns
+  (`school`, `hull`, `coral`, `whale`), so the spaced form would make prose
+  such as "the school #1 priority" scan as a citation; only `chelis` keeps
+  the older spaced spellings. A **bare `#NNN`** and a repo **outside** the
+  registry stay rejected — neither resolves without guessing which tracker
+  was meant.
+  A cascade wave makes sibling blockage the common case rather than an edge
+  (seven of eleven registry shells were blocked on one sibling release
+  during the 0.18.5 wave), so do **not** manufacture a `docs/issue_drafts/`
+  file whose only content is a pointer at a sibling PR: a draft is
+  pre-filing staging for an issue that will be filed, not a citation
+  costume.
 - **Narrowing-citation rule.** Any narrowing in shell code or spec — a
   `fail(...)` guard on a config the reference accepts, a frozen/untrained
   parameter, a fixed shape, a per-rank verb copy, a forward-only verb —
-  cites, **at the narrowing site**, either `chelis#NNN` / a parked draft,
-  or a dated deferral slot in the shell's own plan. "Implementation
-  convenience" is not a citable reason. An uncited narrowing is invisible
-  to de-narrowing and will outlive its justification.
+  cites, **at the narrowing site**, either `chelis#NNN` / a registry
+  sibling's `<repo>#NNN` / a parked draft, or a dated deferral slot in the
+  shell's own plan. "Implementation convenience" is not a citable reason.
+  An uncited narrowing is invisible to de-narrowing and will outlive its
+  justification.
 - **Surface loudly; never silently work around.** Hitting a suspected
   upstream bug mid-build means, in the same change set as the workaround:
   minimal reproducer → upstream-tracker dedup search → file (or park a
   draft) → cite at the site → UPSTREAM_BUGS entry.
 - **Staleness audit.** A stdlib-only script scans the repo for
-  `chelis#NNN` citations and flags issues that are CLOSED upstream but
-  still cited from code — resolved-upstream-but-still-worked-around is the
-  default failure state, not the exception. Run at every bump (§7 step 3);
+  `chelis#NNN` / `<sibling>#NNN` citations and flags issues that are CLOSED
+  upstream but still cited from code. Resolved-upstream-but-still-worked-around
+  is the default failure state, not the exception. Run at every bump (§7 step 3);
   the offline pin check from §2 lives in the same script.
 
 School exemplars: [`docs/UPSTREAM_BUGS.md`](https://github.com/Chelis-Lang/school/blob/main/docs/UPSTREAM_BUGS.md),
@@ -275,9 +296,21 @@ suites) and **enforced by `chelis reef conform bump-check --base <ref>`**, a CI
 guard that fails any diff which changes the reef pin without a green audit — so
 a raw pin edit that skips the checklist cannot land. A bump lands as a **PR**
 (shell-driven `bump-pr.yml` opens it; branch protection blocks direct pushes to
-`main`), never a direct-to-`main` cascade. The shell's `AGENTS.md` carries the
-checklist (adapted to its surfaces), and every bump runs all of it in one
-change set:
+`main`), never a direct-to-`main` cascade.
+
+**The write verbs are all-or-nothing on their prerequisites** (chelis#1263).
+`bump` and `sync` restamp `reef.toml`, `AGENTS.md`, and
+`docs/CHELIS_SURFACE.md` **in place**, so they check all three before their first
+write and refuse, with a nonzero exit naming the whole gap and pointing at
+`conform init`, if any is absent. A repo that has never been conformed is not a
+repo they partially bump: the older behavior ran the edit sequence until it
+reached the first missing artifact, leaving the pins rewritten and the skills
+materialized behind a failure, and in one measured case reporting success while
+doing it. Exiting nonzero *because CI is not green* stays legitimate (CI owns
+green-ness); exiting after abandoning its own edit sequence does not.
+
+The shell's `AGENTS.md` carries the checklist (adapted to its surfaces), and
+every bump runs all of it in one change set:
 
 1. Update **every** pin location (reef.toml + each workflow's env pair);
    `conform bump` does this and the §2 offline pin check confirms it. Install
@@ -337,6 +370,51 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   downstream-authoring skill,
   [`agent-skills/chelis-std/`](https://github.com/Chelis-Lang/school/tree/main/agent-skills/chelis-std),
   declared this way.
+- **The set is uniform by design; there is no per-shell exclusion** (chelis#1262).
+  Every shell carries every skill in the pinned toolchain's set, whether or not
+  its domain exercises all of them, and an unused skill is **inert**: it is
+  markdown an agent loads only when the task matches its description — it runs
+  nothing, gates nothing, and costs a few kilobytes. There is deliberately **no**
+  `exclude` / `skip` control, in `agent-skills/UPSTREAM.toml`, in `reef.toml`, or
+  anywhere else. The reason is not implementation cost, it is that the
+  declaration and the fact have different lifetimes: applicability is a snapshot
+  of the shell's surface *today*, while an exclusion is permanent, so the day a
+  web shell grows a `chelis` invocation the skill it excluded is exactly the
+  guidance it needs and nobody remembers to re-enable it. That is the same shape
+  as a workaround outliving its justification (§4), and it is why the current
+  state is the worst option: shells document an exclusion the tooling overrides.
+  To record that a skill does **not** fit this shell, append a shell-local
+  override block (below) saying so. That is strictly better than deleting the
+  file: it survives `sync`, it keeps propagating upstream body changes underneath
+  it, and it reaches the agent at the point of use instead of leaving an absence
+  the agent cannot interpret. Correspondingly, the **top-level `conform` value**
+  in `reef.toml` carries exactly the declarations this contract defines. Today
+  there is one: **`conform.local_skills`, an array of strings** (§8's repo-local
+  domain-skill allowlist). Anything else under `conform` — any key, at any
+  nesting depth — **fails** `conform audit` rather than being silently ignored,
+  so a shell can never believe in a control the tool does not implement.
+  Recognition is by **key path and value type**, not by spelling: the manifest is
+  parsed as TOML and the parsed value is what is checked, so a header
+  (`[conform]`), an inline table (`conform = { … }`), a dotted key
+  (`conform.local_skills = …`), a quoted key (`"local_skills"`), a sub-table
+  (`[conform.skills]`), and an array-of-tables all reach the same answer. A
+  *table* at `local_skills` is therefore unrecognized, because the recognized
+  declaration's value type is an array. By the same rule the control surface
+  itself is a **table**, so a `conform` that is a string, a number, or an array
+  (`conform = []`) is reported too: "anything else under `conform`" does not
+  cover a `conform` with nothing under it, and a declaration in the wrong shape
+  must not read as an absent one. A `conform` table that is not the top-level one
+  (`package.conform`, which is what a dotted `conform.exclude` written after a
+  table header actually declares) controls nothing and is reported as such. That
+  test is on the value, not the name: a `conform` below the top level that
+  **cannot carry keys** — a version string, a number, an array of scalars — is
+  left alone, because `[dependencies] conform = "1"` is an ordinary dependency
+  named `conform` and failing a shell for that would be a false alarm on a MUST
+  row. A `reef.toml` that does not parse **fails this row** with the
+  parse error: §8 cannot be checked against a file the tool cannot read, and
+  reading an unreadable manifest as "declares nothing" would be a silent pass on
+  a MUST row. The rule behind all of that is one sentence: **a checker that
+  quietly normalizes or drops what it cannot read is itself the bypass.**
 - **Shell-specific overrides on a shared skill** (chelis#653): a shell MAY append
   a single trailing `<!-- shell-local:begin -->…<!-- shell-local:end -->` block to
   a shared skill's `SKILL.md` to supersede toolchain guidance that does not fit
@@ -401,7 +479,7 @@ self-audit.
 | 11 | `tests_neg/` + runner, in CI | MUST | §6 | `tests_neg/`, `scripts/run_negative_tests.py` |
 | 12 | `tests_blocked/` + runner, in CI | MUST once a blocker exists | §5 | `tests_blocked/`, `scripts/run_blocked_probes.py` |
 | 13 | Pin Bump Checklist in AGENTS.md | MUST | §7 | `AGENTS.md` §Pin Bump Checklist |
-| 14 | Vendored shared skills + symlinked skill dirs + mirrored commands | MUST | §8 | `agent-skills/`, `.claude/skills` |
+| 14 | Uniform vendored shared skill set (no per-shell exclusions) + symlinked skill dirs + mirrored commands | MUST | §8 | `agent-skills/`, `.claude/skills` |
 | 15 | Parity harness (own uv project, checked-in goldens, oracle guards) | MUST if external oracles | §9 | `parity/` |
 | 16 | ≥2-config acceptance for new public surface | MUST | §9 | `spec/vision.md` amendments |
 | 17 | Scaffolding Drift Rule in AGENTS.md | MUST | §10 | `AGENTS.md` §Scaffolding Drift Rule |

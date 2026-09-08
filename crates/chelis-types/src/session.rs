@@ -70,6 +70,25 @@ impl DiagnosticSink<'_> {
     ) -> std::slice::Iter<'_, CheckError> {
         self.errors[checkpoint.offset..].iter()
     }
+
+    /// Retain only diagnostics accepted by `keep` after an earlier checkpoint.
+    ///
+    /// This deliberately cannot inspect, replace, or discard diagnostics that
+    /// precede the checkpoint. It exists for an exact compiler-owned source
+    /// boundary whose structural validator accepts a closed wrapper graph while
+    /// ordinary HM inference still records useful child stamps for that graph.
+    pub(crate) fn retain_since(
+        &mut self,
+        checkpoint: DiagnosticCheckpoint,
+        mut keep: impl FnMut(&CheckError) -> bool,
+    ) {
+        let retained = self
+            .errors
+            .drain(checkpoint.offset..)
+            .filter(|error| keep(error))
+            .collect::<Vec<_>>();
+        self.errors.extend(retained);
+    }
 }
 
 #[cfg(test)]
@@ -380,8 +399,8 @@ pub(crate) fn try_checked_program_with_effect_annotations(
 pub(crate) fn param_has_consuming_use(
     expr: &chelis_deep::Expr,
     param: &str,
-    available_signatures: &std::collections::HashMap<String, crate::types::Type>,
-    type_env: &std::collections::HashMap<String, chelis_deep::Expr>,
+    available_signatures: &chelis_unord::UnordMap<String, crate::types::Type>,
+    type_env: &std::collections::BTreeMap<String, chelis_deep::Expr>,
     type_headers: &crate::deep_type::TypeResolutionEnv,
 ) -> Result<bool, InferResult> {
     run_result(|sink| {

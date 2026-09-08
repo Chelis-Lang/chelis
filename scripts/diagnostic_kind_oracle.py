@@ -109,6 +109,7 @@ fn diagnostic_kind_oracle_literal() -> crate::schema::Diagnostic {
         suggestions: Vec::new(),
         span: None,
         deep_path: None,
+        span_id: None,
     }
 }
 """
@@ -128,20 +129,20 @@ fn diagnostic_kind_oracle_mutation(mut diagnostic: crate::schema::Diagnostic) {
 def mutate_diagnostic_vocabulary(source: str) -> str:
     replacements = (
         (
-            "    CheckOther,\n}\n\nimpl DiagnosticKind",
-            "    CheckOther,\n    Phase3OracleKind,\n}\n\nimpl DiagnosticKind",
+            "    TypeTotality,\n}\n\nimpl DiagnosticKind",
+            "    TypeTotality,\n    Phase3OracleKind,\n}\n\nimpl DiagnosticKind",
         ),
         (
-            "    pub const ALL: [Self; 48] = [",
-            "    pub const ALL: [Self; 49] = [",
+            "    pub const ALL: [Self; 52] = [",
+            "    pub const ALL: [Self; 53] = [",
         ),
         (
-            "        Self::CheckOther,\n    ];",
-            "        Self::CheckOther,\n        Self::Phase3OracleKind,\n    ];",
+            "        Self::TypeTotality,\n    ];",
+            "        Self::TypeTotality,\n        Self::Phase3OracleKind,\n    ];",
         ),
         (
-            '            Self::CheckOther => "Other",\n',
-            '            Self::CheckOther => "Other",\n'
+            '            Self::TypeTotality => "TypeTotality",\n',
+            '            Self::TypeTotality => "TypeTotality",\n'
             '            Self::Phase3OracleKind => "phase3_oracle_kind",\n',
         ),
     )
@@ -170,6 +171,7 @@ impl From<WireDiagnostic> for Diagnostic {
             suggestions: wire.suggestions,
             span: wire.span,
             deep_path: wire.deep_path,
+            span_id: wire.span_id,
         }
     }
 }

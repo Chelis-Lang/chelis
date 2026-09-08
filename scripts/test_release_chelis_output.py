@@ -49,7 +49,7 @@ DARWIN_CONSUME_JOB_REQUIRED_MARKERS = (
     "runs-on: macos-latest",
     "chelis-v*-darwin-arm64.tar.gz",
     "verify_release_smt.py --tarball",
-    "smoke_macos_accelerate.py",
+    "smoke_macos_manifested_callable.py",
 )
 CONSUME_JOB_REQUIRED_MARKERS = (
     "needs: [build-chelis-release]",

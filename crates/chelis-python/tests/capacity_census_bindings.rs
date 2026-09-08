@@ -11,10 +11,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyModule, PyType};
 use serde::Deserialize;
 
+#[path = "../../../tests/support/capacity_census_authority.rs"]
+mod capacity_census_authority;
 #[path = "../../../tests/support/managed_python.rs"]
 mod managed_python;
+use capacity_census_authority::{AuthorityRegistries, SurfaceDescriptor};
 
 const PERMANENT_BINDING_DISPOSITION: &str = "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)";
+const BINDING_CENSUS_FAMILY: &str = "pyo3-binding";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrozenSurfaceRow {
@@ -249,6 +253,33 @@ fn permanent_baseline_problem(bytes: &[u8]) -> Option<String> {
     None
 }
 
+fn current_authority_problem(current: &[SurfaceRow]) -> Option<String> {
+    let legacy = frozen_surface_rows();
+    for row in current {
+        if legacy.contains(row) {
+            continue;
+        }
+        let surface = SurfaceDescriptor {
+            family: BINDING_CENSUS_FAMILY.to_string(),
+            kind: row.kind.clone(),
+            id: row.id.clone(),
+            flags: row.flags.clone(),
+        };
+        if let Err(problem) = capacity_census_authority::classify_final_authority(
+            &surface,
+            AuthorityRegistries {
+                nonnumeric: &[],
+                tagged_transports: &[],
+                numeric_operations: &[],
+            },
+            "",
+        ) {
+            return Some(problem);
+        }
+    }
+    None
+}
+
 #[test]
 fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
     let baseline_bytes = baseline_bytes();
@@ -277,10 +308,16 @@ fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
     let current: Vec<SurfaceRow> =
         serde_json::from_slice(&output.stdout).expect("typed binding census JSON");
     assert_eq!(
+        current_authority_problem(&current),
+        None,
+        "every non-legacy binding row requires exactly one final authority"
+    );
+    assert_eq!(
         current, baseline.rows,
         "registered PyO3 signature shape changed. A raw dtype id or bare numeric carrier \
          has no ordinary issue-citation path: redesign onto the typed carrier, remove the \
-         ingress, or obtain the explicit C6 review disposition"
+         ingress, or add the exact final authority registration without changing the \
+         sealed legacy cohort"
     );
 }
 

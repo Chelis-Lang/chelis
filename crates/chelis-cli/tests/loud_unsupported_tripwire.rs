@@ -96,7 +96,7 @@ macro_rules! declare_pats {
         /// plus the hosted chelis#732 format classes.
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
         enum Pat {
-            $($(#[$meta])* $name,)+
+            $($name,)+
         }
 
         /// Every pattern, generated from the same list that declares the
@@ -400,12 +400,6 @@ const BASELINE: &[Entry] = &[
     ),
     (
         Pat::UnwrapOrDefault,
-        "crates/chelis-backend-c/src/memory.rs",
-        1,
-        "pre-existing at the P0 baseline; not censused as substituting",
-    ),
-    (
-        Pat::UnwrapOrDefault,
         "crates/chelis-backend-c/src/lib.rs",
         1,
         "pre-existing at the P0 baseline; not censused as substituting",
@@ -419,12 +413,6 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-backend-hip/src/emit.rs",
-        1,
-        "pre-existing at the P0 baseline; not censused as substituting",
-    ),
-    (
-        Pat::UnwrapOrDefault,
-        "crates/chelis-backend-hip/src/memory.rs",
         1,
         "pre-existing at the P0 baseline; not censused as substituting",
     ),
@@ -556,18 +544,6 @@ const BASELINE: &[Entry] = &[
     // uses a precision spec today, and a new one is a third formatter. --
     (
         Pat::RustFormatNarrowing,
-        "crates/chelis-compiler-api/src/runtime/json.rs",
-        2,
-        "round_to's decimal-rounding MECHANISM (chelis#890, [05-OP-1]): \
-         each dtype lane formats its operand at `places` precision then \
-         exactly re-parses at the operand's own width -- an internal \
-         numeric algorithm whose precision spec IS the operation, not an \
-         observation exit; the observable result re-enters the value \
-         domain before any exit formats it. One site per authored lane \
-         (f64, f32)",
-    ),
-    (
-        Pat::RustFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",
         6,
         "cfg(test): the fill negative-lock needle ({value:.8}f must NOT \
@@ -684,11 +660,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustFormatNarrowing,
         "crates/chelis-types/src/observation.rs",
-        5,
+        6,
         "format_element's own spec/05 8.1 escalation candidates ({:.*e}) \
          plus three {v:e} spellings inside its panic/assert DIAGNOSTIC \
-         messages (round-4 F5 widening) - the sanctioned formatter's \
-         implementation and its self-checks, not additional exits",
+         messages (round-4 F5 widening), plus [05-OP-1]'s one sealed \
+         decimal-place formatter - the sanctioned formatter's implementation \
+         and its self-checks, not additional exits",
     ),
     (
         Pat::RustFormatNarrowing,
@@ -704,7 +681,12 @@ const BASELINE: &[Entry] = &[
     // definition there. The compiler-api rows are the DECLARED
     // derived-Debug residue carriers per faithful_observation.md B2.4:
     // diagnostics that Debug-print mismatched values through derive(Debug),
-    // owned by chelis#729's payload work plus the review rule. -----------
+    // owned by chelis#729's payload work plus the review rule. A NEW
+    // diagnostic in these modules routes through the crate-private
+    // boundary beside render_value (host_ops.rs's describe_value /
+    // describe_argument / describe_fields, chelis#997's FO-DIAG package);
+    // Debug-printing the payload locally is not an option this baseline
+    // leaves open. -------------------------------------------------------
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-types/src/observation.rs",
@@ -736,38 +718,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        31,
+        24,
         "declared derived-Debug residue carriers: Err(format!) \
-         diagnostics over Value/callable/handle shapes; +7 from the \
-         chelis#890/#903 JSON/CSV builtin dispatch arms (chelis#997 debt)",
-    ),
-    (
-        Pat::RustDebugNumericFormat,
-        "crates/chelis-compiler-api/src/runtime/json.rs",
-        18,
-        "chelis#890 JSON I/O runtime: Err(format!) parse/shape diagnostics \
-         over Json ADT fields and truncated payload renders -- the same \
-         residue-carrier class as eval.rs/host_ops.rs (chelis#997 debt; \
-         the sweep fix routes them through render_value); +1 cfg(test) \
-         assertion message in the invalid-escape regression test",
-    ),
-    (
-        Pat::RustDebugNumericFormat,
-        "crates/chelis-compiler-api/src/runtime/csv.rs",
-        10,
-        "chelis#903 CSV I/O runtime: Err(format!) parse/shape diagnostics \
-         over document shapes, incl. the integer-accessor malformed-cell \
-         renders -- the json.rs residue-carrier class (chelis#997 debt; \
-         same render_value sweep)",
-    ),
-    (
-        Pat::RustDebugNumericFormat,
-        "crates/chelis-compiler-api/src/runtime/mod.rs",
-        1,
-        "the shared truncated_debug helper for the chelis#890/#903 \
-         JSON/CSV shape diagnostics: ONE Debug spelling those modules \
-         route through (chelis#997 debt; the sweep replaces this single \
-         site)",
+         diagnostics over Value/callable/handle shapes; the seven \
+         chelis#890/#903 JSON/CSV builtin dispatch arms left with \
+         chelis#997's FO-DIAG migration onto host_ops::describe_value / \
+         describe_argument",
     ),
     (
         Pat::RustDebugNumericFormat,
@@ -786,12 +742,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        43,
+        23,
         "cfg-gated runtime unit-test assertions, not product exits; \
          chelis#729 Phase 1 replaced one raw-scalar assertion with two \
-         sealed ScalarValue assertion sites (net +1); +22 from the \
-         chelis#890/#903 JSON/CSV pipeline-test `got {other:?}` \
-         assertion messages",
+         sealed ScalarValue assertion sites (net +1); branch-owned JSON \
+         and CSV pipeline centralization removed the former local test \
+         assertions",
     ),
     (
         Pat::RustDebugNumericFormat,

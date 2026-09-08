@@ -1,29 +1,29 @@
 module Std.Test
-export (assert_true, assert_false, assert_eq, assert_eq_int, assert_eq_bool, assert_eq_string, assert_close, assert_close_tensor, assert_eq_tensor_int64, assert_shape, fail)
+export (assert_true, assert_false, assert_eq, assert_close, assert_close_tensor, assert_eq_tensor, assert_shape, fail)
 def assert_true(cond: bool, label: string) -> unit ! { Test } = test_assert(cond, label)
 def assert_false(cond: bool, label: string) -> unit ! { Test } = test_assert(not(cond), label)
-def assert_eq(actual: f32, expected: f32, label: string) -> unit ! { Test } = test_assert_eq_f32(actual, expected, label)
-def assert_eq_int(actual: int64, expected: int64, label: string) -> unit ! { Test } = test_assert_eq_int(actual, expected, label)
-def assert_eq_bool(actual: bool, expected: bool, label: string) -> unit ! { Test } = test_assert_eq_bool(actual, expected, label)
-def assert_eq_string(actual: string, expected: string, label: string) -> unit ! { Test } = test_assert_eq_string(actual, expected, label)
-def assert_close(actual: f32, expected: f32, tol: f32, label: string) -> unit ! { Test } = {
+def assert_eq[q](actual: q, expected: q, label: string) -> unit ! { Test } = test_assert_eq(actual, expected, label)
+def assert_close[p: Float](actual: p, expected: p, tol: p, label: string) -> unit ! { Test } = {
+  zero = sub(tol, tol)
   tol_nan = neq(tol, tol)
-  tol_negative = gt(cast(0.0, f32), tol)
+  tol_negative = gt(zero, tol)
   if or(tol_nan, tol_negative) then test_assert(false, string_concat("assert_close (", string_concat(label, string_concat("): invalid tolerance ", to_string(tol))))) else {
     actual_nan = neq(actual, actual)
     expected_nan = neq(expected, expected)
     diff = sub(actual, expected)
-    abs_diff = if gt(cast(0.0, f32), diff) then sub(cast(0.0, f32), diff) else diff
-    in_tol = if eq(tol, cast(0.0, f32)) then eq(actual, expected) else not(gt(abs_diff, tol))
+    abs_diff = if gt(zero, diff) then sub(zero, diff) else diff
+    in_tol = if eq(tol, zero) then eq(actual, expected) else not(gt(abs_diff, tol))
     ok = and(not(or(actual_nan, expected_nan)), in_tol)
     test_assert(ok, string_concat("assert_close (", string_concat(label, string_concat("): expected ", string_concat(to_string(expected), string_concat(", got ", string_concat(to_string(actual), string_concat(", tol ", to_string(tol)))))))))
   }
 }
-def assert_close_tensor[n, p](actual: &tensor[n, p], expected: &tensor[n, p], tol: f32, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
-def assert_eq_tensor_int64[n](actual: &tensor[n, int64], expected: &tensor[n, int64], label: string) -> unit ! { Test } = test_assert_eq_tensor_int64(actual, expected, label)
-def assert_shape[n, p](t: &tensor[n, p], expected_n: int64, label: string) -> unit ! { Test } = {
-  actual_n = cast(shape(t, cast(0, int32)), int64)
-  ok = eq(actual_n, expected_n)
-  test_assert(ok, string_concat("assert_shape (", string_concat(label, string_concat("): expected ", string_concat(to_string(expected_n), string_concat(", got ", to_string(actual_n)))))))
+def assert_close_tensor[p: Float](actual: &tensor[..r, p], expected: &tensor[..r, p], tol: p, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
+def assert_eq_tensor[p](actual: &tensor[..r, p], expected: &tensor[..r, p], label: string) -> unit ! { Test } = test_assert_eq_tensor(actual, expected, label)
+def assert_shape[p](t: &tensor[..r, p], expected: List[int64], label: string) -> unit ! { Test } = {
+  actual_rank = cast(rank(t), int64)
+  same_rank = eq(actual_rank, len(expected))
+  same_extents = if same_rank then shape_matches(t, expected, cast(0, int32), cast(actual_rank, int32)) else false
+  test_assert(and(same_rank, same_extents), label)
 }
+def shape_matches[p](t: &tensor[..r, p], expected: List[int64], axis: int32, limit: int32) -> bool = if gte(axis, limit) then true else and(eq(shape(t, axis), index(expected, cast(axis, int64))), shape_matches(t, expected, add(axis, cast(1, int32)), limit))
 def fail(msg: string) -> unit ! { Test } = test_assert(false, msg)

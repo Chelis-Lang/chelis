@@ -9,7 +9,7 @@ use chelis_deep::DeepTag;
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
 use chelis_surf::ast as surf;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 use std::ops::Deref;
 use std::path::Path;
 
@@ -36,9 +36,9 @@ use std::path::Path;
 /// corpus-wide shadow bucket. Named-module shadow remains corpus-wide.
 #[derive(Debug, Default)]
 struct Catalog {
-    opaque_modules_by_leaf: HashMap<String, HashSet<String>>,
-    opaque_defining_modules: HashSet<String>,
-    declared_leaves: HashSet<(Option<String>, String)>,
+    opaque_modules_by_leaf: UnordMap<String, UnordSet<String>>,
+    opaque_defining_modules: UnordSet<String>,
+    declared_leaves: UnordSet<(Option<String>, String)>,
 }
 
 impl Catalog {
@@ -59,7 +59,7 @@ impl Catalog {
 /// declarations. The latter must never leak to another checked file (CR2-7).
 struct CatalogContext<'a> {
     corpus: &'a Catalog,
-    current_file_module_less_leaves: &'a HashSet<String>,
+    current_file_module_less_leaves: &'a UnordSet<String>,
 }
 
 impl Deref for CatalogContext<'_> {
@@ -202,8 +202,8 @@ fn check_surf_decls_with_catalog(
 /// Leaves of the type declarations the file declares at TOP LEVEL
 /// (outside any `module` wrapper), for the file-scoped module-less
 /// shadow (CR2-7).
-fn surf_module_less_leaves(decls: &[surf::Decl]) -> HashSet<String> {
-    let mut out = HashSet::new();
+fn surf_module_less_leaves(decls: &[surf::Decl]) -> UnordSet<String> {
+    let mut out = UnordSet::new();
     for decl in decls {
         match decl {
             surf::Decl::TypeDef { name, .. } | surf::Decl::TypeAlias { name, .. } => {
@@ -440,7 +440,11 @@ fn check_surf_expr(
 }
 
 fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
-    let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) else {
+    // chelis#1088: the rule reads the same stamped `.dp` carrier the compiler
+    // does. A `.dp` the compiler will not accept produces no violations here;
+    // the compile path reports it, and a lint has never been the surface that
+    // announces malformed Deep.
+    let Ok(exprs) = chelis_deep::parse_and_stamp_file(source) else {
         return Vec::new();
     };
     let catalog = collect_deep_catalog(&exprs);
@@ -464,8 +468,8 @@ fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
 
 /// Leaves of the top-level (module-less) `deftype`/`typealias` nodes in
 /// a Deep source, for the file-scoped module-less shadow (CR2-7).
-fn deep_module_less_leaves(exprs: &[deep::Expr]) -> HashSet<String> {
-    let mut out = HashSet::new();
+fn deep_module_less_leaves(exprs: &[deep::Expr]) -> UnordSet<String> {
+    let mut out = UnordSet::new();
     for expr in exprs {
         let Some((tag, _, children)) = deep_node_parts(expr) else {
             continue;
@@ -992,7 +996,8 @@ def probability(x: f32) -> Probability = Probability { value: x }
                 .opaque_modules_by_leaf
                 .get("Type173")
                 .expect("leaf index")
-                .iter()
+                .to_sorted()
+                .into_iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["Domain173"]

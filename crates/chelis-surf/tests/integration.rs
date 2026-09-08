@@ -759,6 +759,77 @@ fn fmt_if_as_binary_operand_is_idempotent_and_meaning_preserving() {
     );
 }
 
+fn discover_repo_ch_files(root: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    const GENERATED_DIRECTORIES: &[&str] = &[".devenv", ".git", ".venv", "node_modules", "target"];
+
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| GENERATED_DIRECTORIES.contains(&name))
+                {
+                    continue;
+                }
+                stack.push(path);
+            } else if file_type.is_file()
+                && path.extension().and_then(|suffix| suffix.to_str()) == Some("ch")
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("corpus sweep found zero .ch files under {}", root.display()),
+        ));
+    }
+    Ok(files)
+}
+
+#[test]
+fn repo_ch_corpus_discovery_excludes_generated_and_symlinked_trees() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("repository fixture");
+    let external = tempfile::tempdir().expect("external fixture");
+    std::fs::write(root.path().join("real.ch"), "def real() -> int32 = 1\n")
+        .expect("write repository source");
+    for generated in [".devenv", ".venv", "target", "node_modules", ".git"] {
+        let directory = root.path().join(generated);
+        std::fs::create_dir_all(&directory).expect("create generated directory");
+        std::fs::write(directory.join("generated.ch"), "not repository source")
+            .expect("write generated source");
+    }
+    std::fs::write(external.path().join("escaped.ch"), "not repository source")
+        .expect("write external source");
+    symlink(external.path(), root.path().join("escape")).expect("create directory symlink");
+
+    let files = discover_repo_ch_files(root.path()).expect("discover repository corpus");
+    assert_eq!(files, vec![root.path().join("real.ch")]);
+}
+
+#[test]
+fn repo_ch_corpus_discovery_rejects_an_empty_corpus() {
+    let root = tempfile::tempdir().expect("empty repository fixture");
+    let error = discover_repo_ch_files(root.path()).expect_err("empty corpus must fail");
+    assert!(
+        error.to_string().contains("zero .ch files"),
+        "unexpected empty-corpus error: {error}"
+    );
+}
+
 /// Canonical v0.19 corpus oracle: every repository `.ch` file parses, is
 /// already a formatter fixed point, and stays fixed after another pass.
 /// Parse failures are failures, never silently skipped from the corpus.
@@ -771,31 +842,8 @@ fn fmt_idempotent_on_repo_ch_corpus() {
         .join("..")
         .join("..");
 
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut stack = vec![repo_root];
-    while let Some(dir) = stack.pop() {
-        for entry in
-            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
-        {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            if path.is_dir() {
-                if matches!(
-                    path.file_name().and_then(|name| name.to_str()),
-                    Some(".git" | "target" | "node_modules")
-                ) {
-                    continue;
-                }
-                stack.push(path);
-            } else if path.extension().and_then(|s| s.to_str()) == Some("ch") {
-                files.push(path);
-            }
-        }
-    }
-    assert!(
-        !files.is_empty(),
-        "corpus sweep found zero .ch files; check root paths"
-    );
+    let files: Vec<PathBuf> = discover_repo_ch_files(&repo_root)
+        .unwrap_or_else(|error| panic!("repository corpus discovery failed: {error}"));
 
     let mut failures: Vec<String> = Vec::new();
     for path in &files {

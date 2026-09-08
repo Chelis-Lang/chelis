@@ -105,6 +105,69 @@ class ManagedRuntimeTests(unittest.TestCase):
         self.assertEqual(argv[8:], ["--local"])
         self.assertEqual(environment["PATH"], "/usr/bin")
 
+    def test_reexec_drops_a_conflicting_python_preference(self):
+        """uv rejects --python-preference beside the --managed-python the gate passes.
+
+        Devenv exports UV_PYTHON_PREFERENCE=only-system, and any uv user may
+        set it, which turned `python3 scripts/gate.py` into `error: the
+        argument --managed-python cannot be used with --python-preference`
+        (chelis#1421). The gate's own flag decides which interpreter runs it.
+        """
+        calls = []
+
+        def fake_execvpe(program, argv, environment):
+            calls.append((program, argv, environment))
+            raise RuntimeError("exec intercepted")
+
+        with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
+            gate.ensure_managed_runtime(
+                ["--list"],
+                environ={
+                    "PATH": "/usr/bin",
+                    "UV_PYTHON_PREFERENCE": "only-system",
+                    "UV_PYTHON_DOWNLOADS": "never",
+                    "UV_PROJECT_ENVIRONMENT": "/state/venv",
+                },
+                executable=Path("/usr/bin/python3"),
+                prefix=Path("/System/Python"),
+                base_prefix=Path("/System/Python"),
+                find_uv=lambda _: "/opt/bin/uv",
+                execvpe=fake_execvpe,
+            )
+
+        _, argv, environment = calls[0]
+        self.assertIn("--managed-python", argv)
+        self.assertNotIn("UV_PYTHON_PREFERENCE", environment)
+        # Only the conflicting knob is dropped. A workstation that forbids
+        # downloads keeps failing loudly instead of having the gate fetch an
+        # interpreter behind that choice.
+        self.assertEqual(environment["UV_PYTHON_DOWNLOADS"], "never")
+        self.assertEqual(environment["UV_PROJECT_ENVIRONMENT"], "/state/venv")
+        self.assertEqual(environment["PATH"], "/usr/bin")
+
+    def test_reexec_leaves_the_callers_own_environment_untouched(self):
+        """The strip applies to the child, not to the caller's mapping."""
+        caller_environment = {
+            "PATH": "/usr/bin",
+            "UV_PYTHON_PREFERENCE": "only-system",
+        }
+
+        def fake_execvpe(program, argv, environment):
+            raise RuntimeError("exec intercepted")
+
+        with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
+            gate.ensure_managed_runtime(
+                ["--list"],
+                environ=caller_environment,
+                executable=Path("/usr/bin/python3"),
+                prefix=Path("/System/Python"),
+                base_prefix=Path("/System/Python"),
+                find_uv=lambda _: "/opt/bin/uv",
+                execvpe=fake_execvpe,
+            )
+
+        self.assertEqual(caller_environment["UV_PYTHON_PREFERENCE"], "only-system")
+
     def test_missing_uv_prints_install_and_setup_guidance(self):
         error = io.StringIO()
         result = gate.ensure_managed_runtime(

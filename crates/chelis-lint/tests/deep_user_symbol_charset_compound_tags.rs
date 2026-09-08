@@ -16,7 +16,7 @@
 
 use chelis_lint::rules::deep_user_symbol_charset::{CLOSED_TAGS, DeepUserSymbolCharset};
 use chelis_lint::{Context, Rule, Surface, Violation};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 fn run(src: &str) -> Vec<Violation> {
@@ -96,8 +96,8 @@ fn accepts_all_emitted_compound_tags() {
 /// initially missed from this allowlist.
 #[test]
 fn closed_tags_match_canonical_deep_vocabulary() {
-    let local: HashSet<&str> = CLOSED_TAGS.iter().copied().collect();
-    let canonical: HashSet<&str> = chelis_deep::validate::VALID_TAGS.iter().copied().collect();
+    let local: BTreeSet<&str> = CLOSED_TAGS.iter().copied().collect();
+    let canonical: BTreeSet<&str> = chelis_deep::validate::VALID_TAGS.iter().copied().collect();
     let missing: Vec<&&str> = canonical.difference(&local).collect();
     let extra: Vec<&&str> = local.difference(&canonical).collect();
     assert!(

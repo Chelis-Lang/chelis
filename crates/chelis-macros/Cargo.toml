@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 thiserror.workspace = true
 
@@ -14,3 +15,6 @@ chelis-surf.workspace = true
 chelis-types.workspace = true
 chelis-effects.workspace = true
 chelis-ir.workspace = true
+
+[lints]
+workspace = true

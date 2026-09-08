@@ -1,9 +1,9 @@
-//! Issue #185 host-runtime acceptance (Group C — Binary Tier 2).
+//! Issue #185 host-runtime acceptance for direct Tier-1 extrema identities.
 //!
-//! `BUILTIN_NAMES` accepts `max_elem` and `min_elem` but the host
-//! runtime evaluator did not dispatch them. Each is an element-wise
-//! binary op; the host runtime must agree with the IR evaluator's
-//! `binary_map(.., f64::max)` / `binary_map(.., f64::min)` behavior.
+//! `BUILTIN_NAMES` accepts `max_elem` and `min_elem`, but the host runtime
+//! evaluator originally did not dispatch them. Each is a direct element-wise
+//! selector; the host runtime must agree with the
+//! exact stored-operand selection required by [05-OP-40].
 //!
 //! Spec source of truth: `spec/05-risc-primitives.md` §3.4.
 

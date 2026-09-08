@@ -1,6 +1,6 @@
 use chelis_ir::host::{
-    ConcreteHostProgram, HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary,
-    HostTensorHelper, HostTensorSpecialization,
+    HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary, HostTensorHelper,
+    HostTensorSpecialization,
 };
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
@@ -173,257 +173,27 @@ use crate::host_abi::{
     HostAbiCallback as HostCallback, HostAbiCallbackKind as HostCallbackKind,
     HostAbiExpr as HostExpr, HostAbiExprKind as HostExprKind, HostAbiFunction as HostFunction,
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
-    HostAbiType, HostAbiType as HostType, project_program,
+    HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_types::types::Prim;
+use chelis_ir::ownership::{
+    HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedDagView, VerifiedEdgeView,
+    VerifiedHostAction, VerifiedHostOperation, VerifiedHostTensorHelperView,
+    VerifiedHostTerminator, VerifiedOperationId, VerifiedOwnerId, VerifiedOwnershipUse,
+    VerifiedTerminalView,
+};
+use chelis_types::manifest::{RootManifest, RootPathStep};
+use chelis_types::types::{Lane, Prim};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
-use std::collections::{HashMap, HashSet};
-
-/// The set of parameter indices a user function's result may alias
-/// (issue #406 call-escape interprocedural summary). `Indices(s)` means
-/// the result may *be* the allocation of one of the parameters in `s`
-/// (and only those); an empty set means the result is always a fresh
-/// allocation that does not escape any argument. `Any` is the
-/// conservative top element: the result may alias *any* refcounted
-/// pointer-typed argument. `Any` is used whenever the body contains a
-/// shape the analysis does not precisely model (e.g. a call to a
-/// function not yet in the summary, an unmodeled `HostExprKind`), so the
-/// emit site over-retains rather than risking a use-after-free.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ReturnsArg {
-    Indices(HashSet<usize>),
-    Any,
-}
-
-impl ReturnsArg {
-    fn empty() -> Self {
-        ReturnsArg::Indices(HashSet::new())
-    }
-
-    /// Join two result-alias summaries (the `if`/`match`-arm union or the
-    /// fixpoint widening). `Any` absorbs everything; otherwise the index
-    /// sets are unioned.
-    fn join(self, other: ReturnsArg) -> ReturnsArg {
-        match (self, other) {
-            (ReturnsArg::Any, _) | (_, ReturnsArg::Any) => ReturnsArg::Any,
-            (ReturnsArg::Indices(mut a), ReturnsArg::Indices(b)) => {
-                a.extend(b);
-                ReturnsArg::Indices(a)
-            }
-        }
-    }
-
-    /// Does the result possibly alias parameter index `i`?
-    fn may_return(&self, i: usize) -> bool {
-        match self {
-            ReturnsArg::Any => true,
-            ReturnsArg::Indices(s) => s.contains(&i),
-        }
-    }
-}
-
-/// Compute, for every user function in the program, the set of parameter
-/// indices its result may alias (issue #406 call-escape). Reaches a
-/// least-fixpoint over the call graph so mutual recursion is handled: a
-/// function that returns the result of calling another (or itself)
-/// propagates that callee's parameter-alias set back through the matching
-/// argument positions.
-///
-/// Soundness contract: the result for a function is only ever *widened*
-/// across iterations, and any expression shape the walker does not
-/// precisely model yields [`ReturnsArg::Any`] (top), so the summary is a
-/// sound over-approximation of "may the result be this parameter's
-/// allocation". The emit site uses it to decide which block-frame heap
-/// bindings escape through a call and must be retained; an over-estimate
-/// retains a binding that did not actually escape (a documented residual
-/// leak), never frees one that did (which would be a use-after-free).
-fn analyze_returns_arg(program: &HostProgram) -> HashMap<String, ReturnsArg> {
-    let mut summary: HashMap<String, ReturnsArg> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.clone(), ReturnsArg::empty()))
-        .collect();
-
-    // Monotone fixpoint: re-evaluate each body until no summary widens.
-    // Bounded by (function count x parameter count) widenings.
-    loop {
-        let mut changed = false;
-        for function in &program.functions {
-            let param_index: HashMap<&str, usize> = function
-                .params
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.name.as_str(), i))
-                .collect();
-            let mut env: HashMap<String, ReturnsArg> = HashMap::new();
-            let computed = result_alias_set(&function.body, &param_index, &summary, &mut env);
-            let entry = summary
-                .entry(function.name.clone())
-                .or_insert_with(ReturnsArg::empty);
-            let joined = entry.clone().join(computed);
-            if &joined != entry {
-                *entry = joined;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    summary
-}
-
-/// Evaluate the parameter-alias set of `expr`'s *result value* under the
-/// current call-graph `summary` and the local `env` mapping in-scope
-/// `let`-binding names to their own alias sets. `param_index` maps the
-/// enclosing function's parameter names to their positions.
-///
-/// The result is the set of enclosing-function parameter indices the
-/// value may alias, or [`ReturnsArg::Any`] when the value may alias an
-/// argument the analysis cannot pin to a specific parameter (a call to a
-/// not-yet-summarized or opaque function whose returned argument is
-/// itself parameter-derived, etc.). Constructors, literals, builtins, and
-/// tensor lanes produce fresh allocations and contribute the empty set.
-fn result_alias_set(
-    expr: &HostExpr,
-    param_index: &HashMap<&str, usize>,
-    summary: &HashMap<String, ReturnsArg>,
-    env: &mut HashMap<String, ReturnsArg>,
-) -> ReturnsArg {
-    match &expr.kind {
-        HostExprKind::Var(name, _) => {
-            if let Some(&i) = param_index.get(name.as_str()) {
-                ReturnsArg::Indices(HashSet::from([i]))
-            } else if let Some(set) = env.get(name) {
-                set.clone()
-            } else {
-                // An outer-scope / global name: not one of this
-                // function's parameters, so it does not alias any
-                // parameter. (A captured global is owned elsewhere.)
-                ReturnsArg::empty()
-            }
-        }
-        HostExprKind::Let { bindings, body, .. } => {
-            for binding in bindings {
-                let set = result_alias_set(&binding.value, param_index, summary, env);
-                env.insert(binding.name.clone(), set);
-            }
-            result_alias_set(body, param_index, summary, env)
-        }
-        HostExprKind::If {
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            let t = result_alias_set(then_expr, param_index, summary, env);
-            let e = result_alias_set(else_expr, param_index, summary, env);
-            t.join(e)
-        }
-        HostExprKind::MatchOption {
-            bind_name,
-            some_expr,
-            none_expr,
-            ..
-        } => {
-            // `bind_name` names the Option's unwrapped inner value (a
-            // fresh scalar/boxed extraction), not a parameter; shadow any
-            // outer entry with the empty set for the `some` arm.
-            let prev = env.insert(bind_name.clone(), ReturnsArg::empty());
-            let s = result_alias_set(some_expr, param_index, summary, env);
-            match prev {
-                Some(set) => {
-                    env.insert(bind_name.clone(), set);
-                }
-                None => {
-                    env.remove(bind_name);
-                }
-            }
-            let n = result_alias_set(none_expr, param_index, summary, env);
-            s.join(n)
-        }
-        HostExprKind::MatchAdt {
-            arms, default_expr, ..
-        } => {
-            let mut acc = ReturnsArg::empty();
-            for arm in arms {
-                // The arm's pattern bindings name freshly-accessed ADT
-                // fields (a `chelis_adt_field` read returns an independent
-                // retained handle), not the enclosing function's
-                // parameters. Shadow any outer `env` entry of the same
-                // name with the empty set for the arm body so a coincidental
-                // name reuse cannot spuriously propagate a parameter alias.
-                let saved: Vec<(String, Option<ReturnsArg>)> = arm
-                    .bindings
-                    .iter()
-                    .map(|b| {
-                        (
-                            b.name.clone(),
-                            env.insert(b.name.clone(), ReturnsArg::empty()),
-                        )
-                    })
-                    .collect();
-                acc = acc.join(result_alias_set(&arm.expr, param_index, summary, env));
-                for (name, prev) in saved {
-                    match prev {
-                        Some(set) => {
-                            env.insert(name, set);
-                        }
-                        None => {
-                            env.remove(&name);
-                        }
-                    }
-                }
-            }
-            if let Some(default) = default_expr {
-                acc = acc.join(result_alias_set(default, param_index, summary, env));
-            }
-            acc
-        }
-        HostExprKind::Call { function, args, .. } => {
-            // The call's result aliases this function's parameters only
-            // through whichever arguments the callee returns. If the
-            // callee is not yet summarized, treat it as may-return-any of
-            // its arguments (conservative top): any argument that itself
-            // aliases a parameter then propagates.
-            let callee = summary.get(function);
-            let mut acc = ReturnsArg::empty();
-            for (i, arg) in args.iter().enumerate() {
-                let returns_this = match callee {
-                    Some(s) => s.may_return(i),
-                    None => true,
-                };
-                if returns_this {
-                    acc = acc.join(result_alias_set(arg, param_index, summary, env));
-                }
-            }
-            acc
-        }
-        HostExprKind::WithSeed { body, .. } => result_alias_set(body, param_index, summary, env),
-        // Constructors, literals, builtins, field access, the iterator
-        // lanes, and tensor calls all build fresh allocations whose
-        // result does not alias an incoming parameter pointer. (A builtin
-        // like `id` is not a user function call; the few identity-shaped
-        // builtins still hand back a retained/independent reference, so
-        // treating them as fresh here is sound for the block-release
-        // balance.)
-        _ => ReturnsArg::empty(),
-    }
-}
-
-pub fn emit_host_program(
-    program: &ConcreteHostProgram,
-    program_name: &str,
-) -> Result<String, Unsupported> {
-    let abi_program = project_program(program)?;
-    emit_host_abi_program(&abi_program, program_name)
-}
+use chelis_unord::{UnordMap, UnordSet};
 
 pub(crate) fn emit_host_abi_program(
-    program: &HostProgram,
+    projected: &ProjectedHostProgram<'_>,
     program_name: &str,
 ) -> Result<String, Unsupported> {
+    let program = projected.program();
+    let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
     // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
@@ -433,9 +203,11 @@ pub(crate) fn emit_host_abi_program(
     // no declaration in scope.
     let mut body: Vec<String> = Vec::new();
     let mut helper_requirements = HelperRequirements::default();
-    append_tensor_reshape_helper(&mut body);
-    body.push(String::new());
     append_scalar_conversion_helpers(&mut body);
+    body.push(String::new());
+    append_tensor_abi_helpers(&mut body);
+    body.push(String::new());
+    append_tensor_reshape_helper(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
     body.push(String::new());
@@ -443,20 +215,55 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_tensor_math_helpers(&mut body);
     body.push(String::new());
-    // When the program is a self-contained binary (has globals → `main` is emitted in the
-    // same translation unit), user-defined host functions can be marked `static inline` so
-    // the compiler can inline scalar helpers across calls under `-O2` / `-fPIC` without
-    // requiring the downstream shell to supply `-flto -Wl,-Bsymbolic`. Object-mode builds
-    // (no main) keep external linkage so the exported symbols remain callable from the
-    // linker.
-    let internal_linkage = !program.globals.is_empty();
+    // Authored functions are published in the generated header with external
+    // linkage. [05-OBS-11] can make the same translation unit executable by
+    // adding `main`, but that observation driver must not contradict the
+    // published ABI by turning those definitions `static`. Compiler-owned
+    // monomorphized specializations remain translation-unit local below.
+    let internal_linkage = false;
     let emitted_names = emitted_function_names(program, program_name);
     reject_duplicate_emitted_function_names(&emitted_names)?;
+    let internal_names = internal_function_names(program, &emitted_names);
+    let mut all_names = emitted_names.clone();
+    for (original, internal) in internal_names.to_sorted() {
+        if emitted_names
+            .get(original)
+            .is_some_and(|public| public != internal)
+        {
+            all_names.insert(format!("{original} (owned body)"), internal.clone());
+        }
+    }
+    reject_duplicate_emitted_function_names(&all_names)?;
     let function_specializations = function_specializations(program);
-    let returns_arg = analyze_returns_arg(program);
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage)?;
     if !header.is_empty() {
         body.push(header);
+        body.push(String::new());
+    }
+    for function in &program.functions {
+        if function.origin != chelis_ir::host::HostFunctionOrigin::Authored {
+            continue;
+        }
+        let params = function
+            .params
+            .iter()
+            .map(|param| c_decl(&param.ty, &param.name))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        body.push(format!(
+            "static inline {} {}({});",
+            c_type(&function.ret_ty)?,
+            internal_names
+                .get(&function.name)
+                .expect("authored function has owned-body name"),
+            params
+        ));
+    }
+    if program
+        .functions
+        .iter()
+        .any(|function| function.origin == chelis_ir::host::HostFunctionOrigin::Authored)
+    {
         body.push(String::new());
     }
 
@@ -467,9 +274,14 @@ pub(crate) fn emit_host_abi_program(
     // scope; `emit_main` assigns them in binding order instead of declaring
     // locals, so function bodies and `main()` resolve the same object
     // (mirroring eval's load-closure, which serves the binding's value at
-    // call time). Check-time name resolution rejects forward references
-    // from a use site to a later binding, so every hoisted binding is
-    // initialized before the first user call that reads it.
+    // call time). [04-INF-4] rejects a DIRECT forward reference from a
+    // compiled function to a later binding at check time, annotated or not,
+    // so a hoisted binding a function names is initialized before the first
+    // user call that reads it. [04-INF-8] closes the INDIRECT shape too: when
+    // an earlier binding's initializer calls a function that reaches a later
+    // value, the checker rejects the initiating root before this emitter runs.
+    // `main()` remains source ordered; the checker, not a reordered backend,
+    // owns the top-level initialization frontier (chelis#1339).
     let captured_globals = captured_global_names(program);
     if !captured_globals.is_empty() {
         body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());
@@ -488,6 +300,9 @@ pub(crate) fn emit_host_abi_program(
         helper_requirements.merge(append_helper(
             &mut body,
             helper,
+            projected
+                .global_tensor_helper(index)
+                .expect("projected global helper retains verified child"),
             &format!("{program_name}__global__tensor_{index}"),
         )?);
     }
@@ -510,21 +325,35 @@ pub(crate) fn emit_host_abi_program(
             .is_none_or(|reachable| reachable.contains(name))
     };
 
-    let mut stubbed_functions: HashSet<String> = HashSet::new();
+    let mut stubbed_functions: UnordSet<String> = UnordSet::new();
     let mut function_bodies: Vec<String> = Vec::new();
-    for function in &program.functions {
+    for (function_index, function) in program.functions.iter().enumerate() {
         let emitted_name = emitted_names
             .get(&function.name)
             .expect("host function emitted name");
         let mut fn_buf: Vec<String> = Vec::new();
+        let helper_output_counts = (0..function.tensor_helpers.len())
+            .map(|helper| {
+                let verified = projected
+                    .function_tensor_helper(function_index, helper)
+                    .expect("projected function helper retains verified child");
+                CEmitter::output_labels(verified.dag()).len().max(1)
+            })
+            .collect::<Vec<_>>();
         match emit_function(
             &mut fn_buf,
             function,
             emitted_name,
-            &emitted_names,
+            &internal_names,
             &function_specializations,
-            &returns_arg,
             internal_linkage || function.is_monomorphized_specialization(),
+            projected
+                .function_sites(function_index)
+                .expect("projected function retains verified sites"),
+            projected
+                .function_owner_bindings(function_index)
+                .expect("projected function retains verified body-owner bindings"),
+            &helper_output_counts,
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -545,7 +374,7 @@ pub(crate) fn emit_host_abi_program(
         }
     }
 
-    for function in &program.functions {
+    for (function_index, function) in program.functions.iter().enumerate() {
         if stubbed_functions.contains(&function.name) {
             // A stubbed wrapper aborts before any helper call; skip its
             // (possibly unemittable) tensor helpers entirely.
@@ -558,6 +387,9 @@ pub(crate) fn emit_host_abi_program(
             helper_requirements.merge(append_helper(
                 &mut body,
                 helper,
+                projected
+                    .function_tensor_helper(function_index, index)
+                    .expect("projected function helper retains verified child"),
                 &format!("{function_name}__tensor_{index}"),
             )?);
         }
@@ -566,14 +398,50 @@ pub(crate) fn emit_host_abi_program(
     body.extend(function_bodies);
 
     if !program.globals.is_empty() {
-        let hoisted: HashSet<&str> = captured_globals.iter().map(String::as_str).collect();
-        emit_main(&mut body, program_name, program, &returns_arg, &hoisted)?;
+        let hoisted: UnordSet<&str> = captured_globals.iter().map(String::as_str).collect();
+        let helper_output_counts = (0..program.global_tensor_helpers.len())
+            .map(|helper| {
+                let verified = projected
+                    .global_tensor_helper(helper)
+                    .expect("projected global helper retains verified child");
+                CEmitter::output_labels(verified.dag()).len().max(1)
+            })
+            .collect::<Vec<_>>();
+        emit_main(
+            &mut body,
+            program_name,
+            program,
+            projected.manifest(),
+            &hoisted,
+            projected.root_sites(),
+            &internal_names,
+            &helper_output_counts,
+        )?;
+    }
+
+    // Keep the JSON-only sorting machinery out of unrelated generated
+    // translation units. Detect the structured call emitted above, then
+    // prepend its definition so C never relies on an implicit declaration.
+    let needs_json_canonical_object_helper = body
+        .iter()
+        .any(|line| line.contains(" = chelis_json_canonical_object_entries("));
+    if needs_json_canonical_object_helper {
+        let mut json_helpers = Vec::new();
+        append_json_canonical_object_helpers(&mut json_helpers);
+        json_helpers.push(String::new());
+        json_helpers.extend(body);
+        body = json_helpers;
     }
 
     let mut out: Vec<String> = vec![
         "#include \"chelis_runtime.h\"".to_string(),
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
+    ];
+    if needs_json_canonical_object_helper {
+        out.push("#include <stdlib.h>".to_string());
+    }
+    out.extend([
         String::new(),
         // chelis#943: emitter-internal accumulator ABI. Deliberately absent
         // from the published chelis_runtime.h (the capacity census governs
@@ -583,7 +451,7 @@ pub(crate) fn emit_host_abi_program(
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
         "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
         "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
-    ];
+    ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
     }
@@ -613,13 +481,14 @@ fn emitted_function_name(program_name: &str, function_name: &str) -> String {
 /// would otherwise emit a whole-TU symbol redefinition from a build that
 /// reported success.
 fn reject_duplicate_emitted_function_names(
-    emitted_names: &HashMap<String, String>,
+    emitted_names: &UnordMap<String, String>,
 ) -> Result<(), Unsupported> {
-    let mut by_emitted: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (original, emitted) in emitted_names {
+    let mut by_emitted: UnordMap<&str, Vec<&str>> = UnordMap::new();
+    for (original, emitted) in emitted_names.to_sorted() {
         by_emitted.entry(emitted).or_default().push(original);
     }
     let mut collisions: Vec<String> = by_emitted
+        .into_sorted()
         .into_iter()
         .filter(|(_, originals)| originals.len() > 1)
         .map(|(emitted, mut originals)| {
@@ -648,7 +517,7 @@ fn reject_duplicate_emitted_function_names(
     ))
 }
 
-fn emitted_function_names(program: &HostProgram, program_name: &str) -> HashMap<String, String> {
+fn emitted_function_names(program: &HostProgram, program_name: &str) -> UnordMap<String, String> {
     program
         .functions
         .iter()
@@ -661,7 +530,32 @@ fn emitted_function_names(program: &HostProgram, program_name: &str) -> HashMap<
         .collect()
 }
 
-fn function_specializations(program: &HostProgram) -> HashMap<String, HostFunctionSpecialization> {
+fn owned_body_name(emitted_name: &str) -> String {
+    format!("{emitted_name}__chelis_owned_body")
+}
+
+fn internal_function_names(
+    program: &HostProgram,
+    emitted_names: &UnordMap<String, String>,
+) -> UnordMap<String, String> {
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            let public = emitted_names
+                .get(&function.name)
+                .expect("every host function has an emitted name");
+            let internal = if function.origin == chelis_ir::host::HostFunctionOrigin::Authored {
+                owned_body_name(public)
+            } else {
+                public.clone()
+            };
+            (function.name.clone(), internal)
+        })
+        .collect()
+}
+
+fn function_specializations(program: &HostProgram) -> UnordMap<String, HostFunctionSpecialization> {
     program
         .functions
         .iter()
@@ -724,9 +618,86 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     );
 }
 
+/// Translation-unit-local support for Std.Io.Json's canonical object
+/// observation. Generic Dict iteration remains insertion ordered; this helper
+/// sorts only the private JSON serializer boundary. Comparing one Unicode
+/// scalar slice at a time handles prefixes and embedded U+0000, while UTF-8's
+/// byte order preserves scalar-value order for every nonzero scalar.
+fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
+    for line in [
+        "static int chelis_json_compare_strings(chelis_string lhs, chelis_string rhs) {",
+        "    int64_t lhs_len = chelis_string_len(lhs);",
+        "    int64_t rhs_len = chelis_string_len(rhs);",
+        "    int64_t common = lhs_len < rhs_len ? lhs_len : rhs_len;",
+        "    for (int64_t index = 0; index < common; ++index) {",
+        "        chelis_string lhs_scalar = chelis_string_slice(lhs, index, 1);",
+        "        chelis_string rhs_scalar = chelis_string_slice(rhs, index, 1);",
+        "        const unsigned char *lhs_bytes = (const unsigned char *)chelis_string_data(lhs_scalar);",
+        "        const unsigned char *rhs_bytes = (const unsigned char *)chelis_string_data(rhs_scalar);",
+        "        int result = 0;",
+        "        int64_t byte = 0;",
+        "        while (lhs_bytes[byte] != 0 && rhs_bytes[byte] != 0 && lhs_bytes[byte] == rhs_bytes[byte]) {",
+        "            ++byte;",
+        "        }",
+        "        if (lhs_bytes[byte] < rhs_bytes[byte]) result = -1;",
+        "        if (lhs_bytes[byte] > rhs_bytes[byte]) result = 1;",
+        "        chelis_string_release(lhs_scalar);",
+        "        chelis_string_release(rhs_scalar);",
+        "        if (result != 0) return result;",
+        "    }",
+        "    return lhs_len < rhs_len ? -1 : (lhs_len > rhs_len ? 1 : 0);",
+        "}",
+        "",
+        "static int chelis_json_compare_entry_keys(chelis_value lhs_entry, chelis_value rhs_entry) {",
+        "    chelis_value lhs_key = chelis_tuple_get(chelis_tuple_borrow_value(lhs_entry), 0);",
+        "    chelis_value rhs_key = chelis_tuple_get(chelis_tuple_borrow_value(rhs_entry), 0);",
+        "    int result = chelis_json_compare_strings(chelis_string_borrow_value(lhs_key), chelis_string_borrow_value(rhs_key));",
+        "    chelis_value_release(lhs_key);",
+        "    chelis_value_release(rhs_key);",
+        "    return result;",
+        "}",
+        "",
+        "static chelis_list *chelis_json_canonical_object_entries(const chelis_dict *dict) {",
+        "    chelis_list *source = chelis_dict_entries(dict);",
+        "    int64_t len = chelis_list_len(source);",
+        "    int64_t *order = len > 0 ? (int64_t *)malloc((size_t)len * sizeof(int64_t)) : NULL;",
+        "    if (len > 0 && order == NULL) {",
+        "        chelis_fail(chelis_string_from_cstr(\"JSON canonical object ordering allocation failed\"));",
+        "    }",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        order[index] = index;",
+        "        int64_t cursor = index;",
+        "        while (cursor > 0) {",
+        "            chelis_value lhs = chelis_list_index(source, order[cursor - 1]);",
+        "            chelis_value rhs = chelis_list_index(source, order[cursor]);",
+        "            int comparison = chelis_json_compare_entry_keys(lhs, rhs);",
+        "            chelis_value_release(lhs);",
+        "            chelis_value_release(rhs);",
+        "            if (comparison <= 0) break;",
+        "            int64_t swap = order[cursor - 1];",
+        "            order[cursor - 1] = order[cursor];",
+        "            order[cursor] = swap;",
+        "            --cursor;",
+        "        }",
+        "    }",
+        "    chelis_list *result = chelis_list_with_capacity(len);",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        chelis_value entry = chelis_list_index(source, order[index]);",
+        "        chelis_list_push(result, entry);",
+        "        chelis_value_release(entry);",
+        "    }",
+        "    free(order);",
+        "    chelis_list_release(source);",
+        "    return result;",
+        "}",
+    ] {
+        out.push(line.to_string());
+    }
+}
+
 /// Instantiate the scalar host-expression path at each concrete float ABI.
 ///
-/// Tensor activations decompose through `chelis_ir::tier2`; scalar calls in a
+/// Tensor activations lower through `chelis_ir::tier2`; scalar calls in a
 /// Surf `def` reach this emitter after host-ABI projection instead. Reduced
 /// floats need distinct per-node finalizers even though both compute as C
 /// `float`, so one generated specialization cannot serve every source dtype.
@@ -736,7 +707,6 @@ fn append_activation_helpers(
     c_type: &str,
     literal_suffix: &str,
     exp: &str,
-    max: &str,
     finalizer: Option<&str>,
 ) {
     let literal = |value: &str| match suffix {
@@ -753,8 +723,9 @@ fn append_activation_helpers(
         "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
     ));
     out.push(format!(
-        "    return {};",
-        finalize(format!("{max}({}, x)", literal("0.0")))
+        "    return x < {} ? {} : x;",
+        literal("0.0"),
+        literal("0.0")
     ));
     out.push("}".to_string());
 
@@ -876,7 +847,6 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
         "float",
         "f",
         "expf",
-        "fmaxf",
         Some("chelis_host_finalize_f16"),
     );
     append_activation_helpers(
@@ -885,11 +855,10 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
         "float",
         "f",
         "expf",
-        "fmaxf",
         Some("chelis_host_finalize_bf16"),
     );
-    append_activation_helpers(out, "f32", "float", "f", "expf", "fmaxf", None);
-    append_activation_helpers(out, "f64", "double", "", "exp", "fmax", None);
+    append_activation_helpers(out, "f32", "float", "f", "expf", None);
+    append_activation_helpers(out, "f64", "double", "", "exp", None);
 }
 
 /// Private scalar-cast helpers for the generated translation unit.
@@ -996,16 +965,74 @@ fn append_scalar_conversion_helpers(out: &mut Vec<String>) {
     out.push("#define CHELIS_PRIVATE_SCALAR_TENSOR_HELPERS".to_string());
     out.extend(
         [
+            "static uint32_t chelis_host_f32_bits(float value) {",
+            "    uint32_t bits; memcpy(&bits, &value, sizeof bits); return bits;",
+            "}",
+            "",
+            "static uint64_t chelis_host_f64_bits(double value) {",
+            "    uint64_t bits; memcpy(&bits, &value, sizeof bits); return bits;",
+            "}",
+            "",
+            "static chelis_scalar chelis_host_scalar_from_i8(int8_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i16(int16_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i32(int32_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i64(int64_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_f64(double value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits(value));",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_f32(float value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits(value));",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_bool(bool value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, value ? 1u : 0u);",
+            "}",
+            "",
+            "static int64_t chelis_host_scalar_as_i64(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    switch (expected) {",
+            "        case CHELIS_DTYPE_I8: return (int8_t)(uint8_t)value.bits;",
+            "        case CHELIS_DTYPE_I16: return (int16_t)(uint16_t)value.bits;",
+            "        case CHELIS_DTYPE_I32: return (int32_t)(uint32_t)value.bits;",
+            "        case CHELIS_DTYPE_I64: { int64_t out; memcpy(&out, &value.bits, sizeof out); return out; }",
+            "        default: fprintf(stderr, \"expected signed integer scalar\\n\"); exit(1);",
+            "    }",
+            "}",
+            "",
+            "static uint64_t chelis_host_scalar_bits(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    return value.bits;",
+            "}",
+            "",
+            "static double chelis_host_scalar_as_float(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    switch (expected) {",
+            "        case CHELIS_DTYPE_F32: return (double)chelis_f32_from_bits((uint32_t)value.bits);",
+            "        case CHELIS_DTYPE_F64: return chelis_f64_from_bits(value.bits);",
+            "        case CHELIS_DTYPE_F16: return (double)chelis_f16_to_f32((uint16_t)value.bits);",
+            "        case CHELIS_DTYPE_BF16: return (double)chelis_bf16_to_f32((uint16_t)value.bits);",
+            "        default: fprintf(stderr, \"expected float scalar\\n\"); exit(1);",
+            "    }",
+            "}",
+            "",
+            "static bool chelis_host_scalar_as_bool(chelis_scalar value) {",
+            "    if (value.dtype != CHELIS_DTYPE_BOOL) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    return value.bits == 1;",
+            "}",
+            "",
             "static chelis_tensor *chelis_host_scalar_tensor_from_f16(uint16_t value) {",
-            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_F16);",
-            "    *((uint16_t *)tensor->data) = value;",
-            "    return tensor;",
+            "    return chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)value));",
             "}",
             "",
             "static chelis_tensor *chelis_host_scalar_tensor_from_bf16(uint16_t value) {",
-            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_BF16);",
-            "    *((uint16_t *)tensor->data) = value;",
-            "    return tensor;",
+            "    return chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)value));",
             "}",
         ]
         .into_iter()
@@ -1246,186 +1273,169 @@ fn cast_prim_c_type(prim: Prim) -> &'static str {
     }
 }
 
-/// One emitted `case` of the per-dtype element printer, or `None` for a
-/// `Prim` that has no runtime tensor storage (`f8e4m3` is rejected at
-/// check time per spec/04 section 1.1.1; `string` payloads are never
-/// tensor elements). Exhaustive over `Prim` with no `_` arm
-/// (`loud_unsupported.md` section C4): adding a primitive is a
-/// compile-error work-list here, never a silent fall-through to the
-/// aborting `default:`. The `CHELIS_*` case labels and format widths come
-/// from the `RuntimeDType` vocabulary declaration, not a local table.
-fn print_helper_elem_case(prim: Prim) -> Option<Vec<String>> {
-    use chelis_vocab::RuntimeDType;
-    let case = |dtype: RuntimeDType, body: Vec<String>| -> Vec<String> {
-        let mut lines = vec![format!("        case {}:", dtype.c_macro())];
-        lines.extend(body.into_iter().map(|line| format!("            {line}")));
-        lines.push("            break;".to_string());
-        lines
-    };
-    // Floats: read at storage width, widen to the exact double image
-    // (lossless for every supported float), format at the value's OWN
-    // width through the runtime's shortest-round-trip routine.
-    let float_case = |dtype: RuntimeDType, image_expr: &str| -> Vec<String> {
-        case(
-            dtype,
-            vec![
-                format!(
-                    "chelis_format_shortest({image_expr}, {}, fmt_buf, sizeof fmt_buf);",
-                    dtype.c_macro()
-                ),
-                "fputs(fmt_buf, stdout);".to_string(),
-            ],
-        )
-    };
-    // Integers: printf at width, all digits exact. int64 goes through
-    // `long long` (>= 64 bits everywhere), NEVER through double
-    // (chelis#723's lie was exactly that funnel).
-    let int_case =
-        |dtype: RuntimeDType, print_expr: String| -> Vec<String> { case(dtype, vec![print_expr]) };
-    match prim {
-        Prim::F64 => Some(float_case(RuntimeDType::F64, "((const double*)t->data)[i]")),
-        Prim::F32 => Some(float_case(
-            RuntimeDType::F32,
-            "(double)((const float*)t->data)[i]",
-        )),
-        // f16/bf16 decode through the same WS-1 conversion helpers the
-        // kernels use; f16 -> f32 -> double widening is exact, so the
-        // routine sees the stored value's true image (chelis#716's fix).
-        Prim::F16 => Some(float_case(
-            RuntimeDType::F16,
-            "(double)chelis_f16_to_f32(((const uint16_t*)t->data)[i])",
-        )),
-        Prim::Bf16 => Some(float_case(
-            RuntimeDType::Bf16,
-            "(double)chelis_bf16_to_f32(((const uint16_t*)t->data)[i])",
-        )),
-        Prim::Int64 => Some(int_case(
-            RuntimeDType::I64,
-            "printf(\"%lld\", (long long)((const int64_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int32 => Some(int_case(
-            RuntimeDType::I32,
-            "printf(\"%d\", (int)((const int32_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int16 => Some(int_case(
-            RuntimeDType::I16,
-            "printf(\"%d\", (int)((const int16_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int8 => Some(int_case(
-            RuntimeDType::I8,
-            "printf(\"%d\", (int)((const int8_t*)t->data)[i]);".to_string(),
-        )),
-        // Bool tensor storage is f32-encoded today (the runtime's
-        // convention); the ELEMENT prints `true`/`false` at every exit
-        // (chelis#726's C half, [05-OBS-2]).
-        Prim::Bool => Some(case(
-            RuntimeDType::Bool,
-            vec![
-                "fputs(((const float*)t->data)[i] != 0.0f ? \"true\" : \"false\", stdout);"
-                    .to_string(),
-            ],
-        )),
-        // Not in the active dtype set (spec/04 section 1.1.1); rejected at
-        // check time, so no tensor can carry one. No runtime dtype id
-        // exists to case on.
-        Prim::F8e4m3 => None,
-        // String values render as themselves at their exits and are never
-        // numeric tensor element payloads.
-        Prim::String => None,
-    }
-}
-
-/// chelis#732 Phase 2 (faithful_observation.md section C3.2): the emitted
-/// print helper is GENERATED from [`print_helper_elem_case`]'s exhaustive
-/// `Prim` match. The hand-written `(double)` funnel this replaces rendered
-/// int64 through double (chelis#723), read f16/bf16 buffers as f32 before
-/// the chelis#730 interim abort (chelis#716), printed bool as `1.0`/`0.0`
-/// against to_list's `true`/`false` (chelis#726), and lost whole value
-/// classes to its near-integer/`%g` format split (chelis#748). No
-/// hand-written dtype switch may return (frozen at Phase 2 exit); the
-/// `default:` arm aborts with the raw dtype id so an unknown runtime
-/// dtype stays loud (loud_unsupported.md section C1).
-fn append_tensor_print_helper(out: &mut Vec<String>) {
-    // chelis#729 Phase 3 / chelis#734: reduced-float scalar `to_string`
-    // uses the same own-width formatter as tensor/scalar print.  Keep these
-    // helpers private to the generated translation unit: the public runtime
-    // ABI remains on tagged numeric carriers rather than gaining uint16
-    // payload callables.
-    out.push("static chelis_string chelis_host_string_from_f16(uint16_t value) {".to_string());
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
+/// Private generated-C adapters over the opaque published tensor ABI.  Read
+/// access always enters through `chelis_tensor_read_view`; output writers use
+/// an explicit guard at the call site and therefore never route mutation
+/// through these helpers.
+fn append_tensor_abi_helpers(out: &mut Vec<String>) {
     out.push(
-        "    chelis_format_shortest((double)chelis_f16_to_f32(value), CHELIS_F16, fmt_buf, sizeof fmt_buf);"
+        "static chelis_dtype chelis_host_tensor_dtype(const chelis_tensor *tensor) { return chelis_tensor_read_view(tensor).dtype; }"
             .to_string(),
     );
-    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
+    out.push(
+        "static const void *chelis_host_tensor_data(const chelis_tensor *tensor) { return chelis_tensor_read_view(tensor).data; }"
+            .to_string(),
+    );
+    out.push(
+        "static int64_t chelis_host_tensor_stride(const chelis_tensor *tensor, int32_t axis) {"
+            .to_string(),
+    );
+    out.push("    int32_t rank = chelis_tensor_rank(tensor);".to_string());
+    out.push("    int64_t stride = 1;".to_string());
+    out.push(
+        "    for (int32_t current = rank - 1; current > axis; --current) stride *= chelis_tensor_shape(tensor, current);"
+            .to_string(),
+    );
+    out.push("    return stride;".to_string());
+    out.push("}".to_string());
+    out.push(
+        "static void chelis_host_flat_to_indices(int64_t flat, const chelis_tensor *tensor, int64_t *indices) {"
+            .to_string(),
+    );
+    out.push("    for (int32_t axis = chelis_tensor_rank(tensor); axis-- > 0;) {".to_string());
+    out.push("        int64_t extent = chelis_tensor_shape(tensor, axis);".to_string());
+    out.push("        indices[axis] = flat % extent;".to_string());
+    out.push("        flat /= extent;".to_string());
+    out.push("    }".to_string());
+    out.push("}".to_string());
+    out.push(
+        "static int64_t chelis_host_indices_to_flat(const int64_t *indices, const chelis_tensor *tensor) {"
+            .to_string(),
+    );
+    out.push("    int64_t flat = 0;".to_string());
+    out.push(
+        "    for (int32_t axis = 0; axis < chelis_tensor_rank(tensor); ++axis) flat += indices[axis] * chelis_host_tensor_stride(tensor, axis);"
+            .to_string(),
+    );
+    out.push("    return flat;".to_string());
+    out.push("}".to_string());
+    out.push(
+        "static chelis_tensor *chelis_host_alloc_like(const chelis_tensor *input, chelis_dtype dtype) {"
+            .to_string(),
+    );
+    out.push("    int32_t rank = chelis_tensor_rank(input);".to_string());
+    out.push("    int64_t shape[rank > 0 ? rank : 1];".to_string());
+    out.push(
+        "    for (int32_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(input, axis);"
+            .to_string(),
+    );
+    out.push("    return chelis_alloc(rank, rank > 0 ? shape : NULL, dtype);".to_string());
+    out.push("}".to_string());
+    out.push(
+        "static void chelis_host_require_elementwise_agreement(const chelis_tensor *lhs, const chelis_tensor *rhs, const char *target_label, const char *lhs_label, const char *rhs_label) {"
+            .to_string(),
+    );
+    out.push("    int32_t lhs_rank = chelis_tensor_rank(lhs);".to_string());
+    out.push("    int32_t rhs_rank = chelis_tensor_rank(rhs);".to_string());
+    out.push("    if (lhs_rank > 0 && rhs_rank > 0 && lhs_rank != rhs_rank) {".to_string());
+    out.push(
+        "        fprintf(stderr, \"chelis: elementwise operand rank mismatch at host value %s (%s vs %s): %d vs %d\\n\", target_label, lhs_label, rhs_label, lhs_rank, rhs_rank);"
+            .to_string(),
+    );
+    out.push("        abort();".to_string());
+    out.push("    }".to_string());
+    out.push("    if (lhs_rank == rhs_rank) {".to_string());
+    out.push("        for (int32_t axis = 0; axis < lhs_rank; ++axis) {".to_string());
+    out.push(
+        "            if (chelis_tensor_shape(lhs, axis) != chelis_tensor_shape(rhs, axis)) {"
+            .to_string(),
+    );
+    out.push(
+        "                fprintf(stderr, \"chelis: elementwise operand shape mismatch at host value %s (%s vs %s) axis %d\\n\", target_label, lhs_label, rhs_label, axis);"
+            .to_string(),
+    );
+    out.push("                abort();".to_string());
+    out.push("            }".to_string());
+    out.push("        }".to_string());
+    out.push("    }".to_string());
+    out.push("}".to_string());
+}
+
+/// Render a tensor element by first recovering the exact tagged scalar.
+/// The runtime owns the exhaustive dtype dispatch and public text contract.
+fn append_tensor_print_helper(out: &mut Vec<String>) {
+    out.push(
+        "static bool chelis_host_string_eq_cstr(chelis_string lhs, const char *rhs) {".to_string(),
+    );
+    out.push("    chelis_string owned_rhs = chelis_string_from_cstr(rhs);".to_string());
+    out.push("    bool equal = chelis_string_eq(lhs, owned_rhs);".to_string());
+    out.push("    chelis_string_release(owned_rhs);".to_string());
+    out.push("    return equal;".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
+    out.push("static chelis_string chelis_host_string_from_f16(uint16_t value) {".to_string());
+    out.push(
+        "    return chelis_string_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)value));"
+            .to_string(),
+    );
     out.push("}".to_string());
     out.push(String::new());
     out.push("static chelis_string chelis_host_string_from_bf16(uint16_t value) {".to_string());
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
     out.push(
-        "    chelis_format_shortest((double)chelis_bf16_to_f32(value), CHELIS_BF16, fmt_buf, sizeof fmt_buf);"
+        "    return chelis_string_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)value));"
             .to_string(),
     );
-    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
+    out.push(
+        "static chelis_scalar chelis_host_tensor_scalar_at(const chelis_tensor* t, int64_t i) {"
+            .to_string(),
+    );
+    out.push("    uint64_t bits = 0;".to_string());
+    out.push("    chelis_read_view view = chelis_tensor_read_view(t);".to_string());
+    out.push("    int64_t width = chelis_dtype_size(view.dtype);".to_string());
+    out.push(
+        "    memcpy(&bits, (const uint8_t*)view.data + i * width, (size_t)width);".to_string(),
+    );
+    out.push("    return chelis_scalar_from_bits(view.dtype, bits);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push(
         "static void chelis_print_tensor_elem_stdout(const chelis_tensor* t, int64_t i) {"
             .to_string(),
     );
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
-    out.push("    (void)fmt_buf;".to_string());
-    out.push("    switch (t->dtype) {".to_string());
-    for prim in [
-        Prim::F32,
-        Prim::F64,
-        Prim::F16,
-        Prim::Bf16,
-        Prim::F8e4m3,
-        Prim::Int8,
-        Prim::Int16,
-        Prim::Int32,
-        Prim::Int64,
-        Prim::Bool,
-        Prim::String,
-    ] {
-        if let Some(case_lines) = print_helper_elem_case(prim) {
-            out.extend(case_lines);
-        }
-    }
-    out.push("        default:".to_string());
     out.push(
-        "            fprintf(stderr, \"unsupported: tensor print of dtype id %d on the \
-         emitted C print helper (runtime); the RuntimeDType vocabulary defines no such \
-         id\\n\", (int)t->dtype);"
+        "    chelis_string text = chelis_string_from_scalar(chelis_host_tensor_scalar_at(t, i));"
             .to_string(),
     );
-    out.push("            exit(1);".to_string());
-    out.push("    }".to_string());
+    out.push("    fputs(chelis_string_data(text), stdout);".to_string());
+    out.push("    chelis_string_release(text);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push("static void chelis_print_tensor_stdout(const chelis_tensor* t) {".to_string());
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
-    out.push("    if (t->ndim == 0) {".to_string());
+    out.push("    int32_t rank = chelis_tensor_rank(t);".to_string());
+    out.push("    if (rank == 0) {".to_string());
     out.push("        chelis_print_tensor_elem_stdout(t, 0);".to_string());
     out.push("        return;".to_string());
     out.push("    }".to_string());
     out.push("    printf(\"tensor(shape=[\");".to_string());
-    out.push("    for (int64_t d = 0; d < t->ndim; ++d) {".to_string());
+    out.push("    for (int32_t d = 0; d < rank; ++d) {".to_string());
     out.push("        if (d > 0) { printf(\", \"); }".to_string());
-    out.push("        printf(\"%lld\", (long long)t->shape[d]);".to_string());
+    out.push("        printf(\"%lld\", (long long)chelis_tensor_shape(t, d));".to_string());
     out.push("    }".to_string());
     out.push("    printf(\"], data=[\");".to_string());
     // [05-OBS-5]: every exit truncates tensor element rendering after 32
     // elements with the `, ...` marker; full-element fidelity is
     // to_list's and the wire's job, never print's.
-    out.push("    int64_t limit = t->size < 32 ? t->size : 32;".to_string());
+    out.push("    int64_t size = chelis_tensor_numel(t);".to_string());
+    out.push("    int64_t limit = size < 32 ? size : 32;".to_string());
     out.push("    for (int64_t i = 0; i < limit; ++i) {".to_string());
     out.push("        if (i > 0) { printf(\", \"); }".to_string());
     out.push("        chelis_print_tensor_elem_stdout(t, i);".to_string());
     out.push("    }".to_string());
-    out.push("    if (t->size > limit) { printf(\", ...\"); }".to_string());
+    out.push("    if (size > limit) { printf(\", ...\"); }".to_string());
     out.push("    printf(\"])\");".to_string());
     out.push("}".to_string());
 }
@@ -1436,24 +1446,23 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
             .to_string(),
     );
     out.push("    int64_t ndim64 = chelis_list_len(shape_values);".to_string());
-    out.push("    if (ndim64 < 0 || ndim64 > CHELIS_MAX_DIM) {".to_string());
+    out.push("    if (ndim64 < 0 || ndim64 > INT32_MAX) {".to_string());
     out.push(
-        "        fprintf(stderr, \"reshape expects between 0 and %d dims, got %lld\\n\", CHELIS_MAX_DIM, (long long)ndim64);"
+        "        fprintf(stderr, \"reshape rank is outside int32: %lld\\n\", (long long)ndim64);"
             .to_string(),
     );
     out.push("        exit(1);".to_string());
     out.push("    }".to_string());
     out.push("    int ndim = (int)ndim64;".to_string());
-    // chelis#1112: the shape buffer IS the ABI's extent carrier, so the
-    // list value is stored at the width it was read at. The retired 32-bit
-    // buffer needed an `(int)` cast here, and that cast needed a companion
-    // trap above INT_MAX because the only other guard (`dim < 0`) ran
-    // before it; both are gone with the narrowing they existed to catch.
-    out.push("    int64_t shape[CHELIS_MAX_DIM] = {0};".to_string());
+    out.push(
+        "    int64_t *shape = (int64_t*)calloc((size_t)(ndim > 0 ? ndim : 1), sizeof(int64_t));"
+            .to_string(),
+    );
+    out.push("    if (shape == NULL) { fprintf(stderr, \"reshape shape allocation failed\\n\"); exit(1); }".to_string());
     out.push("    int64_t expected = 1;".to_string());
     out.push("    for (int i = 0; i < ndim; ++i) {".to_string());
     out.push(
-        "        int64_t dim = chelis_value_as_int64(chelis_list_index(shape_values, i));"
+        "        int64_t dim = chelis_host_scalar_as_i64(chelis_value_unbox_scalar(chelis_list_index(shape_values, i)), CHELIS_DTYPE_I64);"
             .to_string(),
     );
     out.push("        if (dim < 0) {".to_string());
@@ -1466,16 +1475,19 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push("        shape[i] = dim;".to_string());
     out.push("        expected *= dim;".to_string());
     out.push("    }".to_string());
-    out.push("    if (expected != input->size) {".to_string());
+    out.push("    int64_t input_size = chelis_tensor_numel(input);".to_string());
+    out.push("    if (expected != input_size) {".to_string());
     out.push(
-        "        fprintf(stderr, \"reshape expects %lld elements but tensor has %lld\\n\", (long long)expected, (long long)input->size);"
+        "        fprintf(stderr, \"reshape expects %lld elements but tensor has %lld\\n\", (long long)expected, (long long)input_size);"
             .to_string(),
     );
     out.push("        exit(1);".to_string());
     out.push("    }".to_string());
+    out.push("    chelis_read_view input_view = chelis_tensor_read_view(input);".to_string());
     out.push(
-        "    chelis_tensor* out_tensor = chelis_alloc(ndim, shape, input->dtype);".to_string(),
+        "    chelis_tensor* out_tensor = chelis_alloc(ndim, shape, input_view.dtype);".to_string(),
     );
+    out.push("    free(shape);".to_string());
     // RT-4 F2: size the memcpy by the actual dtype element width via
     // chelis_dtype_size, not by hardcoded sizeof(float). Mirrors
     // `chelis_alloc`'s element sizing (crates/chelis-runtime/src/lib.rs::
@@ -1484,27 +1496,23 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     // closes both CBackend-ReshapeMemcpy (HEAD; PR #67) and the
     // narrow-int extensions in this cycle. See
     // `docs/investigations/cbackend_reshape_memcpy_diagnosis.md`.
-    out.push("    size_t elem_bytes = (size_t)chelis_dtype_size(input->dtype);".to_string());
+    out.push("    size_t elem_bytes = (size_t)chelis_dtype_size(input_view.dtype);".to_string());
+    out.push("    chelis_tensor_write *guard = chelis_tensor_begin_write(out_tensor);".to_string());
+    out.push("    chelis_write_view output_view = chelis_tensor_write_view(guard);".to_string());
     out.push(
-        "    memcpy(out_tensor->data, input->data, (size_t)input->size * elem_bytes);".to_string(),
+        "    memcpy(output_view.data, input_view.data, (size_t)input_size * elem_bytes);"
+            .to_string(),
     );
+    out.push("    chelis_tensor_end_write(guard);".to_string());
     out.push("    return out_tensor;".to_string());
     out.push("}".to_string());
 }
 
-pub fn emit_host_header(
-    program: &ConcreteHostProgram,
-    program_name: &str,
-) -> Result<String, Unsupported> {
-    let abi_program = project_program(program)?;
-    emit_host_declarations(&abi_program, program_name, false, false)
-}
-
 pub(crate) fn emit_host_abi_header(
-    program: &HostProgram,
+    projected: &ProjectedHostProgram<'_>,
     program_name: &str,
 ) -> Result<String, Unsupported> {
-    emit_host_declarations(program, program_name, false, false)
+    emit_host_declarations(projected.program(), program_name, false, false)
 }
 
 fn emit_host_header_with_linkage(
@@ -1575,9 +1583,10 @@ impl HelperRequirements {
 fn append_helper(
     out: &mut Vec<String>,
     helper: &HostTensorHelper,
+    verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
 ) -> Result<HelperRequirements, Unsupported> {
-    if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
+    if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
         out.push(format!(
             "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
             helper_name,
@@ -1594,13 +1603,13 @@ fn append_helper(
     // generated `.c` file and must never be exported symbols.  `static_entry`
     // ensures the kernel function itself gets `static` linkage so that when
     // compiled with `-shared -fPIC` the symbol is not exported via PLT.
-    let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
-    let uses_blas = specialized
+    let dag = verified.dag();
+    let uses_blas = dag
         .nodes()
         .iter()
         .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
-    let helper_src = CEmitter::emit_dag_with_options(
-        &specialized,
+    let helper_src = CEmitter::emit_verified_dag_with_options(
+        dag,
         helper_name,
         crate::CodegenOptions {
             use_blas: uses_blas,
@@ -1645,14 +1654,15 @@ fn append_helper(
     Ok(requirements)
 }
 
-fn identity_helper_input(
+fn verified_identity_helper_input(
     helper: &HostTensorHelper,
+    dag: VerifiedDagView<'_>,
 ) -> Option<(String, chelis_ir::dag::TensorType)> {
-    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
+    if dag.roots().len() != 1 || helper.inputs.len() != 1 {
         return None;
     }
-    let root = helper.dag.roots()[0];
-    let node = helper.dag.get(root)?;
+    let root = dag.roots()[0];
+    let node = dag.get(root)?;
     match &node.op {
         RiscOp::Load { name } if node.output_type == helper.output => helper
             .inputs
@@ -1701,14 +1711,17 @@ fn append_unreachable_fn_abort_stub(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_function(
     out: &mut Vec<String>,
     function: &HostFunction,
     emitted_name: &str,
-    emitted_names: &HashMap<String, String>,
-    function_specializations: &HashMap<String, HostFunctionSpecialization>,
-    returns_arg: &HashMap<String, ReturnsArg>,
+    internal_names: &UnordMap<String, String>,
+    function_specializations: &UnordMap<String, HostFunctionSpecialization>,
     internal_linkage: bool,
+    ownership_sites: &[ProjectedHostSite<'_>],
+    owner_bindings: &[(VerifiedOwnerId, String)],
+    helper_output_counts: &[usize],
 ) -> Result<(), Unsupported> {
     let params = function
         .params
@@ -1716,7 +1729,11 @@ fn emit_function(
         .map(|param| c_decl(&param.ty, &param.name))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
-    let prefix = if internal_linkage {
+    let authored = function.origin == chelis_ir::host::HostFunctionOrigin::Authored;
+    let body_name = internal_names
+        .get(&function.name)
+        .expect("verified function has an internal emitted name");
+    let prefix = if internal_linkage || authored {
         "static inline "
     } else {
         ""
@@ -1724,36 +1741,155 @@ fn emit_function(
     out.push(format!(
         "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty)?,
-        emitted_name,
+        body_name,
         params
     ));
     let mut emitter = HostEmitter::new(
         "    ".to_string(),
         emitted_name,
-        emitted_names.clone(),
+        internal_names.clone(),
         function_specializations.clone(),
-        returns_arg.clone(),
         &function.tensor_helpers,
+        helper_output_counts,
+        ownership_sites,
     );
+    if owner_bindings.len() < function.params.len()
+        || function
+            .params
+            .iter()
+            .zip(owner_bindings)
+            .any(|(param, (_, name))| param.name != *name)
+    {
+        return Err(invalid_abi_shape(
+            format!(
+                "verified function's {} payload parameters disagree with {} body-owner bindings",
+                function.params.len(),
+                owner_bindings.len()
+            ),
+            "verified C host ownership emission",
+        ));
+    }
+    for (owner, name) in owner_bindings {
+        if emitter
+            .owner_vars
+            .insert(*owner, c_ident(name).into_owned())
+            .is_some()
+        {
+            return Err(invalid_abi_shape(
+                format!("verified function repeats parameter owner {owner:?}"),
+                "verified C host ownership emission",
+            ));
+        }
+    }
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
+    let terminal = ownership_sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified host function has no FunctionReturn site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    emitter.emit_terminal_site(terminal, Some("__result"))?;
+    emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
     out.push("}".to_string());
+
+    if authored {
+        let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
+        let wrapper_params = function
+            .params
+            .iter()
+            .map(|param| c_decl(&param.ty, &param.name))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        out.push(format!(
+            "{} {}({}) {{",
+            c_type(&function.ret_ty)?,
+            emitted_name,
+            wrapper_params
+        ));
+        let mut args = Vec::with_capacity(function.params.len());
+        for (index, (param, use_)) in function.params.iter().zip(entry_uses).enumerate() {
+            if use_ == VerifiedOwnershipUse::Move && retain_call(&param.name, &param.ty).is_some() {
+                let owned = format!("__chelis_owned_arg_{index}");
+                out.push(format!(
+                    "    {} = {};",
+                    c_decl(&param.ty, &owned)?,
+                    c_ident(&param.name)
+                ));
+                out.push(format!(
+                    "    {}",
+                    retain_call(&owned, &param.ty).expect("heap retain")
+                ));
+                args.push(owned);
+            } else {
+                args.push(c_ident(&param.name).into_owned());
+            }
+        }
+        out.push(format!(
+            "    {} __result = {}({});",
+            c_type(&function.ret_ty)?,
+            body_name,
+            args.join(", ")
+        ));
+        out.push("    return __result;".to_string());
+        out.push("}".to_string());
+    }
     Ok(())
 }
 
-/// The base C indent inside the generated `main` body. Top-level `main`
-/// locals are emitted at this indent; `track_owned_alloc` releases only
-/// allocations at this depth (issue #406) so block-scoped temporaries in
-/// nested loop/conditional bodies are not freed out of scope.
+fn authored_entry_uses(
+    sites: &[ProjectedHostSite<'_>],
+    param_count: usize,
+) -> Result<Vec<VerifiedOwnershipUse>, Unsupported> {
+    let entry = sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionEntry)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified authored function has no FunctionEntry site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    let args = entry.directives.iter().find_map(|action| match action {
+        VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { edge, .. }) => {
+            Some(edge.args())
+        }
+        _ => None,
+    });
+    let Some(args) = args else {
+        return Err(invalid_abi_shape(
+            "verified authored FunctionEntry has no consuming body edge".to_string(),
+            "verified C host ownership emission",
+        ));
+    };
+    if args.len() < param_count {
+        return Err(invalid_abi_shape(
+            format!(
+                "verified authored FunctionEntry carries {} arguments for {param_count} parameters",
+                args.len()
+            ),
+            "verified C host ownership emission",
+        ));
+    }
+    Ok(args[..param_count].iter().map(|arg| arg.use_()).collect())
+}
+
 const BASE_MAIN_INDENT: &str = "    ";
 
+#[allow(clippy::too_many_arguments)]
 fn emit_main(
     out: &mut Vec<String>,
     program_name: &str,
     program: &HostProgram,
-    returns_arg: &HashMap<String, ReturnsArg>,
-    hoisted: &HashSet<&str>,
+    manifest: &RootManifest,
+    hoisted: &UnordSet<&str>,
+    ownership_sites: &[ProjectedHostSite<'_>],
+    internal_names: &UnordMap<String, String>,
+    helper_output_counts: &[usize],
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
     // chelis#840: the globals emitter needs the same original-to-emitted
@@ -1763,28 +1899,15 @@ fn emit_main(
     let mut emitter = HostEmitter::new(
         BASE_MAIN_INDENT.to_string(),
         &format!("{program_name}__global"),
-        emitted_function_names(program, program_name),
+        internal_names.clone(),
         function_specializations(program),
-        returns_arg.clone(),
         &program.global_tensor_helpers,
+        helper_output_counts,
+        ownership_sites,
     );
-    // issue #406: `main` is the program root — it owns every heap value
-    // it creates (globals plus the list/tuple/dict temporaries built to
-    // construct them) and returns none, so enable scope-release tracking
-    // and free each owned allocation before `return 0`. Without this the
-    // generated binary leaks them for the whole process lifetime, which
-    // a `valgrind --leak-check=full --error-exitcode=1` gate flags as
-    // "definitely lost".
-    emitter.scope_releases = Some(Vec::new());
     for (index, binding) in program.globals.iter().enumerate() {
         let binding_var = format!("__binding_{index}_value");
         emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty)?;
-        // The binding-value local owns its allocation regardless of how
-        // it was produced (tensor kernel output, list/dict builtin,
-        // literal). Track it here; the alias name (`theta`) is never
-        // tracked, and dedup in `emit_scope_releases` collapses the case
-        // where the binding value *is* a literal already tracked above.
-        emitter.track_owned_alloc(&binding_var, &binding.ty);
         if hoisted.contains(binding.name.as_str()) {
             // Declared at file scope (issue #352); assign, don't shadow.
             // #379: reference the same mangled name the file-scope `static`
@@ -1800,18 +1923,150 @@ fn emit_main(
             ));
         }
     }
+    let root_sites = ownership_sites
+        .iter()
+        .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::ManifestRoot)
+        .collect::<Vec<_>>();
+    let mut consumed_root_sites = UnordSet::new();
     for binding in &program.globals {
-        if let Some(display_name) = binding.display_name.as_deref() {
-            // #379: the display label stays raw (it is a printed string);
-            // the C value identifier routes through `c_ident` so it matches
-            // the (possibly mangled) declaration above.
+        for display in &binding.display_roots {
+            let mut entries = manifest.entries.iter().enumerate().filter(|(_, root)| {
+                let short_def = root
+                    .def_name
+                    .rsplit_once("__")
+                    .map(|(_, tail)| tail)
+                    .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
+                    .unwrap_or(root.def_name.as_str());
+                let suffix = root.name.strip_prefix(root.def_name.as_str()).unwrap_or("");
+                let selected = binding.name == root.def_name
+                    || matches!(
+                        &binding.value.kind,
+                        HostExprKind::Call { function, args, .. }
+                            if function == &root.def_name && args.is_empty()
+                    );
+                root.lane == Lane::Host
+                    && selected
+                    && display.name == format!("{short_def}{suffix}")
+                    && display.path == root.path
+            });
+            let manifest_index = entries.next().map(|(index, _)| index);
+            if entries.next().is_some() {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "materialized root `{}` has duplicate manifest entries",
+                        display.name
+                    ),
+                    "verified C host ownership emission",
+                ));
+            }
+            let mut sites = root_sites.iter().copied().filter(|site| {
+                let identity = site.directives.iter().any(|action| {
+                    matches!(
+                        action,
+                        VerifiedHostAction::ManifestRoot {
+                            manifest_index: candidate,
+                            ..
+                        } if *candidate == manifest_index
+                    )
+                });
+                let label = manifest_index.is_some()
+                    || site.directives.iter().any(|action| {
+                        matches!(
+                            action,
+                            VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume {
+                                root,
+                                ..
+                            }) if *root == display.name
+                        )
+                    });
+                identity && label
+            });
+            let site = sites.next().ok_or_else(|| {
+                invalid_abi_shape(
+                    format!("display root `{}` has no verified root site", display.name),
+                    "verified C host ownership emission",
+                )
+            })?;
+            if sites.next().is_some() || !consumed_root_sites.insert(site.id) {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "display root `{}` has duplicate verified root sites",
+                        display.name
+                    ),
+                    "verified C host ownership emission",
+                ));
+            }
+            emitter.prepare_manifest_root(site)?;
+            emitter.emit_manifest_root(
+                &display.name,
+                &c_ident(&binding.name),
+                &binding.ty,
+                &display.path,
+            )?;
+            emitter.finish_manifest_root(site)?;
+        }
+        if binding.display_roots.is_empty()
+            && let Some(display_name) = binding.display_name.as_deref()
+        {
+            let mut sites = root_sites.iter().copied().filter(|site| {
+                let display = site.directives.iter().any(|action| {
+                    matches!(
+                        action,
+                        VerifiedHostAction::ManifestRoot {
+                            manifest_index: None,
+                            ..
+                        }
+                    )
+                });
+                let consume = site.directives.iter().any(|action| {
+                    matches!(
+                        action,
+                        VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume {
+                            root,
+                            ..
+                        }) if *root == display_name
+                    )
+                });
+                display && consume
+            });
+            let site = sites.next().ok_or_else(|| {
+                invalid_abi_shape(
+                    format!("displayed root `{display_name}` has no verified root site"),
+                    "verified C host ownership emission",
+                )
+            })?;
+            if sites.next().is_some() || !consumed_root_sites.insert(site.id) {
+                return Err(invalid_abi_shape(
+                    format!("displayed root `{display_name}` has duplicate verified root sites"),
+                    "verified C host ownership emission",
+                ));
+            }
+            emitter.prepare_manifest_root(site)?;
             emitter.emit_labeled_root(display_name, &c_ident(&binding.name), &binding.ty)?;
+            emitter.finish_manifest_root(site)?;
         }
     }
-    // issue #406: free everything `main` owns before returning. Emitted
-    // after the labeled-root prints so the values are still live when
-    // printed and reclaimed immediately after.
-    emitter.emit_scope_releases();
+    if consumed_root_sites.len() != root_sites.len() {
+        return Err(invalid_abi_shape(
+            format!(
+                "verified ownership root-site cursor consumed {} of {} roots",
+                consumed_root_sites.len(),
+                root_sites.len()
+            ),
+            "verified C host ownership emission",
+        ));
+    }
+    let terminal = ownership_sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified roots unit has no terminal site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    emitter.emit_terminal_site(terminal, None)?;
+    emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
     out.push("    return 0;".to_string());
     out.push("}".to_string());
@@ -1828,11 +2083,11 @@ fn emit_main(
 /// missing a genuine capture reproduces the undeclared-identifier build
 /// break this pass exists to prevent.
 fn captured_global_names(program: &HostProgram) -> Vec<String> {
-    let mut referenced: HashSet<String> = HashSet::new();
+    let mut referenced: UnordSet<String> = UnordSet::new();
     for function in &program.functions {
         collect_var_names(&function.body, &mut referenced);
     }
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: UnordSet<&str> = UnordSet::new();
     program
         .globals
         .iter()
@@ -1845,7 +2100,7 @@ fn captured_global_names(program: &HostProgram) -> Vec<String> {
 /// Record every `Var` name referenced anywhere in `expr`, including
 /// let-binding values, match arms, and inline-callback bodies. Exhaustive
 /// over `HostExprKind` so a new variant forces this walk to be revisited.
-fn collect_var_names(expr: &HostExpr, out: &mut HashSet<String>) {
+fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     match &expr.kind {
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
@@ -1943,7 +2198,7 @@ fn collect_var_names(expr: &HostExpr, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_callback_var_names(callback: &HostCallback, out: &mut HashSet<String>) {
+fn collect_callback_var_names(callback: &HostCallback, out: &mut UnordSet<String>) {
     match &callback.kind {
         HostCallbackKind::Named { .. } => {}
         HostCallbackKind::Inline { body, .. } => collect_var_names(body, out),
@@ -1955,9 +2210,9 @@ fn collect_callback_var_names(callback: &HostCallback, out: &mut HashSet<String>
 /// over-approximation direction is the safe one for the reachability
 /// gate below: an over-counted reference makes a failing wrapper a hard
 /// build error rather than a loud stub.
-fn collect_referenced_fn_names(expr: &HostExpr, out: &mut HashSet<String>) {
+fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     collect_var_names(expr, out);
-    fn walk(expr: &HostExpr, out: &mut HashSet<String>) {
+    fn walk(expr: &HostExpr, out: &mut UnordSet<String>) {
         match &expr.kind {
             HostExprKind::Call { function, args, .. } => {
                 out.insert(function.clone());
@@ -2056,7 +2311,7 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut HashSet<String>) {
             | HostExprKind::Var(_, _) => {}
         }
     }
-    fn walk_callback(callback: &HostCallback, out: &mut HashSet<String>) {
+    fn walk_callback(callback: &HostCallback, out: &mut UnordSet<String>) {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
                 out.insert(function.clone());
@@ -2074,18 +2329,19 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut HashSet<String>) {
 /// loud abort stub (an exported-but-unreachable wrapper - e.g. a def
 /// whose only use was inlined into a grad DAG; the abort keeps an
 /// external caller loud at run time, the Metal rank-2 stub precedent).
-fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> {
-    let by_name: HashMap<&str, &HostFunction> = program
+fn host_functions_reachable_from_main(program: &HostProgram) -> UnordSet<String> {
+    let by_name: UnordMap<&str, &HostFunction> = program
         .functions
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect();
-    let mut seed = HashSet::new();
+    let mut seed = UnordSet::new();
     for binding in &program.globals {
         collect_referenced_fn_names(&binding.value, &mut seed);
     }
-    let mut reachable: HashSet<String> = HashSet::new();
+    let mut reachable: UnordSet<String> = UnordSet::new();
     let mut stack: Vec<String> = seed
+        .into_sorted()
         .into_iter()
         .filter(|name| by_name.contains_key(name.as_str()))
         .collect();
@@ -2094,9 +2350,9 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> 
             continue;
         }
         if let Some(function) = by_name.get(name.as_str()) {
-            let mut refs = HashSet::new();
+            let mut refs = UnordSet::new();
             collect_referenced_fn_names(&function.body, &mut refs);
-            for r in refs {
+            for r in refs.into_sorted() {
                 if by_name.contains_key(r.as_str()) && !reachable.contains(&r) {
                     stack.push(r);
                 }
@@ -2110,74 +2366,59 @@ struct HostEmitter<'a> {
     lines: Vec<String>,
     indent: String,
     helper_prefix: String,
-    emitted_names: HashMap<String, String>,
-    function_specializations: HashMap<String, HostFunctionSpecialization>,
-    /// Interprocedural "result aliases parameter" summary (issue #406
-    /// call-escape): maps a user function's name to the set of parameter
-    /// indices whose allocation its result may *be* (rather than a fresh
-    /// allocation). Computed once per program by [`analyze_returns_arg`].
-    /// When a block result is `f(p, ...)` and `f` may return its first
-    /// parameter, the block-frame heap binding `p` escapes through the
-    /// call and must be retained so the block's release does not drop the
-    /// reference the caller now holds. A callee absent from this map
-    /// (recursion not yet at fixpoint, an unanalyzable builtin path, or a
-    /// genuinely opaque call) is treated conservatively as may-return-any
-    /// by the emit-site logic, which is use-after-free-safe (it may
-    /// over-retain, never under-retain).
-    returns_arg: HashMap<String, ReturnsArg>,
+    emitted_names: UnordMap<String, String>,
+    function_specializations: UnordMap<String, HostFunctionSpecialization>,
     tensor_helpers: &'a [HostTensorHelper],
+    tensor_helper_output_counts: &'a [usize],
+    expression_sites: Vec<ProjectedHostSite<'a>>,
+    expression_site_index: usize,
+    pre_emitted_clone_sites: UnordSet<HostSiteId>,
+    pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
+    owner_vars: UnordMap<VerifiedOwnerId, String>,
     temp_counter: usize,
-    /// When `Some`, every heap-owning allocation created in this emit
-    /// scope is recorded as `(var, type)` so the scope can release it
-    /// before returning. Set only for `emit_main` (issue #406): the
-    /// generated `main` is the program root, owns every heap value it
-    /// creates, and transfers none out, so each owned allocation must be
-    /// freed at scope exit or it leaks for the process lifetime. `None`
-    /// inside compiled functions, which already emit their own
-    /// per-local `chelis_free` cleanup.
-    scope_releases: Option<Vec<(String, HostType)>>,
-    /// Stack of open release-tracking `let` blocks (issue #406, the
-    /// function-body sibling of the `emit_main` leak). One entry per block;
-    /// each records the slots the block transfers an owned reference into
-    /// (`owned_destinations`: its result target plus each binding's value
-    /// temp) and the heap bindings it frees at its close (`bindings`).
-    ///
-    /// A bare pointer-copy that aliases one of a block's `bindings` into an
-    /// `owned_destinations` slot (emitted directly for a `Var` body or
-    /// inside an `if`/`match` arm) is retained: that destination owns an
-    /// independent reference and the retain cancels the eventual release so
-    /// the caller keeps one reference. A transient read of a binding into an
-    /// internal arg temp (e.g. `__arg0 = p` feeding `chelis_tuple_get`) is
-    /// not an owned destination, so it is left untouched. Empty outside a
-    /// tracked block (e.g. `emit_main`, whose alias handling is the distinct
-    /// global-binding path above).
-    let_scopes: Vec<LetReleaseScope>,
 }
 
-/// One open release-tracking `let` block; see `HostEmitter::let_scopes`.
-struct LetReleaseScope {
-    /// C variables this block transfers an owned reference into: the block's
-    /// result target (the enclosing-scope variable it writes its result to)
-    /// plus each binding's `__let_N` value temp. A bare pointer-copy that
-    /// aliases one of this block's `bindings` into one of these destinations
-    /// must be retained so the destination owns an independent reference —
-    /// that destination is itself released later (a binding at this block's
-    /// close, or by whatever owns the result target). A copy into any other
-    /// temp (a transient arg fed to `chelis_tuple_get`, say) is a borrow and
-    /// is not retained.
-    owned_destinations: HashSet<String>,
-    /// Heap binding names this block releases at its close.
-    bindings: HashSet<String>,
+/// Resolve the one verifier-authorized direct call at a host `Call` site.
+///
+/// A diagnostic label or an intrinsic/indirect application cannot authorize
+/// consuming-call terminal motion. Missing or duplicated structural call
+/// identity therefore fails closed before the emitter writes any pre-call
+/// action.
+pub(crate) fn direct_call_action_index(site: &ProjectedHostSite<'_>) -> Result<usize, Unsupported> {
+    let mut direct_call = None;
+    for (index, action) in site.directives.iter().enumerate() {
+        if matches!(
+            action,
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                kind: VerifiedApplyKind::DirectCall { .. },
+                ..
+            })
+        ) && direct_call.replace(index).is_some()
+        {
+            return Err(invalid_abi_shape(
+                "verified user-function call site contains multiple direct-call authorities"
+                    .to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+    }
+    direct_call.ok_or_else(|| {
+        invalid_abi_shape(
+            "verified user-function call site has no direct-call authority".to_string(),
+            "verified C host ownership emission",
+        )
+    })
 }
 
 impl<'a> HostEmitter<'a> {
     fn new(
         indent: String,
         helper_prefix: &str,
-        emitted_names: HashMap<String, String>,
-        function_specializations: HashMap<String, HostFunctionSpecialization>,
-        returns_arg: HashMap<String, ReturnsArg>,
+        emitted_names: UnordMap<String, String>,
+        function_specializations: UnordMap<String, HostFunctionSpecialization>,
         tensor_helpers: &'a [HostTensorHelper],
+        tensor_helper_output_counts: &'a [usize],
+        ownership_sites: &[ProjectedHostSite<'a>],
     ) -> Self {
         Self {
             lines: Vec::new(),
@@ -2185,97 +2426,38 @@ impl<'a> HostEmitter<'a> {
             helper_prefix: helper_prefix.to_string(),
             emitted_names,
             function_specializations,
-            returns_arg,
             tensor_helpers,
+            tensor_helper_output_counts,
+            expression_sites: ownership_sites
+                .iter()
+                .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::Expression)
+                .cloned()
+                .collect(),
+            expression_site_index: 0,
+            pre_emitted_clone_sites: UnordSet::new(),
+            pre_emitted_terminals: UnordSet::new(),
+            owner_vars: UnordMap::new(),
             temp_counter: 0,
-            scope_releases: None,
-            let_scopes: Vec::new(),
         }
     }
 
-    /// Record `var` (of `ty`) as a heap-owning allocation this scope must
-    /// release before returning. No-op unless scope-release tracking is
-    /// enabled (i.e. this is the `main` emitter, issue #406). Only the
-    /// pointer-typed, heap-owning `HostType`s are tracked; scalars and
-    /// borrowed views carry no ownership.
-    fn track_owned_alloc(&mut self, var: &str, ty: &HostType) {
-        // Only track allocations declared at the scope's own (base) indent
-        // level. Temporaries created inside a nested C block -- a
-        // `map` / `flat_map` / `filter` / `fold` loop body, or an `if` /
-        // `match` arm -- are emitted at a deeper indent and are block-
-        // scoped, so they are not visible at the function-level cleanup
-        // and must not be released there (that would emit C referencing
-        // an out-of-scope identifier). The combinator loops accumulate
-        // in place (`chelis_list_push`/`chelis_list_extend`, chelis#943)
-        // so they create no per-iteration list generations; the `append`
-        // builtin's per-call result inside a nested block is still
-        // unreleased -- that remaining half of chelis#943 needs
-        // consumption facts this emitter does not have yet.
-        if self.indent.len() != BASE_MAIN_INDENT.len() {
-            return;
-        }
-        if let Some(releases) = self.scope_releases.as_mut()
-            && release_call(var, ty).is_some()
-        {
-            releases.push((var.to_string(), ty.clone()));
-        }
+    fn begin_tensor_write(&mut self, tensor: &str) -> (String, String) {
+        let guard = self.next_temp("tensor_write_guard");
+        let view = self.next_temp("tensor_write_view");
+        self.lines.push(format!(
+            "{}chelis_tensor_write *{guard} = chelis_tensor_begin_write({tensor});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}chelis_write_view {view} = chelis_tensor_write_view({guard});",
+            self.indent
+        ));
+        (guard, view)
     }
 
-    /// Drain the recorded scope-owned allocations, emitting one release
-    /// call per distinct variable (deduped: an alias such as `theta =
-    /// __binding_0_value` is never recorded, only the underlying
-    /// `__binding_N_value`, so each heap pointer is freed exactly once).
-    /// Released in reverse creation order so a container is freed after
-    /// any later-created value, mirroring C scope-exit destruction order.
-    fn emit_scope_releases(&mut self) {
-        let Some(releases) = self.scope_releases.take() else {
-            return;
-        };
-        let mut seen: HashSet<String> = HashSet::new();
-        for (var, ty) in releases.into_iter().rev() {
-            if !seen.insert(var.clone()) {
-                continue;
-            }
-            if let Some(call) = release_call(&var, &ty) {
-                self.lines.push(format!("{}{call}", self.indent));
-            }
-        }
-    }
-
-    /// Retain `target` when a bare pointer-copy `target = source` moves a
-    /// heap `let` binding into a slot that owns an independent reference
-    /// (issue #406). Fires only when `source` is a binding some open block
-    /// frees at its close *and* `target` is one of that block's
-    /// `owned_destinations` (its result target or another binding's value
-    /// temp). The retain cancels the eventual release of the destination so
-    /// every owned slot — the escaping result, and any binding that aliases
-    /// an earlier one — carries exactly one reference.
-    ///
-    /// A transient read of a binding into an internal arg temp (e.g.
-    /// `__arg0 = p` feeding `chelis_tuple_get`) is not an owned destination,
-    /// so it is left alone: `chelis_tuple_get` does its own element retain
-    /// and the binding's single release still balances its construction. A
-    /// transfer of a parameter or outer-scope value is likewise untouched —
-    /// no open block frees it, so a retain would leak.
-    fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) {
-        // `source` may be a binding of an outer block while `target` is an
-        // owned slot of an inner one (a nested `let b = a in ...`), so test
-        // the two conditions independently across all open scopes rather
-        // than within a single scope.
-        let target_is_owned = self
-            .let_scopes
-            .iter()
-            .any(|scope| scope.owned_destinations.contains(target));
-        let source_is_binding = self
-            .let_scopes
-            .iter()
-            .any(|scope| scope.bindings.contains(source));
-        if !(target_is_owned && source_is_binding) {
-            return;
-        }
-        if let Some(call) = retain_call(target, ty) {
-            self.lines.push(format!("{}{call}", self.indent));
-        }
+    fn end_tensor_write(&mut self, guard: &str) {
+        self.lines
+            .push(format!("{}chelis_tensor_end_write({guard});", self.indent));
     }
 
     fn emit_expr_to_var(
@@ -2287,6 +2469,726 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)?));
         self.assign_expr(target, expr, ty)?;
+        Ok(())
+    }
+
+    fn next_expression_site(&mut self) -> Result<ProjectedHostSite<'a>, Unsupported> {
+        let Some(site) = self
+            .expression_sites
+            .get(self.expression_site_index)
+            .cloned()
+        else {
+            return Err(invalid_abi_shape(
+                "verified ownership expression-site cursor exhausted before host payload"
+                    .to_string(),
+                "verified C host ownership emission",
+            ));
+        };
+        self.expression_site_index += 1;
+        Ok(site)
+    }
+
+    fn emit_expression_site(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        target: &str,
+    ) -> Result<(), Unsupported> {
+        self.emit_expression_site_excluding_block(site, target, None)
+    }
+
+    fn emit_expression_site_excluding_block(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        target: &str,
+        excluded: Option<VerifiedBlockId>,
+    ) -> Result<(), Unsupported> {
+        let excluded = excluded.map_or_else(Vec::new, |block| vec![block]);
+        self.emit_expression_site_excluding_blocks(site, target, &excluded)
+    }
+
+    fn emit_expression_site_excluding_blocks(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        target: &str,
+        excluded: &[VerifiedBlockId],
+    ) -> Result<(), Unsupported> {
+        if site.actions.len() != site.directives.len() {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified expression site carries {} classifications for {} directives",
+                    site.actions.len(),
+                    site.directives.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        for action in &site.directives {
+            if excluded
+                .iter()
+                .any(|block| Self::action_is_in_block(action, *block))
+            {
+                continue;
+            }
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Define { dest, .. }) => {
+                    self.owner_vars.insert(dest.id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: Some(dest),
+                    binding_name,
+                    label,
+                    ..
+                }) => {
+                    let value = binding_name
+                        .as_ref()
+                        .filter(|_| {
+                            label.starts_with("option_payload")
+                                || label.starts_with("adt_payload")
+                                || *label == "loop_item"
+                        })
+                        .map_or_else(
+                            || target.to_string(),
+                            |name| c_ident(name.as_str()).into_owned(),
+                        );
+                    self.owner_vars.insert(dest.id(), value);
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: None,
+                    label: "builtin:copy" | "builtin:debug",
+                    ..
+                }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    dest,
+                    source,
+                    ..
+                }) if !self.pre_emitted_clone_sites.contains(&site.id) => {
+                    self.emit_clone_to(*dest, *source, None)?;
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Project {
+                    source, ..
+                }) => {
+                    self.owner_vars
+                        .insert(source.owner().id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation,
+                    owner,
+                    ..
+                }) if !self.pre_emitted_terminals.contains(&(site.id, *operation)) => {
+                    self.emit_owner_drop(owner.owner())?;
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { .. }) => {}
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { edge, .. }) => {
+                    if edge.params().len() == 1 {
+                        self.owner_vars
+                            .insert(edge.params()[0].id(), target.to_string());
+                    }
+                }
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                }) => {
+                    if body_edge.params().len() == 2 && exit_edge.params().len() == 2 {
+                        // Scan carries `(state, output)` and binds those two
+                        // payloads to distinct C variables in `assign_scan`.
+                        continue;
+                    }
+                    for (edge, name) in [(body_edge, "body"), (exit_edge, "exit")] {
+                        let [param] = edge.params() else {
+                            return Err(invalid_abi_shape(
+                                format!(
+                                    "verified loop {name} edge carries {} parameters, expected one owned payload",
+                                    edge.params().len()
+                                ),
+                                "verified C host ownership emission",
+                            ));
+                        };
+                        self.owner_vars.insert(param.id(), target.to_string());
+                    }
+                }
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Branch { .. })
+                | VerifiedHostAction::Terminator(VerifiedHostTerminator::Match { .. }) => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("unexpected verified expression-site action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit argument-owner clones before the consuming call they feed.
+    ///
+    /// Ownership lowering records a call site's operand `Clone` operations
+    /// before its result-producing `Apply`. Formatting necessarily visits the
+    /// argument payloads first; this hook preserves that verified ordering
+    /// instead of retaining an argument after the owned callee has consumed it.
+    fn emit_pre_call_actions(&mut self, site: &ProjectedHostSite<'a>) -> Result<(), Unsupported> {
+        let direct_call_index = direct_call_action_index(site)?;
+        if !self.pre_emitted_clone_sites.insert(site.id) {
+            return Err(invalid_abi_shape(
+                "verified call site emitted its pre-call actions twice".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+        for (index, action) in site.directives.iter().enumerate() {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    dest,
+                    source,
+                    ..
+                }) => self.emit_clone_to(*dest, *source, None)?,
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation,
+                    owner,
+                    ..
+                }) if index < direct_call_index => {
+                    self.emit_owner_drop(owner.owner())?;
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                    operation, ..
+                }) if index < direct_call_index => {
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn action_is_in_block(action: &VerifiedHostAction<'_>, expected: VerifiedBlockId) -> bool {
+        let block = match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Define { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Apply { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Clone { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Project { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Drop { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Discard { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Return { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Branch { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Match { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Exit { block }) => *block,
+            VerifiedHostAction::ControlEdge { source, .. } => *source,
+            VerifiedHostAction::ManifestRoot { .. } => return false,
+        };
+        block == expected
+    }
+
+    fn join_completion_blocks(
+        site: &ProjectedHostSite<'a>,
+        expected: usize,
+        context: &str,
+    ) -> Result<Vec<VerifiedBlockId>, Unsupported> {
+        let blocks = site
+            .directives
+            .iter()
+            .filter_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { block, .. }) => {
+                    Some(*block)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if blocks.len() != expected {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified {context} site has {} arm completions, expected {expected}",
+                    blocks.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        Ok(blocks)
+    }
+
+    fn emit_expression_block_actions(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        target: &str,
+    ) -> Result<(), Unsupported> {
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Define {
+                    block: owner_block,
+                    dest,
+                    ..
+                }) if *owner_block == block => {
+                    self.owner_vars.insert(dest.id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    block: owner_block,
+                    dest: Some(dest),
+                    binding_name,
+                    label,
+                    ..
+                }) if *owner_block == block => {
+                    let value = binding_name
+                        .as_ref()
+                        .filter(|_| {
+                            label.starts_with("option_payload")
+                                || label.starts_with("adt_payload")
+                                || *label == "loop_item"
+                        })
+                        .map_or_else(
+                            || target.to_string(),
+                            |name| c_ident(name.as_str()).into_owned(),
+                        );
+                    self.owner_vars.insert(dest.id(), value);
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                    operation,
+                    block: owner_block,
+                    ..
+                }) if *owner_block == block
+                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+                {
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    block: owner_block,
+                    dest,
+                    source,
+                    ..
+                }) if *owner_block == block => self.emit_clone_to(*dest, *source, None)?,
+                VerifiedHostAction::Operation(VerifiedHostOperation::Project {
+                    block: owner_block,
+                    source,
+                    ..
+                }) if *owner_block == block => {
+                    self.owner_vars
+                        .insert(source.owner().id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation,
+                    block: owner_block,
+                    owner,
+                    ..
+                }) if *owner_block == block
+                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+                {
+                    self.emit_owner_drop(owner.owner())?;
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { .. }) => {}
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
+                    block: owner_block,
+                    edge,
+                }) if *owner_block == block && edge.params().len() == 1 => {
+                    self.owner_vars
+                        .insert(edge.params()[0].id(), target.to_string());
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit one verified owner's scheduled terminal in a physical block.
+    ///
+    /// A nested source expression can move control to child blocks before the
+    /// parent site's completion jump.  Its parent-owned terminals still need
+    /// to run after that child expression on the selected path, even when the
+    /// completion block differs from the arm's entry block.
+    fn emit_expression_block_terminal_for_owner(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        expected_owner: VerifiedOwnerId,
+    ) -> Result<(), Unsupported> {
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation,
+                    block: owner_block,
+                    owner,
+                    ..
+                }) if *owner_block == block
+                    && owner.owner().id() == expected_owner
+                    && !self.pre_emitted_terminals.contains(&(site.id, *operation)) =>
+                {
+                    self.emit_owner_drop(owner.owner())?;
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                    operation,
+                    block: owner_block,
+                    owner,
+                    ..
+                }) if *owner_block == block && owner.id() == expected_owner => {
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_loop_item(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        emitted_var: &str,
+    ) -> Result<(), Unsupported> {
+        let mut items = site.directives.iter().filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { dest, .. }) => {
+                Some(*dest)
+            }
+            _ => None,
+        });
+        let Some(owner) = items.next() else {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has no typed loop-item action".to_string(),
+                "verified C host ownership emission",
+            ));
+        };
+        if items.next().is_some() {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has more than one typed loop-item action".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+        self.owner_vars.insert(owner.id(), emitted_var.to_string());
+        Ok(())
+    }
+
+    /// Bind a verified pattern-payload owner to the C variable that holds the
+    /// independently retained value extracted for that pattern.
+    ///
+    /// Payload owners can acquire further logical names while lowering nested
+    /// lets.  Falling back to the last such name can point a later arm-terminal
+    /// release at a C temporary whose lexical scope has already closed, so the
+    /// match formatter consumes the exact entry-block payload action instead.
+    fn bind_match_payload(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        label_prefix: &str,
+        binding_name: &str,
+    ) -> Result<(), Unsupported> {
+        let mut owners = site.directives.iter().filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                block: owner_block,
+                dest: Some(dest),
+                binding_name: projected_name,
+                label,
+                ..
+            }) if *owner_block == block
+                && label.starts_with(label_prefix)
+                && projected_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == binding_name) =>
+            {
+                Some(*dest)
+            }
+            _ => None,
+        });
+        let Some(owner) = owners.next() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified match block {:?} has no `{label_prefix}` payload owner for `{binding_name}`",
+                    block
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        if owners.next().is_some() {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified match block {:?} has duplicate `{label_prefix}` payload owners for `{binding_name}`",
+                    block
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        self.owner_vars
+            .insert(owner.id(), c_ident(binding_name).into_owned());
+        Ok(())
+    }
+
+    /// Return the loop preheader and the block that completes one body
+    /// iteration.
+    ///
+    /// The body entry is not necessarily its completion block: an inline
+    /// callback may introduce branch/match blocks before the back-edge. Scope
+    /// terminals recorded on the enclosing loop site belong immediately
+    /// before that back-edge, while the callback locals are still in C scope.
+    fn loop_blocks(
+        site: &ProjectedHostSite<'a>,
+    ) -> Result<(VerifiedBlockId, VerifiedBlockId), Unsupported> {
+        let mut headers = site.directives.iter().filter_map(|action| match action {
+            VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop { block, .. }) => {
+                Some(*block)
+            }
+            _ => None,
+        });
+        let Some(header) = headers.next() else {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has no loop terminator".to_string(),
+                "verified C host ownership emission",
+            ));
+        };
+        if headers.next().is_some() {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has more than one loop terminator".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+
+        let jumps =
+            site.directives
+                .iter()
+                .filter_map(|action| match action {
+                    VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
+                        block,
+                        edge,
+                    }) if edge.target() == header => Some(*block),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+        let [preheader, completion] = jumps.as_slice() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified list-loop site has {} jumps to its header, expected preheader and back-edge",
+                    jumps.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        Ok((*preheader, *completion))
+    }
+
+    fn loop_edges(
+        site: &ProjectedHostSite<'a>,
+    ) -> Result<(VerifiedEdgeView<'a>, VerifiedEdgeView<'a>), Unsupported> {
+        site.directives
+            .iter()
+            .find_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                }) => Some((body_edge.clone(), exit_edge.clone())),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "verified list-loop site has no loop terminator".to_string(),
+                    "verified C host ownership emission",
+                )
+            })
+    }
+
+    fn finish_expression_sites(&self) -> Result<(), Unsupported> {
+        if self.expression_site_index == self.expression_sites.len() {
+            Ok(())
+        } else {
+            Err(invalid_abi_shape(
+                format!(
+                    "verified ownership expression-site cursor left {} of {} sites unconsumed",
+                    self.expression_sites.len() - self.expression_site_index,
+                    self.expression_sites.len()
+                ),
+                "verified C host ownership emission",
+            ))
+        }
+    }
+
+    fn owner_var(
+        &self,
+        owner: chelis_ir::ownership::VerifiedOwnerView<'_>,
+    ) -> Result<String, Unsupported> {
+        self.owner_vars.get(&owner.id()).cloned().ok_or_else(|| {
+            invalid_abi_shape(
+                format!(
+                    "verified ownership action names emitted owner {:?} with no value binding",
+                    owner.id()
+                ),
+                "verified C host ownership emission",
+            )
+        })
+    }
+
+    fn owner_abi_type(
+        owner: chelis_ir::ownership::VerifiedOwnerView<'_>,
+    ) -> Result<HostType, Unsupported> {
+        HostAbiType::try_from_concrete(owner.ty())
+    }
+
+    fn emit_owner_drop(
+        &mut self,
+        owner: chelis_ir::ownership::VerifiedOwnerView<'_>,
+    ) -> Result<(), Unsupported> {
+        let var = self.owner_var(owner)?;
+        let ty = Self::owner_abi_type(owner)?;
+        if let Some(release) = release_call(&var, &ty) {
+            self.lines.push(format!("{}{release}", self.indent));
+        }
+        Ok(())
+    }
+
+    fn emit_edge_terminals(
+        &mut self,
+        site: HostSiteId,
+        edge: &VerifiedEdgeView<'_>,
+    ) -> Result<(), Unsupported> {
+        for terminal in edge.terminals() {
+            match terminal {
+                VerifiedTerminalView::Drop { owner, .. } => self.emit_owner_drop(*owner)?,
+                VerifiedTerminalView::Discard { .. } => {}
+            }
+            self.pre_emitted_terminals
+                .insert((site, terminal.operation()));
+        }
+        Ok(())
+    }
+
+    fn emit_clone_to(
+        &mut self,
+        dest: chelis_ir::ownership::VerifiedOwnerView<'_>,
+        source: chelis_ir::ownership::VerifiedOperandView<'_>,
+        target: Option<&str>,
+    ) -> Result<(), Unsupported> {
+        let source_var = self.owner_var(source.owner())?;
+        let dest_var = target.map_or_else(|| source_var.clone(), str::to_string);
+        let ty = Self::owner_abi_type(dest)?;
+        if let Some(retain) = retain_call(&dest_var, &ty) {
+            self.lines.push(format!("{}{retain}", self.indent));
+        }
+        self.owner_vars.insert(dest.id(), dest_var);
+        Ok(())
+    }
+
+    fn emit_terminal_site(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        result_target: Option<&str>,
+    ) -> Result<(), Unsupported> {
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    dest,
+                    source,
+                    ..
+                }) => self.emit_clone_to(*dest, *source, result_target)?,
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { owner, .. }) => {
+                    self.emit_owner_drop(owner.owner())?;
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Return { .. })
+                | VerifiedHostAction::Terminator(VerifiedHostTerminator::Exit { .. }) => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("unexpected verified terminal-site action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_manifest_root(&mut self, site: &ProjectedHostSite<'a>) -> Result<(), Unsupported> {
+        let mut observed = false;
+        let mut terminal_started = false;
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    dest,
+                    source,
+                    ..
+                }) if !observed && !terminal_started => {
+                    self.emit_clone_to(*dest, *source, None)?;
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation,
+                    owner,
+                    ..
+                }) if !observed => {
+                    terminal_started = true;
+                    self.emit_owner_drop(owner.owner())?;
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                    operation, ..
+                }) if !observed => {
+                    terminal_started = true;
+                    self.pre_emitted_terminals.insert((site.id, *operation));
+                }
+                VerifiedHostAction::ManifestRoot { .. } if !observed => observed = true,
+                VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume { .. })
+                    if observed => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("out-of-order verified manifest-root action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
+        }
+        if observed {
+            Ok(())
+        } else {
+            Err(invalid_abi_shape(
+                "verified manifest-root site has no observation marker".to_string(),
+                "verified C host ownership emission",
+            ))
+        }
+    }
+
+    fn finish_manifest_root(&mut self, site: &ProjectedHostSite<'a>) -> Result<(), Unsupported> {
+        let mut consumed = 0usize;
+        let mut observed = false;
+        let mut terminal_started = false;
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone { .. })
+                    if !observed && !terminal_started => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    operation, ..
+                })
+                | VerifiedHostAction::Operation(VerifiedHostOperation::Discard {
+                    operation, ..
+                }) if !observed && self.pre_emitted_terminals.contains(&(site.id, *operation)) => {
+                    terminal_started = true;
+                }
+                VerifiedHostAction::ManifestRoot { .. } if !observed => observed = true,
+                VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume {
+                    owner, ..
+                }) if observed => {
+                    consumed += 1;
+                    let var = self.owner_var(owner.owner())?;
+                    let ty = Self::owner_abi_type(owner.owner())?;
+                    if let Some(release) = release_call(&var, &ty) {
+                        self.lines.push(format!("{}{release}", self.indent));
+                    }
+                }
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("out-of-order verified manifest-root action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
+        }
+        if consumed != 1 {
+            return Err(invalid_abi_shape(
+                format!("verified manifest-root site has {consumed} consuming actions"),
+                "verified C host ownership emission",
+            ));
+        }
         Ok(())
     }
 
@@ -2334,6 +3236,18 @@ impl<'a> HostEmitter<'a> {
         expr: &HostExpr,
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        let site = self.next_expression_site()?;
+        self.assign_expr_at_site(target, expr, ty, &site)?;
+        Ok(())
+    }
+
+    fn assign_expr_at_site(
+        &mut self,
+        target: &str,
+        expr: &HostExpr,
+        ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+    ) -> Result<(), Unsupported> {
         self.emit_span_comments(expr);
         match &expr.kind {
             HostExprKind::Int(value) => self
@@ -2371,19 +3285,11 @@ impl<'a> HostEmitter<'a> {
                     self.lines
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else {
-                    // `target = name` is a bare pointer copy that does not
-                    // bump the refcount. When `name` is a heap `let` binding
-                    // freed at its block close (issue #406), retain the
-                    // transferred result to keep the caller's reference
-                    // alive; a parameter or outer-scope `name` is left
-                    // untouched (the block does not free it).
-                    //
                     // #379: route the referenced name through `c_ident` so a
                     // binding/param/let spelled like a C keyword resolves to
                     // the same mangled identifier its declaration used.
                     self.lines
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
-                    self.retain_transferred_result(target, name, ty);
                 }
             }
             HostExprKind::Call {
@@ -2393,7 +3299,7 @@ impl<'a> HostEmitter<'a> {
                 ty: call_ty,
             } => {
                 require_same_abi_type(ty, call_ty, "call expression")?;
-                self.assign_call(target, function, args, arg_tys, call_ty)?;
+                self.assign_call(target, function, args, arg_tys, call_ty, site)?;
             }
             HostExprKind::Builtin {
                 name,
@@ -2426,20 +3332,44 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "if expression")?;
+                let (then_edge, else_edge) = site
+                    .directives
+                    .iter()
+                    .find_map(|action| match action {
+                        VerifiedHostAction::Terminator(VerifiedHostTerminator::Branch {
+                            then_edge,
+                            else_edge,
+                            ..
+                        }) => Some((then_edge.clone(), else_edge.clone())),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            "verified if site has no branch terminator".to_string(),
+                            "verified C host ownership emission",
+                        )
+                    })?;
+                let completion = Self::join_completion_blocks(site, 2, "if")?;
+                let (then_block, else_block) = (completion[0], completion[1]);
                 let cond_var = self.next_temp("cond");
                 self.emit_expr_to_var(cond, &cond_var, &HostType::Bool)?;
                 self.lines
                     .push(format!("{}if ({cond_var}) {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                self.emit_edge_terminals(site.id, &then_edge)?;
                 self.assign_expr(target, then_expr, ty)?;
+                self.emit_expression_block_actions(site, then_block, target)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                self.emit_edge_terminals(site.id, &else_edge)?;
                 self.assign_expr(target, else_expr, ty)?;
+                self.emit_expression_block_actions(site, else_block, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
+                return Ok(());
             }
             HostExprKind::MatchOption {
                 scrutinee,
@@ -2449,48 +3379,102 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "option match")?;
+                let (scrutinee_owner, some_edge, none_edge) = site
+                    .directives
+                    .iter()
+                    .find_map(|action| match action {
+                        VerifiedHostAction::Terminator(VerifiedHostTerminator::Match {
+                            scrutinee,
+                            arms,
+                            ..
+                        }) if arms.len() == 2 => {
+                            Some((scrutinee.owner().id(), arms[0].clone(), arms[1].clone()))
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            "verified option-match site has no two-arm terminator".to_string(),
+                            "verified C host ownership emission",
+                        )
+                    })?;
+                let completion = Self::join_completion_blocks(site, 2, "option-match")?;
+                let arm_blocks = (completion[0], completion[1]);
                 let option_var = self.next_temp("option");
                 let option_ty = host_type(scrutinee);
                 self.emit_expr_to_var(scrutinee, &option_var, &option_ty)?;
-                self.lines
-                    .push(format!("{}if ({}.is_some) {{", self.indent, option_var));
+                self.lines.push(format!(
+                    "{}if (chelis_option_is_some({option_var})) {{",
+                    self.indent
+                ));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                self.emit_edge_terminals(site.id, &some_edge)?;
                 let inner_ty = option_inner_type(&option_ty)?;
+                let boxed_inner = self.next_temp("option_value");
+                self.lines.push(format!(
+                    "{}chelis_value {boxed_inner} = chelis_option_unwrap({option_var});",
+                    self.indent
+                ));
                 match option_ty {
-                    HostType::Option(inner)
-                        if !matches!(inner.as_ref(), HostType::Int64 | HostType::Float64) =>
-                    {
+                    HostType::Option(inner) if is_scalar_abi(inner.as_ref()) => {
+                        self.lines.push(format!(
+                            "{}{} {} = {};",
+                            self.indent,
+                            c_type(&inner_ty)?,
+                            bind_name,
+                            scalar_carrier_value_expr(
+                                &format!("chelis_value_unbox_scalar({boxed_inner})"),
+                                inner.as_ref(),
+                            )?
+                        ));
+                    }
+                    HostType::Option(_) => {
                         self.lines.push(format!(
                             "{}{} {};",
                             self.indent,
                             c_type(&inner_ty)?,
                             bind_name
                         ));
-                        self.assign_unboxed_value(
-                            bind_name,
-                            &inner_ty,
-                            &format!("{option_var}.value"),
-                        )?;
+                        self.assign_unboxed_value(bind_name, &inner_ty, &boxed_inner)?;
                     }
-                    _ => {
-                        self.lines.push(format!(
-                            "{}{} {} = {}.value;",
-                            self.indent,
-                            c_type(&inner_ty)?,
-                            bind_name,
-                            option_var
+                    other => {
+                        return Err(invalid_abi_shape(
+                            format!("option match scrutinee has non-option ABI type `{other:?}`"),
+                            "option match",
                         ));
                     }
                 }
+                self.bind_match_payload(site, some_edge.target(), "option_payload", bind_name)?;
+                // chelis#1222: the binder shadows any enclosing name it
+                // reuses. Its key carries no outgoing edge, because the
+                // value is freshly extracted here rather than copied from
+                // something this scope already owns -- which is also what
+                // keeps emitted C unchanged for every program that does not
+                // shadow: a reference to it dead-ends exactly as it does
+                // today.
                 self.assign_expr(target, some_expr, ty)?;
+                self.emit_expression_block_terminal_for_owner(
+                    site,
+                    some_edge.target(),
+                    scrutinee_owner,
+                )?;
+                self.emit_expression_block_actions(site, arm_blocks.0, target)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
+                self.emit_edge_terminals(site.id, &none_edge)?;
                 self.assign_expr(target, none_expr, ty)?;
+                self.emit_expression_block_terminal_for_owner(
+                    site,
+                    none_edge.target(),
+                    scrutinee_owner,
+                )?;
+                self.emit_expression_block_actions(site, arm_blocks.1, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
+                return Ok(());
             }
             HostExprKind::MatchAdt {
                 scrutinee,
@@ -2499,7 +3483,8 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "ADT match")?;
-                self.assign_match_adt(target, scrutinee, arms, default_expr.as_deref(), ty)?;
+                self.assign_match_adt(target, scrutinee, arms, default_expr.as_deref(), ty, site)?;
+                return Ok(());
             }
             HostExprKind::Let {
                 bindings,
@@ -2510,21 +3495,6 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                // issue #406: this `let` introduces a nested C scope that
-                // owns every heap binding it declares. The block body's
-                // result is written to `target` in the *outer* scope, so
-                // each heap binding must be released at block close or it
-                // leaks (the function-body sibling of the `emit_main`
-                // leak). Track this block's owned destinations + heap
-                // bindings; a bare pointer-copy of a binding into an owned
-                // destination (the escaping result, or another binding's
-                // value temp that aliases an earlier binding) is retained so
-                // each owned slot keeps exactly one reference.
-                self.let_scopes.push(LetReleaseScope {
-                    owned_destinations: HashSet::from([target.to_string()]),
-                    bindings: HashSet::new(),
-                });
-                let mut heap_bindings: Vec<(String, HostType)> = Vec::new();
                 for binding in bindings {
                     // Compute the value into a temp before declaring the binding name.
                     // If the compiler inlines a recursive call that reuses a binding
@@ -2532,17 +3502,6 @@ impl<'a> HostEmitter<'a> {
                     // declaring the inner name first would shadow the outer variable
                     // before its value is read, yielding a NULL pointer at runtime.
                     let temp = self.next_temp("let");
-                    // The value temp is an owned slot of this block: if the
-                    // binding's value is a bare alias of an earlier binding
-                    // (`b = a`), the copy into the temp must retain so `b`
-                    // owns an independent reference and the two distinct
-                    // block releases do not double-free the shared
-                    // allocation. Register it before emitting the value.
-                    if binding_release(&temp, &binding.ty).is_some()
-                        && let Some(scope) = self.let_scopes.last_mut()
-                    {
-                        scope.owned_destinations.insert(temp.clone());
-                    }
                     self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
                     self.lines.push(format!(
                         "{}{};",
@@ -2557,38 +3516,24 @@ impl<'a> HostEmitter<'a> {
                         c_ident(&binding.name),
                         temp
                     ));
-                    // Track the binding name (not its `__let_N` temp: the
-                    // two alias the same allocation, so releasing only the
-                    // name frees it exactly once). Add it to the scope's
-                    // binding set after its value is computed so a binding
-                    // whose value reads an *earlier* binding still retains
-                    // on that transfer.
-                    if binding_release(&binding.name, &binding.ty).is_some() {
-                        heap_bindings.push((binding.name.clone(), binding.ty.clone()));
-                        if let Some(scope) = self.let_scopes.last_mut() {
-                            scope.bindings.insert(binding.name.clone());
-                        }
-                    }
                 }
                 self.assign_expr(target, body, ty)?;
-                // Release the block's heap bindings in reverse declaration
-                // order, before closing the C block while they are still in
-                // scope. Last-declared shadows of a reused name win the C
-                // lookup, mirroring C scope-exit destruction order.
-                for (name, binding_ty) in heap_bindings.iter().rev() {
-                    if let Some(call) = binding_release(name, binding_ty) {
-                        self.lines.push(format!("{}{call}", self.indent));
-                    }
-                }
-                self.let_scopes.pop();
+                self.emit_expression_site(site, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
+                return Ok(());
             }
             HostExprKind::Map { callback, list, ty } => {
-                self.assign_map(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_map(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::Filter { callback, list, ty } => {
-                self.assign_filter(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_filter(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::Fold {
                 callback,
@@ -2596,7 +3541,23 @@ impl<'a> HostEmitter<'a> {
                 list,
                 ty,
             } => {
-                self.assign_fold(target, callback, init, list, ty)?;
+                let (preheader_block, body_block) = Self::loop_blocks(site)?;
+                self.assign_fold(
+                    target,
+                    callback,
+                    init,
+                    list,
+                    ty,
+                    site,
+                    preheader_block,
+                    body_block,
+                )?;
+                self.emit_expression_site_excluding_blocks(
+                    site,
+                    target,
+                    &[preheader_block, body_block],
+                )?;
+                return Ok(());
             }
             HostExprKind::Scan {
                 callback,
@@ -2604,13 +3565,22 @@ impl<'a> HostEmitter<'a> {
                 list,
                 ty,
             } => {
-                self.assign_scan(target, callback, init, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_scan(target, callback, init, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::Partition { callback, list, ty } => {
-                self.assign_partition(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_partition(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::FlatMap { callback, list, ty } => {
-                self.assign_flat_map(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_flat_map(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::WithSeed { seed, body, ty } => {
                 let seed_var = self.next_temp("seed");
@@ -2640,7 +3610,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
         }
-        Ok(())
+        self.emit_expression_site(site, target)
     }
 
     fn assign_builtin(
@@ -2681,6 +3651,11 @@ impl<'a> HostEmitter<'a> {
                 _ => None,
             };
             if let Some(assignment) = assignment {
+                // The scalar literal is folded into its checked cast without
+                // a temporary, but it remains an exact verified expression
+                // site and must advance the ownership cursor.
+                let literal_site = self.next_expression_site()?;
+                self.emit_expression_site(&literal_site, target)?;
                 let target_prim = checked_cast_abi_scalar_prim(ty)?;
                 let plan = CheckedCastPlan::new(Prim::F64, target_prim)
                     .map_err(|error| checked_cast_plan_error(error.to_string()))?;
@@ -2712,6 +3687,20 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        if name == "__json_canonical_object_entries" {
+            if arg_vars.len() != 1 || !matches!(arg_vars[0].1, HostType::Dict(_, _)) {
+                return Err(invalid_abi_shape(
+                    "JSON canonical object ordering requires one Dict argument".to_string(),
+                    "C host JSON serialization",
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = chelis_json_canonical_object_entries({});",
+                self.indent, arg_vars[0].0
+            ));
+            return Ok(());
         }
 
         if name == "cast" {
@@ -2904,7 +3893,7 @@ impl<'a> HostEmitter<'a> {
 
         match name {
             "Some" => {
-                self.assign_option_some(target, ty, &arg_vars[0].0, &arg_vars[0].1)?;
+                self.assign_option_some(target, ty, &arg_vars[0].0, &arg_vars[0].1, &args[0])?;
                 return Ok(());
             }
             "None" => {
@@ -2932,7 +3921,7 @@ impl<'a> HostEmitter<'a> {
                         format!(
                             "({})chelis_trunc_float_to_int({}, {}, {domain:?}, {overflow:?})",
                             c_type(target)?,
-                            scalar_float_as_double(&arg_vars[0].0, source),
+                            host_float_as_double(&arg_vars[0].0, source),
                             integer_abi_width(target)?
                         )
                     }
@@ -3012,14 +4001,22 @@ impl<'a> HostEmitter<'a> {
             }
             "scatter" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_scatter({}, {}, {}, {}, {});",
-                    self.indent,
-                    arg_vars[0].0,
-                    arg_vars[1].0,
-                    arg_vars[2].0,
-                    arg_vars[3].0,
-                    arg_vars[4].0
+                    "{}if (strcmp(chelis_string_data({}), \"replace\") == 0) {{",
+                    self.indent, arg_vars[4].0
                 ));
+                self.lines.push(format!(
+                    "{}    {target} = chelis_tensor_scatter_replace({}, {}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0, arg_vars[3].0
+                ));
+                self.lines.push(format!(
+                    "{}}} else if (strcmp(chelis_string_data({}), \"add\") == 0) {{",
+                    self.indent, arg_vars[4].0
+                ));
+                self.lines.push(format!(
+                    "{}    {target} = chelis_tensor_scatter_add({}, {}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0, arg_vars[3].0
+                ));
+                self.lines.push(format!("{}}} else {{ fprintf(stderr, \"scatter mode must be replace or add\\n\"); exit(1); }}", self.indent));
                 return Ok(());
             }
             "where" => {
@@ -3065,9 +4062,39 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "einsum" => {
+                if arg_vars.len() != 3 {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "einsum reached C emission with {} arguments; expected equation and two operands",
+                            arg_vars.len()
+                        ),
+                        "einsum accumulator selection",
+                    ));
+                }
+                let Some((_, HostType::Tensor(lhs_ty))) = arg_vars.get(1) else {
+                    return Err(invalid_abi_shape(
+                        "einsum lhs does not carry a resolved tensor ABI".to_string(),
+                        "einsum accumulator selection",
+                    ));
+                };
+                // spec/04-type-system.md section 5.7.1 and [05-OP-33]
+                // define einsum's omitted accumulator with the reduce-sum
+                // default table. Materialize that resolved dtype at the
+                // exact runtime boundary.
+                let accumulator = lhs_ty
+                    .precision
+                    .default_reduce_sum_accumulator()
+                    .and_then(|precision| {
+                        precision.runtime_dtype().map_err(|error| error.to_string())
+                    })
+                    .map_err(|error| invalid_abi_shape(error, "einsum accumulator selection"))?;
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_einsum({}, {}, {});",
-                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                    "{}{target} = chelis_tensor_einsum({}, {}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    arg_vars[2].0,
+                    accumulator.c_macro()
                 ));
                 return Ok(());
             }
@@ -3125,22 +4152,27 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "dict_get" => {
-                let getter = match ty {
-                    HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                        "chelis_dict_get_i64"
-                    }
-                    HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                        "chelis_dict_get_f64"
-                    }
-                    _ => "chelis_dict_get",
+                let HostType::Option(inner) = ty else {
+                    return Err(invalid_abi_shape(
+                        format!("dict_get result has non-option ABI type `{ty:?}`"),
+                        "dict_get result",
+                    ));
                 };
-                self.lines.push(format!(
-                    "{}{target} = {}({}, {});",
-                    self.indent,
-                    getter,
-                    arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
-                ));
+                let key = self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?;
+                if is_scalar_abi(inner.as_ref()) {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_dict_get_scalar({}, {}, {});",
+                        self.indent,
+                        arg_vars[0].0,
+                        key,
+                        scalar_dtype_macro(inner.as_ref())?
+                    ));
+                } else {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_dict_get({}, {});",
+                        self.indent, arg_vars[0].0, key
+                    ));
+                }
                 return Ok(());
             }
             "dict_contains" => {
@@ -3200,35 +4232,29 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "to_tensor" => {
-                // RT-4 F1: when the destination tensor's precision is
-                // known at compile time, dispatch through the typed
-                // runtime entry point so the storage width matches
-                // the declared dtype. Without this hint the runtime
-                // would deduce dtype from the value-tag of the first
-                // leaf — but `chelis_value_from_f64` has the same tag
-                // (CHELIS_VALUE_FLOAT64) for both f32 and f64 sources,
-                // so a declared `tensor[3, f64] = [1.0, 2.0, 3.0]`
-                // silently truncated to f32 storage.
-                if let HostType::Tensor(t) = ty
-                    && let Ok(dtype) = t.precision.runtime_dtype()
-                {
-                    self.lines.push(format!(
-                        "{}{target} = chelis_tensor_from_value_list_typed({}, {});",
-                        self.indent,
-                        arg_vars[0].0,
-                        dtype.c_macro()
+                // [05-OP-33]: the checked result dtype selects the exact
+                // tagged list-ingress constructor. A non-tensor or deferred
+                // result is an IR/ABI disagreement, never an untyped fallback.
+                let HostType::Tensor(t) = ty else {
+                    return Err(invalid_abi_shape(
+                        format!("to_tensor result has non-tensor ABI type `{ty:?}`"),
+                        "to_tensor list ingress",
                     ));
-                    return Ok(());
-                }
+                };
+                let dtype = t.precision.runtime_dtype().map_err(|error| {
+                    invalid_abi_shape(error.to_string(), "to_tensor list ingress")
+                })?;
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_from_value_list({});",
-                    self.indent, arg_vars[0].0
+                    "{}{target} = chelis_tensor_from_values({}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    dtype.c_macro()
                 ));
                 return Ok(());
             }
             "to_list" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_list_from_tensor({});",
+                    "{}{target} = chelis_tensor_elements({});",
                     self.indent, arg_vars[0].0
                 ));
                 return Ok(());
@@ -3238,7 +4264,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_pad_sequences({}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
+                    scalar_carrier_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -3248,7 +4274,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent,
                     arg_vars[0].0,
                     arg_vars[1].0,
-                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?
+                    scalar_carrier_expr(&arg_vars[2].0, &arg_vars[2].1)?
                 ));
                 return Ok(());
             }
@@ -3422,6 +4448,22 @@ impl<'a> HostEmitter<'a> {
                 |index: usize| scalar_arithmetic_arg_expr(&arg_vars[index].0, &arg_vars[index].1);
             let binary = |operator, lhs, rhs| EmittedExpr::binary(operator, lhs, rhs);
             let unary = |operator, operand| EmittedExpr::unary(operator, operand);
+            let direct_extrema = |comparison| {
+                let lhs = numeric_arg(0);
+                let rhs = numeric_arg(1);
+                let lhs_nan = EmittedExpr::call("isnan", [lhs.clone()]);
+                let rhs_not_nan = EmittedExpr::unary(
+                    UnaryOperator::LogicalNot,
+                    EmittedExpr::call("isnan", [rhs.clone()]),
+                );
+                let ordered = binary(comparison, lhs, rhs);
+                let select_left = binary(
+                    BinaryOperator::LogicalOr,
+                    lhs_nan,
+                    binary(BinaryOperator::LogicalAnd, rhs_not_nan, ordered),
+                );
+                EmittedExpr::conditional(select_left, arg(0), arg(1))
+            };
             let expression_builtin = CExpressionBuiltin::decode(name)?;
             let expr = match expression_builtin {
                 CExpressionBuiltin::Add if is_integer_abi(ty) => integer_checked_binary_expr(
@@ -3618,22 +4660,44 @@ impl<'a> HostEmitter<'a> {
                 }
                 CExpressionBuiltin::StringLen => EmittedExpr::call("chelis_string_len", [arg(0)]),
                 CExpressionBuiltin::ToString => match &arg_vars[0].1 {
-                    HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                        EmittedExpr::call("chelis_string_from_int64", [arg(0)])
-                    }
-                    HostType::Float64 => EmittedExpr::call("chelis_string_from_f64", [arg(0)]),
+                    HostType::Int8 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i8", [arg(0)])],
+                    ),
+                    HostType::Int16 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i16", [arg(0)])],
+                    ),
+                    HostType::Int32 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i32", [arg(0)])],
+                    ),
+                    HostType::Int64 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i64", [arg(0)])],
+                    ),
+                    HostType::Float64 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_f64", [arg(0)])],
+                    ),
                     // to_string is an observation exit: the f32 scalar
                     // renders at ITS width through the runtime's own-width
                     // formatter ([05-OBS-2]; the former promote-to-double
                     // funnel carried f64-image digits and split this exit
                     // from `print` of the same stored value - PR #863
                     // round-1 F1).
-                    HostType::Float32 => EmittedExpr::call("chelis_string_from_f32", [arg(0)]),
+                    HostType::Float32 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_f32", [arg(0)])],
+                    ),
                     HostType::Float16 => EmittedExpr::call("chelis_host_string_from_f16", [arg(0)]),
                     HostType::BFloat16 => {
                         EmittedExpr::call("chelis_host_string_from_bf16", [arg(0)])
                     }
-                    HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
+                    HostType::Bool => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_bool", [arg(0)])],
+                    ),
                     HostType::String => arg(0),
                     // chelis#730 Phase 1 (census row 3, chelis#734): to_string
                     // of a tensor/list/other non-scalar has no C rendering yet;
@@ -3656,11 +4720,82 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 },
-                CExpressionBuiltin::ToInt => EmittedExpr::call("chelis_parse_int64", [arg(0)]),
-                CExpressionBuiltin::ToFloat => EmittedExpr::call("chelis_parse_f64", [arg(0)]),
-                CExpressionBuiltin::TensorToScalar => {
-                    EmittedExpr::call("chelis_tensor_to_f64", [arg(0)])
-                }
+                CExpressionBuiltin::ToInt => EmittedExpr::call(
+                    "chelis_parse_scalar",
+                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_I64")],
+                ),
+                CExpressionBuiltin::ToFloat => EmittedExpr::call(
+                    "chelis_parse_scalar",
+                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_F64")],
+                ),
+                CExpressionBuiltin::TensorToScalar => match ty {
+                    HostType::Float64 => EmittedExpr::call(
+                        "chelis_host_scalar_as_float",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F64"),
+                        ],
+                    ),
+                    HostType::Float32 => EmittedExpr::call(
+                        "chelis_host_scalar_as_float",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F32"),
+                        ],
+                    ),
+                    HostType::Float16 => EmittedExpr::call(
+                        "chelis_host_scalar_bits",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F16"),
+                        ],
+                    ),
+                    HostType::BFloat16 => EmittedExpr::call(
+                        "chelis_host_scalar_bits",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_BF16"),
+                        ],
+                    ),
+                    HostType::Int8 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I8"),
+                        ],
+                    ),
+                    HostType::Int16 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I16"),
+                        ],
+                    ),
+                    HostType::Int32 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I32"),
+                        ],
+                    ),
+                    HostType::Int64 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I64"),
+                        ],
+                    ),
+                    HostType::Bool => EmittedExpr::call(
+                        "chelis_host_scalar_as_bool",
+                        [EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)])],
+                    ),
+                    other => {
+                        return Err(invalid_abi_shape(
+                            format!("tensor_to_scalar carries non-scalar result type `{other:?}`"),
+                            "tensor_to_scalar C emission",
+                        ));
+                    }
+                },
                 // Issue #300: dispatch on the *result* tensor precision, not just
                 // the (coarse) argument host type. `scalar_to_tensor(cast(c,
                 // f32))` must materialize an f32-backed rank-0 tensor: the f64
@@ -3672,21 +4807,40 @@ impl<'a> HostEmitter<'a> {
                 // `ty` carries the real precision.
                 CExpressionBuiltin::ScalarToTensor => match ty {
                     HostType::Tensor(tensor_ty) => match tensor_ty.precision {
-                        Prim::Int64 => EmittedExpr::call("chelis_scalar_tensor_from_i64", [arg(0)]),
-                        Prim::F64 => EmittedExpr::call("chelis_scalar_tensor_from_f64", [arg(0)]),
-                        Prim::F32 => EmittedExpr::call("chelis_scalar_tensor_from_f32", [arg(0)]),
+                        Prim::Int8 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i8", [arg(0)])],
+                        ),
+                        Prim::Int16 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i16", [arg(0)])],
+                        ),
+                        Prim::Int32 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i32", [arg(0)])],
+                        ),
+                        Prim::Int64 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i64", [arg(0)])],
+                        ),
+                        Prim::F64 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_f64", [arg(0)])],
+                        ),
+                        Prim::F32 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_f32", [arg(0)])],
+                        ),
                         Prim::F16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_f16", [arg(0)])
                         }
                         Prim::Bf16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_bf16", [arg(0)])
                         }
-                        // chelis#714 asked for the f16/bf16 host-scalar
-                        // representation and is repaired: both dtypes have
-                        // their own constructor arm above. What survives here
-                        // is the general dtype-capability gap chelis#729
-                        // owns, for the precisions that still have no
-                        // scalar-tensor constructor at all.
+                        Prim::Bool => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_bool", [arg(0)])],
+                        ),
                         precision => {
                             return Err(Unsupported::new(
                                 UnsupportedKind::HostType(format!(
@@ -3775,19 +4929,33 @@ impl<'a> HostEmitter<'a> {
                         "C host scalar activation emission",
                     ));
                 }
-                CExpressionBuiltin::Relu => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_relu_f16",
-                            "chelis_host_relu_bf16",
-                            "chelis_host_relu_f32",
-                            "chelis_host_relu_f64",
+                CExpressionBuiltin::Relu => {
+                    let helper = activation_math_function(
+                        ty,
+                        "chelis_host_relu_f16",
+                        "chelis_host_relu_bf16",
+                        "chelis_host_relu_f32",
+                        "chelis_host_relu_f64",
+                    );
+                    match ty {
+                        // Reduced-float host ABI values are their exact stored
+                        // bits. Decode only for the comparison, then select
+                        // the raw argument or raw +0 through the closed AST.
+                        HostType::Float16 | HostType::BFloat16 => EmittedExpr::conditional(
+                            binary(
+                                BinaryOperator::Less,
+                                numeric_arg(0),
+                                EmittedExpr::integer(0),
+                            ),
+                            EmittedExpr::integer(0),
+                            arg(0),
                         ),
-                        [numeric_arg(0)],
-                    ),
-                    ty,
-                ),
+                        HostType::Float32 | HostType::Float64 => {
+                            EmittedExpr::call(helper, [numeric_arg(0)])
+                        }
+                        _ => unreachable!("non-float ReLU rejected above"),
+                    }
+                }
                 CExpressionBuiltin::Sigmoid => finalize_scalar_expr(
                     EmittedExpr::call(
                         activation_math_function(
@@ -3929,29 +5097,17 @@ impl<'a> HostEmitter<'a> {
                     ty,
                 ),
                 CExpressionBuiltin::MinElem if is_integer_abi(ty) => EmittedExpr::conditional(
-                    binary(BinaryOperator::Less, arg(0), arg(1)),
+                    binary(BinaryOperator::LessEqual, arg(0), arg(1)),
                     arg(0),
                     arg(1),
                 ),
                 CExpressionBuiltin::MaxElem if is_integer_abi(ty) => EmittedExpr::conditional(
-                    binary(BinaryOperator::Greater, arg(0), arg(1)),
+                    binary(BinaryOperator::GreaterEqual, arg(0), arg(1)),
                     arg(0),
                     arg(1),
                 ),
-                CExpressionBuiltin::MinElem => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmin", "fminf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
-                ),
-                CExpressionBuiltin::MaxElem => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmax", "fmaxf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
-                ),
+                CExpressionBuiltin::MinElem => direct_extrema(BinaryOperator::LessEqual),
+                CExpressionBuiltin::MaxElem => direct_extrema(BinaryOperator::GreaterEqual),
             };
             Ok(expr)
         };
@@ -3979,9 +5135,9 @@ impl<'a> HostEmitter<'a> {
     // Per `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
     // 2 the supported precisions are f32, f64, i32, i64, and bool.
     // Each arm selects an element type that matches its representation.
-    // CHELIS_F32 and the current CHELIS_BOOL payload use `(float*)`.
-    // CHELIS_I32 uses `(int32_t*)`, CHELIS_F64 uses `(double*)`, and
-    // CHELIS_I64 uses `(int64_t*)`.
+    // CHELIS_DTYPE_BOOL uses the canonical one-byte `uint8_t` payload.
+    // CHELIS_DTYPE_F32 uses `(float*)`, CHELIS_DTYPE_I32 uses `(int32_t*)`,
+    // CHELIS_DTYPE_F64 uses `(double*)`, and CHELIS_DTYPE_I64 uses `(int64_t*)`.
     //
     // The four helpers split into two pairs:
     //
@@ -3991,14 +5147,15 @@ impl<'a> HostEmitter<'a> {
     //     for every supported dtype arm.  All arms are semantically
     //     well-defined for the supported operators.
     //
-    //   * `assign_tensor_binary_func_elementwise` emits f32 libm calls
-    //     for F32 and the current Bool payload. Its I32 arm emits an exact
-    //     integer comparison for max and min. F64 and I64 abort.
+    //   * `assign_tensor_binary_func_elementwise` emits direct operand
+    //     selection for every represented dtype. Float arms preserve the
+    //     first NaN and every lhs equality bit-pattern; integer and Bool arms
+    //     select the lhs on equality.
     //
     //   * `assign_tensor_unary_func_elementwise` takes an f32-only helper
-    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32 and
-    //     the current Bool payload. I32, F64, and I64 abort rather than
-    //     convert through binary32 and lose precision.
+    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32.
+    //     I32, F64, I64, and Bool abort rather than convert through
+    //     binary32 or treat bool storage as a float payload.
     fn assign_checked_tensor_cast(&mut self, target: &str, input: &str, plan: CheckedCastPlan) {
         if plan.kind() == CheckedCastKind::Identity {
             self.lines
@@ -4020,12 +5177,12 @@ impl<'a> HostEmitter<'a> {
         let indices = format!("{target}_cast_indices");
         let source_index = format!("{target}_cast_source_i");
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {});",
+            "{}{target} = chelis_host_alloc_like({input}, {});",
             self.indent,
             sparse_dtype_macro(target_prim)
         ));
         self.lines.push(format!(
-            "{}if ({input}->dtype != {}) {{",
+            "{}if (chelis_host_tensor_dtype({input}) != {}) {{",
             self.indent,
             sparse_dtype_macro(source_prim)
         ));
@@ -4036,27 +5193,28 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}    abort();", self.indent));
         self.lines.push(format!("{}}}", self.indent));
         self.lines.push(format!(
-            "{}const {source_type} *{source_data} = (const {source_type} *){input}->data;",
+            "{}const {source_type} *{source_data} = (const {source_type} *)chelis_host_tensor_data({input});",
+            self.indent,
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines.push(format!(
+            "{}{target_type} *{target_data} = ({target_type} *){view}.data;",
             self.indent,
         ));
         self.lines.push(format!(
-            "{}{target_type} *{target_data} = ({target_type} *){target}->data;",
+            "{}for (int64_t {flat_index} = 0; {flat_index} < {view}.count; {flat_index}++) {{",
             self.indent,
         ));
         self.lines.push(format!(
-            "{}for (int64_t {flat_index} = 0; {flat_index} < {target}->size; {flat_index}++) {{",
+            "{}    int64_t {indices}[chelis_tensor_rank({input}) > 0 ? chelis_tensor_rank({input}) : 1];",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    chelis_host_flat_to_indices({flat_index}, {input}, {indices});",
             self.indent,
         ));
         self.lines.push(format!(
-            "{}    int64_t {indices}[CHELIS_MAX_DIM];",
-            self.indent,
-        ));
-        self.lines.push(format!(
-            "{}    chelis_flat_to_indices({flat_index}, {target}->shape, {target}->ndim, {indices});",
-            self.indent,
-        ));
-        self.lines.push(format!(
-            "{}    int64_t {source_index} = chelis_indices_to_flat({indices}, {input}->strides, {input}->ndim);",
+            "{}    int64_t {source_index} = chelis_host_indices_to_flat({indices}, {input});",
             self.indent,
         ));
         let source_value = format!("{source_data}[{source_index}]");
@@ -4066,20 +5224,56 @@ impl<'a> HostEmitter<'a> {
             self.indent,
         ));
         self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+    }
+
+    /// chelis#1484: the host-value lane's runtime operand-agreement guard for
+    /// binary elementwise ops, and the sibling of `emit.rs`'s
+    /// `emit_elementwise_operand_guard` (chelis#664, chelis#668).
+    ///
+    /// The emitters below allocate the result at the LHS rank and then read
+    /// every operand through the TARGET's index vector applied to that
+    /// operand's strides. An operand whose runtime rank or shape disagrees is
+    /// therefore read partially or out of bounds, SILENTLY, where the
+    /// evaluator rejects with "tensor shapes must match for elementwise op".
+    /// An elementwise call one of whose operands carries an IO effect is
+    /// lowered here rather than through the tensor DAG, so before this guard
+    /// existed such a call reached codegen with no operand comparison in
+    /// either lane.
+    ///
+    /// Scope, and the reason it is not simply "ranks must be equal":
+    /// `spec/05-risc-primitives.md` §1.2 forbids implicit rank extension, so
+    /// two positive ranks that differ are always a defect and abort. A rank-0
+    /// operand is the backend's own scalar-input representation, not source
+    /// broadcasting, and keeps its established meaning. At equal positive
+    /// rank the shapes are compared axis by axis, which is what §2.4 already
+    /// requires of the tensor-DAG lane.
+    ///
+    /// The message wording is the DAG guard's, so one grep over the emitted C
+    /// finds either lane; the emitted result and operand variable names
+    /// locate the site inside a generated translation unit.
+    fn emit_elementwise_operand_guard(&mut self, target: &str, lhs: &str, rhs: &str) {
+        self.lines.push(format!(
+            "{}chelis_host_require_elementwise_agreement({lhs}, {rhs}, \"{target}\", \"{lhs}\", \"{rhs}\");",
+            self.indent
+        ));
     }
 
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
+        self.emit_elementwise_operand_guard(target, lhs, rhs);
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            "{}{target} = chelis_host_alloc_like({lhs}, chelis_host_tensor_dtype({lhs}));",
             self.indent
         ));
+        let (guard, view) = self.begin_tensor_write(target);
         self.lines
-            .push(format!("{}switch ({target}->dtype) {{", self.indent));
+            .push(format!("{}switch ({view}.dtype) {{", self.indent));
         for arm in DtypeArm::all_operator_arms() {
-            self.emit_binary_elementwise_arm(target, lhs, rhs, op, *arm);
+            self.emit_binary_elementwise_arm(target, lhs, rhs, op, *arm, &view);
         }
-        self.emit_default_runtime_fail_arm_for(target, "binary elementwise op");
+        self.emit_default_runtime_fail_arm_for(&format!("{view}.dtype"), "binary elementwise op");
         self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
     }
 
     fn assign_tensor_binary_func_elementwise(
@@ -4089,94 +5283,101 @@ impl<'a> HostEmitter<'a> {
         rhs: &str,
         func: BinaryElementwiseFunc,
     ) {
+        self.emit_elementwise_operand_guard(target, lhs, rhs);
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            "{}{target} = chelis_host_alloc_like({lhs}, chelis_host_tensor_dtype({lhs}));",
             self.indent
         ));
+        let (guard, view) = self.begin_tensor_write(target);
         self.lines
-            .push(format!("{}switch ({target}->dtype) {{", self.indent));
-        for arm in DtypeArm::f32_payload_func_arms() {
-            self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, *arm);
+            .push(format!("{}switch ({view}.dtype) {{", self.indent));
+        for arm in DtypeArm::all_operator_arms() {
+            self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, *arm, &view);
         }
-        self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, DtypeArm::I32);
-        self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I64],
-            &format!("binary func elementwise ({})", func.f32_name()),
-        );
         self.emit_default_runtime_fail_arm_for(
-            target,
-            &format!("binary func elementwise ({})", func.f32_name()),
+            &format!("{view}.dtype"),
+            &format!("binary func elementwise ({})", func.label()),
         );
         self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
     }
 
     fn assign_tensor_unary_elementwise(&mut self, target: &str, input: &str, op: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            "{}{target} = chelis_host_alloc_like({input}, chelis_host_tensor_dtype({input}));",
             self.indent
         ));
+        let (guard, view) = self.begin_tensor_write(target);
         self.lines
-            .push(format!("{}switch ({target}->dtype) {{", self.indent));
+            .push(format!("{}switch ({view}.dtype) {{", self.indent));
         for arm in DtypeArm::all_operator_arms() {
-            self.emit_unary_elementwise_arm(target, input, op, *arm);
+            self.emit_unary_elementwise_arm(target, input, op, *arm, &view);
         }
-        self.emit_default_runtime_fail_arm_for(target, "unary elementwise op");
+        self.emit_default_runtime_fail_arm_for(&format!("{view}.dtype"), "unary elementwise op");
         self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
     }
 
     fn assign_tensor_unary_func_elementwise(&mut self, target: &str, input: &str, func: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            "{}{target} = chelis_host_alloc_like({input}, chelis_host_tensor_dtype({input}));",
             self.indent
         ));
+        let (guard, view) = self.begin_tensor_write(target);
         self.lines
-            .push(format!("{}switch ({target}->dtype) {{", self.indent));
+            .push(format!("{}switch ({view}.dtype) {{", self.indent));
         for arm in DtypeArm::f32_payload_func_arms() {
-            self.emit_unary_func_elementwise_arm(target, input, func, *arm);
+            self.emit_unary_func_elementwise_arm(target, input, func, *arm, &view);
         }
         self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64],
+            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64, DtypeArm::Bool],
             &format!("unary func elementwise ({func})"),
         );
-        self.emit_default_runtime_fail_arm_for(target, &format!("unary func elementwise ({func})"));
+        self.emit_default_runtime_fail_arm_for(
+            &format!("{view}.dtype"),
+            &format!("unary func elementwise ({func})"),
+        );
         self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
     }
 
     /// Emit one arm of the elementwise binary operator dispatch.
     fn emit_binary_elementwise_arm(
         &mut self,
-        target: &str,
+        _target: &str,
         lhs: &str,
         rhs: &str,
         op: &str,
         arm: DtypeArm,
+        target_view: &str,
     ) {
         let ind = &self.indent;
         let macro_name = arm.dtype_macro();
         let elem_t = arm.elem_t();
         self.lines.push(format!("{ind}    case {macro_name}: {{"));
         self.lines.push(format!(
-            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target_view}.data;"
         ));
         self.lines.push(format!(
-            "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*){lhs}->data;"
+            "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
         ));
         self.lines.push(format!(
-            "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*){rhs}->data;"
+            "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
         ));
         self.lines.push(format!(
-            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
-        ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
-        self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            int64_t indices[chelis_tensor_rank({lhs}) > 0 ? chelis_tensor_rank({lhs}) : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            chelis_host_flat_to_indices(i, {lhs}, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_lhs = chelis_host_indices_to_flat(indices, {lhs});"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_rhs = chelis_host_indices_to_flat(indices, {rhs});"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
@@ -4189,51 +5390,50 @@ impl<'a> HostEmitter<'a> {
     /// Emit one arm of the elementwise binary func dispatch.
     fn emit_binary_func_elementwise_arm(
         &mut self,
-        target: &str,
+        _target: &str,
         lhs: &str,
         rhs: &str,
         func: BinaryElementwiseFunc,
         arm: DtypeArm,
+        target_view: &str,
     ) {
         let ind = &self.indent;
         let macro_name = arm.dtype_macro();
         let elem_t = arm.elem_t();
         self.lines.push(format!("{ind}    case {macro_name}: {{"));
         self.lines.push(format!(
-            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target_view}.data;"
         ));
         self.lines.push(format!(
-            "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*){lhs}->data;"
+            "{ind}        const {elem_t} *__lhs_data = (const {elem_t}*)chelis_host_tensor_data({lhs});"
         ));
         self.lines.push(format!(
-            "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*){rhs}->data;"
+            "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*)chelis_host_tensor_data({rhs});"
         ));
         self.lines.push(format!(
-            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
-        ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
-        self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            int64_t indices[chelis_tensor_rank({lhs}) > 0 ? chelis_tensor_rank({lhs}) : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            chelis_host_flat_to_indices(i, {lhs}, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_lhs = chelis_host_indices_to_flat(indices, {lhs});"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_rhs = chelis_host_indices_to_flat(indices, {rhs});"
         ));
         let expression = match arm {
-            DtypeArm::F32 | DtypeArm::Bool => format!(
-                "{}(__lhs_data[idx_lhs], __rhs_data[idx_rhs])",
-                func.f32_name()
+            DtypeArm::F32 | DtypeArm::F64 => format!(
+                "isnan(__lhs_data[idx_lhs]) || (!isnan(__rhs_data[idx_rhs]) && __lhs_data[idx_lhs] {} __rhs_data[idx_rhs]) ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
+                func.comparison()
             ),
-            DtypeArm::I32 => format!(
+            DtypeArm::Bool | DtypeArm::I32 | DtypeArm::I64 => format!(
                 "__lhs_data[idx_lhs] {} __rhs_data[idx_rhs] ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
-                func.i32_comparison()
+                func.comparison()
             ),
-            DtypeArm::F64 | DtypeArm::I64 => {
-                unreachable!("binary func arm must reject F64 and I64 before emission")
-            }
         };
         self.lines
             .push(format!("{ind}            __target_data[i] = {expression};"));
@@ -4243,27 +5443,35 @@ impl<'a> HostEmitter<'a> {
     }
 
     /// Emit one arm of the elementwise unary operator dispatch.
-    fn emit_unary_elementwise_arm(&mut self, target: &str, input: &str, op: &str, arm: DtypeArm) {
+    fn emit_unary_elementwise_arm(
+        &mut self,
+        _target: &str,
+        input: &str,
+        op: &str,
+        arm: DtypeArm,
+        target_view: &str,
+    ) {
         let ind = &self.indent;
         let macro_name = arm.dtype_macro();
         let elem_t = arm.elem_t();
         self.lines.push(format!("{ind}    case {macro_name}: {{"));
         self.lines.push(format!(
-            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target_view}.data;"
         ));
         self.lines.push(format!(
-            "{ind}        const {elem_t} *__input_data = (const {elem_t}*){input}->data;"
+            "{ind}        const {elem_t} *__input_data = (const {elem_t}*)chelis_host_tensor_data({input});"
         ));
         self.lines.push(format!(
-            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
-        ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
-        self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            int64_t indices[chelis_tensor_rank({input}) > 0 ? chelis_tensor_rank({input}) : 1];"
+        ));
+        self.lines.push(format!(
+            "{ind}            chelis_host_flat_to_indices(i, {input}, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx = chelis_host_indices_to_flat(indices, {input});"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {op}__input_data[idx];"
@@ -4276,31 +5484,33 @@ impl<'a> HostEmitter<'a> {
     /// Emit one arm of the elementwise unary func dispatch.
     fn emit_unary_func_elementwise_arm(
         &mut self,
-        target: &str,
+        _target: &str,
         input: &str,
         func: &str,
         arm: DtypeArm,
+        target_view: &str,
     ) {
         let ind = &self.indent;
         let macro_name = arm.dtype_macro();
         let elem_t = arm.elem_t();
         self.lines.push(format!("{ind}    case {macro_name}: {{"));
         self.lines.push(format!(
-            "{ind}        {elem_t} *__target_data = ({elem_t}*){target}->data;"
+            "{ind}        {elem_t} *__target_data = ({elem_t}*){target_view}.data;"
         ));
         self.lines.push(format!(
-            "{ind}        const {elem_t} *__input_data = (const {elem_t}*){input}->data;"
+            "{ind}        const {elem_t} *__input_data = (const {elem_t}*)chelis_host_tensor_data({input});"
         ));
         self.lines.push(format!(
-            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
-        ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
-        self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            int64_t indices[chelis_tensor_rank({input}) > 0 ? chelis_tensor_rank({input}) : 1];"
+        ));
+        self.lines.push(format!(
+            "{ind}            chelis_host_flat_to_indices(i, {input}, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx = chelis_host_indices_to_flat(indices, {input});"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {func}(__input_data[idx]);"
@@ -4326,13 +5536,13 @@ impl<'a> HostEmitter<'a> {
     }
 
     /// Emit the `default:` arm for an elementwise dtype switch.
-    /// `target` names the dispatched-on tensor so the stderr message
-    /// can include its actual dtype value at runtime.
-    fn emit_default_runtime_fail_arm_for(&mut self, target: &str, site_name: &str) {
+    /// `dtype_expr` names the already-validated tagged dtype used by the
+    /// surrounding switch.
+    fn emit_default_runtime_fail_arm_for(&mut self, dtype_expr: &str, site_name: &str) {
         let ind = &self.indent;
         self.lines.push(format!("{ind}    default: {{"));
         self.lines.push(format!(
-            "{ind}        fprintf(stderr, \"{site_name} unsupported dtype %d\\n\", (int){target}->dtype);"
+            "{ind}        fprintf(stderr, \"{site_name} unsupported dtype %d\\n\", (int)({dtype_expr}));"
         ));
         self.lines.push(format!("{ind}        abort();"));
         self.lines.push(format!("{ind}    }}"));
@@ -4400,58 +5610,62 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
                 // Scalar inputs to tensor helpers use true rank-0 tensors so
-                // tensor[f32] keeps shape=[] across generated host/DAG calls.
-                //
-                // W2 PR 3 (CRuntime-F32Coupling): every arm casts
-                // `->data` through a typed pointer before writing
-                // the scalar.  The legacy bool / f32 arms wrote
-                // through the public `float *data` declaration in
-                // the C runtime header; mirror the int64 arm's
-                // typed-cast pattern for the bool and f32 cases
-                // so the bug class closes uniformly.  Bool
-                // storage today is 4-byte f32-encoded (per
-                // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`),
-                // so the bool arm casts to `(float*)` and writes
-                // the 1.0f / 0.0f bit pattern.
+                // the declared dtype keeps shape=[] across generated host/DAG
+                // calls. Every arm writes through its exact storage type;
+                // Bool is the canonical one-byte Bool8 carrier.
                 let (dtype, store) = match inferred_ty {
                     HostType::Int8 => (
-                        "CHELIS_I8",
-                        format!("((int8_t*){tensor_name}->data)[0] = {value_name};"),
+                        "CHELIS_DTYPE_I8",
+                        format!("((int8_t*){tensor_name}_write.data)[0] = {value_name};"),
                     ),
                     HostType::Int16 => (
-                        "CHELIS_I16",
-                        format!("((int16_t*){tensor_name}->data)[0] = {value_name};"),
+                        "CHELIS_DTYPE_I16",
+                        format!("((int16_t*){tensor_name}_write.data)[0] = {value_name};"),
                     ),
                     HostType::Int64 => (
-                        "CHELIS_I64",
-                        format!("((int64_t*){tensor_name}->data)[0] = {value_name};"),
+                        "CHELIS_DTYPE_I64",
+                        format!("((int64_t*){tensor_name}_write.data)[0] = {value_name};"),
                     ),
                     HostType::Bool => (
-                        "CHELIS_BOOL",
-                        format!("((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"),
+                        "CHELIS_DTYPE_BOOL",
+                        format!(
+                            "((uint8_t*){tensor_name}_write.data)[0] = {value_name} ? UINT8_C(1) : UINT8_C(0);"
+                        ),
                     ),
                     // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
                     // fed to a tensor helper via `scalar_to_tensor` must be
-                    // packed into a `CHELIS_F64` rank-0 tensor and written
+                    // packed into a `CHELIS_DTYPE_F64` rank-0 tensor and written
                     // through a `double*`. The pre-fix catch-all packed it
-                    // as `CHELIS_F32` and stored only the low 4 bytes; the
+                    // as `CHELIS_DTYPE_F32` and stored only the low 4 bytes; the
                     // f64 kernel then read 8 bytes (the high 4 garbage),
                     // collapsing the value to ~0 and silently disagreeing
                     // with the evaluator. Float32 still uses the f32 arm.
                     HostType::Float64 => (
-                        "CHELIS_F64",
-                        format!("((double*){tensor_name}->data)[0] = (double)({value_name});"),
+                        "CHELIS_DTYPE_F64",
+                        format!("((double*){tensor_name}_write.data)[0] = (double)({value_name});"),
                     ),
                     _ => (
-                        "CHELIS_F32",
-                        format!("((float*){tensor_name}->data)[0] = (float)({value_name});"),
+                        "CHELIS_DTYPE_F32",
+                        format!("((float*){tensor_name}_write.data)[0] = (float)({value_name});"),
                     ),
                 };
                 self.lines.push(format!(
                     "{}{tensor_name} = chelis_alloc(0, NULL, {dtype});",
                     self.indent
                 ));
+                self.lines.push(format!(
+                    "{}chelis_tensor_write *{tensor_name}_guard = chelis_tensor_begin_write({tensor_name});",
+                    self.indent
+                ));
+                self.lines.push(format!(
+                    "{}chelis_write_view {tensor_name}_write = chelis_tensor_write_view({tensor_name}_guard);",
+                    self.indent
+                ));
                 self.lines.push(format!("{}{store}", self.indent));
+                self.lines.push(format!(
+                    "{}chelis_tensor_end_write({tensor_name}_guard);",
+                    self.indent
+                ));
                 (tensor_name.clone(), Some(tensor_name))
             };
             tensor_args.push(entry);
@@ -4492,9 +5706,9 @@ impl<'a> HostEmitter<'a> {
         // tensor and assemble a real `chelis_tuple` so the subsequent
         // `chelis_tuple_get` projection has a correctly-typed receiver.
         let root_count = self
-            .tensor_helpers
+            .tensor_helper_output_counts
             .get(helper)
-            .map(|host_helper| host_helper.dag.roots().len().max(1))
+            .copied()
             .unwrap_or(1);
         self.lines.push(format!(
             "{}chelis_tensor *{}[{}] = {{ NULL }};",
@@ -4548,7 +5762,7 @@ impl<'a> HostEmitter<'a> {
         for (_, boxed) in tensor_args {
             if let Some(boxed) = boxed {
                 self.lines
-                    .push(format!("{}chelis_free({boxed});", self.indent));
+                    .push(format!("{}chelis_tensor_release({boxed});", self.indent));
             }
         }
         Ok(())
@@ -4604,7 +5818,7 @@ impl<'a> HostEmitter<'a> {
             output_dims.join(", ")
         ));
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_F32);",
+            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_DTYPE_F32);",
             self.indent,
             output_dims.len()
         ));
@@ -4616,7 +5830,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}if (!({lhs_contig}->ndim >= 2 && {lhs_contig}->strides[{lhs_contig}->ndim - 1] == 1 && {lhs_contig}->strides[{lhs_contig}->ndim - 2] == {k_expr})) {{",
+            "{}if (!(chelis_tensor_rank({lhs_contig}) >= 2 && chelis_host_tensor_stride({lhs_contig}, chelis_tensor_rank({lhs_contig}) - 1) == 1 && chelis_host_tensor_stride({lhs_contig}, chelis_tensor_rank({lhs_contig}) - 2) == {k_expr})) {{",
             self.indent
         ));
         self.lines.push(format!(
@@ -4629,7 +5843,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}if (!({rhs_contig}->ndim >= 2 && {rhs_contig}->strides[{rhs_contig}->ndim - 1] == 1 && {rhs_contig}->strides[{rhs_contig}->ndim - 2] == {n_expr})) {{",
+            "{}if (!(chelis_tensor_rank({rhs_contig}) >= 2 && chelis_host_tensor_stride({rhs_contig}, chelis_tensor_rank({rhs_contig}) - 1) == 1 && chelis_host_tensor_stride({rhs_contig}, chelis_tensor_rank({rhs_contig}) - 2) == {n_expr})) {{",
             self.indent
         ));
         self.lines.push(format!(
@@ -4639,10 +5853,12 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}}}", self.indent));
 
         if summary.batch_dims.is_empty() {
+            let (guard, view) = self.begin_tensor_write(target);
             self.lines.push(format!(
-                "{}cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, {lhs_contig}->data, {k_expr}, {rhs_contig}->data, {n_expr}, 0.0f, {target}->data, {n_expr});",
+                "{}cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, (const float*)chelis_host_tensor_data({lhs_contig}), {k_expr}, (const float*)chelis_host_tensor_data({rhs_contig}), {n_expr}, 0.0f, (float*){view}.data, {n_expr});",
                 self.indent
             ));
+            self.end_tensor_write(&guard);
         } else {
             let batch_count = summary
                 .batch_dims
@@ -4655,6 +5871,17 @@ impl<'a> HostEmitter<'a> {
             let lhs_offset = self.next_temp("blas_lhs_offset");
             let rhs_offset = self.next_temp("blas_rhs_offset");
             let out_offset = self.next_temp("blas_out_offset");
+            let out_strides = (0..summary.batch_dims.len())
+                .map(|axis| {
+                    let stride = self.next_temp(&format!("blas_out_stride_{axis}"));
+                    self.lines.push(format!(
+                        "{}int64_t {stride} = chelis_host_tensor_stride({target}, {axis});",
+                        self.indent
+                    ));
+                    stride
+                })
+                .collect::<Vec<_>>();
+            let (guard, view) = self.begin_tensor_write(target);
             self.lines.push(format!(
                 "{}for (int64_t {batch} = 0; {batch} < {batch_count}; {batch}++) {{",
                 self.indent
@@ -4678,30 +5905,31 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}    {rem} /= ({dim_expr});", self.indent));
                 self.lines.push(format!(
-                    "{}    {lhs_offset} += {coord} * {lhs_contig}->strides[{axis}];",
+                    "{}    {lhs_offset} += {coord} * chelis_host_tensor_stride({lhs_contig}, {axis});",
                     self.indent
                 ));
                 self.lines.push(format!(
-                    "{}    {rhs_offset} += {coord} * {rhs_contig}->strides[{axis}];",
+                    "{}    {rhs_offset} += {coord} * chelis_host_tensor_stride({rhs_contig}, {axis});",
                     self.indent
                 ));
                 self.lines.push(format!(
-                    "{}    {out_offset} += {coord} * {target}->strides[{axis}];",
-                    self.indent
+                    "{}    {out_offset} += {coord} * {};",
+                    self.indent, out_strides[axis]
                 ));
             }
             self.lines.push(format!(
-                "{}    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, {lhs_contig}->data + {lhs_offset}, {k_expr}, {rhs_contig}->data + {rhs_offset}, {n_expr}, 0.0f, {target}->data + {out_offset}, {n_expr});",
+                "{}    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, (const float*)chelis_host_tensor_data({lhs_contig}) + {lhs_offset}, {k_expr}, (const float*)chelis_host_tensor_data({rhs_contig}) + {rhs_offset}, {n_expr}, 0.0f, (float*){view}.data + {out_offset}, {n_expr});",
                 self.indent
             ));
             self.lines.push(format!("{}}}", self.indent));
+            self.end_tensor_write(&guard);
         }
         self.lines.push(format!(
-            "{}if ({lhs_contig} != {lhs}) chelis_free({lhs_contig});",
+            "{}if ({lhs_contig} != {lhs}) chelis_tensor_release({lhs_contig});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}if ({rhs_contig} != {rhs}) chelis_free({rhs_contig});",
+            "{}if ({rhs_contig} != {rhs}) chelis_tensor_release({rhs_contig});",
             self.indent
         ));
         Ok(())
@@ -4712,7 +5940,7 @@ impl<'a> HostEmitter<'a> {
         summary: &HostBlasMatmulSummary,
         tensor_args: &[String],
     ) {
-        let mut symbolic_first = HashMap::<String, String>::new();
+        let mut symbolic_first = UnordMap::<String, String>::new();
         for (input_index, (arg, ty)) in tensor_args.iter().zip(summary.input_tys.iter()).enumerate()
         {
             self.lines
@@ -4723,8 +5951,10 @@ impl<'a> HostEmitter<'a> {
             ));
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
-            self.lines
-                .push(format!("{}if ({arg}->dtype != CHELIS_F32) {{", self.indent));
+            self.lines.push(format!(
+                "{}if (chelis_host_tensor_dtype({arg}) != CHELIS_DTYPE_F32) {{",
+                self.indent
+            ));
             self.lines.push(format!(
                 "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected f32 tensor\\n\");",
                 self.indent
@@ -4732,12 +5962,12 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
             self.lines.push(format!(
-                "{}if ({arg}->ndim != {}) {{",
+                "{}if (chelis_tensor_rank({arg}) != {}) {{",
                 self.indent,
                 ty.dims.len()
             ));
             self.lines.push(format!(
-                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected rank {}, got %d\\n\", chelis_tensor_rank({arg}));",
                 self.indent,
                 ty.dims.len()
             ));
@@ -4747,18 +5977,18 @@ impl<'a> HostEmitter<'a> {
                 match dim {
                     DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
                         self.lines.push(format!(
-                            "{}if ({arg}->shape[{axis}] != {size}) {{",
+                            "{}if (chelis_tensor_shape({arg}, {axis}) != {size}) {{",
                             self.indent
                         ));
                         self.lines.push(format!(
-                            "{}    fprintf(stderr, \"specialized BLAS call input {input_index} axis {axis} expected {size}, got %lld\\n\", (long long){arg}->shape[{axis}]);",
+                            "{}    fprintf(stderr, \"specialized BLAS call input {input_index} axis {axis} expected {size}, got %lld\\n\", (long long)chelis_tensor_shape({arg}, {axis}));",
                             self.indent
                         ));
                         self.lines.push(format!("{}    abort();", self.indent));
                         self.lines.push(format!("{}}}", self.indent));
                     }
                     DimInfo::Named(name, None) => {
-                        let expr = format!("{arg}->shape[{axis}]");
+                        let expr = format!("chelis_tensor_shape({arg}, {axis})");
                         if let Some(first) = symbolic_first.get(name) {
                             self.lines
                                 .push(format!("{}if ({expr} != {first}) {{", self.indent));
@@ -4814,7 +6044,7 @@ impl<'a> HostEmitter<'a> {
             .find_map(|(ty, arg)| {
                 ty.dims.iter().enumerate().find_map(|(axis, dim)| {
                     matches!(dim, DimInfo::Named(dim_name, None) if dim_name == name)
-                        .then(|| format!("{arg}->shape[{axis}]"))
+                        .then(|| format!("chelis_tensor_shape({arg}, {axis})"))
                 })
             })
     }
@@ -4922,7 +6152,7 @@ impl<'a> HostEmitter<'a> {
         summary: &HostSparseOpSummary,
         tensor_args: &[String],
     ) {
-        let mut symbolic_first = HashMap::<String, String>::new();
+        let mut symbolic_first = UnordMap::<String, String>::new();
         for (input_index, (arg, ty)) in tensor_args.iter().zip(summary.input_tys.iter()).enumerate()
         {
             let expected_dtype = sparse_dtype_macro(ty.precision);
@@ -4935,7 +6165,7 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
             self.lines.push(format!(
-                "{}if ({arg}->dtype != {expected_dtype}) {{",
+                "{}if (chelis_host_tensor_dtype({arg}) != {expected_dtype}) {{",
                 self.indent
             ));
             self.lines.push(format!(
@@ -4945,12 +6175,12 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
             self.lines.push(format!(
-                "{}if ({arg}->ndim != {}) {{",
+                "{}if (chelis_tensor_rank({arg}) != {}) {{",
                 self.indent,
                 ty.dims.len()
             ));
             self.lines.push(format!(
-                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected rank {}, got %d\\n\", chelis_tensor_rank({arg}));",
                 self.indent,
                 ty.dims.len()
             ));
@@ -4960,18 +6190,18 @@ impl<'a> HostEmitter<'a> {
                 match dim {
                     DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
                         self.lines.push(format!(
-                            "{}if ({arg}->shape[{axis}] != {size}) {{",
+                            "{}if (chelis_tensor_shape({arg}, {axis}) != {size}) {{",
                             self.indent
                         ));
                         self.lines.push(format!(
-                            "{}    fprintf(stderr, \"specialized sparse call input {input_index} axis {axis} expected {size}, got %lld\\n\", (long long){arg}->shape[{axis}]);",
+                            "{}    fprintf(stderr, \"specialized sparse call input {input_index} axis {axis} expected {size}, got %lld\\n\", (long long)chelis_tensor_shape({arg}, {axis}));",
                             self.indent
                         ));
                         self.lines.push(format!("{}    abort();", self.indent));
                         self.lines.push(format!("{}}}", self.indent));
                     }
                     DimInfo::Named(name, None) => {
-                        let expr = format!("{arg}->shape[{axis}]");
+                        let expr = format!("chelis_tensor_shape({arg}, {axis})");
                         if let Some(first) = symbolic_first.get(name) {
                             self.lines
                                 .push(format!("{}if ({expr} != {first}) {{", self.indent));
@@ -5026,15 +6256,21 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}const {values_elem_t} *{values_ct}_data = (const {values_elem_t}*){values_ct}->data;",
+            "{}const {values_elem_t} *{values_ct}_data = (const {values_elem_t}*)chelis_host_tensor_data({values_ct});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*){indices_ct}->data;",
+            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*)chelis_host_tensor_data({indices_ct});",
             self.indent
         ));
+        let index_count = self.next_temp("sparse_index_count");
         self.lines.push(format!(
-            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target}->data;",
+            "{}int64_t {index_count} = chelis_tensor_numel({indices_ct});",
+            self.indent
+        ));
+        let (target_guard, target_view) = self.begin_tensor_write(target);
+        self.lines.push(format!(
+            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target_view}.data;",
             self.indent
         ));
         self.lines.push(format!(
@@ -5048,8 +6284,8 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}int64_t {target}_after = {after};", self.indent));
         self.lines.push(format!(
-            "{}int64_t {target}_index_count = {indices_ct}->size;",
-            self.indent
+            "{}int64_t {target}_index_count = {index_count};",
+            self.indent,
         ));
         self.lines.push(format!(
             "{}for (int64_t {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
@@ -5060,7 +6296,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = (chelis_host_tensor_dtype({indices_ct}) == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)chelis_host_tensor_data({indices_ct}))[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -5086,12 +6322,13 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}        }}", self.indent));
         self.lines.push(format!("{}    }}", self.indent));
         self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&target_guard);
         self.lines.push(format!(
-            "{}if ({values_ct} != {values_arg}) chelis_free({values_ct});",
+            "{}if ({values_ct} != {values_arg}) chelis_tensor_release({values_ct});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}if ({indices_ct} != {indices_arg}) chelis_free({indices_ct});",
+            "{}if ({indices_ct} != {indices_arg}) chelis_tensor_release({indices_ct});",
             self.indent
         ));
     }
@@ -5140,19 +6377,30 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*){indices_ct}->data;",
+            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*)chelis_host_tensor_data({indices_ct});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}const {updates_elem_t} *{updates_ct}_data = (const {updates_elem_t}*){updates_ct}->data;",
+            "{}const {updates_elem_t} *{updates_ct}_data = (const {updates_elem_t}*)chelis_host_tensor_data({updates_ct});",
+            self.indent
+        ));
+        let target_count = self.next_temp("sparse_target_count");
+        let index_count = self.next_temp("sparse_index_count");
+        self.lines.push(format!(
+            "{}int64_t {target_count} = chelis_tensor_numel({target});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target}->data;",
+            "{}int64_t {index_count} = chelis_tensor_numel({indices_ct});",
+            self.indent
+        ));
+        let (target_guard, target_view) = self.begin_tensor_write(target);
+        self.lines.push(format!(
+            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target_view}.data;",
             self.indent
         ));
         self.lines.push(format!(
-            "{}memcpy({target}->data, {target_ct}->data, (size_t){target}->size * {target_elem_size});",
+            "{}memcpy({target_view}.data, chelis_host_tensor_data({target_ct}), (size_t){target_count} * {target_elem_size});",
             self.indent
         ));
         self.lines.push(format!(
@@ -5166,8 +6414,8 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}int64_t {target}_after = {after};", self.indent));
         self.lines.push(format!(
-            "{}int64_t {target}_index_count = {indices_ct}->size;",
-            self.indent
+            "{}int64_t {target}_index_count = {index_count};",
+            self.indent,
         ));
         self.lines.push(format!(
             "{}for (int64_t {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
@@ -5178,7 +6426,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = (chelis_host_tensor_dtype({indices_ct}) == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)chelis_host_tensor_data({indices_ct}))[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -5205,16 +6453,17 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}        }}", self.indent));
         self.lines.push(format!("{}    }}", self.indent));
         self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&target_guard);
         self.lines.push(format!(
-            "{}if ({target_ct} != {target_arg}) chelis_free({target_ct});",
+            "{}if ({target_ct} != {target_arg}) chelis_tensor_release({target_ct});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}if ({indices_ct} != {indices_arg}) chelis_free({indices_ct});",
+            "{}if ({indices_ct} != {indices_arg}) chelis_tensor_release({indices_ct});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}if ({updates_ct} != {updates_arg}) chelis_free({updates_ct});",
+            "{}if ({updates_ct} != {updates_arg}) chelis_tensor_release({updates_ct});",
             self.indent
         ));
     }
@@ -5226,6 +6475,7 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         arg_tys: &[HostType],
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
     ) -> Result<(), Unsupported> {
         if let Some(spec) = self.function_specializations.get(function).cloned() {
             match spec {
@@ -5292,6 +6542,7 @@ impl<'a> HostEmitter<'a> {
                 "user-function call",
             ));
         }
+        self.emit_pre_call_actions(site)?;
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
@@ -5306,77 +6557,7 @@ impl<'a> HostEmitter<'a> {
                 .unwrap_or_else(|| c_ident(function)),
             arg_vars.join(", ")
         ));
-        self.retain_call_escaped_args(target, function, args, ty);
         Ok(())
-    }
-
-    /// Issue #406 (call-escape): when a block result is produced by a call
-    /// whose return may alias one of its arguments, and that argument is a
-    /// bare `Var` naming a heap binding some open `let` block frees at its
-    /// close, the call's result `target` shares the binding's allocation
-    /// and the block release would drop the reference the caller now
-    /// holds. Retain `target` once per such escaping argument so the
-    /// block's release leaves exactly one live reference (the same
-    /// retain-cancels-release balance the bare-`Var` transfer arm uses).
-    ///
-    /// Precision: the per-function `returns_arg` summary
-    /// ([`analyze_returns_arg`]) determines which argument positions the
-    /// callee may return, so a call that demonstrably builds a fresh
-    /// result (does not return the argument) retains nothing and does not
-    /// over-retain. A callee absent from the summary (an opaque /
-    /// not-user-defined call) is treated as may-return-any: the retain
-    /// then fires, which is use-after-free-safe and at worst leaks one
-    /// reference. Tensors and other non-refcounted types have no
-    /// `retain_call` and are skipped, keeping them excluded as before.
-    fn retain_call_escaped_args(
-        &mut self,
-        target: &str,
-        function: &str,
-        args: &[HostExpr],
-        ty: &HostType,
-    ) {
-        // Only meaningful for a refcounted result with a retain primitive
-        // and at least one open release-tracking `let` block.
-        if retain_call(target, ty).is_none() || self.let_scopes.is_empty() {
-            return;
-        }
-        let callee = self.returns_arg.get(function).cloned();
-        let mut retained = false;
-        for (index, arg) in args.iter().enumerate() {
-            // Only a bare `Var` directly aliases a binding's allocation.
-            // A more complex argument expression is materialized into a
-            // fresh temp (and, if it transferred a binding, already
-            // retained by the bare-`Var` arm or another call-escape
-            // retain when it was built), so it does not need a retain
-            // here.
-            let HostExprKind::Var(name, _) = &arg.kind else {
-                continue;
-            };
-            let source_is_binding = self
-                .let_scopes
-                .iter()
-                .any(|scope| scope.bindings.contains(name));
-            if !source_is_binding {
-                continue;
-            }
-            let may_return = match &callee {
-                Some(summary) => summary.may_return(index),
-                // Opaque callee: conservatively assume the argument may
-                // escape through the return (UAF-safe over-retain).
-                None => true,
-            };
-            if may_return {
-                retained = true;
-            }
-        }
-        // Retain at most once: the result is a single pointer, and one
-        // extra reference cancels the one block release that would
-        // otherwise drop the escaping allocation. (Even if several
-        // arguments alias the *same* binding, the block releases that
-        // binding exactly once, so a single retain restores the balance.)
-        if retained && let Some(call) = retain_call(target, ty) {
-            self.lines.push(format!("{}{call}", self.indent));
-        }
     }
 
     fn assign_adt_construct(
@@ -5390,8 +6571,8 @@ impl<'a> HostEmitter<'a> {
         // ISO C forbids a zero-length array (`chelis_value adt_fields[0];`),
         // so pass a NULL fields pointer with count 0 instead; the runtime
         // helper's `len <= 0` guard never dereferences it (issue #310).
-        let fields_arg = if fields.is_empty() {
-            "NULL".to_string()
+        let (fields_arg, field_values) = if fields.is_empty() {
+            ("NULL".to_string(), None)
         } else {
             let values_name = self.next_temp("adt_fields");
             self.lines.push(format!(
@@ -5408,18 +6589,34 @@ impl<'a> HostEmitter<'a> {
                     "{}{}[{index}] = {};",
                     self.indent,
                     values_name,
-                    self.box_value_expr(&field_var, &field_ty)?
+                    self.box_aggregate_value_expr(&field_var, &field_ty, field)?
                 ));
             }
-            values_name
+            (values_name.clone(), Some(values_name))
         };
+        let ctor_value = self.next_temp("adt_ctor");
         self.lines.push(format!(
-            "{}{target} = chelis_adt_construct(chelis_string_from_cstr({:?}), {}, {});",
+            "{}chelis_string {ctor_value} = chelis_string_from_cstr({:?});",
+            self.indent, ctor
+        ));
+        self.lines.push(format!(
+            "{}{target} = chelis_adt_construct({ctor_value}, {}, {});",
             self.indent,
-            ctor,
             fields_arg,
             fields.len()
         ));
+        self.lines.push(format!(
+            "{}chelis_string_release({ctor_value});",
+            self.indent
+        ));
+        if let Some(values_name) = field_values {
+            for index in 0..fields.len() {
+                self.lines.push(format!(
+                    "{}chelis_value_release({values_name}[{index}]);",
+                    self.indent
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -5448,9 +6645,44 @@ impl<'a> HostEmitter<'a> {
         arms: &[HostMatchArm],
         default_expr: Option<&HostExpr>,
         expr_ty: &HostType,
+        site: &ProjectedHostSite<'a>,
     ) -> Result<(), Unsupported> {
+        let (scrutinee_owner, arm_edges) = site
+            .directives
+            .iter()
+            .find_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Match {
+                    scrutinee,
+                    arms,
+                    ..
+                }) => Some((scrutinee.owner().id(), arms.clone())),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "verified ADT-match site has no match terminator".to_string(),
+                    "verified C host ownership emission",
+                )
+            })?;
+        let expected_arms = arms.len() + usize::from(default_expr.is_some());
+        if arm_edges.len() != expected_arms {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified ADT match has {} blocks for {expected_arms} emitted arms",
+                    arm_edges.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        let arm_blocks = Self::join_completion_blocks(site, expected_arms, "ADT-match")?;
         let scrutinee_var = self.next_temp("adt");
         self.emit_expr_to_var(scrutinee, &scrutinee_var, &host_type(scrutinee))?;
+        // Pattern bindings may shadow the authored name that originally held
+        // the scrutinee. Keep the verified owner attached to this
+        // compiler-generated temporary so an arm-completion drop cannot be
+        // redirected to a same-spelled scalar or another payload binding.
+        self.owner_vars
+            .insert(scrutinee_owner, scrutinee_var.clone());
         let tag_var = self.next_temp("adt_tag");
         self.lines.push(format!(
             "{}chelis_string {} = chelis_adt_get_tag({});",
@@ -5459,11 +6691,17 @@ impl<'a> HostEmitter<'a> {
         for (index, arm) in arms.iter().enumerate() {
             let prefix = if index == 0 { "if" } else { "else if" };
             self.lines.push(format!(
-                "{}{prefix} (chelis_string_eq({}, chelis_string_from_cstr({:?}))) {{",
+                "{}{prefix} (chelis_host_string_eq_cstr({}, {:?})) {{",
                 self.indent, tag_var, arm.ctor
             ));
             let nested_indent = format!("{}    ", self.indent);
             let previous = std::mem::replace(&mut self.indent, nested_indent);
+            self.emit_edge_terminals(site.id, &arm_edges[index])?;
+            // chelis#1222: one binder scope per arm. Each arm's pattern
+            // bindings shadow any enclosing name they reuse, and their keys
+            // carry no outgoing edge -- `chelis_adt_field` hands back an
+            // independently retained handle, so the arm binding is not a
+            // copy of anything this scope already owns.
             for binding in &arm.bindings {
                 let field_var = self.next_temp(&format!("{}_field", binding.name));
                 self.lines.push(format!(
@@ -5477,8 +6715,15 @@ impl<'a> HostEmitter<'a> {
                     binding.name
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
+                self.bind_match_payload(
+                    site,
+                    arm_edges[index].target(),
+                    "adt_payload:",
+                    &binding.name,
+                )?;
             }
             self.assign_expr(target, &arm.expr, expr_ty)?;
+            self.emit_expression_block_actions(site, arm_blocks[index], target)?;
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
@@ -5486,7 +6731,9 @@ impl<'a> HostEmitter<'a> {
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
         if let Some(default_expr) = default_expr {
+            self.emit_edge_terminals(site.id, &arm_edges[arms.len()])?;
             self.assign_expr(target, default_expr, expr_ty)?;
+            self.emit_expression_block_actions(site, arm_blocks[arms.len()], target)?;
         } else {
             self.lines.push(format!(
                 "{}fprintf(stderr, \"non-exhaustive ADT match\\n\");",
@@ -5496,6 +6743,8 @@ impl<'a> HostEmitter<'a> {
         }
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.lines
+            .push(format!("{}chelis_string_release({tag_var});", self.indent));
         Ok(())
     }
 
@@ -5530,7 +6779,7 @@ impl<'a> HostEmitter<'a> {
                 "{}{}[{index}] = {};",
                 self.indent,
                 values_name,
-                self.box_value_expr(&item_var, item_ty)?
+                self.box_aggregate_value_expr(&item_var, item_ty, item)?
             ));
         }
         self.lines.push(format!(
@@ -5539,9 +6788,12 @@ impl<'a> HostEmitter<'a> {
             values_name,
             items.len()
         ));
-        // issue #406: a freshly-built list temporary in the program root
-        // scope is owned by `main` and must be released at scope exit.
-        self.track_owned_alloc(target, ty);
+        for index in 0..items.len() {
+            self.lines.push(format!(
+                "{}chelis_value_release({values_name}[{index}]);",
+                self.indent
+            ));
+        }
         Ok(())
     }
 
@@ -5589,7 +6841,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{}[{index}] = {};",
                     self.indent,
                     values_name,
-                    self.box_value_expr(&item_var, item_ty)?
+                    self.box_aggregate_value_expr(&item_var, item_ty, item)?
                 ));
             }
             values_name
@@ -5600,9 +6852,14 @@ impl<'a> HostEmitter<'a> {
             items_arg,
             items.len()
         ));
-        // issue #406: a freshly-built tuple temporary in the program root
-        // scope is owned by `main` and must be released at scope exit.
-        self.track_owned_alloc(target, ty);
+        if !items.is_empty() {
+            for index in 0..items.len() {
+                self.lines.push(format!(
+                    "{}chelis_value_release({items_arg}[{index}]);",
+                    self.indent
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -5612,7 +6869,10 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let list_var = self.next_temp("map_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("map_len");
@@ -5630,6 +6890,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("map_item_value");
         self.lines.push(format!(
             "{}chelis_value {} = chelis_list_index({}, __i);",
@@ -5651,14 +6912,17 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}chelis_list_push({target}, {});",
             self.indent,
             self.box_value_expr(&result_var, &callback.ret_ty)?
         ));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_edge_terminals(site.id, &exit_edge)?;
         Ok(())
     }
 
@@ -5668,7 +6932,10 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let list_var = self.next_temp("filter_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("filter_len");
@@ -5686,6 +6953,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("filter_item_value");
         self.lines.push(format!(
             "{}chelis_value {} = chelis_list_index({}, __i);",
@@ -5703,6 +6971,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
@@ -5714,11 +6983,14 @@ impl<'a> HostEmitter<'a> {
         ));
         self.indent = nested_previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_edge_terminals(site.id, &exit_edge)?;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assign_fold(
         &mut self,
         target: &str,
@@ -5726,8 +6998,13 @@ impl<'a> HostEmitter<'a> {
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        preheader_block: VerifiedBlockId,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let (body_edge, exit_edge) = Self::loop_edges(site)?;
         self.assign_expr(target, init, ty)?;
+        self.emit_expression_block_actions(site, preheader_block, target)?;
         let list_var = self.next_temp("fold_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("fold_len");
@@ -5741,11 +7018,6 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
-        let item_value = self.next_temp("fold_item_value");
-        self.lines.push(format!(
-            "{}chelis_value {} = chelis_list_index({}, __i);",
-            self.indent, item_value, list_var
-        ));
         let params = callback_params(callback);
         let acc_arg = self.next_temp("fold_acc");
         self.lines.push(format!(
@@ -5753,6 +7025,49 @@ impl<'a> HostEmitter<'a> {
             self.indent,
             c_type(&params[0].ty)?,
             acc_arg
+        ));
+        let [body_acc] = body_edge.params() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified fold body edge carries {} parameters, expected one accumulator",
+                    body_edge.params().len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        let [exit_acc] = exit_edge.params() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified fold exit edge carries {} parameters, expected one accumulator",
+                    exit_edge.params().len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        // The body consumes the per-iteration accumulator copy, while the exit
+        // owner remains represented by the expression result.  Bind both from
+        // the verified loop edges before the callback's ownership actions run;
+        // a later name-derived recovery would reintroduce backend inference.
+        self.owner_vars.insert(body_acc.id(), acc_arg.clone());
+        self.owner_vars.insert(exit_acc.id(), target.to_string());
+        let body_acc_dropped = body_edge.terminals().iter().any(|terminal| {
+            matches!(
+                terminal,
+                VerifiedTerminalView::Drop { owner, .. } if owner.id() == body_acc.id()
+            )
+        });
+        self.emit_edge_terminals(site.id, &body_edge)?;
+        if body_acc_dropped {
+            // An inline callback still has a physical parameter even when the
+            // verified program proves that parameter dead on entry.  Do not
+            // propagate a released pointer into that non-semantic C alias.
+            self.lines
+                .push(format!("{}{} = NULL;", self.indent, acc_arg));
+        }
+        let item_value = self.next_temp("fold_item_value");
+        self.lines.push(format!(
+            "{}chelis_value {} = chelis_list_index({}, __i);",
+            self.indent, item_value, list_var
         ));
         let item_arg = self.next_temp("fold_item");
         self.lines.push(format!(
@@ -5762,12 +7077,16 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
+        self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], target)?;
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_edge_terminals(site.id, &exit_edge)?;
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assign_scan(
         &mut self,
         target: &str,
@@ -5775,6 +7094,8 @@ impl<'a> HostEmitter<'a> {
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         let HostType::List(inner_ty) = ty else {
             self.lines
@@ -5784,6 +7105,36 @@ impl<'a> HostEmitter<'a> {
         let acc_ty = inner_ty.as_ref().clone();
         let acc_var = self.next_temp("scan_acc");
         self.emit_expr_to_var(init, &acc_var, &acc_ty)?;
+        let (body_edge, exit_edge) = site
+            .directives
+            .iter()
+            .find_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                }) => Some((body_edge.clone(), exit_edge.clone())),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "verified scan site has no loop terminator".to_string(),
+                    "verified C host ownership emission",
+                )
+            })?;
+        for (edge, name) in [(&body_edge, "body"), (&exit_edge, "exit")] {
+            let [state, output] = edge.params() else {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "verified scan {name} edge carries {} parameters, expected state and output",
+                        edge.params().len()
+                    ),
+                    "verified C host ownership emission",
+                ));
+            };
+            self.owner_vars.insert(state.id(), acc_var.clone());
+            self.owner_vars.insert(output.id(), target.to_string());
+        }
         let list_var = self.next_temp("scan_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("scan_len");
@@ -5801,6 +7152,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("scan_item_value");
         self.lines.push(format!(
             "{}chelis_value {} = chelis_list_index({}, __i);",
@@ -5823,14 +7175,17 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
+        self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         self.lines.push(format!(
             "{}chelis_list_push({target}, {});",
             self.indent,
             self.box_value_expr(&acc_var, &acc_ty)?
         ));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_edge_terminals(site.id, &exit_edge)?;
         Ok(())
     }
 
@@ -5840,7 +7195,10 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let HostType::Tuple(parts) = ty else {
             // chelis#730 Phase 1 (census row 15, section C1.4
             // raise-or-prove): a `partition` whose result type is not a
@@ -5899,6 +7257,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("partition_item_value");
         self.lines.push(format!(
             "{}chelis_value {} = chelis_list_index({}, __i);",
@@ -5916,6 +7275,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
@@ -5935,17 +7295,19 @@ impl<'a> HostEmitter<'a> {
         ));
         self.indent = else_previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_edge_terminals(site.id, &exit_edge)?;
         let tuple_values = self.next_temp("partition_values");
         self.lines
             .push(format!("{}chelis_value {}[2];", self.indent, tuple_values));
         self.lines.push(format!(
-            "{}{}[0] = chelis_value_from_list({});",
+            "{}{}[0] = chelis_value_take_list({});",
             self.indent, tuple_values, pass_var
         ));
         self.lines.push(format!(
-            "{}{}[1] = chelis_value_from_list({});",
+            "{}{}[1] = chelis_value_take_list({});",
             self.indent, tuple_values, fail_var
         ));
         self.lines.push(format!(
@@ -5961,7 +7323,10 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
+        let (body_edge, exit_edge) = Self::loop_edges(site)?;
         let list_var = self.next_temp("flat_map_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("flat_map_len");
@@ -5979,6 +7344,7 @@ impl<'a> HostEmitter<'a> {
         ));
         let nested_indent = format!("{}    ", self.indent);
         let previous = std::mem::replace(&mut self.indent, nested_indent);
+        self.emit_edge_terminals(site.id, &body_edge)?;
         let item_value = self.next_temp("flat_map_item_value");
         self.lines.push(format!(
             "{}chelis_value {} = chelis_list_index({}, __i);",
@@ -6000,13 +7366,16 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}chelis_list_extend({target}, {});",
             self.indent, result_var
         ));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_edge_terminals(site.id, &exit_edge)?;
         Ok(())
     }
 
@@ -6050,27 +7419,61 @@ impl<'a> HostEmitter<'a> {
 
     fn box_value_expr(&self, value: &str, ty: &HostType) -> Result<String, Unsupported> {
         Ok(match ty {
-            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                format!("chelis_value_from_int64((int64_t){value})")
+            HostType::Int8 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)(int8_t){value}))"
+            ),
+            HostType::Int16 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)(int16_t){value}))"
+            ),
+            HostType::Int32 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)(int32_t){value}))"
+            ),
+            HostType::Int64 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){value}))"
+            ),
+            HostType::Float64 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits({value})))"
+            ),
+            HostType::Float32 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits({value})))"
+            ),
+            HostType::Float16 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)(uint16_t){value}))"
+            ),
+            HostType::BFloat16 => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)(uint16_t){value}))"
+            ),
+            HostType::Bool => format!(
+                "chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0)))"
+            ),
+            HostType::String => format!("chelis_value_take_string({value})"),
+            HostType::Adt(_, _) => format!("chelis_value_take_adt({value})"),
+            HostType::Tensor(_) => format!("chelis_value_take_tensor({value})"),
+            HostType::List(_) => format!("chelis_value_take_list({value})"),
+            HostType::Tuple(_) => format!("chelis_value_take_tuple({value})"),
+            HostType::Dict(_, _) => format!("chelis_value_take_dict({value})"),
+            HostType::Option(_) => format!("chelis_value_take_option({value})"),
+            HostType::MappedFile => format!("chelis_value_take_mapped_file({value})"),
+            // Unit has no payload and no dedicated public chelis_value tag.
+            // Its canonical structural runtime image is the empty tuple,
+            // which already renders as `()` and participates in the generic
+            // ADT/list carriers without expanding the public C ABI.
+            HostType::Unit => {
+                "chelis_value_take_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
             }
-            HostType::Float64 => format!("chelis_value_from_f64({value})"),
-            HostType::Float32 => format!("chelis_value_from_f32_boxed({value})"),
-            HostType::Float16 => format!("chelis_value_from_f16_bits_boxed({value})"),
-            HostType::BFloat16 => format!("chelis_value_from_bf16_bits_boxed({value})"),
-            HostType::Bool => format!("chelis_value_from_bool({value})"),
-            HostType::String => format!("chelis_value_from_string({value})"),
-            HostType::Adt(_, _) => format!("chelis_value_from_adt({value})"),
-            HostType::Tensor(_) => format!("chelis_value_from_tensor({value})"),
-            HostType::List(_) => format!("chelis_value_from_list({value})"),
-            HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
-            HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            HostType::Callback(_, _) => {
                 return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
             }
         })
+    }
+
+    fn box_aggregate_value_expr(
+        &self,
+        value: &str,
+        ty: &HostType,
+        _source: &HostExpr,
+    ) -> Result<String, Unsupported> {
+        self.box_value_expr(value, ty)
     }
 
     fn assign_unboxed_value(
@@ -6080,28 +7483,44 @@ impl<'a> HostEmitter<'a> {
         value_expr: &str,
     ) -> Result<(), Unsupported> {
         let expr = match ty {
-            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                format!("({})chelis_value_as_int64({value_expr})", c_type(ty)?)
+            HostType::Int8 => format!(
+                "(int8_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I8)"
+            ),
+            HostType::Int16 => format!(
+                "(int16_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I16)"
+            ),
+            HostType::Int32 => format!(
+                "(int32_t)chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I32)"
+            ),
+            HostType::Int64 => format!(
+                "chelis_host_scalar_as_i64(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_I64)"
+            ),
+            HostType::Float64 => format!(
+                "chelis_host_scalar_as_float(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_F64)"
+            ),
+            HostType::Float32 => format!(
+                "(float)chelis_host_scalar_as_float(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_F32)"
+            ),
+            HostType::Float16 => format!(
+                "(uint16_t)chelis_host_scalar_bits(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_F16)"
+            ),
+            HostType::BFloat16 => format!(
+                "(uint16_t)chelis_host_scalar_bits(chelis_value_unbox_scalar({value_expr}), CHELIS_DTYPE_BF16)"
+            ),
+            HostType::Bool => {
+                format!("chelis_host_scalar_as_bool(chelis_value_unbox_scalar({value_expr}))")
             }
-            HostType::Float64 => format!("chelis_value_as_f64({value_expr})"),
-            HostType::Float32 => format!("(float)chelis_value_as_f64({value_expr})"),
-            HostType::Float16 => {
-                format!("chelis_f32_to_f16((float)chelis_value_as_f64({value_expr}))")
-            }
-            HostType::BFloat16 => {
-                format!("chelis_f32_to_bf16((float)chelis_value_as_f64({value_expr}))")
-            }
-            HostType::Bool => format!("chelis_value_as_bool({value_expr})"),
-            HostType::String => format!("chelis_value_as_string({value_expr})"),
-            HostType::Adt(_, _) => format!("chelis_value_as_adt({value_expr})"),
-            HostType::Tensor(_) => format!("chelis_value_as_tensor({value_expr})"),
-            HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
-            HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
-            HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            HostType::String => format!("chelis_string_take_value({value_expr})"),
+            HostType::Adt(_, _) => format!("chelis_adt_take_value({value_expr})"),
+            HostType::Tensor(_) => format!("chelis_tensor_take_value({value_expr})"),
+            HostType::List(_) => format!("chelis_list_take_value({value_expr})"),
+            HostType::Tuple(_) => format!("chelis_tuple_take_value({value_expr})"),
+            HostType::Dict(_, _) => format!("chelis_dict_take_value({value_expr})"),
+            HostType::Option(_) => format!("chelis_option_take_value({value_expr})"),
+            HostType::MappedFile => format!("chelis_mapped_file_take_value({value_expr})"),
+            // The empty tuple carrier above has no scalar payload to read.
+            HostType::Unit => "0".to_string(),
+            HostType::Callback(_, _) => {
                 return Err(unsupported_value_boxing(
                     ty,
                     "unboxing a resolved host value",
@@ -6130,12 +7549,12 @@ impl<'a> HostEmitter<'a> {
             // (the f32 C value widens to its exact double image), never
             // through a fixed-precision printf (chelis#748).
             HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
-                let dtype = scalar_float_dtype_macro(ty);
-                let value = scalar_float_as_double(value, ty);
+                let boxed = self.box_value_expr(value, ty)?;
                 self.lines.push(format!(
-                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
-                     printf(\"%s\\n\", fmt_buf); }}",
+                    "{}{{ chelis_value boxed = {boxed}; \
+                     chelis_string text = chelis_string_from_scalar(chelis_value_unbox_scalar(boxed)); \
+                     printf(\"%s\\n\", chelis_string_data(text)); \
+                     chelis_string_release(text); }}",
                     self.indent
                 ));
             }
@@ -6248,15 +7667,14 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value
                 ))
             }
-            // chelis#732 Phase 2: same own-width routine as
-            // `emit_print_value` (intra-lane exit agreement, [05-OBS-1]).
+            // Same exact tagged-scalar path as `emit_print_value`.
             HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
-                let dtype = scalar_float_dtype_macro(ty);
-                let value = scalar_float_as_double(value, ty);
+                let boxed = self.box_value_expr(value, ty)?;
                 self.lines.push(format!(
-                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
-                     printf(\"%s\", fmt_buf); }}",
+                    "{}{{ chelis_value boxed = {boxed}; \
+                     chelis_string text = chelis_string_from_scalar(chelis_value_unbox_scalar(boxed)); \
+                     printf(\"%s\", chelis_string_data(text)); \
+                     chelis_string_release(text); }}",
                     self.indent
                 ));
             }
@@ -6302,6 +7720,109 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
+    fn emit_manifest_root(
+        &mut self,
+        name: &str,
+        value: &str,
+        ty: &HostType,
+        path: &[RootPathStep],
+    ) -> Result<(), Unsupported> {
+        if path.is_empty() {
+            return self.emit_labeled_root(name, value, ty);
+        }
+
+        let mut current = value.to_string();
+        let mut boxed_values = Vec::with_capacity(path.len());
+        for (depth, step) in path.iter().enumerate() {
+            let boxed = self.next_temp("manifest_root_field");
+            let container = if depth == 0 {
+                current.clone()
+            } else {
+                match step {
+                    RootPathStep::Tuple(_) => format!("chelis_tuple_borrow_value({current})"),
+                    RootPathStep::Adt(_) => format!("chelis_adt_borrow_value({current})"),
+                }
+            };
+            let access = match step {
+                RootPathStep::Tuple(index) => {
+                    if depth == 0 && !matches!(ty, HostType::Tuple(_)) {
+                        return Err(invalid_abi_shape(
+                            format!("manifest tuple path starts at `{ty:?}`"),
+                            "manifested root observation",
+                        ));
+                    }
+                    format!("chelis_tuple_get({container}, {index})")
+                }
+                RootPathStep::Adt(index) => {
+                    if depth == 0 && !matches!(ty, HostType::Adt(_, _)) {
+                        return Err(invalid_abi_shape(
+                            format!("manifest ADT path starts at `{ty:?}`"),
+                            "manifested root observation",
+                        ));
+                    }
+                    format!("chelis_adt_get_field({container}, {index})")
+                }
+            };
+            self.lines
+                .push(format!("{}chelis_value {boxed} = {access};", self.indent));
+            current = boxed.clone();
+            boxed_values.push(boxed);
+        }
+
+        self.emit_labeled_boxed_root(name, &current);
+        for boxed in boxed_values.into_iter().rev() {
+            self.lines
+                .push(format!("{}chelis_value_release({boxed});", self.indent));
+        }
+        Ok(())
+    }
+
+    fn emit_labeled_boxed_root(&mut self, name: &str, value: &str) {
+        let safe_name = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        self.lines.push(format!(
+            "{}printf(\"%s = \", \"{safe_name}\");",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}switch ({value}.tag) {{", self.indent));
+        self.lines.push(format!(
+            "{}case CHELIS_VALUE_SCALAR: {{ chelis_string text = \
+             chelis_string_from_scalar(chelis_value_unbox_scalar({value})); \
+             fputs(chelis_string_data(text), stdout); chelis_string_release(text); break; }}",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}case CHELIS_VALUE_UNIT: printf(\"()\"); break;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}case CHELIS_VALUE_STRING: printf(\"%s\", chelis_string_data(chelis_string_borrow_value({value}))); break;",
+            self.indent
+        ));
+        for (tag, printer, accessor) in [
+            (
+                "TENSOR",
+                "chelis_print_tensor_stdout",
+                "chelis_tensor_borrow_value",
+            ),
+            ("LIST", "chelis_print_list", "chelis_list_borrow_value"),
+            ("TUPLE", "chelis_print_tuple", "chelis_tuple_borrow_value"),
+            ("DICT", "chelis_print_dict", "chelis_dict_borrow_value"),
+            ("ADT", "chelis_print_adt", "chelis_adt_borrow_value"),
+        ] {
+            self.lines.push(format!(
+                "{}case CHELIS_VALUE_{tag}: {printer}({accessor}({value})); break;",
+                self.indent
+            ));
+        }
+        self.lines.push(format!(
+            "{}default: fprintf(stderr, \"invalid chelis_value tag in manifested root\\n\"); abort();",
+            self.indent
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!("{}printf(\"\\n\");", self.indent));
+    }
+
     fn next_temp(&mut self, prefix: &str) -> String {
         let name = format!("__{prefix}_{}", self.temp_counter);
         self.temp_counter += 1;
@@ -6314,80 +7835,46 @@ impl<'a> HostEmitter<'a> {
         ty: &HostType,
         value_var: &str,
         value_ty: &HostType,
+        source: &HostExpr,
     ) -> Result<(), Unsupported> {
-        match ty {
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = {value_var};", self.indent));
-            }
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = {value_var};", self.indent));
-            }
-            HostType::Option(_) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines.push(format!(
-                    "{}{target}.value = {};",
-                    self.indent,
-                    self.box_value_expr(value_var, value_ty)?
-                ));
-            }
-            other => {
-                return Err(invalid_abi_shape(
-                    format!("Some constructor carries non-option ABI type `{other:?}`"),
-                    "Some constructor",
-                ));
-            }
-        }
+        let HostType::Option(inner) = ty else {
+            return Err(invalid_abi_shape(
+                format!("Some constructor carries non-option ABI type `{ty:?}`"),
+                "Some constructor",
+            ));
+        };
+        require_same_abi_type(inner.as_ref(), value_ty, "Some constructor payload")?;
+        let boxed = self.next_temp("option_payload");
+        let boxed_expr = self.box_aggregate_value_expr(value_var, value_ty, source)?;
+        self.lines.push(format!(
+            "{}chelis_value {boxed} = {boxed_expr};",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}{target} = chelis_option_some({boxed});",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}chelis_value_release({boxed});", self.indent));
         Ok(())
     }
 
     fn assign_option_none(&mut self, target: &str, ty: &HostType) -> Result<(), Unsupported> {
-        match ty {
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = 0;", self.indent));
-            }
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = 0.0;", self.indent));
-            }
-            HostType::Option(_) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines.push(format!(
-                    "{}{target}.value = chelis_value_from_int64(0);",
-                    self.indent
-                ));
-            }
-            other => {
-                return Err(invalid_abi_shape(
-                    format!("None constructor carries non-option ABI type `{other:?}`"),
-                    "None constructor",
-                ));
-            }
-        }
+        let HostType::Option(_) = ty else {
+            return Err(invalid_abi_shape(
+                format!("None constructor carries non-option ABI type `{ty:?}`"),
+                "None constructor",
+            ));
+        };
+        self.lines
+            .push(format!("{}{target} = chelis_option_none();", self.indent));
         Ok(())
     }
 }
 
 /// The runtime release call that frees the heap allocation a value of
-/// `ty` held in `var` owns, or `None` for non-owning types (scalars,
-/// borrowed views, function pointers). Used by `emit_main`'s scope-exit
-/// cleanup (issue #406) so a `chelis build --target c` program frees the
-/// list / tensor / tuple / dict / adt / string temporaries it allocates
-/// instead of leaking them for the process lifetime. The runtime release
-/// functions are refcounted, so releasing a container correctly
-/// decrements any retained element without double-freeing it.
+/// `ty` held in `var` owns, or `None` for non-owning types. Called only
+/// while formatting a verified `Drop` or `RootConsume` action.
 fn release_call(var: &str, ty: &HostType) -> Option<String> {
     // #379: the var may be a user binding/let name spelled like a C keyword;
     // route through `c_ident` so the free call names the same (possibly
@@ -6395,61 +7882,36 @@ fn release_call(var: &str, ty: &HostType) -> Option<String> {
     // (`__binding_N_value`, `__let_N`) pass through unchanged.
     let var = c_ident(var);
     match ty {
-        HostType::Tensor(_) => Some(format!("chelis_free({var});")),
+        HostType::Tensor(_) => Some(format!("chelis_tensor_release({var});")),
         HostType::List(_) => Some(format!("chelis_list_release({var});")),
         HostType::Tuple(_) => Some(format!("chelis_tuple_release({var});")),
         HostType::Dict(_, _) => Some(format!("chelis_dict_release({var});")),
         HostType::Adt(_, _) => Some(format!("chelis_adt_release({var});")),
         HostType::String => Some(format!("chelis_string_release({var});")),
-        // Scalars (int/float/bool/unit), borrowed mapped files, function
-        // pointers, and Option-of-scalar carry no owned heap allocation
-        // for `main` to free. `Option` of a pointer type and `Unknown`
-        // are deliberately not auto-freed here: their concrete ownership
-        // is not recoverable from the host type alone, so freeing them
-        // blindly would risk a double-free. They remain process-lifetime
-        // until a future change threads precise ownership.
+        HostType::Option(_) => Some(format!("chelis_option_release({var});")),
+        HostType::MappedFile => Some(format!("chelis_mapped_file_release({var});")),
+        // Scalars (int/float/bool/unit), function pointers, and `Unknown`
+        // have no concrete heap owner that this Phase 1 emitter can release.
         _ => None,
     }
 }
 
-/// The runtime retain call that adds one reference to the heap allocation
-/// a value of `ty` held in `var` owns, or `None` for non-refcounted types.
-/// Used by the `let`-block scope release (issue #406): when a block result
-/// is transferred to a `target` in the outer scope via a bare pointer copy
-/// (`target = <heap var>` for a `Var` body or an `if`/`match` arm), the
-/// target shares the source allocation's reference. Retaining at the
-/// transfer leaf lets the block uniformly release every heap binding it
-/// declared without freeing the value the caller now holds.
-///
-/// Only the refcounted host-value types are retainable. `Tensor` is
-/// excluded deliberately: it is freed by the unconditional `chelis_free`,
-/// has no refcount retain, and tensor locals are already cleaned up by the
-/// tensor-helper lane — so tensor `let` bindings are never tracked for
-/// block release in the first place (see `binding_release`).
+/// The runtime retain call that formats one verified `Clone` action.
 fn retain_call(var: &str, ty: &HostType) -> Option<String> {
     // #379: mirror `release_call` — a user name spelled like a C keyword
     // routes through `c_ident`; compiler temps pass through unchanged.
     let var = c_ident(var);
     match ty {
+        HostType::Tensor(_) => Some(format!("chelis_tensor_retain({var});")),
         HostType::List(_) => Some(format!("chelis_list_retain({var});")),
         HostType::Tuple(_) => Some(format!("chelis_tuple_retain({var});")),
         HostType::Dict(_, _) => Some(format!("chelis_dict_retain({var});")),
         HostType::Adt(_, _) => Some(format!("chelis_adt_retain({var});")),
         HostType::String => Some(format!("chelis_string_retain({var});")),
+        HostType::Option(_) => Some(format!("chelis_option_retain({var});")),
+        HostType::MappedFile => Some(format!("chelis_mapped_file_retain({var});")),
         _ => None,
     }
-}
-
-/// The release call for a `let` binding tracked by the block-scope cleanup
-/// (issue #406), or `None` if the binding's type is not a refcounted
-/// host-value (so it owns no heap allocation the block must reclaim, or it
-/// is a `Tensor` reclaimed by the tensor-helper lane and has no matching
-/// `retain_call` to pair the transfer-leaf retain against). Restricting
-/// the tracked set to exactly the `retain_call` types keeps every
-/// retain/release balanced regardless of how the block result is produced.
-fn binding_release(var: &str, ty: &HostType) -> Option<String> {
-    retain_call(var, ty)?;
-    release_call(var, ty)
 }
 
 fn c_type(ty: &HostAbiType) -> Result<&'static str, Unsupported> {
@@ -6472,6 +7934,21 @@ fn is_float_abi(ty: &HostAbiType) -> bool {
     matches!(
         ty,
         HostAbiType::Float16 | HostAbiType::BFloat16 | HostAbiType::Float32 | HostAbiType::Float64
+    )
+}
+
+fn is_scalar_abi(ty: &HostAbiType) -> bool {
+    matches!(
+        ty,
+        HostAbiType::Int8
+            | HostAbiType::Int16
+            | HostAbiType::Int32
+            | HostAbiType::Int64
+            | HostAbiType::Float16
+            | HostAbiType::BFloat16
+            | HostAbiType::Float32
+            | HostAbiType::Float64
+            | HostAbiType::Bool
     )
 }
 
@@ -6951,7 +8428,8 @@ fn callback_param(callback: &HostCallback, index: usize) -> &HostParam {
 /// fall through to a quiet wrong-width read.
 fn sparse_elem_type(prim: Prim) -> &'static str {
     match prim {
-        Prim::F32 | Prim::Bool => "float",
+        Prim::F32 => "float",
+        Prim::Bool => "uint8_t",
         Prim::F64 => "double",
         Prim::Int8 => "int8_t",
         Prim::Int16 => "int16_t",
@@ -6970,29 +8448,113 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
     }
 }
 
-/// Width id macro for a scalar float `HostType` handed to
-/// `chelis_format_shortest` (chelis#732 Phase 2).
-/// `CHELIS_<DTYPE>` macro selector for a scalar float print, matching
-/// the sibling `sparse_dtype_macro` naming. It selects a DTYPE, not a
-/// width: spec/04 [04-NUM-8] gives storage and arithmetic width separate
-/// meanings, so a name spelled after "width" would be ambiguous at the
-/// one call site that feeds `chelis_format_shortest`.
-fn scalar_float_dtype_macro(ty: &HostType) -> &'static str {
-    match ty {
-        HostType::Float16 => chelis_vocab::RuntimeDType::F16.c_macro(),
-        HostType::BFloat16 => chelis_vocab::RuntimeDType::Bf16.c_macro(),
-        HostType::Float32 => chelis_vocab::RuntimeDType::F32.c_macro(),
-        HostType::Float64 => chelis_vocab::RuntimeDType::F64.c_macro(),
-        other => unreachable!("scalar float print of non-float host type {other:?}"),
-    }
+/// Project a resolved host scalar to the exact tagged C carrier expected by
+/// scalar-taking runtime calls. Generic `chelis_value` boxing is a distinct
+/// container boundary and must not be used as a compatibility conversion.
+fn scalar_carrier_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
+    let expr = match ty {
+        HostType::Int8 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)(int8_t){value})")
+        }
+        HostType::Int16 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)(int16_t){value})"
+        ),
+        HostType::Int32 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)(int32_t){value})"
+        ),
+        HostType::Int64 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){value})")
+        }
+        HostType::Float64 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits({value}))")
+        }
+        HostType::Float32 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits({value}))"
+        ),
+        HostType::Float16 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)(uint16_t){value})")
+        }
+        HostType::BFloat16 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)(uint16_t){value})")
+        }
+        HostType::Bool => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0))")
+        }
+        other => {
+            return Err(invalid_abi_shape(
+                format!("scalar runtime argument has non-scalar ABI type `{other:?}`"),
+                "exact scalar runtime argument",
+            ));
+        }
+    };
+    Ok(expr)
 }
 
-fn scalar_float_as_double(value: &str, ty: &HostType) -> String {
+/// Project the exact tagged runtime scalar back to the resolved host scalar
+/// type. The expected dtype is always checked before reading the payload.
+fn scalar_carrier_value_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
+    let expr = match ty {
+        HostType::Int8 => {
+            format!("(int8_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I8)")
+        }
+        HostType::Int16 => {
+            format!("(int16_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I16)")
+        }
+        HostType::Int32 => {
+            format!("(int32_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I32)")
+        }
+        HostType::Int64 => {
+            format!("chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I64)")
+        }
+        HostType::Float16 => {
+            format!("(uint16_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_F16)")
+        }
+        HostType::BFloat16 => {
+            format!("(uint16_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_BF16)")
+        }
+        HostType::Float32 => {
+            format!("(float)chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F32)")
+        }
+        HostType::Float64 => {
+            format!("chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F64)")
+        }
+        HostType::Bool => format!("chelis_host_scalar_as_bool({value})"),
+        other => {
+            return Err(invalid_abi_shape(
+                format!("scalar runtime result has non-scalar ABI type `{other:?}`"),
+                "exact scalar runtime result",
+            ));
+        }
+    };
+    Ok(expr)
+}
+
+fn scalar_dtype_macro(ty: &HostType) -> Result<&'static str, Unsupported> {
+    Ok(match ty {
+        HostType::Int8 => "CHELIS_DTYPE_I8",
+        HostType::Int16 => "CHELIS_DTYPE_I16",
+        HostType::Int32 => "CHELIS_DTYPE_I32",
+        HostType::Int64 => "CHELIS_DTYPE_I64",
+        HostType::Float16 => "CHELIS_DTYPE_F16",
+        HostType::BFloat16 => "CHELIS_DTYPE_BF16",
+        HostType::Float32 => "CHELIS_DTYPE_F32",
+        HostType::Float64 => "CHELIS_DTYPE_F64",
+        HostType::Bool => "CHELIS_DTYPE_BOOL",
+        other => {
+            return Err(invalid_abi_shape(
+                format!("dtype selection has non-scalar ABI type `{other:?}`"),
+                "exact scalar dtype selection",
+            ));
+        }
+    })
+}
+
+fn host_float_as_double(value: &str, ty: &HostType) -> String {
     match ty {
         HostType::Float16 => format!("(double)chelis_f16_to_f32({value})"),
         HostType::BFloat16 => format!("(double)chelis_bf16_to_f32({value})"),
         HostType::Float32 | HostType::Float64 => format!("(double)({value})"),
-        other => unreachable!("scalar float conversion of non-float host type {other:?}"),
+        other => unreachable!("float conversion of non-float host type {other:?}"),
     }
 }
 
@@ -7056,14 +8618,14 @@ enum BinaryElementwiseFunc {
 }
 
 impl BinaryElementwiseFunc {
-    fn f32_name(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Max => "fmaxf",
-            Self::Min => "fminf",
+            Self::Max => "max_elem",
+            Self::Min => "min_elem",
         }
     }
 
-    fn i32_comparison(self) -> &'static str {
+    fn comparison(self) -> &'static str {
         match self {
             Self::Max => ">=",
             Self::Min => "<=",
@@ -7075,8 +8637,8 @@ impl BinaryElementwiseFunc {
 /// host-emit helpers (`assign_tensor_*_elementwise`). Each arm names a
 /// `CHELIS_*` constant and the C element type for tensor buffer access.
 ///
-/// Equal byte widths do not permit a shared element type. Native int32
-/// storage uses `int32_t`. F32 and the current Bool payload use `float`.
+/// Equal byte widths do not permit a shared element type. Bool uses its
+/// canonical one-byte payload and never shares the f32 representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DtypeArm {
     F32,
@@ -7103,10 +8665,11 @@ impl DtypeArm {
 
     fn elem_t(self) -> &'static str {
         match self {
-            DtypeArm::F32 | DtypeArm::Bool => "float",
+            DtypeArm::F32 => "float",
             DtypeArm::F64 => "double",
             DtypeArm::I32 => "int32_t",
             DtypeArm::I64 => "int64_t",
+            DtypeArm::Bool => "uint8_t",
         }
     }
 
@@ -7126,7 +8689,7 @@ impl DtypeArm {
     /// Representations that can use f32-only helper functions directly.
     /// I32 is excluded because conversion to binary32 loses integer precision.
     fn f32_payload_func_arms() -> &'static [DtypeArm] {
-        &[DtypeArm::F32, DtypeArm::Bool]
+        &[DtypeArm::F32]
     }
 }
 
@@ -7171,7 +8734,7 @@ fn sparse_symbol_expr(
         .find_map(|(ty, arg)| {
             ty.dims.iter().enumerate().find_map(|(axis, dim)| {
                 matches!(dim, DimInfo::Named(dim_name, None) if dim_name == name)
-                    .then(|| format!("{arg}->shape[{axis}]"))
+                    .then(|| format!("chelis_tensor_shape({arg}, {axis})"))
             })
         })
 }
@@ -7179,6 +8742,155 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    #[test]
+    fn verified_clone_and_drop_formatters_cover_all_eight_public_heap_payloads() {
+        let scalar = HostType::Int64;
+        let heap = [
+            (HostType::String, "chelis_string"),
+            (
+                HostType::Tensor(TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::F32,
+                }),
+                "chelis_tensor",
+            ),
+            (HostType::List(Box::new(scalar.clone())), "chelis_list"),
+            (HostType::Tuple(vec![scalar.clone()]), "chelis_tuple"),
+            (
+                HostType::Dict(Box::new(scalar.clone()), Box::new(scalar.clone())),
+                "chelis_dict",
+            ),
+            (HostType::Adt("Probe".into(), Vec::new()), "chelis_adt"),
+            (HostType::Option(Box::new(scalar.clone())), "chelis_option"),
+            (HostType::MappedFile, "chelis_mapped_file"),
+        ];
+        for (ty, prefix) in heap {
+            assert_eq!(
+                retain_call("owner", &ty),
+                Some(format!("{prefix}_retain(owner);")),
+                "verified Clone lost its {ty:?} runtime effect"
+            );
+            assert_eq!(
+                release_call("owner", &ty),
+                Some(format!("{prefix}_release(owner);")),
+                "verified Drop lost its {ty:?} runtime effect"
+            );
+        }
+
+        for ty in [
+            HostType::Int64,
+            HostType::Float32,
+            HostType::Bool,
+            HostType::Unit,
+        ] {
+            assert_eq!(retain_call("owner", &ty), None, "{ty:?}");
+            assert_eq!(release_call("owner", &ty), None, "{ty:?}");
+        }
+
+        let source = include_str!("host_emit.rs");
+        assert!(source.contains("VerifiedHostOperation::Clone"));
+        assert!(source.contains("VerifiedHostOperation::Drop"));
+        assert!(source.contains("self.emit_clone_to"));
+        assert!(source.contains("release_call(&var, &ty)"));
+    }
+
+    #[test]
+    fn exact_scalar_argument_projection_never_boxes_through_chelis_value() {
+        for (ty, dtype) in [
+            (HostType::Int8, "CHELIS_DTYPE_I8"),
+            (HostType::Int16, "CHELIS_DTYPE_I16"),
+            (HostType::Int32, "CHELIS_DTYPE_I32"),
+            (HostType::Int64, "CHELIS_DTYPE_I64"),
+            (HostType::Float16, "CHELIS_DTYPE_F16"),
+            (HostType::BFloat16, "CHELIS_DTYPE_BF16"),
+            (HostType::Float32, "CHELIS_DTYPE_F32"),
+            (HostType::Float64, "CHELIS_DTYPE_F64"),
+            (HostType::Bool, "CHELIS_DTYPE_BOOL"),
+        ] {
+            let emitted = scalar_carrier_expr("value", &ty).unwrap();
+            assert!(
+                emitted.contains("chelis_scalar_from_bits") && emitted.contains(dtype),
+                "{ty:?} did not project to its exact tagged scalar: {emitted}"
+            );
+            assert!(
+                !emitted.contains("chelis_value_box_scalar"),
+                "exact scalar argument was unnecessarily boxed: {emitted}"
+            );
+        }
+        assert!(
+            scalar_carrier_expr("value", &HostType::String).is_err(),
+            "a non-scalar host value must not acquire a scalar ABI fallback"
+        );
+    }
+
+    #[test]
+    fn exact_scalar_result_projection_checks_every_active_dtype() {
+        for (ty, dtype) in [
+            (HostType::Int8, "CHELIS_DTYPE_I8"),
+            (HostType::Int16, "CHELIS_DTYPE_I16"),
+            (HostType::Int32, "CHELIS_DTYPE_I32"),
+            (HostType::Int64, "CHELIS_DTYPE_I64"),
+            (HostType::Float16, "CHELIS_DTYPE_F16"),
+            (HostType::BFloat16, "CHELIS_DTYPE_BF16"),
+            (HostType::Float32, "CHELIS_DTYPE_F32"),
+            (HostType::Float64, "CHELIS_DTYPE_F64"),
+            (HostType::Bool, "CHELIS_DTYPE_BOOL"),
+        ] {
+            let emitted = scalar_carrier_value_expr("value", &ty).unwrap();
+            assert!(
+                emitted.contains(dtype) || matches!(ty, HostType::Bool),
+                "{ty:?} did not validate its exact tagged scalar dtype: {emitted}"
+            );
+            assert_eq!(scalar_dtype_macro(&ty).unwrap(), dtype);
+            assert!(
+                !emitted.contains("chelis_value_unbox_scalar"),
+                "exact scalar result crossed the generic value carrier: {emitted}"
+            );
+        }
+        assert!(scalar_carrier_value_expr("value", &HostType::String).is_err());
+        assert!(scalar_dtype_macro(&HostType::String).is_err());
+    }
+
+    #[test]
+    fn manifested_boxed_roots_use_only_the_exact_value_carrier() {
+        let mut emitter = HostEmitter::new(
+            "    ".to_string(),
+            "manifest",
+            UnordMap::new(),
+            UnordMap::new(),
+            &[],
+            &[],
+            &[],
+        );
+        emitter.emit_labeled_boxed_root("root", "boxed");
+        let emitted = emitter.lines.join("\n");
+
+        for required in [
+            "case CHELIS_VALUE_SCALAR:",
+            "chelis_value_unbox_scalar(boxed)",
+            "chelis_string_borrow_value(boxed)",
+            "chelis_tensor_borrow_value(boxed)",
+            "default:",
+            "abort();",
+        ] {
+            assert!(
+                emitted.contains(required),
+                "boxed-root observation is missing `{required}`:\n{emitted}"
+            );
+        }
+        for retired in [
+            "CHELIS_VALUE_INT64",
+            "CHELIS_VALUE_FLOAT64",
+            "CHELIS_VALUE_BOOL",
+            ".as.",
+        ] {
+            assert!(
+                !emitted.contains(retired),
+                "boxed-root observation restored retired value ABI `{retired}`:\n{emitted}"
+            );
+        }
+    }
 
     #[test]
     fn open_builtin_name_must_decode_before_expression_construction() {
@@ -7217,14 +8929,22 @@ mod expression_dispatch_tests {
                 );
             }
         }
+        for width in ["f16", "bf16", "f32", "f64"] {
+            let start = emitted
+                .find(&format!("chelis_host_relu_{width}"))
+                .expect("ReLU helper start");
+            let body = &emitted[start..];
+            let end = body.find("}\n").expect("ReLU helper end");
+            let body = &body[..end];
+            assert!(body.contains("return x <"), "{width}: {body}");
+            assert!(!body.contains("fmax"), "{width}: {body}");
+        }
         assert!(emitted.contains("chelis_host_finalize_f16"));
         assert!(emitted.contains("chelis_host_finalize_bf16"));
     }
 
-    /// chelis#1112: the emitted reshape helper stores the extent it read,
-    /// at the width it read it. `chelis_value_as_int64` returns int64 and
-    /// the shape buffer is the ABI's int64 extent carrier, so no cast sits
-    /// between them.
+    /// chelis#1112: the emitted reshape helper stores the exact tagged
+    /// int64 extent into a dynamically sized int64 shape buffer.
     ///
     /// This replaces `reshape_helper_traps_extent_above_int32_before_the_store`,
     /// which pinned the ordering of a trap against the `(int)` store it
@@ -7239,12 +8959,12 @@ mod expression_dispatch_tests {
         append_tensor_reshape_helper(&mut out);
         let text = out.join("\n");
         assert!(
-            text.contains("int64_t shape[CHELIS_MAX_DIM] = {0};"),
-            "the shape buffer must be the int64 extent carrier:\n{text}"
+            text.contains("int64_t *shape = (int64_t*)calloc("),
+            "the shape buffer must be dynamically sized for the requested rank:\n{text}"
         );
         let read = text
-            .find("int64_t dim = chelis_value_as_int64(")
-            .expect("the extent is read at int64");
+            .find("int64_t dim = chelis_host_scalar_as_i64(chelis_value_unbox_scalar(")
+            .expect("the extent is read from an exact tagged int64 scalar");
         let store = text
             .find("shape[i] = dim;")
             .expect("the extent is stored without a cast");
@@ -7259,6 +8979,10 @@ mod expression_dispatch_tests {
         assert!(
             !text.contains("2147483647LL"),
             "the int32 extent trap is dead with the cast it guarded:\n{text}"
+        );
+        assert!(
+            !text.contains("CHELIS_MAX_DIM"),
+            "reshape rank must not be capped by a fixed compatibility constant:\n{text}"
         );
         // The negative-extent guard is NOT dead: a negative dim is invalid
         // at every carrier width, so the widening must not have taken it

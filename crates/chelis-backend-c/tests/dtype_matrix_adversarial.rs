@@ -16,11 +16,13 @@
 //!     output dtype is i32; the emitted C must use `int32_t` for the
 //!     accumulator.
 
-use chelis_backend_c::emit::CEmitter;
-use chelis_backend_c::{CodegenOptions, codegen_with_options};
+mod support;
+use chelis_backend_c::CodegenOptions;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_ir::load_store_name::LoadStoreName;
 use chelis_types::types::Prim;
+use support::codegen_with_options;
+use support::emit_dag;
 
 fn vec_t(n: usize, p: Prim) -> TensorType {
     TensorType {
@@ -85,9 +87,9 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
         None,
     );
     dag.add_root(mm);
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
-        src.contains("chelis_bf16_buffer_to_f32"),
+        src.contains("chelis_bf16_to_f32"),
         "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
@@ -95,7 +97,7 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
         "WS-1: bf16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(
-        src.contains("chelis_f32_buffer_to_bf16"),
+        src.contains("chelis_f32_to_bf16"),
         "WS-1: bf16 matmul must downcast the f32 accumulator buffer back to bf16 storage; got:\n{src}"
     );
 }
@@ -128,9 +130,9 @@ fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
         None,
     );
     dag.add_root(mm);
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
-        src.contains("chelis_f16_buffer_to_f32"),
+        src.contains("chelis_f16_to_f32"),
         "WS-1: f16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
@@ -138,7 +140,7 @@ fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
         "WS-1: f16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(
-        src.contains("chelis_f32_buffer_to_f16"),
+        src.contains("chelis_f32_to_f16"),
         "WS-1: f16 matmul must downcast the f32 accumulator buffer back to f16 storage; got:\n{src}"
     );
 }

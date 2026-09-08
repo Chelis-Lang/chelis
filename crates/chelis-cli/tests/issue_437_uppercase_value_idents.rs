@@ -102,7 +102,7 @@ fn uppercase_reference_resolves_to_value_not_constructor() {
     // The decisive resolution check (not just a type-check): a bound `S`
     // referenced as `T = S` must resolve to S's VALUE, not to a
     // constructor application. In chelis-types this is the
-    // is_constructor_name(S)=true / constructor_out_of_scope(S)=false path
+    // is_constructor_name(S)=true / bare_constructor_out_of_scope(S)=false path
     // (the name is uppercase but bound in env, so env lookup wins). Eval
     // is the oracle: if `S` resolved as a constructor, T would read back
     // as an ADT `{ctor: "S"}` instead of the scalar 2.0, which is exactly
@@ -145,15 +145,8 @@ fn uppercase_reference_resolves_to_value_not_constructor() {
     let datum = t
         .get("value")
         .and_then(|v| v.get("value"))
-        .and_then(|v| v.get("data"))
-        // Execution wire v2 (chelis#729): tagged per-dtype payload.
-        .and_then(|d| d.get("values"))
-        .and_then(Value::as_array)
-        .and_then(|d| d.first())
         .and_then(Value::as_f64)
-        .unwrap_or_else(|| {
-            panic!("T must be a scalar tensor (S's value), not an ADT; json={json}")
-        });
+        .unwrap_or_else(|| panic!("T must be S's bare scalar value, not an ADT; json={json}"));
     assert_eq!(
         datum, 2.0,
         "T = S must evaluate to S's value 2.0; json={json}"

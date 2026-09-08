@@ -15,3 +15,7 @@ suffix_view = print(suffix)
 flat_tokens_view = print(flat_tokens)
 token_batches_view = print(token_batches)
 roundtrip_view = print(roundtrip)
+selection_mask: tensor[2, bool] = [true, false]
+runtime_position: int64 = tensor_to_scalar(count(&selection_mask, 0))
+runtime_selected = index(ys, runtime_position)
+runtime_selected_view = print(runtime_selected)

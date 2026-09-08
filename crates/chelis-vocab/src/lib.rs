@@ -68,10 +68,18 @@ pub enum DiagnosticKind {
     UnknownForm,
     MalformedForm,
     CheckOther,
+    // chelis#886: the effect checker's kinds. The `chelis check` report has
+    // always published these spellings; they become governed identities here
+    // so the wire stops being spelled from `chelis_effects`' Rust variant
+    // names.
+    UnhandledEffect,
+    InvalidHandler,
+    BuildTargetMismatch,
+    TypeTotality,
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 52] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -120,6 +128,10 @@ impl DiagnosticKind {
         Self::UnknownForm,
         Self::MalformedForm,
         Self::CheckOther,
+        Self::UnhandledEffect,
+        Self::InvalidHandler,
+        Self::BuildTargetMismatch,
+        Self::TypeTotality,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -172,6 +184,10 @@ impl DiagnosticKind {
             Self::UnknownForm => "UnknownForm",
             Self::MalformedForm => "MalformedForm",
             Self::CheckOther => "Other",
+            Self::UnhandledEffect => "UnhandledEffect",
+            Self::InvalidHandler => "InvalidHandler",
+            Self::BuildTargetMismatch => "BuildTargetMismatch",
+            Self::TypeTotality => "TypeTotality",
         }
     }
 
@@ -270,11 +286,8 @@ pub enum Repr {
     TwosComplement16,
     TwosComplement32,
     TwosComplement64,
-    /// A boolean in an IEEE binary32 payload.
-    ///
-    /// The payload uses `0.0` for false and `1.0` for true. This variant names
-    /// the current four-byte ABI debt without approval of that design.
-    BoolInBinary32,
+    /// A canonical boolean in one byte: `0` is false and `1` is true.
+    Bool8,
 }
 
 impl Repr {
@@ -287,14 +300,14 @@ impl Repr {
         Self::TwosComplement16,
         Self::TwosComplement32,
         Self::TwosComplement64,
-        Self::BoolInBinary32,
+        Self::Bool8,
     ];
 
     pub const fn byte_width(self) -> usize {
         match self {
-            Self::TwosComplement8 => 1,
+            Self::TwosComplement8 | Self::Bool8 => 1,
             Self::Ieee754Binary16 | Self::Bfloat16 | Self::TwosComplement16 => 2,
-            Self::Ieee754Binary32 | Self::TwosComplement32 | Self::BoolInBinary32 => 4,
+            Self::Ieee754Binary32 | Self::TwosComplement32 => 4,
             Self::Ieee754Binary64 | Self::TwosComplement64 => 8,
         }
     }
@@ -303,7 +316,6 @@ impl Repr {
     /// representation.
     pub const fn is_payload_encoded(self) -> bool {
         match self {
-            Self::BoolInBinary32 => true,
             Self::Ieee754Binary16
             | Self::Ieee754Binary32
             | Self::Ieee754Binary64
@@ -311,12 +323,15 @@ impl Repr {
             | Self::TwosComplement8
             | Self::TwosComplement16
             | Self::TwosComplement32
-            | Self::TwosComplement64 => false,
+            | Self::TwosComplement64
+            | Self::Bool8 => false,
         }
     }
 }
 
 /// Dtypes that the C-compatible runtime ABI can store.
+///
+/// Stored and arithmetic representation are selected together by [`Self::contract`].
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeDType {
@@ -329,6 +344,68 @@ pub enum RuntimeDType {
     F16 = 6,
     I8 = 7,
     I16 = 8,
+}
+
+/// The representation used while computing, before storage finalization
+/// ([04-NUM-8]). This is identity, not operation or backend capability policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArithmeticRepr {
+    Ieee754Binary32,
+    Ieee754Binary64,
+    ExactTwosComplement8,
+    ExactTwosComplement16,
+    ExactTwosComplement32,
+    ExactTwosComplement64,
+}
+
+impl ArithmeticRepr {
+    pub const ALL: [Self; 6] = [
+        Self::Ieee754Binary32,
+        Self::Ieee754Binary64,
+        Self::ExactTwosComplement8,
+        Self::ExactTwosComplement16,
+        Self::ExactTwosComplement32,
+        Self::ExactTwosComplement64,
+    ];
+
+    /// Exact encoding of an arithmetic intermediate, not the tensor's storage.
+    pub const fn repr(self) -> Repr {
+        match self {
+            Self::Ieee754Binary32 => Repr::Ieee754Binary32,
+            Self::Ieee754Binary64 => Repr::Ieee754Binary64,
+            Self::ExactTwosComplement8 => Repr::TwosComplement8,
+            Self::ExactTwosComplement16 => Repr::TwosComplement16,
+            Self::ExactTwosComplement32 => Repr::TwosComplement32,
+            Self::ExactTwosComplement64 => Repr::TwosComplement64,
+        }
+    }
+}
+
+/// A closed [04-NUM-8] registration. Only [`RuntimeDType::contract`] constructs
+/// it; consumers cannot supply a width, swap an encoding, or grant bool arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DTypeContract {
+    dtype: RuntimeDType,
+    repr: Repr,
+    arithmetic: Option<ArithmeticRepr>,
+}
+
+impl DTypeContract {
+    pub const fn dtype(self) -> RuntimeDType {
+        self.dtype
+    }
+
+    pub const fn repr(self) -> Repr {
+        self.repr
+    }
+
+    pub const fn arithmetic(self) -> Option<ArithmeticRepr> {
+        self.arithmetic
+    }
+
+    pub const fn byte_width(self) -> usize {
+        self.repr.byte_width()
+    }
 }
 
 impl RuntimeDType {
@@ -364,36 +441,48 @@ impl RuntimeDType {
 
     pub const fn c_macro(self) -> &'static str {
         match self {
-            Self::F32 => "CHELIS_F32",
-            Self::F64 => "CHELIS_F64",
-            Self::I32 => "CHELIS_I32",
-            Self::Bool => "CHELIS_BOOL",
-            Self::I64 => "CHELIS_I64",
-            Self::Bf16 => "CHELIS_BF16",
-            Self::F16 => "CHELIS_F16",
-            Self::I8 => "CHELIS_I8",
-            Self::I16 => "CHELIS_I16",
+            Self::F32 => "CHELIS_DTYPE_F32",
+            Self::F64 => "CHELIS_DTYPE_F64",
+            Self::I32 => "CHELIS_DTYPE_I32",
+            Self::Bool => "CHELIS_DTYPE_BOOL",
+            Self::I64 => "CHELIS_DTYPE_I64",
+            Self::Bf16 => "CHELIS_DTYPE_BF16",
+            Self::F16 => "CHELIS_DTYPE_F16",
+            Self::I8 => "CHELIS_DTYPE_I8",
+            Self::I16 => "CHELIS_DTYPE_I16",
         }
     }
 
-    /// Returns the physical encoding of one element.
-    pub const fn repr(self) -> Repr {
-        match self {
-            Self::F32 => Repr::Ieee754Binary32,
-            Self::F64 => Repr::Ieee754Binary64,
-            Self::I32 => Repr::TwosComplement32,
-            Self::Bool => Repr::BoolInBinary32,
-            Self::I64 => Repr::TwosComplement64,
-            Self::Bf16 => Repr::Bfloat16,
-            Self::F16 => Repr::Ieee754Binary16,
-            Self::I8 => Repr::TwosComplement8,
-            Self::I16 => Repr::TwosComplement16,
+    /// Selects stored and arithmetic representation together, exactly as
+    /// [04-NUM-8] declares. Bool has no arithmetic representation ([04-NUM-4]).
+    pub const fn contract(self) -> DTypeContract {
+        use ArithmeticRepr as A;
+        let (repr, arithmetic) = match self {
+            Self::F32 => (Repr::Ieee754Binary32, Some(A::Ieee754Binary32)),
+            Self::F64 => (Repr::Ieee754Binary64, Some(A::Ieee754Binary64)),
+            Self::I32 => (Repr::TwosComplement32, Some(A::ExactTwosComplement32)),
+            Self::Bool => (Repr::Bool8, None),
+            Self::I64 => (Repr::TwosComplement64, Some(A::ExactTwosComplement64)),
+            Self::Bf16 => (Repr::Bfloat16, Some(A::Ieee754Binary32)),
+            Self::F16 => (Repr::Ieee754Binary16, Some(A::Ieee754Binary32)),
+            Self::I8 => (Repr::TwosComplement8, Some(A::ExactTwosComplement8)),
+            Self::I16 => (Repr::TwosComplement16, Some(A::ExactTwosComplement16)),
+        };
+        DTypeContract {
+            dtype: self,
+            repr,
+            arithmetic,
         }
+    }
+
+    /// Returns the registered physical encoding of one element.
+    pub const fn repr(self) -> Repr {
+        self.contract().repr()
     }
 
     /// Returns the width from the physical representation.
     pub const fn byte_width(self) -> usize {
-        self.repr().byte_width()
+        self.contract().byte_width()
     }
 
     pub const fn decode_id(id: i32) -> Result<Self, RuntimeDTypeDecodeError> {

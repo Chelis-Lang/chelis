@@ -1,6 +1,6 @@
 module Std.Tests.Decimal
 import Std.Decimal (decimal, decimal_add, decimal_div, decimal_eq, decimal_from_int, decimal_gt, decimal_gte, decimal_lt, decimal_lte, decimal_mul, decimal_sub, decimal_to_float, decimal_to_string, round_half_even, try_decimal)
-import Std.Test (assert_close, assert_eq_string, assert_false, assert_true)
+import Std.Test (assert_close, assert_eq, assert_false, assert_true)
 def test_add_tenths_is_exact() -> unit ! { Test } = {
   sum = decimal_add(decimal("0.1"), decimal("0.2"))
   assert_true(decimal_eq(sum, decimal("0.3")), "0.1 + 0.2 == 0.3")
@@ -28,10 +28,10 @@ def test_ordering_gte_reflexive() -> unit ! { Test } = assert_true(decimal_gte(d
 def test_ordering_lt_irreflexive() -> unit ! { Test } = assert_false(decimal_lt(decimal("0.1"), decimal("0.1")), "0.1 < 0.1 must be false")
 def test_string_roundtrip() -> unit ! { Test } = {
   rendered = decimal_to_string(decimal("3.14"))
-  assert_eq_string(rendered, "3.14", "decimal_to_string(decimal(\"3.14\")) == \"3.14\"")
+  assert_eq(rendered, "3.14", "decimal_to_string(decimal(\"3.14\")) == \"3.14\"")
 }
-def test_string_roundtrip_negative() -> unit ! { Test } = assert_eq_string(decimal_to_string(decimal("-2.50")), "-2.5", "negative trailing-zero normalises")
-def test_string_roundtrip_zero() -> unit ! { Test } = assert_eq_string(decimal_to_string(decimal("0")), "0", "zero renders as 0")
+def test_string_roundtrip_negative() -> unit ! { Test } = assert_eq(decimal_to_string(decimal("-2.50")), "-2.5", "negative trailing-zero normalises")
+def test_string_roundtrip_zero() -> unit ! { Test } = assert_eq(decimal_to_string(decimal("0")), "0", "zero renders as 0")
 def test_to_float_half_exact() -> unit ! { Test } = {
   approx = decimal_to_float(decimal("0.5"))
   assert_close(cast(approx, f32), cast(0.5, f32), cast(0.0, f32), "decimal(0.5) -> f32 0.5 exactly")
@@ -50,4 +50,4 @@ def test_div_five_by_two_half_even_ties_to_even() -> unit ! { Test } = {
   assert_true(decimal_eq(q, decimal_from_int(cast(2, int64))), "5 / 2 half-even == 2 (banker's)")
 }
 def test_mul_scale_accumulation_value() -> unit ! { Test } = assert_true(decimal_eq(decimal_mul(decimal("0.1"), decimal("0.1")), decimal("0.01")), "0.1 * 0.1 == 0.01 (value)")
-def test_mul_scale_accumulation_string() -> unit ! { Test } = assert_eq_string(decimal_to_string(decimal_mul(decimal("0.1"), decimal("0.1"))), "0.01", "decimal_to_string normalises 0.1*0.1 to \"0.01\"")
+def test_mul_scale_accumulation_string() -> unit ! { Test } = assert_eq(decimal_to_string(decimal_mul(decimal("0.1"), decimal("0.1"))), "0.01", "decimal_to_string normalises 0.1*0.1 to \"0.01\"")

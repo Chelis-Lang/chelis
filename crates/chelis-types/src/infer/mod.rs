@@ -10,9 +10,11 @@ pub use stack::{
     reset_grow_segment_bytes_for_test, run_on_grown_stack, set_grow_segment_bytes_for_test,
 };
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use chelis_deep::ast as deep;
+use chelis_deep::role::SlotShape;
 use chelis_deep::{DeepTag, Span, decode_effect_kind};
 use chelis_vocab::EffectKind;
 
@@ -22,9 +24,10 @@ use crate::cancel::CancelToken;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::deep_type::{
     BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeDiagnosticLocation, TypeResolutionEnv,
-    TypeUseSite,
+    TypeUseSite, deferred_family_diagnostic, is_deferred_dtype_name, is_unsigned_dtype_name,
+    unsigned_family_diagnostic,
 };
-use crate::env::Env;
+use crate::env::{Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
 use crate::session::DiagnosticSink;
@@ -56,12 +59,14 @@ mod app_collection;
 mod app_helpers;
 mod app_hostio;
 mod app_numeric;
+mod app_operand_dtype;
 mod app_post;
 mod app_route;
 mod app_scatter;
 mod app_shape;
 mod app_shape_helpers;
 mod app_tensor;
+mod binder_literal;
 mod checked;
 mod common;
 mod declarations;
@@ -72,8 +77,13 @@ mod expr_record;
 mod expr_transform;
 mod program;
 pub(crate) mod recursion;
+mod rigid;
+mod shape_honesty;
+mod slot;
+mod static_int;
 mod static_value;
 mod validate;
+mod vmap_extent;
 
 use annotate::*;
 use app::*;
@@ -81,12 +91,14 @@ use app_collection::*;
 use app_helpers::*;
 use app_hostio::*;
 use app_numeric::*;
+use app_operand_dtype::*;
 use app_post::*;
 use app_route::*;
 use app_scatter::*;
 use app_shape::*;
 use app_shape_helpers::*;
 use app_tensor::*;
+use binder_literal::*;
 use checked::*;
 use common::*;
 use declarations::*;
@@ -96,8 +108,12 @@ use expr_pattern::*;
 use expr_record::*;
 use expr_transform::*;
 use program::*;
+use rigid::*;
+use slot::*;
+pub use static_int::fold_static_int_expr;
 use static_value::*;
 use validate::*;
+use vmap_extent::*;
 
 pub use checked::{
     CheckedProgram, FunctionSignatureInference, InferResult, InferStats, ParamSignatureInference,

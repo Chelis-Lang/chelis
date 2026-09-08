@@ -96,9 +96,24 @@ class IsDocsOnlyTests(unittest.TestCase):
         self.assertFalse(m.is_docs_only(["Cargo.toml"]))
 
     def test_executable_oracle_doc_forces_full_suite(self):
-        oracle_doc = "spec/design/faithful_observation.md"
-        self.assertFalse(m.is_docs_only([oracle_doc]))
-        self.assertFalse(m.is_docs_only(["README.md", oracle_doc]))
+        for oracle_doc in (
+            "spec/design/faithful_observation.md",
+            "spec/02-surf-syntax.md",
+            "spec/03-deep-syntax.md",
+            "spec/04-type-system.md",
+            "spec/05-risc-primitives.md",
+            "spec/11-ffi.md",
+            "spec/design/capability_table.md",
+            "spec/design/compiled_value_ownership.md",
+            "spec/design/dtype_semantics.md",
+            "spec/design/loud_unsupported.md",
+            "spec/design/spec_provenance.md",
+            "spec/design/remediation_roadmap.md",
+            "docs/investigations/remediation_status_2026_08_04.md",
+        ):
+            with self.subTest(oracle_doc=oracle_doc):
+                self.assertFalse(m.is_docs_only([oracle_doc]))
+                self.assertFalse(m.is_docs_only(["README.md", oracle_doc]))
 
 
 class RejectionAuthorityChangeTests(unittest.TestCase):

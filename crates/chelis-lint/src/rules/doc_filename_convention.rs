@@ -16,8 +16,8 @@
 
 use crate::policy::TraversalPolicy;
 use crate::{Context, LintError, PreparedRuleState, Rule, Surface, Violation};
+use chelis_unord::UnordSet;
 use regex::Regex;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -43,7 +43,7 @@ pub struct DocFilenameConvention;
 
 #[derive(Debug, Default)]
 struct DocFilenameState {
-    package_names: HashSet<String>,
+    package_names: UnordSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,8 +187,8 @@ fn prepare_doc_filename_state(
     entries: &[crate::walker::Entry],
     policy: &TraversalPolicy,
 ) -> DocFilenameState {
-    let mut package_names = HashSet::new();
-    let mut visited_manifests = HashSet::<PathBuf>::new();
+    let mut package_names = UnordSet::new();
+    let mut visited_manifests = UnordSet::<PathBuf>::new();
 
     for entry in entries {
         if entry.surface != Some(Surface::ManifestToml)
@@ -231,7 +231,7 @@ fn prepare_doc_filename_state(
     DocFilenameState { package_names }
 }
 
-fn filename_matches_known_cargo_package(path: &Path, package_names: &HashSet<String>) -> bool {
+fn filename_matches_known_cargo_package(path: &Path, package_names: &UnordSet<String>) -> bool {
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .is_some_and(|stem| looks_like_cargo_package_name(stem) && package_names.contains(stem))
@@ -273,7 +273,7 @@ impl DocFilenameConvention {
     fn check_with_package_names(
         &self,
         ctx: &Context<'_>,
-        package_names: Option<&HashSet<String>>,
+        package_names: Option<&UnordSet<String>>,
     ) -> Vec<Violation> {
         let Some(name) = ctx.path.file_name().and_then(|n| n.to_str()) else {
             return Vec::new();

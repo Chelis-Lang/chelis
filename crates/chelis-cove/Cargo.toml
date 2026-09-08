@@ -16,3 +16,6 @@ tree-sitter-chelis = { path = "../../tree-sitter-chelis" }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

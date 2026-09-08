@@ -133,9 +133,11 @@ jobs:
       - name: Run C2.2 controlled mutations
         run: devenv-retry --profile ci shell --no-tui -- python scripts/diagnostic_kind_oracle.py
 
-  lint-and-unit:
-    name: Lint and Unit Tests (Linux)
+  lint-rust:
+    name: Rust Policy (Linux)
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     defaults:
       run:
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -182,27 +184,64 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
-      # Run the scripts/ Python unit tests with the project Devenv
-      # interpreter. The profile set-math class runs in workspace-tests after
-      # its build is warm, so this step disables only that duplicate class.
-      - name: Script unit tests (scripts/test_*.py)
-        env:
-          CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH: "1"
-        run: devenv-retry --profile ci shell --no-tui -- python -m unittest discover -s scripts -p 'test_*.py'
-
-      # Phase 1's registered-PyO3 ingress tests use the NumPy package
-      # declared by devenv/toolchains.nix. The suite stubs safetensors.
-      - name: Python binding ingress unit tests
-        run: devenv-retry --profile ci shell --no-tui -- python -m unittest discover -s bindings/python/tests -p 'test_*.py'
-
-      # The lint-and-unit gate subset (build, clippy, fmt, chelis lint
-      # --check) is defined once in scripts/gate.py and run here via
-      # `gate.py lint-and-unit`. Do not hand-inline cargo/chelis
-      # commands into this job: scripts/test_gate.py greps this file
-      # and fails if any gate step is not produced by gate.py. See
+      # The Rust-policy gate subset (clippy, fmt, chelis lint --check,
+      # doctests, and compile guards) is defined once in scripts/gate.py and
+      # run here via `gate.py lint-and-unit`. Clippy already compiles every
+      # workspace target, so a preceding standalone
+      # `cargo build --workspace --all-targets` is redundant. Do not
+      # hand-inline cargo/chelis commands into this job:
+      # scripts/test_gate.py greps this file and fails if any gate step is
+      # not produced by gate.py. See
       # docs/investigations/test_toolchain_guards_design.md.
       - name: Gate (lint-and-unit subset)
         run: devenv-retry --profile ci shell --no-tui -- python scripts/gate.py lint-and-unit
+
+  script-unit:
+    name: Script and Python Unit Tests (Linux)
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # A small number of workflow guards inspect Cargo metadata. They do not
+      # compile the workspace, but they require the stable cargo executable.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      # cargo-nextest is intentionally absent, so the expensive structural
+      # profile oracle self-skips here and runs once on workspace shard 1.
+      - name: Script unit tests (scripts/test_*.py)
+        run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Install Python binding ingress test dependency
+        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
+
+      - name: Python binding ingress unit tests
+        run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+
+  # Preserve the required branch-protection context while the independent
+  # Rust and Python policy workers execute in parallel.
+  lint-and-unit:
+    name: Lint and Unit Tests (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, lint-rust, script-unit]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every lint and unit worker
+        run: python3 scripts/ci_require_success.py lint-rust=${{ needs.lint-rust.result }} script-unit=${{ needs.script-unit.result }}
 
   # Non-gate job (see NON_GATE_JOBS in scripts/test_gate.py, rule-id
   # GATE-SCOPE-SMT): the required fast SMT smoke. It builds the
@@ -294,8 +333,32 @@ jobs:
       - name: Run cvc5 engine smoke tests
         run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features smt --lib cvc5_engine_
 
+      # chelis#1125 PP7: `crates/chelis-cli/tests/prove_deep_obligations.rs` is
+      # `#![cfg(feature = "smt")]` and had NO invocation anywhere. The gate
+      # never passes `--features smt`, this job tested only `chelis-prove`, and
+      # smt-full-prove.yml never names `chelis-cli`, so a merged test asserting
+      # the correct proof tier for the `.dp` surface could not fail and the
+      # regression it was written to catch landed green. This is the smallest
+      # step that runs it, in the job that already provisions cvc5. Pinned by
+      # scripts/test_gate.py's SmtCiSplitTests so it cannot silently disappear
+      # again.
+      - name: Run the Deep-surface obligation tier tests
+        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-cli --features smt --test prove_deep_obligations
+
+      # Clippy's `disallowed_types` ban on raw hash collections
+      # (spec/design/hash_order_determinism.md C2.3) only sees the
+      # configuration it compiles. This job already provisions cvc5, so it is
+      # the cheapest place to lint the `smt` feature's code. Registered in
+      # scripts/check_configuration_closure.py CLIPPY_MATRIX, which fails if
+      # this command drifts from it.
+      - name: Clippy over the cvc5 feature configuration
+        run: devenv-retry --profile smt shell --no-tui -- cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
+
   smt-build-darwin-arm64:
     name: SMT Feature Build (darwin-arm64)
+    # Hosted macOS runners pay a cold Nix cvc5 closure, so this lane stays a
+    # manual dispatch (openspec converge-smt-lanes-on-nix-cvc5). The Linux
+    # smt-build job is the per-PR required SMT signal.
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     # Warm closure + warm cargo cache runs in minutes; a cold cvc5 closure
@@ -362,8 +425,12 @@ jobs:
       - name: Verify cvc5 discharge path (smt feature live)
         run: devenv-retry --profile smt shell --no-tui -- python .github/scripts/verify_release_smt.py ./target/release/chelis
 
-  workspace-tests:
-    name: Workspace Tests (Linux)
+  workspace-tests-shard:
+    name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -373,7 +440,7 @@ jobs:
     # always false. `needs: [changes]` is what makes the output readable.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Strip debuginfo through the `ci` Devenv profile. See lint-and-unit
+    # Strip debuginfo through the `ci` Devenv profile. See lint-rust
     # for the chelis#392 rationale.
     steps:
       - uses: actions/checkout@v6
@@ -398,6 +465,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
+          # Both shards restore the same warm workspace cache. Only shard 1
+          # publishes a new entry, avoiding a same-key save race.
+          save-if: ${{ matrix.shard == 1 }}
 
       # The workspace has ~200 integration test binaries. `cargo test
       # --workspace --tests` runs them one binary at a time, serializing
@@ -406,31 +476,105 @@ jobs:
       # a single global thread pool, overlapping the heavyweight work.
       # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
       #
-      # The integration gate subset (`cargo nextest run --workspace`)
-      # is defined once in scripts/gate.py and run here via `gate.py
-      # integration`. The `ci` nextest profile writes per-test JUnit
-      # timing XML to target/nextest/ci/junit.xml; the test-timing
-      # budget step below consumes it. Do not hand-inline cargo
-      # commands into this job (see scripts/test_gate.py parity lock).
-      - name: Gate (integration subset)
-        run: devenv-retry --profile ci shell --no-tui -- python scripts/gate.py integration
+      # The integration nextest command is defined once in scripts/gate.py.
+      # Each worker selects one of two deterministic, disjoint hash
+      # partitions. The `ci` nextest profile writes per-test JUnit
+      # timing XML to target/nextest/ci/junit.xml; the aggregate job downloads
+      # both artifacts and reports their combined timings. Do not hand-inline
+      # cargo commands into this job (see scripts/test_gate.py parity lock).
+      - name: Gate (workspace test shard)
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: devenv-retry --profile ci shell --no-tui -- python scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2
 
-      # Run the structural oracle here after the workspace build
-      # is warm so its three `nextest list` calls are continuously enforced.
+      # Shard 2 already has the feature-complete workspace build warm. Run
+      # each non-test integration oracle exactly once here instead of paying
+      # for a third independently compiled worker.
+      - name: Gate (integration support subset)
+        if: matrix.shard == 2
+        run: devenv-retry --profile ci shell --no-tui -- python scripts/gate.py integration --support-only
+
+      # This structural oracle needs cargo-nextest. Execute it exactly once on
+      # shard 1, balancing its hosted cost against shard 2's exact-once
+      # integration support subset. It lists only the default feature
+      # configuration this shard has already built; the generalization lane's
+      # feature-enabled listing runs on generalization shard 1 for the same
+      # reason.
       - name: Verify nextest profile coverage
+        if: matrix.shard == 1
         run: devenv-retry --profile ci shell --no-tui -- python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
-      # Informational, non-failing: flags integration tests that have
-      # regressed past their committed timing baseline or that are new
-      # and over the absolute ceiling. The baseline
-      # (scripts/test_timing_baseline.json) is hand-curated and
-      # explicitly regenerated, never auto-updated on merge. Promotable
-      # to a blocking step later. See
-      # docs/investigations/test_toolchain_guards_design.md.
-      - name: Test-timing budget (informational)
+      - name: Upload workspace JUnit shard
         if: always()
-        continue-on-error: true
-        run: devenv-retry --profile ci shell --no-tui -- python scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-workspace-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  workspace-tests:
+    name: Workspace Tests (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, workspace-tests-shard]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every workspace test worker
+        run: python3 scripts/ci_require_success.py workspace-tests-shard=${{ needs.workspace-tests-shard.result }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Download workspace JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-1
+          path: target/test-telemetry/input/workspace-1
+
+      - name: Download workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-2
+          path: target/test-telemetry/input/workspace-2
+
+      - name: Merge disjoint workspace timing reports
+        run: >-
+          uv run --managed-python --python 3.11 --no-project python
+          scripts/ci_test_telemetry.py
+          --shard workspace-1=target/test-telemetry/input/workspace-1/junit.xml
+          --shard workspace-2=target/test-telemetry/input/workspace-2/junit.xml
+          --require-disjoint
+          --merged-junit target/test-telemetry/workspace-junit.xml
+          --json target/test-telemetry/workspace-report.json
+          --summary target/test-telemetry/workspace-summary.md
+          --github-summary "${GITHUB_STEP_SUMMARY}"
+
+      # The baseline comes from the exact two-shard hosted runner. A later
+      # unchanged-code run produced scheduler-sensitive relative and absolute
+      # outliers, so both stay visible without false-redding the required gate.
+      # Missing, malformed, empty, or invalid telemetry remains blocking.
+      - name: Validate and report test timing
+        run: >-
+          uv run --managed-python --python 3.11 --no-project python
+          scripts/test_timing_check.py
+          --junit target/test-telemetry/workspace-junit.xml
+          --informational
+
+      - name: Upload merged workspace telemetry
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-telemetry-linux-workspace
+          path: |
+            target/test-telemetry/workspace-junit.xml
+            target/test-telemetry/workspace-report.json
+            target/test-telemetry/workspace-summary.md
+          if-no-files-found: error
+          retention-days: 14
 
   # Run the inherited Phase 0-3 acceptance contract beside the workspace
   # nextest suite. On the measured #1118 run these steps took 7m22s after a
@@ -467,14 +611,50 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Both parallel jobs restore the same cache; only workspace-tests
-          # saves it, avoiding a second multi-GB entry in the 10 GB cache pool.
+          # Both parallel jobs restore the same cache; only matrix shard 1 of
+          # workspace-tests-shard saves it, avoiding a second multi-GB entry.
           save-if: false
+
+      # The wire and bindings census binaries both invoke nested cargo rustdoc
+      # in this shared ~500 MB target. Restore it independently of the normal
+      # workspace cache so those exact nested builds survive across runs.
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
       - name: Dtype Phase 0-3 oracle
         env:
           GH_TOKEN: ${{ github.token }}
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: devenv-retry --profile ci shell --no-tui -- python scripts/dtype_phase3_oracle.py
+
+      - name: Validate and report test timing
+        run: >-
+          devenv-retry --profile ci shell --no-tui --
+          python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+      - name: Upload dtype JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-dtype
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+      # Pull requests only consume the last main-produced cache. One
+      # successful push-to-main writer avoids duplicate multi-hundred-MB
+      # entries and same-key races across the parallel consumers.
+      - name: Save capacity rustdoc build
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
   # Keep the #732 Phase 2 acceptance contract executable as its own blocking
   # leg. This is deliberately not appended to the dtype job: each phase oracle
@@ -489,8 +669,6 @@ jobs:
       contents: read
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v6
 
@@ -512,50 +690,246 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Restore the workspace cache but leave the single writer in the
-          # workspace-tests job, avoiding another multi-GB cache entry.
+          # Restore the workspace cache but leave the single writer in matrix
+          # shard 1 of workspace-tests-shard, avoiding another multi-GB entry.
           save-if: false
 
       - name: Faithful observation Phase 2 oracle
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: devenv-retry --profile ci shell --no-tui -- python scripts/faithful_observation_phase2_oracle.py
 
-  # Keep the existing required status context while making the three expensive
-  # legs parallel. `!cancelled()` lets this job inspect dependency failures
-  # while still suppressing work after cancellation.
+  # Freeze chelis#1286's complete initial ownership fixture universe and its
+  # typed expected-failure receipts before production ownership changes begin.
+  # This phase is hardware-independent; the HIP hardware row becomes mandatory
+  # in Phase 3.
+  compiled-value-ownership-phase0-oracle:
+    name: Compiled Value Ownership Phase 2 Oracle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          # Restore the workspace cache while leaving shard 1 of the workspace
+          # suite as the single writer for this namespace.
+          save-if: false
+
+      - name: Compiled value ownership Phase 2 oracle
+        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2
+
+      - name: Compiled value ownership launch subset
+        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
+
+  # chelis#893 Phase 0's authoritative oracle is the `runtime-representation`
+  # gate stage. It runs release-profile reproducers whose artifacts are never
+  # in the shared cache plus 37 serial controlled mutations, about eleven
+  # hosted minutes: measured on push run 33653771041 it took workspace shard
+  # 2's support step from 2.1 to 13.0 minutes and the shard from 14.4 to 25.9.
+  # Like the other phase oracles it therefore gets its own runner and its own
+  # failure boundary, aggregated under the required Integration Tests (Linux)
+  # context. `clang` is the oracle's C/Objective-C front end.
+  runtime-representation-phase0-oracle:
+    name: Runtime Representation Phase 0 Oracle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          # Restore the workspace cache; matrix shard 1 of workspace-tests-shard
+          # remains the single writer for this namespace.
+          save-if: false
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # The stage is defined once in scripts/gate.py; scripts/test_gate.py
+      # pins this job's run commands like the other gate-owned workers.
+      - name: Gate (runtime representation stage)
+        run: python3 scripts/gate.py runtime-representation
+
+  # chelis#1207's authoritative parity corpus compares every production
+  # level-based generalization with the retained reference sweep and bypasses
+  # nextest's default filter so no discovered non-ignored test is omitted.
+  # Split the one corpus over four deterministic hash partitions: each shard
+  # still compiles the exact feature-enabled workspace, while the expensive
+  # test execution runs on four hosted runners in parallel. The aggregate job
+  # below retains a stable oracle status and fails closed unless all four
+  # disjoint partitions succeed; the directly required Integration Tests (Linux)
+  # context transitively gates that aggregate.
+  generalize-sweep-oracle-shard:
+    name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
+
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
+
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
+        with:
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+
+      - name: Typecheck level generalization oracle
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: devenv-retry --profile ci shell --no-tui -- cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+
+      # The generalization-lane selection census lists this exact feature
+      # configuration, which is warm only here. On workspace shard 1 the same
+      # listing recompiled the workspace under a second feature set and cost
+      # 4.4 minutes per run; here it is one `cargo nextest list` on the build
+      # the oracle step just produced. Shard 1 runs it once.
+      - name: Verify generalization lane selection
+        if: matrix.shard == 1
+        run: devenv-retry --profile ci shell --no-tui -- python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
+
+      - name: Validate and report test timing
+        run: >-
+          devenv-retry --profile ci shell --no-tui --
+          python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+      - name: Upload generalization JUnit shard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-generalization-${{ matrix.shard }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  generalize-sweep-oracle:
+    name: Typecheck Level Generalization Oracle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, generalize-sweep-oracle-shard]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every generalization-oracle shard
+        run: python3 scripts/ci_require_success.py generalize-sweep-oracle-shard=${{ needs.generalize-sweep-oracle-shard.result }}
+
+  # Keep the existing required status context while making the expensive
+  # legs parallel. `always()` makes the stable required context inspect every
+  # dependency result, including cancellation, instead of being skipped green.
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    defaults:
-      run:
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, generalize-sweep-oracle]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
-
       - name: Require all integration legs
-        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}
+        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }} compiled-value-ownership-phase0-oracle=${{ needs.compiled-value-ownership-phase0-oracle.result }} runtime-representation-phase0-oracle=${{ needs.runtime-representation-phase0-oracle.result }} generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
   # commit to main on every merge. See WS-7 / spend-trim.
 
-  macos-smoke:
-    name: macOS Smoke
+  macos-workspace-shard:
+    name: macOS Workspace (shard ${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: macos-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-    # Hosted macOS runners are a manual gate. Linux remains the blocking
-    # workspace path for pull requests and pushes.
-    if: github.event_name == 'workflow_dispatch'
-    # The manual macOS workspace build drops debuginfo to reduce its cost.
+    # Successful runs normally finish in 14-16 minutes, but hosted-runner
+    # variance can push the workspace suite past the old 20-minute job cap.
+    # Keep a hard ceiling while leaving measured headroom for the post-test
+    # architecture, manifested-C-ABI, and Metal smoke checks.
+    timeout-minutes: 30
+    # Skip on docs-only PRs (chelis#419); a skipped required job reports
+    # success. macOS Smoke is the authoritative workspace oracle, so it
+    # runs on every code PR and every push; only a pure-prose PR skips it.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    # Every other cargo *test* job in this workflow drops debuginfo; this
+    # one was the only omission, and it is the workflow's critical path
+    # (the `Workspace tests` step alone is longer than any whole job).
     # macOS pays for debuginfo twice: rustc emits it, then the linker
     # walks the debug map for every test binary the workspace produces.
     # Nothing here reads debuginfo -- the job asserts binary architecture
@@ -566,19 +940,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
+      # The macOS workspace shards stay on the hosted toolchain rather than
+      # Devenv: this workflow's Devenv conversion covers the portable Linux
+      # jobs, and these shards are the authoritative workspace oracle.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      # The Devenv shell composes the private Chelis-Lang/ci consumer module,
-      # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
-        with:
-          app-client-id: ${{ vars.CI_APP_ID }}
-          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      # See lint-rust for why this runs before the cargo cache
+      # and why the version is pinned to v8.1.0 rather than @v8.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-workspace
+          save-if: ${{ matrix.shard == 1 }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Assert Apple Silicon runner
         run: |
@@ -595,18 +978,31 @@ jobs:
       # compilation, so a separate `cargo build --workspace` step
       # beforehand is redundant under Swatinem's rust-cache. nextest's
       # cross-binary parallelism keeps this job off the same ~200-binary
-      # serialization bloat as the Linux integration job; see
+      # serialization bloat as the Linux workspace workers; see
       # docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Workspace tests
-        run: devenv-retry --profile ci shell --no-tui -- cargo nextest run --workspace
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: cargo nextest run --workspace --profile ci-full --partition hash:${{ matrix.shard }}/2
+
+      - name: Upload macOS workspace JUnit shard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-macos-workspace-${{ matrix.shard }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify packaged binary architecture
+        if: matrix.shard == 2
         run: |
           set -euo pipefail
           file target/debug/chelis | grep -E 'arm64|aarch64'
 
-      - name: Smoke test generated C with Accelerate
-        run: devenv-retry --profile ci shell --no-tui -- python .github/scripts/smoke_macos_accelerate.py ./target/debug/chelis
+      - name: Smoke test manifested C callable ABI
+        if: matrix.shard == 2
+        run: python3 .github/scripts/smoke_macos_manifested_callable.py ./target/debug/chelis
 
       # Phase M smoke: emit `.mm` from the Metal backend and link it
       # against the Metal/Foundation frameworks. Compile-and-link only
@@ -615,7 +1011,141 @@ jobs:
       # in the M6 manual gate (`cargo test -p chelis-backend-metal
       # --test gpu_correctness -- --ignored`) on a real workstation.
       - name: Smoke test Metal backend codegen + link
-        run: devenv-retry --profile ci shell --no-tui -- python .github/scripts/smoke_macos_metal.py ./target/debug/chelis
+        if: matrix.shard == 2
+        run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
+
+      - name: Validate and report test timing
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+  # Keep the exact branch-protection context stable and fail closed if either
+  # disjoint full-workspace partition fails.
+  macos-smoke:
+    name: macOS Smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, macos-workspace-shard]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every macOS workspace shard
+        run: python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}
+
+  # Preserve every partition's nextest timing as a durable artifact and one
+  # cross-platform report. Overlap between semantic lanes is intentional and
+  # remains visible; the workspace aggregate separately proves its hash
+  # partitions are disjoint before producing their validated timing report.
+  # Dtype, generalization, and macOS producers validate and report the same
+  # diagnostic thresholds before their own required aggregates.
+  #
+  # Every JUnit producer must have SUCCEEDED. This job downloads nine
+  # named artifacts with no fallback, and a producer that did not finish
+  # uploads none of its own: a hosted-runner allocation failure cancels
+  # the job before its first step, and a producer that dies at its own
+  # upload step leaves the artifact equally absent. Without that gate a
+  # run gains a second red job whose only message is `Artifact not found
+  # for name: junit-macos-workspace-1`, which reads as a repository
+  # defect rather than as the producer failure the required aggregate
+  # already reports. Skipping is safe here and only here: this is a
+  # non-required reporting aggregate, the run is already red from the
+  # producer itself, and each producer separately validates and reports
+  # its own lane timing through scripts/test_timing_check.py. Required
+  # aggregates keep `always()` and stay fail-closed.
+  test-telemetry:
+    name: CI Test Telemetry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, workspace-tests-shard, dtype-phase3-oracle, generalize-sweep-oracle-shard, macos-workspace-shard]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.workspace-tests-shard.result == 'success' && needs.dtype-phase3-oracle.result == 'success' && needs.generalize-sweep-oracle-shard.result == 'success' && needs.macos-workspace-shard.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Download Linux workspace JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-1
+          path: target/test-telemetry/input/linux-workspace-1
+
+      - name: Download Linux workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-2
+          path: target/test-telemetry/input/linux-workspace-2
+
+      - name: Download dtype JUnit
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-dtype
+          path: target/test-telemetry/input/linux-dtype
+
+      - name: Download generalization JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-1
+          path: target/test-telemetry/input/linux-generalization-1
+
+      - name: Download generalization JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-2
+          path: target/test-telemetry/input/linux-generalization-2
+
+      - name: Download generalization JUnit shard 3
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-3
+          path: target/test-telemetry/input/linux-generalization-3
+
+      - name: Download generalization JUnit shard 4
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-4
+          path: target/test-telemetry/input/linux-generalization-4
+
+      - name: Download macOS workspace JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-macos-workspace-1
+          path: target/test-telemetry/input/macos-workspace-1
+
+      - name: Download macOS workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-macos-workspace-2
+          path: target/test-telemetry/input/macos-workspace-2
+
+      - name: Build cross-lane timing report
+        run: >-
+          uv run --managed-python --python 3.11 --no-project python
+          scripts/ci_test_telemetry.py
+          --shard linux-workspace-1=target/test-telemetry/input/linux-workspace-1/junit.xml
+          --shard linux-workspace-2=target/test-telemetry/input/linux-workspace-2/junit.xml
+          --shard linux-dtype=target/test-telemetry/input/linux-dtype/junit.xml
+          --shard linux-generalization-1=target/test-telemetry/input/linux-generalization-1/junit.xml
+          --shard linux-generalization-2=target/test-telemetry/input/linux-generalization-2/junit.xml
+          --shard linux-generalization-3=target/test-telemetry/input/linux-generalization-3/junit.xml
+          --shard linux-generalization-4=target/test-telemetry/input/linux-generalization-4/junit.xml
+          --shard macos-workspace-1=target/test-telemetry/input/macos-workspace-1/junit.xml
+          --shard macos-workspace-2=target/test-telemetry/input/macos-workspace-2/junit.xml
+          --json target/test-telemetry/full/report.json
+          --summary target/test-telemetry/full/summary.md
+          --github-summary "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload cross-lane timing report
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-telemetry-all-lanes
+          path: target/test-telemetry/full
+          if-no-files-found: error
+          retention-days: 14
 
   backend-sanitizers:
     name: Backend Sanitizers
@@ -714,7 +1244,18 @@ jobs:
     # Strip debuginfo through the `ci` Devenv profile. This job compiles the
     # chelis-e2e skill-suite test binary.
     steps:
+      # Full history: the Phase 4B acknowledgement gate diffs every frozen
+      # contract file against `git merge-base origin/main HEAD`. The default
+      # shallow checkout gives neither a usable `origin/main` nor enough
+      # history behind it, and what it does give varies with the clone shape:
+      # measured, `--depth 1 --no-single-branch` makes `git merge-base` exit 1
+      # with no output, and `--depth 1 --branch <topic>` leaves `origin/main`
+      # absent entirely. The gate fails loudly on both, so a shallow checkout
+      # turns this job red rather than quiet, but the depth is what makes it
+      # green for the right reason.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
@@ -735,6 +1276,44 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
+      - name: Validate CI topology documentation
+        run: devenv-retry --profile ci shell --no-tui -- python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
+
+      # chelis#729 Phase 4B froze the numeric atoms and the capability schema
+      # behind atom and region digests over spec/ and spec/design/, plus a
+      # per-file acknowledgement gate over every frozen contract file. The
+      # oracle validates documents and runs no cargo command, and a docs-only
+      # pull request skips every heavy job, so this always-run job is the only
+      # placement that actually defends the freeze against the edits most
+      # likely to break it. This step is unconditional: on a push or a
+      # workflow_dispatch it runs the atom and region digests and reports the
+      # contract diff without requiring a pull request body.
+      - name: Validate the chelis#729 Phase 4B freeze
+        run: devenv-retry --profile ci shell --no-tui -- python scripts/dtype_phase4b_oracle.py
+
+      # The enforcing half. On a pull request every changed frozen contract
+      # file must be named by a `Frozen-contract-change:` line in the body.
+      # The body is untrusted text written by the PR author, so it is passed
+      # through the environment and never interpolated into a shell command.
+      #
+      # The base is the default `origin/main`, deliberately, not
+      # `github.event.pull_request.base.sha`. The checkout is `refs/pull/N/merge`,
+      # so HEAD is GitHub's test-merge commit and `git merge-base origin/main HEAD`
+      # is that commit's first parent: exactly the base the merge was built on.
+      # The payload SHA is only the base tip at event-creation time, so if `main`
+      # advances and GitHub regenerates the merge ref before the checkout, the
+      # payload SHA lags and main's changes get charged to this branch. The merge
+      # base cannot lag that way, and both steps then read one baseline.
+      - name: Require frozen contract acknowledgements
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: devenv-retry --profile ci shell --no-tui -- python scripts/dtype_phase4b_oracle.py --require-acknowledgement --acknowledgements-env PR_BODY
+
+      # No project venv setup here — `cargo test -p chelis-e2e` does not
+      # transitively pull pyo3 (verified by `cargo tree -p chelis-e2e`), so
+      # pyo3-build-config never runs in this job. The focused documentation
+      # contract above uses uv's managed no-project interpreter directly.
       - name: Validate package SKILL and mdBook examples
         run: devenv-retry --profile ci shell --no-tui -- cargo test -p chelis-e2e --test skill_suite
 

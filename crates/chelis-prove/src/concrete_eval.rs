@@ -27,13 +27,13 @@ use chelis_types::{
     CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue, cast_scalar, compare_scalars,
     float_binop, float_unop, int_binop, int_unop, scalar_from_f64, scalar_from_i64, types::Prim,
 };
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 /// Exact, dtype-carrying environment for concrete prover evaluation.
 ///
 /// The value type is deliberately sealed by `chelis-types`: callers cannot
 /// insert a bare `f64` or erase an integer width before evaluation.
-pub type ConcreteEnv = HashMap<String, ScalarValue>;
+pub type ConcreteEnv = UnordMap<String, ScalarValue>;
 
 /// Evaluate a boolean-shaped [`SmtExpr`] with the legacy *fuzz*
 /// comparison semantics: `==`/`!=` carry a `1e-10` tolerance. This is the
@@ -490,7 +490,7 @@ mod tests {
             Box::new(SmtExpr::IntLit(9_007_199_254_740_992)),
         );
         assert!(
-            eval_bool_strict(&distinct, &HashMap::new()),
+            eval_bool_strict(&distinct, &UnordMap::new()),
             "adjacent int64 values above 2^53 must not collapse in the concrete prover"
         );
     }
@@ -508,7 +508,7 @@ mod tests {
             Box::new(SmtExpr::IntLit(9_007_199_254_740_992)),
         );
         assert!(
-            eval_bool_strict(&exact, &HashMap::new()),
+            eval_bool_strict(&exact, &UnordMap::new()),
             "integer arithmetic must remain exact rather than compute through f64"
         );
     }
@@ -528,7 +528,7 @@ mod tests {
             Box::new(SmtExpr::IntLit(9_007_199_254_740_993)),
         );
         assert!(
-            eval_bool_strict(&exact, &HashMap::new()),
+            eval_bool_strict(&exact, &UnordMap::new()),
             "integer min must preserve the adjacent int64 distinction"
         );
     }

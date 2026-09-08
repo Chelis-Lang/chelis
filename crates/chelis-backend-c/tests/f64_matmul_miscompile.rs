@@ -21,9 +21,11 @@
 //! NOT contain `cblas_sgemm`. A regression that drops the precision
 //! filter would fail these assertions.
 
-use chelis_backend_c::{CodegenOptions, codegen_with_options};
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_backend_c::CodegenOptions;
+mod support;
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_with_options;
 
 fn t(prim: Prim, dims: Vec<usize>) -> TensorType {
     TensorType {
@@ -52,7 +54,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t(Prim::F64, vec![8, 16, 4]),
@@ -61,7 +63,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t(Prim::F64, vec![8, 16, 4]),
@@ -114,7 +116,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     // F64 slot allocation should still be present (the data is F64;
     // the generic expand+mul+sum path computes against it).
     assert!(
-        result.c_source.contains("CHELIS_F64"),
+        result.c_source.contains("CHELIS_DTYPE_F64"),
         "F64 slot allocation must be present on the generic path; got source:\n{}",
         result.c_source
     );
@@ -150,7 +152,7 @@ fn f32_matmul_subgraph_still_hits_blas_path_in_c_backend() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t(Prim::F32, vec![8, 16, 4]),
@@ -159,7 +161,7 @@ fn f32_matmul_subgraph_still_hits_blas_path_in_c_backend() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t(Prim::F32, vec![8, 16, 4]),

@@ -56,31 +56,12 @@ fn scalar_result(json: &Value) -> f64 {
         .unwrap_or_else(|| panic!("expected a scalar root value; json={json}"))
 }
 
-fn rank0_tensor_datum(json: &Value) -> f64 {
-    let data = json
-        .get("roots")
-        .and_then(Value::as_array)
-        .and_then(|roots| roots.first())
-        .and_then(|root| root.get("value"))
-        .and_then(|value| value.get("value"))
-        .and_then(|tensor| tensor.get("data"))
-        // Execution wire v2 (chelis#729): the payload is the tagged
-        // per-dtype form {"dtype": ..., "values": [...]}.
-        .and_then(|data| data.get("values"))
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| panic!("expected a rank-0 tensor root; json={json}"));
-    assert_eq!(data.len(), 1, "expected a single rank-0 datum; json={json}");
-    data[0]
-        .as_f64()
-        .unwrap_or_else(|| panic!("tensor datum must be a number; json={json}"))
-}
-
 #[test]
 fn f64_literal_above_one_ulp_survives_eval() {
     // The literal itself round-trips bit-for-bit through parse -> eval.
     // If the lexer or any later stage quantized to f32 this would read
     // back as exactly 1.0.
-    let v = rank0_tensor_datum(&eval_json("cast(1.0000000000000002, f64)"));
+    let v = scalar_result(&eval_json("cast(1.0000000000000002, f64)"));
     assert_eq!(
         v, 1.0000000000000002,
         "f64 literal must retain its >f32-ULP precision through eval"
@@ -110,7 +91,7 @@ fn f64_tenth_literal_is_exact_dyadic_not_f32_rounded() {
     // `0.1` cast to f64 is the f64-nearest value to one tenth. The f32
     // round of 0.1 (0.10000000149011612) widened to f64 would be a
     // different, larger value; binding at f64 directly avoids that.
-    let v = rank0_tensor_datum(&eval_json("cast(0.1, f64)"));
+    let v = scalar_result(&eval_json("cast(0.1, f64)"));
     assert_eq!(
         v, 0.1,
         "cast(0.1, f64) must bind at f64, not the f32-widened 0.1"

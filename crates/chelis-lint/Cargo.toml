@@ -11,6 +11,7 @@ name = "chelis_lint"
 path = "src/lib.rs"
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-surf.workspace = true
 ignore = "0.4"
@@ -23,3 +24,6 @@ chelis-deep.workspace = true
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+
+[lints]
+workspace = true

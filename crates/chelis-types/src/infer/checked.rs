@@ -9,7 +9,13 @@ use crate::context::LibraryProofId;
 #[derive(Clone)]
 pub(super) struct DeclaredSigMetadata {
     pub(super) param_types: Vec<deep::Expr>,
-    pub(super) binders: HashSet<String>,
+    pub(super) binders: UnordSet<String>,
+    /// Exact dtype-family capabilities authored on this signature. Keep the
+    /// decode result rather than defaulting malformed metadata to no bounds:
+    /// declaration collection owns the diagnostic, while structural users
+    /// may proceed only through `Ok`.
+    pub(super) dtype_bounds:
+        Result<UnordMap<String, chelis_deep::DtypeFamily>, chelis_deep::DtypeBoundsError>,
 }
 
 /// Explicit annotation-time declaration context. The declared signature map
@@ -18,11 +24,11 @@ pub(super) struct DeclaredSigMetadata {
 /// recursive annotation call.
 #[derive(Clone, Copy)]
 pub(super) struct AnnotationResolutionContext<'a> {
-    declared_signatures: &'a HashMap<String, DeclaredSigMetadata>,
+    declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>,
 }
 
 impl<'a> AnnotationResolutionContext<'a> {
-    pub(super) fn root(declared_signatures: &'a HashMap<String, DeclaredSigMetadata>) -> Self {
+    pub(super) fn root(declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>) -> Self {
         Self {
             declared_signatures,
         }
@@ -282,10 +288,15 @@ pub(super) struct InferenceProduct {
     pub(super) total_nodes: usize,
     pub(super) next_epoch: u64,
     pub(super) active_epoch: Option<TypeStampEpoch>,
-    pub(super) owner_types: HashMap<usize, FinalOwnerType>,
+    pub(super) owner_types: UnordMap<usize, FinalOwnerType>,
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
-    shape_lambda_tvars: HashSet<TypeVar>,
+    pub(super) function_inference_plan: FunctionInferencePlan,
+    /// The canonical declaration-reference graph built for this inference
+    /// run. Scheduling and initialization-cycle diagnostics consume this same
+    /// instance so the two policies cannot drift or repeat the lexical walk.
+    pub(super) top_level_references: TopLevelReferenceGraph,
+    shape_lambda_tvars: UnordSet<TypeVar>,
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
@@ -298,9 +309,12 @@ pub(super) enum DeferredShapeRule {
         name: String,
     },
     Expand {
+        /// `expand` or `insert`. The replay must reach the same route arm the
+        /// original call did, and the two differ in their result forms.
+        builtin: &'static str,
         axis_is_dim_name: bool,
         size_class: SizeClass,
-        env: Env,
+        env: Box<Env>,
     },
     LayerNorm,
     Conv2d,
@@ -329,15 +343,15 @@ enum DeferredTypeDerivation {
 
 pub(super) struct TypeStampEpoch {
     id: u64,
-    owners: HashMap<usize, StampRequirement>,
-    writes: HashMap<usize, Vec<OwnerTypeWrite>>,
+    owners: UnordMap<usize, StampRequirement>,
+    writes: UnordMap<usize, Vec<OwnerTypeWrite>>,
     /// Transitional per-node bridge identities. A `Node::to_list` reader
     /// clones children, so pointer-keyed owner writes from that temporary
     /// view must resolve back to the original stamped child registered by
     /// `begin_root`. The whole-tree normalization boundary is gone; this map
     /// remains only until the individual inference readers consume Nodes
     /// directly.
-    bridge_aliases: HashMap<usize, usize>,
+    bridge_aliases: UnordMap<usize, usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -373,9 +387,9 @@ impl InferenceProduct {
         self.next_epoch += 1;
         let mut epoch = TypeStampEpoch {
             id,
-            owners: HashMap::new(),
-            writes: HashMap::new(),
-            bridge_aliases: HashMap::new(),
+            owners: UnordMap::new(),
+            writes: UnordMap::new(),
+            bridge_aliases: UnordMap::new(),
         };
         register_annotation_owners(root, &mut epoch);
         self.active_epoch = Some(epoch);
@@ -404,9 +418,13 @@ impl InferenceProduct {
     pub(super) fn shape_operand_awaits_lambda_binding(&self, ty: &Type, subst: &Subst) -> bool {
         let applied = subst.apply(ty);
         match applied {
-            Type::Var(current) => self.shape_lambda_tvars.iter().any(|origin| {
-                crate::env::free_tvars(&subst.apply(&Type::Var(*origin))).contains(&current)
-            }),
+            Type::Var(current) => self
+                .shape_lambda_tvars
+                .to_sorted()
+                .into_iter()
+                .any(|origin| {
+                    crate::env::free_tvars(&subst.apply(&Type::Var(*origin))).contains(&current)
+                }),
             Type::Ref(inner) => self.shape_operand_awaits_lambda_binding(&inner, subst),
             _ => false,
         }
@@ -539,10 +557,12 @@ impl InferenceProduct {
                     errors,
                 ),
                 DeferredShapeRule::Expand {
+                    builtin,
                     axis_is_dim_name,
                     size_class,
                     env,
                 } => check_expand_signature(
+                    builtin,
                     &check.arg_exprs,
                     &check.arg_tys,
                     &check.result_ty,
@@ -593,7 +613,7 @@ impl InferenceProduct {
             let operation = match check.rule {
                 DeferredShapeRule::Matmul => "matmul".to_string(),
                 DeferredShapeRule::Reduction { name } => name,
-                DeferredShapeRule::Expand { .. } => "expand".to_string(),
+                DeferredShapeRule::Expand { builtin, .. } => (*builtin).to_string(),
                 DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
                 DeferredShapeRule::Conv2d => "conv2d".to_string(),
                 DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
@@ -709,7 +729,7 @@ impl InferenceProduct {
             return;
         };
 
-        for (key, requirement) in epoch.owners {
+        for (key, requirement) in epoch.owners.into_sorted() {
             let Some(writes) = epoch.writes.get(&key) else {
                 // Missing owners are diagnosed at the exact annotation lookup,
                 // where the original construct and role are still available.
@@ -744,11 +764,21 @@ impl InferenceProduct {
     }
 
     /// Apply the complete program substitution to the frozen owner stamps.
-    /// Most stamps are already concrete when their root finishes. Deferred
-    /// positional-expand shapes are intentionally selected by later roots,
-    /// so their earlier stamps need one final resolution before annotation.
+    /// Most stamps are already concrete when their root finishes, but a
+    /// variable an earlier root left open can be bound by a later one, so
+    /// every stamp gets one final resolution before annotation.
     pub(super) fn resolve_owner_types(&mut self, subst: &Subst) {
-        for owner in self.owner_types.values_mut() {
+        let keys = self
+            .owner_types
+            .to_sorted()
+            .into_iter()
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        for key in keys {
+            let owner = self
+                .owner_types
+                .get_mut(&key)
+                .expect("collected owner key remains present");
             owner.ty = subst.apply(&owner.ty);
         }
     }
@@ -1043,10 +1073,9 @@ pub(crate) fn run_finalization_mutation_case(
     };
     let _ = finalize_checked_program(
         annotated,
-        HashMap::new(),
+        BTreeMap::new(),
         &signature_context,
-        &TypeResolutionEnv::default(),
-        &AdtRegistry::default(),
+        &InferenceProduct::default(),
         InferStats::default(),
         errors,
     );
@@ -1057,9 +1086,9 @@ pub(crate) fn run_finalization_mutation_case(
 /// and parallel checks cannot observe another unit's declarations.
 pub(super) fn collect_declared_sig_metadata<'a>(
     exprs: impl IntoIterator<Item = &'a deep::Expr>,
-) -> HashMap<String, DeclaredSigMetadata> {
+) -> UnordMap<String, DeclaredSigMetadata> {
     let exprs = exprs.into_iter().collect::<Vec<_>>();
-    let mut map: HashMap<String, DeclaredSigMetadata> = HashMap::new();
+    let mut map: UnordMap<String, DeclaredSigMetadata> = UnordMap::new();
     for expr in &exprs {
         collect_defsig_param_types(expr, &mut map);
     }
@@ -1078,7 +1107,7 @@ pub(super) fn collect_declared_sig_metadata<'a>(
 /// `defsig` keeps an unrelated direct-Deep `(d-var ...)` annotation closed.
 pub(super) fn extend_declared_sig_binders_from_def_params(
     expr: &deep::Expr,
-    map: &mut HashMap<String, DeclaredSigMetadata>,
+    map: &mut UnordMap<String, DeclaredSigMetadata>,
 ) {
     stack_guard!("extend_declared_sig_binders_from_def_params", expr);
     let Some((tag, _, kids)) = stamped_parts(expr) else {
@@ -1141,7 +1170,7 @@ pub(super) fn extend_declared_sig_binders_from_def_params(
             _ => None,
         };
         if let Some(type_expr) = type_expr {
-            metadata.binders.extend(deep_type_binder_names(type_expr));
+            metadata.binders.merge(deep_type_binder_names(type_expr));
         }
     }
 }
@@ -1152,7 +1181,7 @@ pub(super) fn extend_declared_sig_binders_from_def_params(
 /// dropped). A re-declared name keeps the first sig seen.
 pub(super) fn collect_defsig_param_types(
     expr: &deep::Expr,
-    map: &mut HashMap<String, DeclaredSigMetadata>,
+    map: &mut UnordMap<String, DeclaredSigMetadata>,
 ) {
     // Bail before unbounded recursion exhausts the native stack on a
     // deeply-nested input. No error vector here; `stack_guard_tripped`
@@ -1162,7 +1191,7 @@ pub(super) fn collect_defsig_param_types(
     // keeps the "every recursive walker is bounded" invariant uniform and
     // cheap.)
     stack_guard!("collect_defsig_param_types", expr);
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
+    let Some((tag, meta, kids)) = stamped_parts(expr) else {
         return;
     };
     match tag {
@@ -1190,14 +1219,16 @@ pub(super) fn collect_defsig_param_types(
                 .or_insert_with(|| DeclaredSigMetadata {
                     param_types: param_type_exprs,
                     binders: deep_type_binder_names(&kids[1]),
+                    dtype_bounds: chelis_deep::decode_dtype_bounds(meta)
+                        .map(|bounds| bounds.into_iter().collect()),
                 });
         }
         _ => {}
     }
 }
 
-pub(super) fn deep_type_binder_names(type_expr: &deep::Expr) -> HashSet<String> {
-    let mut names = HashSet::new();
+pub(super) fn deep_type_binder_names(type_expr: &deep::Expr) -> UnordSet<String> {
+    let mut names = UnordSet::new();
     let mut pending = vec![type_expr];
     while let Some(current) = pending.pop() {
         let Some((tag, _, children)) = stamped_parts(current) else {
@@ -1231,7 +1262,7 @@ pub struct InferStats {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CheckedProgram {
     annotated_exprs: Vec<deep::Expr>,
-    type_env: HashMap<String, deep::Expr>,
+    type_env: BTreeMap<String, deep::Expr>,
     linearity: LinearityInfo,
     signature_inference: SignatureInferenceMetadata,
     type_headers: TypeResolutionEnv,
@@ -1252,7 +1283,7 @@ impl CheckedProgram {
     #[cfg(test)]
     pub(crate) fn unchecked_for_linearity_diagnostic_test(
         annotated_exprs: Vec<deep::Expr>,
-        type_env: HashMap<String, deep::Expr>,
+        type_env: BTreeMap<String, deep::Expr>,
     ) -> Self {
         Self {
             annotated_exprs,
@@ -1288,7 +1319,7 @@ impl CheckedProgram {
         &self.annotated_exprs
     }
 
-    pub fn type_env(&self) -> &HashMap<String, deep::Expr> {
+    pub fn type_env(&self) -> &BTreeMap<String, deep::Expr> {
         &self.type_env
     }
 
@@ -1431,18 +1462,18 @@ impl CheckedProgram {
 /// real root error is never duplicated by the totality backstop.
 pub(super) fn finalize_checked_program(
     annotated_exprs: Vec<deep::Expr>,
-    type_env: HashMap<String, deep::Expr>,
+    type_env: BTreeMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
-    type_headers: &TypeResolutionEnv,
-    adt_registry: &AdtRegistry,
+    product: &InferenceProduct,
     infer_stats: InferStats,
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
     let signature_inference = infer_signature_metadata_with_context_and_headers(
         &annotated_exprs,
+        &product.function_inference_plan,
         &type_env,
         signature_context,
-        type_headers,
+        &product.type_headers,
         errors,
     );
     let checked = CheckedProgram {
@@ -1450,8 +1481,8 @@ pub(super) fn finalize_checked_program(
         type_env,
         linearity: LinearityInfo::default(),
         signature_inference,
-        type_headers: type_headers.clone(),
-        adt_registry: adt_registry.clone(),
+        type_headers: product.type_headers.clone(),
+        adt_registry: product.adt_registry.clone(),
         infer_stats,
         library_proof_id: None,
         context_library_proof_id: None,

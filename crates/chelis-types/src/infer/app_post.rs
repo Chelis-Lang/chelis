@@ -23,12 +23,18 @@ pub(super) fn finish_unified_app(
     let checked_rule = checked_inference_rule(func_name.as_deref());
     let mut checked_route_observed = false;
 
-    // [04-TENSOR-EXPAND]: an expected tensor fixes whether positional expand
-    // replaces an existing axis (same rank) or inserts one (rank + 1).
-    // Without expected context, `check_expand_signature` records a deferred
-    // two-shape obligation that ordinary consumers can resolve. Seed only the
-    // direct expand body; other operations retain ordinary bottom-up inference.
-    if func_name.as_deref() == Some("expand")
+    // [04-TENSOR-EXPAND]: `expand` and `insert` each have one result shape,
+    // so an expected tensor selects nothing. Both still need the seed, for
+    // the same reason. Unseeded, the result is
+    // still a variable when `check_expand_signature` runs, so the call takes
+    // the `Type::Var(_) if inserts_only` arm, builds its one shape from the
+    // operand and axis alone, and any disagreement with the declared result
+    // surfaces later as a generic ascription mismatch naming no operation.
+    // Seeded, the call reaches the rank and precision arms that name the
+    // callee, and for an agreeing result both arms build the same shape.
+    // Both spellings and no other operation: everything else retains
+    // ordinary bottom-up inference.
+    if matches!(func_name.as_deref(), Some("expand") | Some("insert"))
         && let Some(expected) = expected_result
     {
         if let Err(error) = unify(&result_ty, expected, subst) {
@@ -53,265 +59,23 @@ pub(super) fn finish_unified_app(
         return rejected;
     }
 
-    if let Some(ref fname) = func_name
-        && fname == "uniform_like"
-    {
-        checked_route_observed = true;
-        if let Some(first_arg) = arg_tys.first() {
-            let resolved = type_for_readonly_check(first_arg, subst);
-            match &resolved {
-                Type::Tensor(_, prim) if prim.is_float() => {}
-                Type::Tensor(_, _) => {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "uniform_like expects a float tensor template, got {}",
-                                    resolved
-                                ),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-                Type::Var(_) | Type::Error(_) => {}
-                _ => {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "uniform_like expects tensor template input, got {}",
-                                    resolved
-                                ),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-            }
-        }
-
-        for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
-            let resolved = type_for_readonly_check(arg_ty, subst);
-            match &resolved {
-                Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
-                _ => {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "uniform_like expects f32 bounds for args 2-3, got {}",
-                                    resolved
-                                ),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-            }
-
-            if let Some(expr) = kids.get(index + 1)
-                && !is_static_numeric_bound(expr)
-            {
-                return report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            "uniform_like currently requires literal low/high bounds \
-                         (a numeric literal, optionally negated or cast to a float \
-                         type); a runtime-computed bound is not supported"
-                                .to_string(),
-                        ),
-                        vec![],
-                    ),
-                );
-            }
-        }
+    if let Some(rejected) = reject_inadmissible_operand_dtypes(
+        list,
+        kids,
+        func_name.as_deref(),
+        &arg_tys,
+        env,
+        subst,
+        errors,
+        &mut checked_route_observed,
+    ) {
+        return rejected;
     }
 
-    if let Some(ref fname) = func_name
-        && fname == "dropout"
+    if let Some(result) =
+        integer_binop_result_type(list, func_name.as_deref(), &arg_tys, vg, subst, errors)
     {
-        checked_route_observed = true;
-        if let Some(first_arg) = arg_tys.first() {
-            let resolved = type_for_readonly_check(first_arg, subst);
-            match &resolved {
-                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
-                _ => {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("dropout expects tensor input, got {}", resolved),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-            }
-        }
-
-        if let Some(rate_arg) = arg_tys.get(1) {
-            let resolved = subst.apply(rate_arg);
-            match &resolved {
-                Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
-                _ => {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("dropout expects f32 rate, got {}", resolved),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-            }
-        }
-    }
-
-    if let Some(ref fname) = func_name
-        && fname == "conv2d"
-    {
-        checked_route_observed = true;
-        for (index, arg_ty) in arg_tys.iter().enumerate() {
-            let resolved = type_for_readonly_check(arg_ty, subst);
-            if index < 2 {
-                match &resolved {
-                    Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
-                    _ => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "conv2d expects tensor inputs for args 1-2, got {}",
-                                        resolved
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            } else {
-                match &resolved {
-                    Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
-                    _ => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "conv2d expects int32 stride/padding, got {}",
-                                        resolved
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(ref fname) = func_name
-        && INT_BINOPS.contains(&fname.as_str())
-    {
-        let lhs = arg_tys
-            .first()
-            .map(|ty| subst.apply(ty))
-            .unwrap_or_else(|| vg.fresh_type());
-        let rhs = arg_tys
-            .get(1)
-            .map(|ty| subst.apply(ty))
-            .unwrap_or_else(|| vg.fresh_type());
-        match (&lhs, &rhs) {
-            (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
-                if lhs_prec.is_integer() && rhs_prec.is_integer() && lhs_prec == rhs_prec =>
-            {
-                return Type::Prim(*lhs_prec);
-            }
-            (Type::Var(_), Type::Prim(rhs_prec)) if rhs_prec.is_integer() => {
-                return lhs;
-            }
-            (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
-                return lhs;
-            }
-            (Type::Var(_), Type::Var(_)) | (Type::Error(_), _) | (_, Type::Error(_)) => {
-                return lhs;
-            }
-            _ => {
-                return report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!(
-                                "{} requires matching integer arguments, got {} and {}",
-                                fname, lhs, rhs
-                            ),
-                        ),
-                        vec![],
-                    ),
-                );
-            }
-        }
-    }
-
-    if let Some(ref fname) = func_name
-        && INT_SHIFT_OPS.contains(&fname.as_str())
-    {
-        let lhs = arg_tys
-            .first()
-            .map(|ty| subst.apply(ty))
-            .unwrap_or_else(|| vg.fresh_type());
-        let rhs = arg_tys
-            .get(1)
-            .map(|ty| subst.apply(ty))
-            .unwrap_or_else(|| vg.fresh_type());
-        let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
-            || matches!(&lhs, Type::Var(_) | Type::Error(_));
-        let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
-            || matches!(&rhs, Type::Var(_) | Type::Error(_));
-        if lhs_ok && rhs_ok {
-            return lhs;
-        }
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "{} requires integer lhs and shift amount, got {} and {}",
-                        fname, lhs, rhs
-                    ),
-                ),
-                vec![],
-            ),
-        );
+        return result;
     }
 
     // chelis#778 follow-up: a shape-computed builtin override derives
@@ -334,6 +98,7 @@ pub(super) fn finish_unified_app(
             fname,
             "matmul"
                 | "sum"
+                | "count"
                 | "max_reduce"
                 | "min_reduce"
                 | "prod_reduce"
@@ -380,7 +145,7 @@ pub(super) fn finish_unified_app(
                 }
                 result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
             }
-            "sum" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
+            "sum" | "count" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
             | "argmin_reduce" | "mean" => {
                 checked_route_observed = true;
                 if owes_shape_replay {
@@ -403,7 +168,9 @@ pub(super) fn finish_unified_app(
                     errors,
                 );
             }
-            "expand" => {
+            name @ ("expand" | "insert") => {
+                // `&'static str`, not the borrow: the deferred rule outlives `fname`.
+                let callee = if name == "insert" { "insert" } else { "expand" };
                 checked_route_observed = true;
                 // chelis#339: the axis slot is a dim NAME (the
                 // named-axis insert form) only when it is not bound in
@@ -425,9 +192,10 @@ pub(super) fn finish_unified_app(
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Expand {
+                            builtin: callee,
                             axis_is_dim_name,
                             size_class,
-                            env: env.clone(),
+                            env: Box::new(env.clone()),
                         },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
@@ -436,6 +204,7 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty = check_expand_signature(
+                    callee,
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
@@ -573,13 +342,25 @@ pub(super) fn finish_unified_app(
             _ => None,
         });
         if let Some(dims) = tensor_dims {
-            return Type::Tensor(dims, TensorPrec::Concrete(Prim::Bool));
+            // chelis#1265: route the result through unification rather than
+            // constructing it out of band. A consumer that supplies a shape
+            // must reach this call's result variable, or a declared shape
+            // simply binds a free variable and selects nothing.
+            let result = Type::Tensor(dims, TensorPrec::Concrete(Prim::Bool));
+            if let Err(error) = unify(&ret_tv, &result, subst) {
+                return report(errors, error.into());
+            }
+            return subst.apply(&ret_tv);
         }
         // No tensor arg → scalar comparison, returns scalar bool.
         if let Some(first_arg) = arg_tys.first() {
             let resolved_arg = type_for_readonly_check(first_arg, subst);
             if matches!(resolved_arg, Type::Prim(_)) {
-                return Type::Prim(Prim::Bool);
+                let result = Type::Prim(Prim::Bool);
+                if let Err(error) = unify(&ret_tv, &result, subst) {
+                    return report(errors, error.into());
+                }
+                return subst.apply(&ret_tv);
             }
         }
     }
@@ -818,6 +599,10 @@ pub(super) fn finish_unified_app(
             }
             "shape" => {
                 let input_dims = if let Some(first_arg) = arg_tys.first() {
+                    // A read-only operand may carry the tensor as `Ref<Var>`.
+                    // `type_for_readonly_check` peels that wrapper so borrowed
+                    // and unborrowed reads use the same rule before axis
+                    // validation.
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, _) => Some(dims),
                         Type::Var(_) | Type::Error(_) => None,
@@ -2960,20 +2745,11 @@ pub(super) fn finish_unified_app(
                     Type::Prim(Prim::String),
                 ]);
             }
-            // Host-lane JSON I/O (chelis#890): parse/serialize, dot-path
-            // accessors, output constructors over the prelude `Json` ADT,
-            // and `round_to` decimal rounding ([05-OP-1..5]). Eval-only;
-            // the build backends reject them (see
-            // `reject_eval_only_builtins_host`).
-            "parse_json" | "to_json" | "json_f64" | "json_int" | "json_str" | "json_list"
-            | "json_f64s" | "json_ints" | "jnum" | "jint" | "jstr" | "jlist" | "jdict"
-            | "json_set" | "round_to" => {
-                return check_json_builtin_signature(fname, list, &arg_tys, subst, errors);
+            "round_to" => {
+                return check_round_to_builtin_signature(list, &arg_tys, subst, errors);
             }
             // Host-lane CSV I/O (chelis#903): parse/serialize plus column
-            // accessors. A Csv document rides the `Json` ADT as a fixed
-            // shape, so the value type here is `Json`. Eval-only, like the
-            // JSON family above.
+            // accessors over the canonical List[Dict[string,string]] table.
             "parse_csv" | "to_csv" | "csv_f64s" | "csv_ints" | "csv_strs" | "csv_nrows"
             | "csv_cols" | "csv_f64" | "csv_int" | "csv_str" => {
                 return check_csv_builtin_signature(fname, list, &arg_tys, subst, errors);

@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-deep.workspace = true
 serde.workspace = true
 bincode = "1"
 semver = "1"
+
+[lints]
+workspace = true

@@ -134,6 +134,46 @@ fn fix2_unsound_generalization_rejected() {
     );
 }
 
+#[test]
+fn level_generalization_quantifies_only_the_ignored_inner_argument() {
+    // [04-INF-1] positive twin for `fix2_unsound_generalization_rejected`:
+    // `x` belongs to the enclosing lambda and must remain monomorphic, while
+    // the ignored `z` is created by the let RHS and may be generalized.
+    check_ok(
+        "(def {} test \
+           (fn {} (params {} x) \
+             (let {} (bind {} y (fn {} (params {} z) (var {} x))) \
+               (tuple {} \
+                 (app {} (var {} y) (lit {type: (t-prim {} int32)} 1)) \
+                 (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
+    );
+}
+
+#[cfg(feature = "generalize-sweep-oracle")]
+#[test]
+fn independent_binding_generalization_visits_zero_environment_bindings() {
+    let mut source = String::new();
+    for index in 0..128 {
+        source.push_str(&format!(
+            "(def {{}} independent_{index} \
+               (fn {{}} (params {{}} value_{index}) (var {{}} value_{index})))\n"
+        ));
+    }
+
+    crate::env::reset_generalize_sweep_env_visits();
+    let result = crate::env::without_generalize_sweep_oracle(|| check(&source));
+    assert!(
+        result.errors.is_empty(),
+        "generated independent-binding fixture must check: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        crate::env::generalize_sweep_env_visits(),
+        0,
+        "the production level path must not enumerate environment bindings"
+    );
+}
+
 // Fix 3: defsig not enforced — body must match declared signature
 #[test]
 fn fix3_defsig_enforced() {
@@ -213,6 +253,22 @@ fn fix7_fitness_unresolved_names() {
     assert!(report.errors.iter().all(|e| e.severity > 0.0));
 }
 
+#[test]
+fn fitness_uses_the_structured_identifier_instead_of_rendered_prose() {
+    let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
+    let mut result = crate::infer::infer_program(&exprs);
+    let error = result
+        .errors
+        .iter_mut()
+        .find(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. }))
+        .expect("unbound diagnostic");
+    error.message = "localized name-resolution rendering".to_string();
+
+    let report = crate::fitness::FitnessReport::from_infer_result(&result);
+    assert_eq!(report.unresolved_names, vec!["unknown"]);
+    assert!(report.components.names < 1.0);
+}
+
 // Fix 7b: suggestions populated for UnboundVariable
 #[test]
 fn fix7b_suggestions_for_unbound() {
@@ -220,7 +276,7 @@ fn fix7b_suggestions_for_unbound() {
     let unbound_err = result
         .errors
         .iter()
-        .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
+        .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }))
         .expect("expected UnboundVariable error");
     assert!(
         !unbound_err.suggestions.is_empty(),
@@ -231,8 +287,8 @@ fn fix7b_suggestions_for_unbound() {
 #[test]
 fn ir_literal_dimension_mismatch_surfaces_error() {
     let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
     )
     .expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
@@ -246,13 +302,21 @@ fn ir_literal_dimension_mismatch_surfaces_error() {
         "expected ir inference to preserve literal dimension mismatches, got {:?}",
         result.errors
     );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "dimension mismatch fixture must not include an unrelated trace return TypeMismatch: {:?}",
+        result.errors
+    );
 }
 
 #[test]
 fn ir_rejects_polymorphic_dims_pinned_by_body() {
     let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
          def main() -> f32 = cast(0.0, f32)\n",
     )
     .expect("surf parse");
@@ -265,6 +329,14 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
             .iter()
             .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
         "expected ir inference to reject polymorphic dims forced to literals by the body, got {:?}",
+        result.errors
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "polymorphic dimension fixture must not include an unrelated trace return TypeMismatch: {:?}",
         result.errors
     );
 }
@@ -283,7 +355,7 @@ fn ir_preserves_unresolved_name_errors() {
         result
             .errors
             .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
+            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. })),
         "expected ir inference to preserve unresolved-name errors, got {:?}",
         result.errors
     );
@@ -325,7 +397,7 @@ fn ir_resolves_consistently_mangled_constructor_names() {
     assert!(
         !result.errors.iter().any(|error| matches!(
             error.kind,
-            CheckErrorKind::UnboundVariable | CheckErrorKind::UnknownConstructor
+            CheckErrorKind::UnboundVariable { .. } | CheckErrorKind::UnknownConstructor { .. }
         )),
         "expected the consistently mangled constructor to resolve clean, got {:?}",
         result.errors
@@ -351,13 +423,23 @@ fn ir_rejects_out_of_scope_terminal_constructor_name() {
 
     let result = infer_ir_program(&exprs);
     assert!(
-        result.errors.iter().any(
-            |error| matches!(error.kind, CheckErrorKind::UnknownConstructor)
-                && error.message.contains("KVCache")
-        ),
+        result.errors.iter().any(|error| matches!(
+            error.kind,
+            CheckErrorKind::UnknownConstructor { .. }
+        ) && error.message.contains("KVCache")),
         "expected an UnknownConstructor for the out-of-scope bare `KVCache`, got {:?}",
         result.errors
     );
+
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|error| matches!(error.kind, CheckErrorKind::UnknownConstructor { .. }))
+        .expect("unknown constructor diagnostic");
+    assert_eq!(diagnostic.kind.unresolved_identifier(), Some("KVCache"));
+    let report = crate::fitness::FitnessReport::from_infer_result(&result);
+    assert_eq!(report.unresolved_names, vec!["KVCache"]);
+    assert!(report.components.names < 1.0);
 }
 
 // Fix 8: typed params in Deep
@@ -536,7 +618,7 @@ def predict(
   w: tensor[64, 1, f32],
   b: tensor[1, f32]
 ) -> tensor[batch, 1, f32] =
-  add(matmul(x, w), expand(b, 0, batch))
+  add(matmul(x, w), insert(b, 0, batch))
 "#,
     );
     let missing = checked
@@ -1215,7 +1297,7 @@ out = einsum("ij,jk->ik", a, b)
 }
 
 #[test]
-fn surf_scatter_replace_rejects_static_duplicate_indices() {
+fn surf_scatter_replace_accepts_static_duplicate_indices() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
@@ -1228,14 +1310,7 @@ out = scatter(base, idx, updates, 0, "replace")
         )
         .expect("surf parse"),
     ));
-    let err = result.expect_err("static scatter duplicate indices should be rejected");
-    assert!(
-        err.errors.iter().any(|error| {
-            error.message.contains("scatter") && error.message.contains("duplicate target index")
-        }),
-        "expected scatter duplicate-index rejection, got {:?}",
-        err.errors
-    );
+    result.expect("static scatter duplicate indices follow deterministic last-write-wins");
 }
 
 #[test]
@@ -1928,7 +2003,7 @@ fn narrow_keeps_wildcard_for_return_only_dim_var() {
 /// self-contained (the original #39 behavior).
 #[test]
 fn narrow_substitutes_literal_for_wildcard_unconditionally() {
-    let empty = HashSet::new();
+    let empty = UnordSet::new();
     let body = Type::Tensor(
         vec![Dim::Wildcard, Dim::Wildcard],
         TensorPrec::Concrete(Prim::F32),

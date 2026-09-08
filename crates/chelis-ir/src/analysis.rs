@@ -1,6 +1,7 @@
 //! Analysis helpers over lowered RISC DAGs.
 
-use std::collections::{HashSet, VecDeque};
+use chelis_unord::UnordSet;
+use std::collections::VecDeque;
 
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
@@ -170,7 +171,7 @@ pub fn analyze_function_copy_cost_for_roots(
 }
 
 fn reachable_nodes(dag: &Dag, roots: &[NodeId]) -> Vec<NodeId> {
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     let mut stack = roots.iter().copied().collect::<VecDeque<_>>();
     let mut out = Vec::new();
     while let Some(id) = stack.pop_back() {
