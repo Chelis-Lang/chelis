@@ -59,6 +59,7 @@ REQUIRED_TESTS = {
     PARITY_SOURCE: {
         "parity_dict_foundation",
         "parity_count_bool_axes",
+        "parity_generic_explicit_shape",
         "parity_hash_order_determinism",
         "parity_constraint_directed_risk_guards_library_only",
         "parity_iter_foundation",
@@ -147,6 +148,9 @@ REQUIRED_EVAL_RECEIPTS = {
 # chelis#1247/#1258 add parity_kinded_nominal_dimensions and its executable
 # example. The dedicated issue_1247_integer_type_application suite supplies
 # independent check/test/Surf/eval/C-backend evidence for the corpus change.
+# chelis#1621 adds generic_explicit_shape.ch and its executable parity row.
+# The independently reviewed issue_1621_scalar_surface_cli suite pins the
+# migration example's exact eval/C output and rejects implicit scalar mixing.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_comparator_accepts_byte_identical_tensor_lines": "9224411d844dc758300d5880b424edd89deea5eb9dfa9d12a34ba7257a58e38f",
@@ -156,8 +160,9 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "d5db9d33729fbc1bf028688505216e725e49d11354afd2b48f6d6d70745cd3ee",
+        "parity_corpus_is_complete": "4e4b6f1bfd2a07f4db977773f992ca6703ea819b0a5807045852ee3e3109b4db",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
+        "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",
         "parity_hash_order_determinism": "148c637280b238c9a119e22196960703873e291f1f0df59323c33ddb96b47170",
         # chelis#912 applies [05-OBS-7] uniformly: hello_tensor's pure
         # nullary `main` and opaque_invariants_simplex's top-level `eps`
