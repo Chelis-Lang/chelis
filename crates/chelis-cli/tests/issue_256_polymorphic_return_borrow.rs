@@ -598,11 +598,15 @@ fn borrow_of_deferred_var_resolving_to_non_carrying_adt_is_rejected() {
 /// `validate_deferred_borrow_vars` only when its inner type is an unresolved
 /// `Type::Var` at the borrow arm; a concrete header defers nothing, so that
 /// validator returns at its first line. This row locks that a borrow of a
-/// tensor-carrying ADT is accepted, and nothing more. **The #256 deferred-borrow
-/// classification is unexercised by the corpus on the positive side, pending
-/// chelis#1589**, which records that an inferred parameter rejects at the borrow
-/// arm instead of deferring, so no honest header reaches the path today. The
-/// negative twin below still reaches it.
+/// tensor-carrying ADT is accepted, and nothing more. The deferred
+/// classification's positive side is carried by the chelis#1589 rows at the
+/// end of this file. Those four rows are
+/// `borrow_of_inferred_param_resolving_to_carrier_is_accepted`,
+/// `borrow_of_unannotated_def_resolving_to_carrier_is_accepted`,
+/// `borrow_of_lambda_param_resolving_to_carrier_is_accepted` and
+/// `borrow_of_let_alias_of_inferred_param_is_accepted`, each of which reaches
+/// the validator's `sound=true` branch. The negative twin below reaches the
+/// reject branch.
 #[test]
 fn borrow_of_concrete_carrier_adt_is_accepted() {
     let dir = tempdir().expect("tempdir");
@@ -648,11 +652,15 @@ fn borrow_of_concrete_carrier_adt_is_accepted() {
 /// `validate_deferred_borrow_vars` only when its inner type is an unresolved
 /// `Type::Var` at the borrow arm; a concrete header defers nothing, so that
 /// validator returns at its first line. This row locks that a borrow of a
-/// tensor-carrying ADT is accepted, and nothing more. **The #256 deferred-borrow
-/// classification is unexercised by the corpus on the positive side, pending
-/// chelis#1589**, which records that an inferred parameter rejects at the borrow
-/// arm instead of deferring, so no honest header reaches the path today. The
-/// negative twin below still reaches it.
+/// tensor-carrying ADT is accepted, and nothing more. The deferred
+/// classification's positive side is carried by the chelis#1589 rows at the
+/// end of this file. Those four rows are
+/// `borrow_of_inferred_param_resolving_to_carrier_is_accepted`,
+/// `borrow_of_unannotated_def_resolving_to_carrier_is_accepted`,
+/// `borrow_of_lambda_param_resolving_to_carrier_is_accepted` and
+/// `borrow_of_let_alias_of_inferred_param_is_accepted`, each of which reaches
+/// the validator's `sound=true` branch. The negative twin below reaches the
+/// reject branch.
 #[test]
 fn borrow_of_concrete_transitive_carrier_is_accepted() {
     let dir = tempdir().expect("tempdir");
@@ -679,5 +687,329 @@ fn borrow_of_concrete_transitive_carrier_is_accepted() {
         kinds.is_empty(),
         "a deferred borrow that resolves to a transitively-tensor-carrying \
          ADT must be accepted; got {kinds:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1589: the deferred classification's accept branch, reached honestly.
+//
+// Rows C, E, F and G below are the four headers that reach
+// `validate_deferred_borrow_vars` on its `sound=true` branch. Each was
+// rejected before this change with score 0.80 and a single `InvalidBorrow`,
+// "borrowed arguments must be tensor or tensor-carrying values", raised by
+// linearity's `check_borrow_arg` after inference had already resolved the
+// inner to `BatchNormParams[n]`. `spec/04-type-system.md` §8.2 says the inner
+// "must be — or must ultimately resolve to" a carrier, so the rejection was a
+// spec-compliance defect: linearity failed closed on absent type information
+// rather than reading the resolved `&T` the annotate pass stamps on the
+// `borrow` node.
+//
+// These four rows carry the positive side of the classification that
+// `borrow_of_concrete_carrier_adt_is_accepted` and
+// `borrow_of_concrete_transitive_carrier_is_accepted` cannot: those two use a
+// concrete header, which defers nothing.
+// ---------------------------------------------------------------------------
+
+/// The shared prelude for the chelis#1589 rows: a tensor-carrying record ADT
+/// and a consumer whose parameter is `&BatchNormParams[n]`.
+const BNP_PRELUDE: &str = "type BatchNormParams[n] =\n  \
+     | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
+     sig consume_bnp: &BatchNormParams[n] -> bool\n\
+     def consume_bnp(p) = true\n";
+
+/// Write a `.ch` fixture with the `BNP_PRELUDE`, canonicalize it, and check it.
+fn check_bnp_program(dir: &Path, module: &str, body: &str) -> Value {
+    let fixture = dir.join(format!("{module}.ch"));
+    write_file(&fixture, &format!("module {module}\n{BNP_PRELUDE}{body}"));
+    fmt_inplace(&fixture);
+    run_check(&fixture)
+}
+
+/// Lower a `.ch` fixture to canonical Deep and check the `.dp` instead, so a
+/// row's verdict can be compared across both checker ingresses.
+fn check_via_deep_ingress(source: &Path) -> Value {
+    let deep = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["deep", source.to_str().unwrap()])
+        .output()
+        .expect("run chelis deep");
+    assert!(
+        deep.status.success(),
+        "chelis deep must succeed: {}",
+        String::from_utf8_lossy(&deep.stderr)
+    );
+    let lowered = source.with_extension("dp");
+    fs::write(&lowered, &deep.stdout).expect("write .dp");
+    run_check(&lowered)
+}
+
+/// chelis#1589 row C: **regression test**. An inferred parameter with a
+/// declared return type. `seed` has no annotation, so the borrow arm sees
+/// `Type::Var`, defers, and the call to `consume_bnp` pins it to
+/// `BatchNormParams[n]`; `validate_deferred_borrow_vars` then resolves it
+/// `sound=true`.
+///
+/// Red before this change: score 0.80, one `InvalidBorrow`, "borrowed
+/// arguments must be tensor or tensor-carrying values". Proven by reverting
+/// `crates/chelis-types/src/linearity.rs` to the parent commit and rerunning
+/// this test file.
+#[test]
+fn borrow_of_inferred_param_resolving_to_carrier_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let json = check_bnp_program(
+        dir.path(),
+        "Issue1589InferredParam",
+        "def use_it(seed) -> bool = consume_bnp(&seed)\n",
+    );
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a borrow of an inferred parameter that inference resolves to a \
+         tensor-carrying ADT must be accepted (spec/04 §8.2); got {kinds:?}"
+    );
+}
+
+/// chelis#1589 row C at the Deep ingress: **regression test**. The verdict
+/// must not depend on the entry point, so this asserts equality of score and
+/// error list between `chelis check f.ch` and `chelis check f.dp`, not merely
+/// that each is clean. Row C is the row whose verdict this change moves.
+///
+/// Red before this change at both ingresses (0.80 `InvalidBorrow` each), so
+/// the equality assertion held while the shared verdict was wrong; the score
+/// assertion is what turns red.
+#[test]
+fn borrow_of_inferred_param_agrees_across_both_ingresses() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("Issue1589InferredParamDeep.ch");
+    write_file(
+        &fixture,
+        &format!(
+            "module Issue1589InferredParamDeep\n{BNP_PRELUDE}\
+             def use_it(seed) -> bool = consume_bnp(&seed)\n"
+        ),
+    );
+    fmt_inplace(&fixture);
+
+    let surf = run_check(&fixture);
+    let deep = check_via_deep_ingress(&fixture);
+    assert_eq!(
+        surf["score"], deep["score"],
+        "Surf and Deep ingresses must agree on score: surf={surf}, deep={deep}"
+    );
+    assert_eq!(
+        error_messages(&surf),
+        error_messages(&deep),
+        "Surf and Deep ingresses must agree on the error list"
+    );
+    assert_eq!(surf["score"], 1, "perfect-score contract: {surf}");
+    assert!(
+        error_kinds(&surf).is_empty(),
+        "both ingresses must accept the inferred-parameter borrow; got {:?}",
+        error_kinds(&surf)
+    );
+}
+
+/// chelis#1589 row E: **regression test**. The same borrow with no annotation
+/// anywhere on `use_it` — neither a parameter type nor a return type. The
+/// return type is not what makes the inner visible, so removing it must not
+/// change the verdict.
+///
+/// Red before this change: score 0.80, one `InvalidBorrow`.
+#[test]
+fn borrow_of_unannotated_def_resolving_to_carrier_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let json = check_bnp_program(
+        dir.path(),
+        "Issue1589NoAnnotation",
+        "def use_it(seed) = consume_bnp(&seed)\n",
+    );
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a borrow inside a def with no annotation at all must be accepted \
+         when the callee pins the inner to a carrier; got {kinds:?}"
+    );
+}
+
+/// chelis#1589 row F: **regression test**. The lambda-parameter form. `v` is a
+/// lambda parameter, which carries no declared type in the linear scope for
+/// the same reason an inference-hole `def` parameter does, so the borrow inner
+/// is equally invisible to `expr_type`.
+///
+/// Red before this change: score 0.80, one `InvalidBorrow`.
+#[test]
+fn borrow_of_lambda_param_resolving_to_carrier_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let json = check_bnp_program(
+        dir.path(),
+        "Issue1589LambdaParam",
+        "def use_it[n](p: BatchNormParams[n]) -> bool = (fn (v) -> consume_bnp(&v))(p)\n",
+    );
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a borrow of a lambda parameter that resolves to a carrier must be \
+         accepted; got {kinds:?}"
+    );
+}
+
+/// chelis#1589 row G: **regression test**. The `let`-alias form. `v` takes its
+/// type from an inferred parameter, so the alias inherits the invisibility.
+/// This is the shape the two concrete-carrier locks above use, with the
+/// concrete header replaced by an inferred one.
+///
+/// Red before this change: score 0.80, one `InvalidBorrow`.
+#[test]
+fn borrow_of_let_alias_of_inferred_param_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let json = check_bnp_program(
+        dir.path(),
+        "Issue1589LetAlias",
+        "def use_it(seed) -> bool = {\n  v = seed\n  consume_bnp(&v)\n}\n",
+    );
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a borrow of a let alias of an inferred parameter must be accepted \
+         when the alias resolves to a carrier; got {kinds:?}"
+    );
+}
+
+/// chelis#1589 row J: **disposition lock**. The never-pinned program with an
+/// inferred parameter and no authored binder anywhere. Its job is to hold
+/// `validate_deferred_borrow_vars`'s reject branch on the one header shape the
+/// suite did not cover: the three existing reject rows all carry an authored
+/// `[a]` binder somewhere, so none of them proves the validator still fires
+/// when the deferral originates from a synthesized inference hole.
+///
+/// This is the row that shows the chelis#1589 repair does not widen the
+/// deferred path. It reaches linearity's new fallback only if the validator
+/// stops rejecting first, and it must not: a value never pinned to a tensor
+/// reaching the borrow-erased backend is the chelis#256 round-2 unsoundness.
+///
+/// Green in both states. The subject in the message is an internal type-variable
+/// identity, so this asserts the kind and the message prefix, never the number.
+#[test]
+fn borrow_of_never_pinned_inferred_param_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("Issue1589NeverPinned.ch");
+    write_file(
+        &fixture,
+        "module Issue1589NeverPinned\n\
+         def consume_any[a](t: a) -> bool = true\n\
+         def use_it(seed) -> bool = {\n\
+           v = seed\n\
+           consume_any(&v)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert!(
+        kinds.iter().any(|k| k == "TypeMismatch"),
+        "a never-pinned deferred borrow must be rejected by the deferred \
+         validator, not accepted; got {kinds:?} in {json}"
+    );
+    assert!(
+        error_messages(&json)
+            .iter()
+            .any(|m| m.starts_with("borrow requires tensor or tensor-carrying input, got ")),
+        "the rejection must name the unresolved subject; got {:?}",
+        error_messages(&json)
+    );
+}
+
+/// chelis#1589 negative parity: **disposition lock**. The failure twin of rows
+/// C/E/F/G — the same inferred-parameter route, with the consumer's parameter
+/// changed to a record that carries no tensor. It must stay rejected.
+///
+/// Which gate rejects it is measured, not assumed, and it is not linearity:
+/// `validate_deferred_borrow_vars` resolves the deferred variable to `Config`,
+/// classifies it `sound=false`, and reports `TypeMismatch`, "borrow requires
+/// tensor or tensor-carrying input, got Config". Type analysis therefore fails
+/// and `check_linearity` never runs, so this row cannot exercise the carrier
+/// test in linearity's new fallback; the validator's round-3 comment says as
+/// much ("linearity's loosened classifier can no longer be relied on to catch
+/// it"). Recorded because the chelis#1589 design expected this row to be a
+/// regression test for the fallback, and a mutation receipt showed it is not.
+///
+/// Green in both states. Its job is to hold the boundary of the acceptance the
+/// repair adds: an inferred parameter is accepted because it resolves to a
+/// carrier, not because it is inferred.
+#[test]
+fn borrow_of_inferred_param_resolving_to_non_carrier_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("Issue1589InferredNonCarrier.ch");
+    write_file(
+        &fixture,
+        "module Issue1589InferredNonCarrier\n\
+         type Config = | Config { lr: f32 }\n\
+         sig consume_cfg: &Config -> bool\n\
+         def consume_cfg(c) = true\n\
+         def use_it(seed) -> bool = consume_cfg(&seed)\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    assert!(
+        error_kinds(&json).iter().any(|k| k == "TypeMismatch"),
+        "a borrow of an inferred parameter that resolves to a non-carrying \
+         record must stay rejected; got clean {json}"
+    );
+    assert!(
+        error_messages(&json)
+            .iter()
+            .any(|m| m == "borrow requires tensor or tensor-carrying input, got Config"),
+        "the rejection must come from the deferred validator and name \
+         `Config`; got {:?}",
+        error_messages(&json)
+    );
+}
+
+/// chelis#1589 row L: **disposition lock** on `spec/04-type-system.md` §8.2's
+/// own worked example, written out. `v = relu(seed)` where `seed`'s dimension
+/// variables are bound by the enclosing header, borrowed against a
+/// `&tensor[a, c, h, w, f32]` parameter.
+///
+/// §8.2 used to offer this shape as its illustration of the deferral. It is
+/// not one: a tensor whose dimension variables are unresolved is still
+/// `Type::Tensor`, which the borrow arm matches and classifies immediately;
+/// only an unknown outer type constructor takes the defer branch. This change
+/// corrects that paragraph, and this row locks the verdict the corrected
+/// sentence predicts — accepted, with the classification decided at the borrow
+/// site rather than at the drain.
+///
+/// Green in both states, and the verdict alone does not distinguish the two
+/// mechanisms: a deferral that resolved soundly would also be accepted. That
+/// `validator-drain count=0` for this program was established by probe
+/// instrumentation during the chelis#1589 measurement, not by this assertion.
+#[test]
+fn borrow_of_relu_result_with_unresolved_dims_is_accepted() {
+    let dir = tempdir().expect("tempdir");
+    let fixture = dir.path().join("Issue1589UnresolvedDims.ch");
+    write_file(
+        &fixture,
+        "module Issue1589UnresolvedDims\n\
+         sig consume_t: &tensor[a, c, h, w, f32] -> bool\n\
+         def consume_t(t) = true\n\
+         def use_it[a, c, h, w](seed: tensor[a, c, h, w, f32]) -> bool = {\n\
+           v = relu(seed)\n\
+           consume_t(&v)\n\
+         }\n",
+    );
+    fmt_inplace(&fixture);
+
+    let json = run_check(&fixture);
+    let kinds = error_kinds(&json);
+    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert!(
+        kinds.is_empty(),
+        "a borrow of a tensor with unresolved dimension variables must be \
+         accepted; got {kinds:?}"
     );
 }

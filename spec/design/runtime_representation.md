@@ -195,6 +195,81 @@ Adding a `RuntimeDType`, `Repr`, arithmetic representation, or element marker
 must break an exhaustive compile target until the complete registration exists.
 That mutation is a Phase 1 acceptance test, not a review convention.
 
+### C1 vocabulary delivery boundary
+
+The dependency-bottom vocabulary can ship independently of the runtime element
+seal and checked metadata: existing `RuntimeDType::repr()` and `byte_width()`
+callers immediately consume `contract()`, without changing storage, ABI IDs,
+kernel behavior, or arithmetic policy. This slice implements `DTypeContract`
+and `ArithmeticRepr`, not the whole Phase 1 or the #899 Phase 4 exit.
+
+Its executable acceptance surface is:
+
+```sh
+cargo nextest run -p chelis-vocab --test dtype_contract --test dtype_contract_compile
+```
+
+Every selected test must execute and pass. The table test covers all nine
+[04-NUM-8] rows and negative equal-width/bool cases. Compile controls admit a
+real external consumer, reject forged or rewritten private contracts, and
+mutate each vocabulary in isolated source copies. New dtype controls complete
+the other naming/decoding projections so the missing contract itself must
+fail compilation. No tracked source is mutated by these tests.
+
+The inventory gains `ArithmeticRepr` variant enumeration. Its six exact
+registered variants and `DTypeContract::byte_width` in the vocabulary owner
+are final forms, justified by this executed contract suite; another variant,
+path, or width-helper owner is not. Existing foundation rows remain unchanged,
+and no new transition debt is authorized. The Phase 0 coverage manifest binds
+these final forms and runs the contract suite; its freeze digest changes for
+that reviewed acceptance addition, not to bless a new debt row. The broader
+Phase 1 command remains unimplemented until its other deliverables are green.
+
+### C1 runtime element delivery boundary
+
+The inventory enumerates every trait implementation in the private `element`
+owner, not only implementations whose written trait name is `ElementStorage`.
+Only the exact storage, private-seal, arithmetic-identity, and blanket-projection
+rows are admitted. Import aliases, including aliases defined in another file,
+cannot hide an extra binding; an additional seal implementation is itself a
+new row. Qualified trait spelling and enclosing module ownership remain part
+of the row identity. The added-binding mutation exercises an ordinary alias.
+
+The next independently shippable slice seals the runtime's existing element
+implementations and binds their storage and arithmetic types to `DTypeContract`.
+It leaves the existing unsafe pointer methods at their frozen identities until
+Phase 3 replaces them with validated views; sealing implementations is not a
+claim that arbitrary pointer access is gone.
+
+`element.rs` owns `ElementStorage`, with a private sealing supertrait. The
+public `TensorElement` requires that sealed storage registration and has one
+blanket implementation projecting its dtype, `Repr`, and arithmetic type.
+Neither downstream crates nor sibling runtime modules can register another
+storage type. An exhaustive dtype match instantiates compile-time assertions
+for every registration: exact dtype and representation identity, storage size,
+and arithmetic representation. An equal-width float/integer pairing must fail,
+not merely an unequal-size pairing.
+
+`F16Bits` and `Bf16Bits` name the existing distinct `half::f16` and `half::bf16`
+transparent storage types, not bare `u16` aliases. Reusing those types preserves
+all existing kernel implementations and exact bit conversions. `Bool8` retains
+its checked constructors and uses `()` to denote no arithmetic type; `()` is
+not a tensor element. This slice adds no numerical operation or C ABI.
+
+Acceptance is `cargo nextest run -p chelis-runtime --test element_contract`:
+all nine storage/arithmetic rows, all narrow-float bit patterns, Bool8's complete
+byte domain, equal-width mismatch rejection, and executed compile controls for
+external and sibling-module sealing and incomplete/wrong registrations. Compile
+mutations use isolated copies of the real registration and trait declaration,
+with stubs only for the unchanged raw-access environment; positive controls
+also compile against the real runtime crate. The Phase 0 oracle executes this
+suite in release mode and inventories every trait implementation in the element
+owner. Its exact final set admits the nine storage registrations and private
+seals, the seven arithmetic identities, the derived blanket projection, and
+the compile-time assertion owner. The old nine unsealed bindings leave
+active debt; foundation rows remain immutable. No raw-access debt is relocated
+or reauthorized. Phase 1 still awaits checked metadata and its complete oracle.
+
 ## C2. Exact capacity identity and checked finite counts
 
 Compiler equality and runtime allocation are related but distinct domains.
@@ -647,6 +722,13 @@ universe by eight `chelis-ir/src/ownership/` files without adding or
 reclassifying a representation-seam row. That source-list-only freeze move is
 covered by the existing `unregistered-inventory-source` mutation; no numbered
 representation rule changes with it.
+
+The opt-in lowering trace likewise registers `chelis-ir/src/lowering_trace.rs`
+in that source universe. It clones existing DAG carriers without introducing a
+representation-seam row. Only the source count and corresponding integrity
+digest change; foundation rows, active debt, and mutation implementations stay
+unchanged. The existing `unregistered-inventory-source` mutation covers this
+source-list-only move. No numbered representation semantics change.
 
 ## B2. Invariants at every phase boundary
 

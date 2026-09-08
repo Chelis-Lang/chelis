@@ -955,7 +955,7 @@ impl Checker {
             );
             return;
         }
-        if !self.expr_is_owned_or_borrow_linear(inner, scope) {
+        if !self.borrow_target_is_linear(borrow_expr, inner, scope) {
             self.invalid_borrow(
                 borrow_expr,
                 "borrowed arguments must be tensor or tensor-carrying values",
@@ -963,6 +963,50 @@ impl Checker {
             return;
         }
         self.read_var_expr(inner, scope);
+    }
+
+    /// chelis#1589: classify a borrow target, falling back to the
+    /// `borrow` node's own resolved stamp when the inner carries no
+    /// visible type.
+    ///
+    /// `expr_type` can see nothing at all for the inner of a borrow
+    /// whose parameter annotation was a synthesized inference hole:
+    /// `DeepTag::Var` is in `should_attach_type_metadata`'s deny list so
+    /// a `(var ..)` node never carries `:type`, and the scope entry that
+    /// `param_name_and_type` builds is empty because the parameter was
+    /// emitted as a bare name. `expr_is_owned_or_borrow_linear` is an
+    /// `is_some_and`, so absent information became a rejection: a
+    /// fail-closed, not a classification.
+    ///
+    /// `spec/04-type-system.md` §8.2 decides the rule on the type the
+    /// inner "must be — or must ultimately resolve to", and by the time
+    /// linearity runs that resolution has happened: the `borrow` node is
+    /// metadata-eligible and the annotate pass stamps it with the
+    /// resolved `&T`. Read that stamp instead of rejecting.
+    ///
+    /// This never weakens the deferred-borrow gate. `check_linearity`
+    /// runs only on a successful type analysis
+    /// (`chelis_pipeline_core::semantic::complete_checks_in_context`),
+    /// and `validate_deferred_borrow_vars` rejects an unsound deferral
+    /// during inference, so a borrow whose deferred classification
+    /// failed never reaches this function. The validator remains the
+    /// sole authority on the deferred path; this gate is a redundancy
+    /// check on the resolved type.
+    fn borrow_target_is_linear(
+        &self,
+        borrow_expr: &Expr,
+        inner: &Expr,
+        scope: &LinearScope,
+    ) -> bool {
+        if self.expr_type(inner, scope).is_some() {
+            return self.expr_is_owned_or_borrow_linear(inner, scope);
+        }
+        // Both predicates already recurse through `DeepTag::TRef`, so the
+        // stamped `(t-ref ..)` is passed through without peeling.
+        type_metadata(borrow_expr).is_some_and(|ty| {
+            type_expr_contains_tensor(ty, &self.tensor_carrying_adts)
+                || type_expr_is_unresolved_tvar(ty)
+        })
     }
 
     fn check_let(&mut self, list: &List, scope: &mut LinearScope) {

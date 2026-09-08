@@ -98,30 +98,40 @@ pub(super) fn infer_tuple_get(
     // silently erasing the element type — `Type::Error` then unifies
     // with anything, so a value derived from a tuple projection lost
     // its nominal type at every downstream boundary (chelis#707).
-    let index = match tuple_get_index(&kids[1]) {
-        Some(index) => index,
-        None => {
-            // A malformed index (negative, float, symbol, or any
-            // non-literal) is not a valid projection. Diagnose it
-            // rather than returning a silent `Type::Error`: a bare
-            // negative `Int` used to blow up as `-1 as usize` into a
-            // loud out-of-bounds error, and every other shape was
-            // silently swallowed — both are undiagnosed `Type::Error`
-            // under an empty error vector, the §04-TOT-2 hole this fix
-            // otherwise closes (chelis#707, rt-707).
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::TupleIndexOutOfBounds,
-                    format!(
-                        "invalid tuple index: expected a non-negative integer \
-                     literal, found {}",
-                        describe_tuple_index(&kids[1]),
-                    ),
-                    vec![],
-                ),
-            );
-        }
+    // A malformed index (negative, float, symbol, or any non-literal) is not a
+    // valid projection. Diagnosing it rather than returning a silent
+    // `Type::Error` is chelis#707/rt-707: a bare negative `Int` used to blow up
+    // as `-1 as usize` into a loud out-of-bounds error, and every other shape
+    // was silently swallowed.
+    //
+    // chelis#874 Slice 2 moves it onto the shared seam. The KIND changes from
+    // `TupleIndexOutOfBounds` to `MalformedForm`, which is the honest one: an
+    // unreadable index is not out of bounds, and the genuine out-of-bounds
+    // arm below keeps the kind so it means only what it says. The caller
+    // detail keeps `describe_tuple_index`, which peels a `lit` wrapper to name
+    // the payload atom -- chelis#1107's PP7 [04-TOT-5] row exists because the
+    // two ingresses once disagreed on exactly that wording. It is suppressed
+    // for a bare atom, which `describe_slot_child` already names identically.
+    let index = match read_required_slot_detailed(
+        kids,
+        DeepTag::TupleGet,
+        1,
+        SlotShape::TupleIndex,
+        tuple_get_index,
+        |child| {
+            // Suppressed for a bare atom: `describe_slot_child` already names
+            // it identically, and "found integer literal -1 (integer literal
+            // -1)" would be noise.
+            if matches!(child, deep::Expr::Atom(..)) {
+                None
+            } else {
+                Some(describe_tuple_index(child))
+            }
+        },
+        errors,
+    ) {
+        Ok(index) => index,
+        Err(witness) => return propagate(&witness),
     };
     match resolved {
         Type::Tuple(ref elems) => {
@@ -531,13 +541,22 @@ pub(super) fn infer_access(
         );
     }
     let target_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let Some(field_name) = symbol_name(&kids[1]) else {
-        return malformed_form(
-            list,
-            "access",
-            "a symbol field name as its second child",
-            errors,
-        );
+    // chelis#874 Slice 2: this read was already total, and its failure branch
+    // already pushed. Migrating it onto the shared seam is what makes ONE
+    // mechanism own every role-slot read, which is chelis#874's condition. The
+    // message improves in passing: `malformed_form` reported the node's CHILD
+    // COUNT as what it "found", which says nothing about a two-child `access`
+    // whose second child is the wrong shape; the seam names that child.
+    let field_name = match read_required_slot(
+        kids,
+        DeepTag::Access,
+        1,
+        SlotShape::FieldName,
+        symbol_name,
+        errors,
+    ) {
+        Ok(name) => name,
+        Err(witness) => return propagate(&witness),
     };
     // Peel borrow layers: an `&T` target reads through the borrow.
     let mut resolved = subst.apply(&target_ty);
@@ -818,22 +837,31 @@ pub(super) fn infer_cast(
     if kids.len() < 2 {
         return malformed_form(list, "cast", "an expression and a target type", errors);
     }
-    let mode = match deep::cast_mode_of(kids) {
-        Ok(mode) => mode,
-        Err(selector) => {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::CastNonTensor,
-                    format!("`{selector}` is not a recognized cast mode selector"),
-                    vec![
-                        "the only named cast rung is `trunc` (`cast_trunc`, \
-                         [05-OP-6]); omit the selector for the checked default"
-                            .to_string(),
-                    ],
-                ),
-            );
-        }
+    // chelis#874 Slice 2: the optional [05-OP-6] mode selector at child 2.
+    // `deep::cast_mode_of` handled absence internally and returned a `Result`,
+    // which is the seam's shape in miniature; reading it through the seam makes
+    // the absence-versus-unreadability split visible AT the call site and puts
+    // the last `Selector` slot on one mechanism. The kind changes from
+    // `CastNonTensor` to `MalformedForm`, which is again the honest one: an
+    // unrecognized selector is a malformed form, not a non-tensor cast, and
+    // `CastNonTensor` keeps its two real users (the cast target and the
+    // operand).
+    //
+    // `deep::cast_mode_of` itself is deliberately untouched: `chelis-ir`'s
+    // `lower.rs` and `host.rs` and `chelis-compiler-api`'s `eval.rs` each
+    // format their own copy of the old message from it, and a CHECKED program
+    // never reaches those arms.
+    let mode = match read_optional_slot(
+        kids,
+        DeepTag::Cast,
+        2,
+        SlotShape::ModeSelector,
+        |child| symbol_name(child).and_then(deep::CastMode::from_deep_selector),
+        errors,
+    ) {
+        Ok(Some(mode)) => mode,
+        Ok(None) => deep::CastMode::Checked,
+        Err(witness) => return propagate(&witness),
     };
 
     let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);

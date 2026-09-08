@@ -213,6 +213,51 @@ class BaselineTests(unittest.TestCase):
 
 
 class MutationContractTests(unittest.TestCase):
+    def test_element_final_forms_are_exact_and_never_admit_raw_access(self) -> None:
+        for owner in oracle.ELEMENT_FINAL_CONTRACT_OWNERS:
+            self.assertTrue(oracle.owner_module_final_form(
+                "dtype-contract", oracle.ELEMENT_OWNER, owner
+            ))
+            for kind, path, candidate in (
+                ("dtype-contract", oracle.ELEMENT_OWNER, owner + "New"),
+                ("dtype-contract", "crates/chelis-runtime/src/lib.rs", owner),
+                ("raw-element-pointer", oracle.ELEMENT_OWNER, owner),
+            ):
+                self.assertFalse(oracle.owner_module_final_form(kind, path, candidate))
+        self.assertTrue(oracle.owner_module_final_form(
+            "width-arithmetic", oracle.ELEMENT_OWNER, "assert_registration"
+        ))
+        self.assertFalse(oracle.owner_module_final_form(
+            "raw-element-pointer", oracle.ELEMENT_OWNER, "assert_registration"
+        ))
+        self.assertTrue(any("element_contract" in leg.argv for leg in oracle.phase0_legs()))
+        probe = next(p for p in oracle.phase0_mutation_probes()
+                     if p.witness_id == "phase0.mutate_element_binding")
+        self.assertEqual(probe.expected_owners, (
+            "Storage for UnregisteredElement", "private :: Sealed for UnregisteredElement",
+        ))
+        self.assertIn("impl Storage for UnregisteredElement", probe.mutate(""))
+
+    def test_vocabulary_final_forms_do_not_admit_new_variants_or_owners(self) -> None:
+        path = "crates/chelis-vocab/src/lib.rs"
+        for owner in oracle.VOCAB_FINAL_CONTRACT_OWNERS:
+            self.assertTrue(oracle.owner_module_final_form("dtype-contract", path, owner))
+            self.assertFalse(
+                oracle.owner_module_final_form("dtype-contract", path, owner + "New")
+            )
+            self.assertFalse(oracle.owner_module_final_form(
+                "dtype-contract", "crates/chelis-runtime/src/lib.rs", owner
+            ))
+        self.assertTrue(oracle.owner_module_final_form(
+            "width-arithmetic", path, "DTypeContract::byte_width"
+        ))
+        self.assertFalse(oracle.owner_module_final_form(
+            "width-arithmetic", path, "DTypeContract::other_width"
+        ))
+        self.assertFalse(oracle.owner_module_final_form(
+            "raw-element-pointer", path, "DTypeContract::byte_width"
+        ))
+
     def test_every_seam_kind_in_the_ledger_has_a_mutation(self) -> None:
         baseline = oracle.load_baseline()
         kinds = {
@@ -458,5 +503,5 @@ class RedTeamRegressionTests(unittest.TestCase):
         rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
         headers = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn("Sixty-one are Rust and seven are C or Objective-C headers", source)
-        self.assertEqual((rust, headers), (61, 7))
+        self.assertIn("Sixty-three are Rust and seven are C or Objective-C headers", source)
+        self.assertEqual((rust, headers), (63, 7))

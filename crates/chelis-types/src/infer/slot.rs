@@ -27,7 +27,9 @@
 //!   witness of a diagnostic that has already been pushed.
 //! * The diagnostic is composed here from the parent [`DeepTag`] and a
 //!   [`SlotShape`], so it always names the form and the expected shape and is
-//!   always a `MalformedForm`. No caller supplies message text.
+//!   always a `MalformedForm`. A caller may APPEND a richer description of
+//!   what it found, through [`read_required_slot_detailed`]; it cannot supply
+//!   the message, drop either name, or change the kind.
 //!
 //! What the seam does NOT decide is what the caller does next. Reporting a
 //! malformed slot must not stop the walk from visiting the form's other
@@ -65,7 +67,7 @@ pub(super) fn read_optional_slot<'a, T>(
     };
     match extract(child) {
         Some(value) => Ok(Some(value)),
-        None => Err(malformed_slot(tag, index, shape, Some(child), errors)),
+        None => Err(malformed_slot(tag, index, shape, Some(child), None, errors)),
     }
 }
 
@@ -81,11 +83,56 @@ pub(super) fn read_required_slot<'a, T>(
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<T, ErrorWitness> {
     let Some(child) = kids.get(index) else {
-        return Err(malformed_slot(tag, index, shape, None, errors));
+        return Err(malformed_slot(tag, index, shape, None, None, errors));
     };
     match extract(child) {
         Some(value) => Ok(value),
-        None => Err(malformed_slot(tag, index, shape, Some(child), errors)),
+        None => Err(malformed_slot(tag, index, shape, Some(child), None, errors)),
+    }
+}
+
+/// [`read_required_slot`] with a caller-supplied description of what it found.
+///
+/// `detail` is APPENDED after the seam's own found-shape description; it
+/// cannot replace it, suppress the push, or change the kind. It exists for a
+/// slot whose owner can say more than [`describe_slot_child`] can, and it has
+/// exactly one consumer: `tuple-get`, whose `describe_tuple_index` peels a
+/// `lit` wrapper to name the payload atom's family and value.
+///
+/// That consumer is why the affordance exists rather than a matter of taste.
+/// chelis#1107's PP7 row
+/// (`negative_tuple_get_index_is_rejected_alike_on_both_ingresses`) is a
+/// [04-TOT-5] regression test that exists BECAUSE the two checker ingresses
+/// once disagreed on exactly this found-shape wording: one of them described a
+/// plainly-integer `lit` index as "a non-literal expression". Dropping the
+/// detail would weaken that totality regression test in order to land this
+/// one.
+///
+/// A caller returning `None` from `detail` gets the generic description alone,
+/// which is what `tuple-get` does for a bare atom the generic describer
+/// already names.
+pub(super) fn read_required_slot_detailed<'a, T>(
+    kids: &'a [deep::Expr],
+    tag: DeepTag,
+    index: usize,
+    shape: SlotShape,
+    extract: impl FnOnce(&'a deep::Expr) -> Option<T>,
+    detail: impl FnOnce(&'a deep::Expr) -> Option<String>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<T, ErrorWitness> {
+    let Some(child) = kids.get(index) else {
+        return Err(malformed_slot(tag, index, shape, None, None, errors));
+    };
+    match extract(child) {
+        Some(value) => Ok(value),
+        None => Err(malformed_slot(
+            tag,
+            index,
+            shape,
+            Some(child),
+            detail(child),
+            errors,
+        )),
     }
 }
 
@@ -98,11 +145,16 @@ fn malformed_slot(
     index: usize,
     shape: SlotShape,
     child: Option<&deep::Expr>,
+    detail: Option<String>,
     errors: &mut DiagnosticSink<'_>,
 ) -> ErrorWitness {
     let found = match child {
         Some(child) => describe_slot_child(child),
         None => "no child at that position".to_string(),
+    };
+    let found = match detail {
+        Some(detail) => format!("{found} ({detail})"),
+        None => found,
     };
     report_witness(
         errors,

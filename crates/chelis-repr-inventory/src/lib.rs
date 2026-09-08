@@ -262,7 +262,7 @@ fn multiplicative_call(
 }
 
 /// Types whose variants are the dtype/representation contract.
-const DTYPE_CONTRACT_TYPES: &[&str] = &["Repr", "RuntimeDType"];
+const DTYPE_CONTRACT_TYPES: &[&str] = &["Repr", "RuntimeDType", "ArithmeticRepr"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceClass {
@@ -571,6 +571,9 @@ struct RustSeamScanner {
     /// The exact-capacity owner admits checked/exact arithmetic but never a
     /// saturating fold.
     exact_capacity_owner: bool,
+    /// The private seal makes every trait implementation in this owner part
+    /// of its closed registration universe, irrespective of import spelling.
+    element_storage_owner: bool,
     legacy_capacity_aliases: BTreeSet<String>,
     multiplication_aliases: BTreeSet<String>,
     owners: Vec<String>,
@@ -766,10 +769,18 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
             .as_ref()
             .and_then(|(_, path, _)| path.segments.last())
             .map(|segment| segment.ident.to_string());
-        // `impl TensorElement for f32` is the dtype contract: it binds a Rust
-        // element marker to a runtime dtype tag.
-        if trait_name.as_deref() == Some("TensorElement") {
-            let owner = format!("TensorElement for {self_ty}");
+        if self.element_storage_owner
+            && let Some((_, path, _)) = &item.trait_
+        {
+            // Do not try to resolve aliases from source text. Even an alias
+            // imported from another file must add an inventoried identity.
+            // Seal impls matter too: adding one can enable a binding elsewhere.
+            let registration = format!("{} for {self_ty}", path.to_token_stream());
+            self.with_owner(registration.clone(), |scanner| {
+                scanner.push("dtype-contract", &registration);
+            });
+        } else if let Some(name @ ("TensorElement" | "ElementStorage")) = trait_name.as_deref() {
+            let owner = format!("{name} for {self_ty}");
             self.rows
                 .push(SeamRow::new("dtype-contract", &owner, &owner));
         }
@@ -1299,6 +1310,7 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
         class,
         defines_capacity_keys: path.ends_with("/dag.rs") || path.ends_with("/capacity_key.rs"),
         exact_capacity_owner: path.ends_with("/capacity_key.rs"),
+        element_storage_owner: path == "crates/chelis-runtime/src/element.rs",
         legacy_capacity_aliases: legacy_capacity_aliases(&file),
         multiplication_aliases: multiplication_aliases(&file),
         owners: Vec::new(),

@@ -50,6 +50,33 @@ fn an_unregistered_source_path_fails_rather_than_scanning_empty() {
 }
 
 #[test]
+fn arithmetic_contract_variants_are_individual_seams_including_unknown_ones() {
+    assert_eq!(
+        identities(
+            "crates/chelis-vocab/src/lib.rs",
+            "pub enum ArithmeticRepr { Ieee754Binary32, Unregistered }"
+        ),
+        vec![
+            (
+                "dtype-contract".into(),
+                "ArithmeticRepr::Ieee754Binary32".into()
+            ),
+            (
+                "dtype-contract".into(),
+                "ArithmeticRepr::Unregistered".into()
+            ),
+        ]
+    );
+    assert!(
+        identities(
+            "crates/chelis-vocab/src/lib.rs",
+            "pub enum Unrelated { Plain }"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
 fn every_registered_prefix_classifies() {
     for path in [
         "crates/chelis-runtime/src/lib.rs",
@@ -64,6 +91,53 @@ fn every_registered_prefix_classifies() {
         );
     }
     assert!(SourceClass::for_path("crates/chelis-surf/src/lib.rs").is_none());
+}
+
+#[test]
+fn element_storage_bindings_are_individual_seams_even_for_unknown_markers() {
+    assert_eq!(
+        identities(
+            "crates/chelis-runtime/src/element.rs",
+            "impl ElementStorage for f32 {} impl ElementStorage for Unregistered {}"
+        ),
+        vec![
+            (
+                "dtype-contract".into(),
+                "ElementStorage for Unregistered".into()
+            ),
+            ("dtype-contract".into(), "ElementStorage for f32".into()),
+        ]
+    );
+    assert!(identities(RUNTIME, "impl OrdinaryStorage for Plain {}").is_empty());
+}
+
+#[test]
+fn element_owner_inventories_every_trait_impl_without_resolving_imports() {
+    let path = "crates/chelis-runtime/src/element.rs";
+    for imports in [
+        "use ElementStorage as Storage;",
+        "use self::{ElementStorage as Storage};",
+        "use self::ElementStorage as First; use First as Storage;",
+        "use other_module::Storage;",
+    ] {
+        assert_eq!(
+            identities(path, &format!("{imports} impl Storage for Alias {{}}")),
+            vec![("dtype-contract".into(), "Storage for Alias".into())],
+            "a renamed or imported trait must remain an inventoried implementation"
+        );
+    }
+    assert_eq!(
+        identities(path, "impl private::Sealed for New {}"),
+        vec![("dtype-contract".into(), "private :: Sealed for New".into())]
+    );
+    assert_eq!(
+        identities(path, "mod nested { impl ElementStorage for f32 {} }"),
+        vec![(
+            "dtype-contract".into(),
+            "nested::ElementStorage for f32".into()
+        )]
+    );
+    assert!(identities(RUNTIME, "impl OrdinaryStorage for Plain {}").is_empty());
 }
 
 #[test]

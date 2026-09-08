@@ -2374,6 +2374,25 @@ the `issue_1339_top_level_initialization` CLI oracle,
 every tracked `.ch` and `.dp` file against a control binary built from the
 base, expecting the stdlib list above and no other score change.
 
+**Residue: the #256 deferred-borrow classification ([#1589]).** [04-INF-6] made
+`def use_it[a](seed: a) -> bool = consume_bnp(&seed)` a rigidity rejection, which
+was the header both of the classification's acceptance tests used; PR [#1542]
+migrated them to a concrete carrier and relabelled them as disposition locks.
+That relabel was correct and the conclusion drawn from it was not. Measured, the
+mechanism is live: its reject branch is exercised by three tests in
+`issue_256_polymorphic_return_borrow`, and its accept branch is reached by an
+inferred parameter, an unannotated def, a lambda parameter and a `let` alias of
+any of them, resolving `sound=true` in each case. What no longer reaches the
+accept branch is any tracked source: zero of 171 tracked `.ch` files, and zero of
+the 85 shell definitions that borrow an unannotated parameter, because every one
+of those takes a concrete type from a `sig`. The residue is therefore not a dead
+mechanism but a missing corpus row plus one spec-compliance defect outside PP6's
+schedule subject: `check_borrow_arg` failed closed when `expr_type` returns
+`None`, rejecting a borrow whose inner `spec/04` §8.2 says "must ultimately
+resolve to" a carrier and which inference has already resolved to one. PP6 does
+not absorb it; [#1589] owns it, and decision row 21 records that §8.2 already
+decides the rule.
+
 **Exclusions.** PP6 does not absorb [#1512] (an early return on an
 unresolved `expand` operand skipping validation, owned by the [#1277]
 stream; PP6 touches header-versus-body typing in the schedule, not deferral
@@ -3408,6 +3427,7 @@ is closed.
 | 17 | whether the source-coverage obligation is a new atom or a tightening of an existing one, and whether [#887] closes | DECIDED 2026-09-03: a new atom that EXTENDS [04-TOT-3] rather than replacing it. [04-TOT-3] already governs the live instances and the shipped `access`/`record` rejections cite it, so R1 through R3 are unimplemented [04-TOT-3] cases and an implementer fixing them cites [04-TOT-3]. [04-TOT-4] carries that obligation from the form to each of the form's slots and adds the two sentences no earlier atom states: an omitted optional child and a present unreadable one are distinct inputs with only the omission permitted to default, and coverage quantifies over the submitted program rather than the checked result. The second is the one [04-TOT-2] structurally cannot express, and R1 proves it by satisfying [04-TOT-2] completely while being wrong. [#887] is RE-SCOPED, not closed: its Tier 2 shipped via [#998]/[#1019]/[#1041], and its Tier 1 consumption-boundary residue is this item's Slice 2 | [04-TOT-4] + PP8 |
 | 18 | whether a parsed-vs-checked coverage census belongs at `finalize_checked_program` | OPEN, recorded 2026-09-03, no deliverable attached. It closes none of PP8's five named instances, which Slices 1 and 2 close between them, and its three candidate justifications do not survive a necessity trace: the roles it would guard have no demonstrated defect, `child_stamp_role` already makes an unclassified tag a compile error, and the cancellation route it would subsume is closed at the surface [#874] named. It is also the only proposal here touching the public fitness surface. Revisit if a coverage-keyed instance appears that the selector-read seam does not reach | PP8 + [#874] |
 | 19 | whether an eager value may initialize through a function or nested lambda that reaches a later non-function value | DECIDED 2026-09-04: no. Every non-function value in the initiating value's [04-INF-7] eager-reference set is compared with the initiating value's source position; an acyclic later member is `UnboundVariable`, while a return to the origin is `CycleDetected`. Dependency-ordering whole initializers was rejected because top-level effects and traps make it observably different from eval's demand forcing; the implementation follows PP6 B/C and reuses their single graph | [04-INF-8] + [#1339] frontier section |
+| 21 | whether a borrow's target type is decided at the borrow arm or after def-level resolution, and whether the #256 deferred classification survives [04-INF-6] ([#1589]) | DECIDED by `spec/04` §8.2, which already states it: the inner "must be — or must ultimately resolve to — a tensor or a tensor-carrying value", and classification is deferred when it is not yet known. No language decision is open. The reading that a borrow is decided where it is written is REFUTED by execution: disabling `validate_deferred_borrow_vars` makes `def use_it[a](seed: a) -> bool = { v = seed  consume_any(&v) }` score 1.00 with no errors, reopening the #256 round-2 unsoundness, and turns all three of the suite's deferred-path tests red, so the validator is live code and its two acceptance tests were merely relabelled by [#1542]. The issue's original premise that an inferred parameter "rejects at the borrow arm" is also wrong: measured, the borrow arm defers, the validator resolves it `sound=true`, and the 0.80 `InvalidBorrow` comes from linearity's `check_borrow_arg`, which failed closed because `expr_type` returns `None` for a `(var ..)` node whose parameter annotation is a synthesized hole. The repair reads the resolved `&T` the annotate pass already stamps on the `borrow` node. Rows C/E/F/G of the [#1589] header matrix become accepted regression rows; rows I/J/K stay rejected as locks on the validator's reject branch; §8.2's `relu` example is corrected, because unresolved dimension variables never reach the deferral | `spec/04` §8.2 + PP6 residue |
 
 ## Contract summary
 
@@ -3518,6 +3538,7 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1525]: https://github.com/Chelis-Lang/chelis/issues/1525
 [#1457]: https://github.com/Chelis-Lang/chelis/pull/1457
 [#1542]: https://github.com/Chelis-Lang/chelis/pull/1542
+[#1589]: https://github.com/Chelis-Lang/chelis/issues/1589
 [#1551]: https://github.com/Chelis-Lang/chelis/pull/1551
 [#1512]: https://github.com/Chelis-Lang/chelis/issues/1512
 [#1339]: https://github.com/Chelis-Lang/chelis/issues/1339

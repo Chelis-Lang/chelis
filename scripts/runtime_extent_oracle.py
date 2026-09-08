@@ -367,13 +367,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.no_movement_consumer.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_c",
         ),
         _row(
             "class.no_movement_consumer.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_eval",
         ),
         _row(
@@ -391,13 +391,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.shared_member_node.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_c",
         ),
         _row(
             "class.shared_member_node.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_eval",
         ),
         _row(
@@ -601,13 +601,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "guard_order.effect_after.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
         ),
         _row(
             "guard_order.effect_before.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
         ),
         _row(
@@ -643,8 +643,8 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "rebuild.classes_after_each_pass",
             "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.every_rebuild_pass_preserves_the_derived_classes",
+            EXECUTES,
+            "ir_classes.every_rebuild_pass_preserves_the_derived_classes",
         ),
         _row(
             "reshape.named_claim.node_target.c",
@@ -912,6 +912,24 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice",
             ),
         ),
+        # `runtime_extent_slice_b_classes.rs` locks the DERIVATION rather than
+        # any lane's output, and it is where C5 property 7's rebuild-survival
+        # property is expressible at all: the derivation is a `chelis-ir`
+        # entry point and `chelis-cli` has no `chelis-ir` dependency to call
+        # it before and after a pass. The row's receipt therefore carries an
+        # `ir_classes.` prefix. Named with `--exact` rather than run whole,
+        # for the reason `exec_c` below gives: the receipt check requires the
+        # observed test set to EQUAL the expected one, and that file holds
+        # thirty-odd derivation tests this phase's oracle does not own.
+        TestTarget(
+            "ir_classes",
+            (
+                "cargo", "test", "-p", "chelis-ir", "--test",
+                "runtime_extent_slice_b_classes", "--", "--nocapture", "--exact",
+                "every_rebuild_pass_preserves_the_derived_classes",
+            ),
+            ("every_rebuild_pass_preserves_the_derived_classes",),
+        ),
         TestTarget(
             "cli_slice_b",
             (
@@ -919,6 +937,8 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "runtime_extent_slice_b", "--", "--nocapture",
             ),
             (
+                "a_class_with_no_movement_bound_consumer_still_guards_on_c",
+                "a_class_with_no_movement_bound_consumer_still_guards_on_eval",
                 "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
                 "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
@@ -949,6 +969,8 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
                 "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
                 "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
+                "two_classes_sharing_one_node_keep_separate_guards_on_c",
+                "two_classes_sharing_one_node_keep_separate_guards_on_eval",
                 "two_expands_over_one_operand_axis_share_one_guard",
             ),
         ),

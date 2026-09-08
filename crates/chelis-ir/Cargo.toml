@@ -6,6 +6,10 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Explicit in-memory observations of production lowering; no default capture.
+lowering-trace = []
+
 [dependencies]
 chelis-unord.workspace = true
 chelis-deep.workspace = true

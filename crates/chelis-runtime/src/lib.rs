@@ -6,6 +6,7 @@
 )]
 
 pub use chelis_vocab::{RuntimeDType, RuntimeDTypeDecodeError};
+pub use element::{Bf16Bits, F16Bits};
 use libc::{c_char, c_int};
 use memmap2::Mmap;
 use std::ffi::{CStr, CString};
@@ -16,6 +17,7 @@ use std::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 
 mod decimal_parse;
 pub mod dtype_header;
+mod element;
 mod ieee_narrow;
 mod ownership_ledger;
 
@@ -65,14 +67,14 @@ pub struct DtypeMismatch {
 
 /// Typed access to a `chelis_tensor`'s data buffer.
 ///
-/// # Safety
-///
-/// Implementers assert that `DTYPE` names the byte layout
-/// `chelis_alloc` uses for the corresponding dtype constant.
-/// Misimplementation is the bug class this trait closes; the trait
-/// is `unsafe` so implementations must justify the dtype pairing.
-pub unsafe trait TensorElement: Sized + Copy {
+/// Implementations are sealed in the element owner and checked against the
+/// vocabulary's exact storage and arithmetic registration. Pointer methods
+/// remain unsafe escape hatches until #893's validated-access migration;
+/// sealing this trait does not establish a pointer's ownership or lifetime.
+pub trait TensorElement: element::ElementStorage + Sized + Copy {
     const DTYPE: RuntimeDType;
+    const REPR: chelis_vocab::Repr;
+    type Arithmetic;
 
     /// Checked typed access.  Returns `Err` when the tensor's dtype
     /// does not match `Self::DTYPE`.
@@ -129,31 +131,6 @@ pub unsafe trait TensorElement: Sized + Copy {
             }
         }
     }
-}
-
-unsafe impl TensorElement for f32 {
-    const DTYPE: RuntimeDType = RuntimeDType::F32;
-}
-unsafe impl TensorElement for f64 {
-    const DTYPE: RuntimeDType = RuntimeDType::F64;
-}
-unsafe impl TensorElement for i8 {
-    const DTYPE: RuntimeDType = RuntimeDType::I8;
-}
-unsafe impl TensorElement for i16 {
-    const DTYPE: RuntimeDType = RuntimeDType::I16;
-}
-unsafe impl TensorElement for i32 {
-    const DTYPE: RuntimeDType = RuntimeDType::I32;
-}
-unsafe impl TensorElement for i64 {
-    const DTYPE: RuntimeDType = RuntimeDType::I64;
-}
-unsafe impl TensorElement for half::f16 {
-    const DTYPE: RuntimeDType = RuntimeDType::F16;
-}
-unsafe impl TensorElement for half::bf16 {
-    const DTYPE: RuntimeDType = RuntimeDType::Bf16;
 }
 
 /// One byte of boolean tensor storage: `0` is false, `1` is true.
@@ -229,10 +206,6 @@ impl From<Bool8> for bool {
     fn from(value: Bool8) -> Self {
         value.get()
     }
-}
-
-unsafe impl TensorElement for Bool8 {
-    const DTYPE: RuntimeDType = RuntimeDType::Bool;
 }
 
 /// Typed access to a tensor's buffer as `*mut f32`.

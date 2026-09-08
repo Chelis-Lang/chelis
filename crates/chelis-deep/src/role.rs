@@ -267,8 +267,14 @@ pub enum SlotShape {
     ConstructorName,
     /// A symbol naming a value binding (`pat-var`, `pat-as`).
     BindingName,
+    /// A symbol naming a named operation mode (`cast`).
+    ModeSelector,
     /// An integer axis (`vmap`).
     IntegerAxis,
+    /// A non-negative integer projection index (`tuple-get`).
+    TupleIndex,
+    /// An integer parameter index, or a tuple of them (`grad`'s `wrt`).
+    ParameterIndices,
     /// A scalar literal value (`pat-lit`). spec/03-deep-syntax.md section 6.3
     /// fixes this as a value rather than an expression node: "patterns do not
     /// contain expression nodes".
@@ -281,7 +287,12 @@ impl core::fmt::Display for SlotShape {
             SlotShape::FieldName => "a symbol field name",
             SlotShape::ConstructorName => "a symbol constructor name",
             SlotShape::BindingName => "a symbol binding name",
+            SlotShape::ModeSelector => "a symbol mode selector",
             SlotShape::IntegerAxis => "an integer axis",
+            SlotShape::TupleIndex => "a non-negative integer index",
+            SlotShape::ParameterIndices => {
+                "an integer parameter index or a tuple of integer parameter indices"
+            }
             SlotShape::LiteralValue => "a scalar literal value",
         };
         f.write_str(text)

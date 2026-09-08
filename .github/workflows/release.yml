@@ -406,6 +406,23 @@ jobs:
     needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout tagged release notes
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Extract committed release notes
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: .venv/bin/python scripts/changelog.py extract --version "$RELEASE_VERSION" --output release-notes.md
+
       - name: Download staged artifacts
         uses: actions/download-artifact@v7
         with:
@@ -422,5 +439,6 @@ jobs:
             release-assets/**/*.tar.gz.sha256
             release-assets/**/chelisup-*
             release-assets/**/chelisup.sh
-          generate_release_notes: true
+          body_path: release-notes.md
+          generate_release_notes: false
           fail_on_unmatched_files: true

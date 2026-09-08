@@ -727,16 +727,43 @@ fn assert_decode_once_in_env(site: &str, env: &BTreeMap<String, Expr>) {
 pub fn try_lower_program_to_library(
     program: &CheckedProgram,
 ) -> Result<LoweredLibrary, LowerDiagnostic> {
+    assert_checked_library_boundary(program);
+    catch_lowering(|| {
+        lower_program_to_library_inner(
+            program,
+            #[cfg(feature = "lowering-trace")]
+            None,
+        )
+    })
+}
+
+fn assert_checked_library_boundary(program: &CheckedProgram) {
     assert_decode_once_at_boundary("lower_program_to_library: exprs", program.exprs());
     assert_decode_once_at_boundary(
         "lower_program_to_library: annotated_exprs",
         program.annotated_exprs(),
     );
     assert_decode_once_in_env("lower_program_to_library: type_env", program.type_env());
-    catch_lowering(|| lower_program_to_library_inner(program))
 }
 
-fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_program_to_library_with_trace(
+    program: &CheckedProgram,
+) -> Result<(LoweredLibrary, crate::lowering_trace::LoweringTrace), LowerDiagnostic> {
+    assert_checked_library_boundary(program);
+    // The collector is created and consumed inside the unwind boundary. A
+    // failed lowering discards all partial observations with its contexts.
+    catch_lowering(|| {
+        let collector = crate::lowering_trace::Collector::new();
+        let library = lower_program_to_library_inner(program, Some(collector.clone()));
+        (library, collector.finish())
+    })
+}
+
+fn lower_program_to_library_inner(
+    program: &CheckedProgram,
+    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
+) -> LoweredLibrary {
     let detail_profile = std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -775,6 +802,15 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
         program_defs.clone(),
         program.linearity().clone(),
     );
+    #[cfg(feature = "lowering-trace")]
+    {
+        ctx.trace = trace;
+        if lowered_names.values().any(|lowered| !lowered)
+            && let Some(trace) = &ctx.trace
+        {
+            trace.boundary(crate::lowering_trace::BoundaryKind::UnloweredDefinitions);
+        }
+    }
     log_sub("lower_ctx_new", &mut sub_t);
     let mut last_dag_size: usize = ctx.dag.len();
     // Same reasoning as the assertions_loop above: prefer the
@@ -830,8 +866,21 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
     log_sub("dce", &mut sub_t);
     let (copy_dag, linear_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
     log_sub("implicit_copy_nodes", &mut sub_t);
+    #[cfg(feature = "lowering-trace")]
+    let copy_snapshot = ctx.trace.as_ref().map(|_| copy_dag.clone());
     let linear_dag = insert_drop_nodes_for_unconsumed_values(copy_dag);
     log_sub("implicit_drop_nodes", &mut sub_t);
+    #[cfg(feature = "lowering-trace")]
+    if let (Some(trace), Some(copy_snapshot)) = (&ctx.trace, copy_snapshot) {
+        trace.normalization(
+            &ctx.dag,
+            &dce_dag,
+            copy_snapshot,
+            &linear_dag,
+            &remap,
+            &linear_remap,
+        );
+    }
 
     // Renumber the symbol table through DCE's remap. Names whose nodes
     // were eliminated drop out of the table.
@@ -4946,6 +4995,8 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
 }
 
 struct LowerCtx {
+    #[cfg(feature = "lowering-trace")]
+    trace: Option<crate::lowering_trace::Collector>,
     dag: Dag,
     bindings: UnordMap<String, LoweredValue>,
     list_bindings: UnordMap<String, Expr>,
@@ -5088,6 +5139,8 @@ impl LowerCtx {
         linearity: LinearityInfo,
     ) -> Self {
         Self {
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
             dag: Dag::new(),
             bindings: UnordMap::new(),
             list_bindings: UnordMap::new(),
@@ -6875,6 +6928,13 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        #[cfg(feature = "lowering-trace")]
+        {
+            subctx.trace = self
+                .trace
+                .as_ref()
+                .map(|trace| trace.child(crate::lowering_trace::ContextKind::Gradient));
+        }
         // issue #289: propagate the call-site precision-tvar substitution
         // into the grad sub-context so a precision-polymorphic callee
         // reached while differentiating the body monomorphizes to the
@@ -7090,6 +7150,10 @@ impl LowerCtx {
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
         {
+            #[cfg(feature = "lowering-trace")]
+            if let Some(trace) = &subctx.trace {
+                trace.boundary(crate::lowering_trace::BoundaryKind::UnresolvedCallableGradient);
+            }
             // The standalone higher-order definition cannot know the
             // contribution from an unresolved callable result that reaches
             // the output. Preserve chelis#1095's rootless placeholder; when a
@@ -7152,6 +7216,11 @@ impl LowerCtx {
                 body.span_id().map(ToOwned::to_owned),
             )
         });
+
+        #[cfg(feature = "lowering-trace")]
+        if let Some(trace) = &subctx.trace {
+            trace.gradient(&subctx.dag, output, &wrt, &grad_result);
+        }
 
         let arg_map = param_names
             .iter()
@@ -7683,6 +7752,10 @@ impl LowerCtx {
         actual_args: &[NodeId],
         app_span: Span,
     ) -> LoweredValue {
+        #[cfg(feature = "lowering-trace")]
+        if let Some(trace) = &self.trace {
+            trace.boundary(crate::lowering_trace::BoundaryKind::Vmap);
+        }
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap", std::slice::from_ref(fn_expr));
         };
@@ -7756,6 +7829,13 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        #[cfg(feature = "lowering-trace")]
+        {
+            subctx.trace = self
+                .trace
+                .as_ref()
+                .map(|trace| trace.child(crate::lowering_trace::ContextKind::Vmap));
+        }
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap's parameters carry the vmap-call's span.
@@ -7899,6 +7979,10 @@ impl LowerCtx {
         actual_args: &[NodeId],
         app_span: Span,
     ) -> LoweredValue {
+        #[cfg(feature = "lowering-trace")]
+        if let Some(trace) = &self.trace {
+            trace.boundary(crate::lowering_trace::BoundaryKind::VmapGradient);
+        }
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self.lower_unrepresentable("vmap(grad)", std::slice::from_ref(fn_expr));
         };
@@ -7964,6 +8048,13 @@ impl LowerCtx {
             self.program_defs.clone(),
             LinearityInfo::default(),
         );
+        #[cfg(feature = "lowering-trace")]
+        {
+            subctx.trace = self
+                .trace
+                .as_ref()
+                .map(|trace| trace.child(crate::lowering_trace::ContextKind::VmapGradient));
+        }
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for vmap(grad)'s parameters carry the call's span.
