@@ -11,9 +11,20 @@
 //! body, value annotation) the message was "undeclared type variable `u8`",
 //! which names the wrong defect and offers no remedy.
 //!
+//! The repair also covers two neighbours of that arm. An explicit `[..]`
+//! quantifier list does not rebind a reserved spelling, in a scalar position
+//! or in a tensor precision slot, because §5.8.1 states the rule on the
+//! category. And the arm consults the tensor precision slot's predicate pair,
+//! which rejects the other §1.1.1 reserved-but-deferred names as well as the
+//! unsigned ones, so `complex64` in a scalar position reaches its own §1.1.1
+//! diagnostic instead of scoring 1.0.
+//!
 //! Test labels are recorded in each function's doc comment. The suite claims
-//! the eight §1.1.2 spellings in the six scalar positions it enumerates below
-//! plus the two `t-prim` positions it locks; no other type position is claimed.
+//! the eight §1.1.2 spellings in the six scalar positions it enumerates below,
+//! those eight again under an explicit binder list in a scalar and a tensor
+//! precision position, and the deferred family at `complex64` and `int4`
+//! only; it locks the two `t-prim` positions that already worked. No other
+//! type position and no other reserved spelling is claimed.
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str;

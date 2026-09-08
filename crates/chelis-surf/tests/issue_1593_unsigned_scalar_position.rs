@@ -15,6 +15,15 @@
 //! repaired the opposite way: #1587's short signed spellings MAP to their
 //! primitives, and these MAP TO NOTHING - they reach the rejection.
 //!
+//! Two neighbours belong to the same arm. An explicit `[..]` quantifier list
+//! must not rebind a reserved spelling either, in the scalar position or in
+//! the tensor precision slot, so the reserved row sits ABOVE the quantifier
+//! check in both; §5.8.1 states the rule on the category, and the primitive
+//! row already outranks a binder for the same reason. And the arm consults one
+//! predicate over BOTH §1.1.1 reserved families, matching the tensor precision
+//! slot, which rejects the deferred names too, so the two positions recognise
+//! exactly the same names.
+//!
 //! Test labels are recorded in each function's doc comment.
 
 use chelis_deep::printer::print_canonical_flat;

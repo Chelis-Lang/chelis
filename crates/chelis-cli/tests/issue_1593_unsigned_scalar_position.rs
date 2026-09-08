@@ -11,6 +11,11 @@
 //! desugaring: a `.dp` produced from the Surf carried the quantifier, so the
 //! Deep ingress inherited the hole rather than catching it.
 //!
+//! The explicit-binder form is here for the same reason: `def f[u8](x: u8)`
+//! and its `tensor[3, u8]` twin also scored 1.0, and the Deep leg proves the
+//! desugaring stopped emitting the quantifier rather than the checker learning
+//! to reject one.
+//!
 //! Test labels are recorded in each function's doc comment.
 
 use assert_cmd::Command;
