@@ -44,6 +44,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // Genuine same-rank broadcasts: the declared result has the operand's rank.
     // These are what `expand` means after the split, so they are not renamed.
     (
+        "crates/chelis-ir/tests/lowering_trace.rs",
+        1,
+        "the host-boundary trace fixture broadcasts to_tensor([3.0f32]) from its unit axis to a runtime extent, retaining rank 1",
+    ),
+    (
         "crates/chelis-types/tests/infer_module_parity.rs",
         1,
         "broadcast_bias declares tensor[64, f32] from tensor[1, f32]",
