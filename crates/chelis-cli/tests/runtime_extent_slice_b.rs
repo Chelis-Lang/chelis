@@ -189,26 +189,27 @@ fn runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt() {
         "the receipt names the lane that refused: {stderr}"
     );
 
-    // The eval lane accepts this program on `main` and still does: it
-    // computes shapes from values and never sees the anonymous extent.
+    // The eval lane refuses with the same typed receipt as C, exit 1, no
+    // panic. Before chelis#1277 B2h the host interpreter evaluated this
+    // program (it computes shapes from values and never sees the anonymous
+    // extent); B2h applies `f` through the kernel the C lane emits for it,
+    // so the DAG evaluator's cardinality check refuses exactly where C's
+    // does. That is B2h's eval-lane capability regression on chelis#1482,
+    // recorded there beside S2a's compiled-lane one; both lanes recover
+    // together when the const gains its extent source.
     let evaluated = eval(&path);
-    let stdout = String::from_utf8_lossy(&evaluated.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
     assert!(
-        evaluated.status.success(),
-        "eval acceptance is unchanged: {}",
-        String::from_utf8_lossy(&evaluated.stderr)
+        !evaluated.status.success(),
+        "eval refuses as C does through the routed kernel: {}",
+        String::from_utf8_lossy(&evaluated.stdout)
     );
-    let values = common::parse_tensor_data(&stdout, "out");
-    let expected = [
-        0.731_058_6_f64,
-        0.119_202_92_f64,
-        0.952_574_13_f64,
-        0.982_013_76_f64,
-    ];
-    assert_eq!(values.len(), expected.len(), "{stdout}");
-    for (actual, expected) in values.iter().zip(expected) {
-        assert!((actual - expected).abs() < 1e-6, "{actual} vs {expected}");
-    }
+    assert_eq!(evaluated.status.code(), Some(1), "a typed refusal, not a panic: {stderr}");
+    assert!(!stderr.contains("internal compiler error"), "{stderr}");
+    assert!(stderr.contains("unsupported: "), "{stderr}");
+    assert!(stderr.contains("unimplemented chelis#1482"), "{stderr}");
+    assert!(stderr.contains("extent source(s) for"), "{stderr}");
+    assert!(stderr.contains("(runtime)"), "the receipt names the lane that refused: {stderr}");
 
     // The control that decides how narrow the rule had to be: an
     // elementwise fill under a DECLARED dimension is not a sourceless axis.
@@ -526,4 +527,270 @@ fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
         8,
         "and each renders [04-NUM-9] naming the operation"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The eval lane (chelis#1277 B2h). A value binding applying the def is the
+// eval twin of the DRIVEN C rows: `chelis eval` interprets the binding and
+// applies `f` through the kernel the C lane emits for it, so `f`'s entry
+// guards run at its call. A `def main() = f(..)` root is inlined on both
+// lanes and its extents become literals, so no such form appears here.
+// ---------------------------------------------------------------------------
+
+/// Evaluate a fixture and return whether it succeeded plus its combined
+/// stdout and stderr.
+fn eval_result(dir: &TempDir, name: &str, source: &str) -> (bool, String) {
+    let run = eval(&fixture(dir, name, source));
+    let mut text = String::from_utf8_lossy(&run.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    (run.status.success(), text)
+}
+
+/// The guard-order fixture's claim that agrees with the read.
+const AGREEING: u32 = 5;
+
+/// expand.literal_claim.exported_kernel.eval: chelis#1377's shape through the
+/// value-binding form. The literal claim propagated onto `x` through
+/// inference, so the routed kernel's `Load x` is declared `[4]` and no class
+/// exists for the derived guard; what fires is the DAG evaluator's check of a
+/// declared literal input extent at entry, the eval analogue of the C ABI
+/// preamble (B2a's "complement"), rendered per [04-NUM-9] with section 4.7's
+/// context line.
+///
+/// EVIDENTIARY STATUS: regression test, watched failing on the tree without
+/// the evaluator's literal-extent check (eval printed `shape=[5]`).
+#[test]
+fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = guard_order_source(MISMATCHED, false).replace(
+        "boom = floor_div(1i64, sub(shape(xb, 0), shape(xb, 0)))\n",
+        "",
+    );
+    let (ok, out) = eval_result(&dir, "lit_claim.ch", &source);
+    assert!(!ok, "a declared tensor[4] over a read of 5 must not execute: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        "section 4.7's context line names the claim, the input and the observed extent: {out}"
+    );
+}
+
+/// The positive twin: an agreeing literal executes and keeps the declared
+/// shape, and is the byte-identity witness for this row (the value is the one
+/// the interpreter produced before the routing).
+#[test]
+fn a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = guard_order_source(AGREEING, false).replace(
+        "boom = floor_div(1i64, sub(shape(xb, 0), shape(xb, 0)))\n",
+        "",
+    );
+    let (ok, out) = eval_result(&dir, "lit_claim_ok.ch", &source);
+    assert!(ok, "a declared tensor[5] over a read of 5 must execute: {out}");
+    assert!(out.contains("widened = tensor(shape=[5]"), "{out}");
+}
+
+/// guard_order.trap_before.eval: section 4.7, "an independent effect or trap
+/// that precedes that operation in source order is observed first".
+///
+/// EVIDENTIARY STATUS: disposition lock. The host interpreter already reported
+/// the division first because it had no extent guard at all; the row defends
+/// that the routed kernel's entry guard is not hoisted ahead of the call.
+#[test]
+fn an_earlier_trap_preempts_the_extent_guard_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "before.ch", &guard_order_source(MISMATCHED, true));
+    assert!(!ok, "the program must fail: {out}");
+    assert!(
+        out.contains(DIV_ZERO_TRAP),
+        "the earlier independent trap is observed first: {out}"
+    );
+    assert!(
+        !out.contains("numeric trap: domain in"),
+        "the extent guard must not have run yet: {out}"
+    );
+}
+
+/// guard_order.trap_after.eval: a trap that "follows it is observed only if
+/// the guard passes".
+///
+/// EVIDENTIARY STATUS: regression test, watched failing on `main` (the
+/// interpreter reported the division, the wrong answer).
+#[test]
+fn a_later_trap_is_preempted_by_the_extent_guard_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "after.ch", &guard_order_source(MISMATCHED, false));
+    assert!(!ok, "the program must fail: {out}");
+    assert!(
+        out.contains(&domain_trap_line("load")),
+        "the entry guard of `f` fires at its call, before the later trap: {out}"
+    );
+    assert!(
+        !out.contains(DIV_ZERO_TRAP),
+        "the later independent trap must not be reached: {out}"
+    );
+}
+
+/// The two rows above prove nothing unless the SAME program with an AGREEING
+/// claim runs past the guard and reaches the later trap.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "agree.ch", &guard_order_source(AGREEING, false));
+    assert!(!ok, "the independent trap still fails the program: {out}");
+    assert!(
+        out.contains(DIV_ZERO_TRAP),
+        "with an agreeing claim the later trap is reached: {out}"
+    );
+    assert!(
+        !out.contains("numeric trap: domain in"),
+        "an agreeing claim owes no trap: {out}"
+    );
+}
+
+/// The effect-order fixture: the same claim, applied from an `IO` body that
+/// prints before or after the call. The `IO` body is host on both lanes
+/// (chelis#1528: the shared kernel decision keeps an effect the DAG cannot
+/// carry in host code, so the C host program prints it too), and `f` is a
+/// kernel on both, so the print and `f`'s entry guard are ordered by the
+/// body's source order on both.
+fn effect_order_source(claim: u32, effect_first: bool) -> String {
+    let effect = "_ = print(\"effect\")";
+    let widen = "widened = f(seed, x)";
+    let (first, second) = if effect_first {
+        (effect, widen)
+    } else {
+        (widen, effect)
+    };
+    format!(
+        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = insert(b, 0, shape(x, 0))\n\
+         def run(x: tensor[n, f32]) -> tensor[{claim}, f32] ! {{ IO }} = {{\n\
+         \x20 seed = sum(to_tensor([1.0f32]), 0)\n\
+         \x20 {first}\n\
+         \x20 {second}\n\
+         \x20 widened\n\
+         }}\n\
+         out = run(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]))\n"
+    )
+}
+
+/// guard_order.effect_before.eval: an effect that precedes the call in source
+/// order is observed before the guard traps. NOT provable on eval today, and
+/// the row stays at its baseline: `chelis eval` emits a program's printed
+/// output only when the evaluation succeeds, so an effect that precedes any
+/// failure is discarded (`_ = print("hello")` followed by a division trap
+/// prints nothing, with no runtime-extent guard involved; chelis#1585), while
+/// the compiled program prints it and then traps. What this test locks is the half the
+/// eval lane can show: the guard fires from inside an `IO` body, which the
+/// shared kernel decision keeps in host code on both lanes.
+///
+/// EVIDENTIARY STATUS: regression test for the trap (silent `shape=[5]` on
+/// the tree without the evaluator's literal-extent check); the effect's
+/// order is unobservable on this lane and is not asserted.
+#[test]
+fn an_effect_before_the_guard_runs_when_the_guard_traps_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "effect_before.ch", &effect_order_source(MISMATCHED, true));
+    assert!(!ok, "the program must fail: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(out.contains("extent `4`: claimed = 4, x axis 0 = 5"), "{out}");
+}
+
+/// guard_order.effect_after.eval: an effect that follows the call is not
+/// observed when the guard traps. On eval the absence of "effect" cannot be
+/// read as ORDER (see the row above: nothing printed before a failure is
+/// emitted either, chelis#1585), so the row stays at its baseline and this test locks
+/// the trap alone.
+///
+/// EVIDENTIARY STATUS: regression test for the trap (on the tree without the
+/// evaluator's literal-extent check the program succeeded and printed
+/// "effect"); the effect's absence is not evidence of order on this lane.
+#[test]
+fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "effect_after.ch", &effect_order_source(MISMATCHED, false));
+    assert!(!ok, "the program must fail: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+}
+
+/// guard_order.effect_before.c: the row that returns with chelis#1528. On
+/// `main` the C lane dropped the `IO` effect of a kernel-lowered body, so the
+/// string never appeared in the emitted program and no row could order it.
+///
+/// EVIDENTIARY STATUS: regression test, watched failing on `main` (no
+/// "effect" in the binary's output).
+#[test]
+fn an_effect_before_the_guard_runs_when_the_guard_traps_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "effect_before_c", &effect_order_source(MISMATCHED, true));
+    assert!(!ok, "the binary must fail: {out}");
+    assert!(out.contains("effect"), "the earlier effect is observed: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+}
+
+/// guard_order.effect_after.c.
+///
+/// EVIDENTIARY STATUS: disposition lock on C (nothing printed on `main`
+/// either, for the wrong reason: the effect was dropped); the row asserts the
+/// trap, which is what `main` lacked.
+#[test]
+fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "effect_after_c", &effect_order_source(MISMATCHED, false));
+    assert!(!ok, "the binary must fail: {out}");
+    assert!(!out.contains("effect"), "the later effect must not run: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+}
+
+/// class.load_load.eval: an all-interface class of three witnesses on one
+/// binder; the def reads all three, so each is a kernel input and each later
+/// witness is guarded against the canonical one at entry. `f` is a kernel on
+/// both lanes; a bare-variable body would be host code on both and would
+/// carry no guard on either. The canonical member is the derivation's, not
+/// the signature's first parameter: the compiled kernel for this program
+/// renders `p` as canonical, and the eval lane renders the identical lines
+/// because it reads the same derivation (C2.7).
+///
+/// EVIDENTIARY STATUS: regression test for the rendering. On the tree
+/// without B2h's guard reordering eval reported the symbolic-binding
+/// inference's own wording (`symbolic dimension `zdim` mismatch: canonical
+/// p[0] = 2, but r[0] = 3`), never [04-NUM-9]'s line; on `main` the
+/// interpreter reports chelis#1382's binder receipt.
+#[test]
+fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
+    const SOURCE: &str = "def f(zz: tensor[zdim, f32], p: tensor[zdim, f32], r: tensor[zdim, f32]) -> tensor[zdim, f32] = add(add(zz, p), r)\n";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let r_disagrees = format!(
+        "{SOURCE}out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    );
+    let (ok, out) = eval_result(&dir, "r_disagrees.ch", &r_disagrees);
+    assert!(!ok, "the witness `r` disagrees: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `zdim`: p axis 0 = 2, r axis 0 = 3"),
+        "the later witness is compared against the canonical one, as the compiled kernel renders it: {out}"
+    );
+    let zz_disagrees = format!(
+        "{SOURCE}out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]))\n"
+    );
+    let (ok, out) = eval_result(&dir, "zz_disagrees.ch", &zz_disagrees);
+    assert!(!ok, "the witness `zz` disagrees: {out}");
+    assert!(
+        out.contains("extent `zdim`: p axis 0 = 2, zz axis 0 = 3"),
+        "every non-canonical member is its own guard: {out}"
+    );
+    let agree = format!(
+        "{SOURCE}out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]))\n"
+    );
+    let (ok, out) = eval_result(&dir, "agree_class.ch", &agree);
+    assert!(ok, "agreeing witnesses execute: {out}");
+    assert!(out.contains("out = tensor(shape=[2], data=[3.0, 6.0])"), "{out}");
 }
