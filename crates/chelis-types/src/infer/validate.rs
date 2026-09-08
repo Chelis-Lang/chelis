@@ -2486,21 +2486,6 @@ pub(super) fn conv2d_output_extent(
 /// Returns `None` when the call shape is unrecognized, the args are
 /// non-concrete, or the derived output would be ill-formed (in which
 /// case the validator's own arm will report the diagnostic).
-/// Does `derive_ir_builtin_output_type` have an arm for `name`?
-///
-/// This must list exactly the callees the `match` below dispatches on, and it
-/// exists because the two questions "is this operation shape-sensitive" and
-/// "can this validator derive its output type" stopped having the same answer
-/// when chelis#668 deleted the `stride`/`expand`/`insert` arms. Keying
-/// `let_rhs_is_recognized_shape_sensitive` on the first question marked those
-/// bindings as FAILED derivations, which suppressed every downstream `conv2d`
-/// check (round-1 P0). The failed-derivation marker means "this validator owed
-/// a type here and could not produce one", so it must be keyed on the table
-/// that owes it.
-pub(super) fn ir_builtin_has_output_type_derivation(name: &str) -> bool {
-    matches!(name, "conv2d" | "softmax") || crate::shape_class(name) == crate::ShapeClass::Identity
-}
-
 pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
@@ -2532,6 +2517,22 @@ pub(super) fn derive_ir_builtin_output_type(
         }
         _ => None,
     }
+}
+
+/// Does `derive_ir_builtin_output_type` have an arm for `name`?
+///
+/// This mirrors the `match` above and must list exactly the callees it
+/// dispatches on. It exists because the two questions "is this operation
+/// shape-sensitive" and "can this validator derive its output type" stopped
+/// having the same answer when chelis#668 deleted the
+/// `stride`/`expand`/`insert` arms. Keying
+/// `let_rhs_is_recognized_shape_sensitive` on the first question marked those
+/// bindings as FAILED derivations, which suppressed every downstream `conv2d`
+/// check (round-1 P0). The failed-derivation marker means "this validator owed
+/// a type here and could not produce one", so it must be keyed on the table
+/// that owes it.
+pub(super) fn ir_builtin_has_output_type_derivation(name: &str) -> bool {
+    matches!(name, "conv2d" | "softmax") || crate::shape_class(name) == crate::ShapeClass::Identity
 }
 
 /// Derive the output tensor type of a shape-preserving unary

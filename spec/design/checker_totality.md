@@ -5,7 +5,14 @@ completion design (2026-09-03, in that section) retires the rank side channel
 in favour of unification and routes the residue to [#597], [#1512], and
 [#1506] under the single-meaning `expand` rule of [#1532]. D8 PR A has landed
 the checker half: the side channel is deleted, unification is the one rank
-authority, and both ingresses agree on every program the new oracle covers.
+authority, and both ingresses agree on every program the RANK oracle
+(`issue_668_rank_agreement_is_unification`) covers. That agreement is the rank
+oracle's alone and does not extend to the checker as a whole: the
+post-inference validator, `conv2d`'s guard included, runs on
+`check_ir_program` only, which
+`issue_668_deleted_derivation_does_not_suppress_conv2d`'s
+`the_post_inference_validator_runs_only_on_the_ir_ingress` records. That
+asymmetry predates PR A and is untouched by it.
 The C emitter guards of R3 and R4 stand. PP5 stays partial until PR B's
 comparison surface lands and [#597] and [#1512] close with their owners. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
 schedule, paired-ingress, and public CLI oracles are green. PR [#1406] delivered the
@@ -1848,7 +1855,8 @@ rank 2, so those rows became ordinary unification rejections. The verdict flip
 the user confirmed in row 15 therefore shipped in S2b. PR A deletes a
 mechanism that by then changed no verdict at all.
 
-Measured on `c8a5f1a75` and on the repaired deletion, at both ingresses: for
+Measured on `12c04c66a`, the rebased base, and on the repaired deletion, at
+both ingresses: for
 the elementwise family every rejection stays a rejection with the same `unify`
 text, and every acceptance stays an acceptance. What the deletion removes there
 is a DUPLICATE. On the `check_ir_program` ingress the validator reported a
@@ -1865,7 +1873,7 @@ through a rank comparison. Before the marker was re-keyed ((d)1 above), a
 `conv2d` whose input came from a let-bound `stride`, `expand`, or `insert`
 had its whole validator suppressed, so an invalid `stride = 0` scored 1 and
 then panicked in codegen. With the marker re-keyed, the repaired tree and
-`c8a5f1a75` return byte-identical verdicts, messages, and scores on all seven
+`12c04c66a` return byte-identical verdicts, messages, and scores on all seven
 of that round's probes, so the no-verdict-change result holds for both
 consumers of the environment. The lesson generalises and is recorded because
 it will recur: **a claim about deleting a shared data structure has to be
@@ -1878,13 +1886,16 @@ Test dispositions, each stated for the `check` ingress and, in the new
 - The REGRESSION assertion is ingress agreement, in
   `issue_668_rank_agreement_is_unification`'s `agreed_diagnostics`: the two
   ingresses must return the same diagnostic set. Six of that file's fifteen
-  rows are red on `c8a5f1a75` and green after the deletion, each failure
+  rows are red on `12c04c66a` and green after the deletion, each failure
   printing the validator's surplus diagnostic. Its `where` row asserts a
   diagnostic COUNT of one and is red on the base for the same reason. The
-  prove-red step is `git checkout c8a5f1a75 --
+  prove-red step is `git checkout 12c04c66a --
   crates/chelis-types/src/infer/shape_honesty.rs
   crates/chelis-types/src/infer/validate.rs`, rebuild the one target, watch
-  those rows fail, restore, watch them pass.
+  those rows fail, restore, watch them pass. The receipt was first taken
+  against `c8a5f1a75` and re-run against `12c04c66a` after the rebase; both
+  files are byte-identical between those two commits, so it is the same
+  experiment under the current base's name rather than a relabelled one.
 - Every verdict assertion is a DISPOSITION LOCK, green in both states, and
   labelled as one. That covers the rejections in both operand orders (a
   declared rank-2 user def beside a rank-1 operand, D1 row 1; a rank-0

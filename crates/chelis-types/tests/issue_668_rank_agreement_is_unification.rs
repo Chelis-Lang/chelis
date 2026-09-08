@@ -29,7 +29,7 @@
 //! second, validator-authored `DimensionMismatch` for a call unification had
 //! already rejected, and the stamped ingress reported one. Same program, two
 //! diagnostic sets: the chelis#1107 class. Six rows here are red on
-//! `c8a5f1a75` for exactly that reason.
+//! `12c04c66a`, the base this branch sits on, for exactly that reason.
 //!
 //! Every verdict assertion, rejections and acceptances alike, is a
 //! DISPOSITION LOCK: measured on both trees, the deletion changes no

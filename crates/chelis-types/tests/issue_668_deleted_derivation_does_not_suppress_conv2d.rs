@@ -35,7 +35,7 @@
 //! REGRESSION for the four rows that assert a `conv2d` diagnostic: each is red
 //! at `948ed5736`, the pushed head that carried the defect, where all of these
 //! programs scored 1 with an empty error list. Each is green on the base
-//! `c8a5f1a75` and on the repaired head, which measured byte-identical on all
+//! `12c04c66a` and on the repaired head, which measured byte-identical on all
 //! seven of the reviewer's probes, scores included.
 //!
 //! DISPOSITION LOCK for the direct-call control and the cascade row.
