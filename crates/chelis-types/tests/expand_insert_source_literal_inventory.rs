@@ -262,9 +262,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ("crates/chelis-types/src/linearity.rs", 1, 1, ""),
     (
         "crates/chelis-types/src/unify.rs",
-        18,
-        2,
-        "the deferred two-shape constraint machinery and its tests. `insert` has one legal shape and records no such constraint, so these messages can only ever name `expand`; a counterpart here would be unreachable code",
+        1,
+        1,
+        "one live diagnostic carries both, in one message: the chelis#339 rank-spread collision at `:1653` says `(a named-axis expand insert)` when a signature's result introduces an axis name a spread already binds. That is the site class this inventory watches, a user-facing message about the two operations, and it is unrelated to the deferral. This file held 18 and 2 for the deferred two-shape constraint machinery and its tests, which chelis#1277 S2c deleted; that row leaves, this one does not",
     ),
 ];
 

@@ -1348,6 +1348,13 @@ every frozen atom and region digest and every required-literal anchor is
 unchanged. The script unit tests that call `validate_contract` are the
 executable evidence that only the file digest moved.
 
+That amendment is superseded. chelis#1532 rewrote §4.7.2 to give `expand` and
+`insert` one result shape each, so the settlement order this entry records has
+no subject, the `positional expand settlement order` anchor is gone from
+§4.7.2, and chelis#1277 S2b and S2c deleted the deferral machinery that
+implemented it. The entry stays as the record of what [#1370] did; it is not a
+description of current §4.7.2.
+
 [#1399] amends `spec/02-surf-syntax.md` to make unqualified value scope exact
 and invariant under unrelated unimported modules, and adds [04-FIT-2] to
 `spec/04-type-system.md` so unresolved-name fitness mirrors checker

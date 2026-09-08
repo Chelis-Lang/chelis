@@ -296,10 +296,6 @@ pub(super) struct InferenceProduct {
     /// run. Scheduling and initialization-cycle diagnostics consume this same
     /// instance so the two policies cannot drift or repeat the lexical walk.
     pub(super) top_level_references: TopLevelReferenceGraph,
-    /// Canonical whole-program preorder, computed before dependency/SCC
-    /// scheduling. Deferred constraints must never derive their order from
-    /// allocation or hash-table traversal.
-    source_ordinals: UnordMap<usize, SourceOrdinal>,
     shape_lambda_tvars: UnordSet<TypeVar>,
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
@@ -380,47 +376,6 @@ impl InferenceProduct {
             typed_nodes: self.typed_nodes,
             total_nodes: self.total_nodes,
         }
-    }
-
-    pub(super) fn index_source_order(&mut self, exprs: &[deep::Expr]) {
-        self.source_ordinals.clear();
-        let mut stack = exprs.iter().rev().collect::<Vec<_>>();
-        let mut next = 0_u64;
-        while let Some(expr) = stack.pop() {
-            let ordinal = SourceOrdinal::new(next);
-            next = next
-                .checked_add(1)
-                .expect("canonical Deep source ordinal overflow");
-            self.source_ordinals.insert(expr_key(expr), ordinal);
-            match expr {
-                deep::Expr::List(list, _) => {
-                    self.source_ordinals
-                        .insert(std::ptr::from_ref(list).addr(), ordinal);
-                    stack.extend(children(list).iter().rev());
-                }
-                deep::Expr::Node(node, _) => {
-                    stack.extend(node.children_slice().iter().rev());
-                }
-                deep::Expr::BareList(elements, _) => stack.extend(elements.iter().rev()),
-                deep::Expr::MetaExpr(meta, _) => stack.push(&meta.expr),
-                deep::Expr::UnknownForm(data) => stack.extend(data.children.iter().rev()),
-                deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
-            }
-        }
-    }
-
-    pub(super) fn source_ordinal_for_list(&self, list: &deep::List) -> SourceOrdinal {
-        self.source_ordinals
-            .get(&std::ptr::from_ref(list).addr())
-            .copied()
-            .expect("inference list missing from canonical Deep source-order index")
-    }
-
-    pub(super) fn source_ordinal_for_expr(&self, expr: &deep::Expr) -> SourceOrdinal {
-        self.source_ordinals
-            .get(&expr_key(expr))
-            .copied()
-            .expect("inference expression missing from canonical Deep source-order index")
     }
 
     pub(super) fn begin_root(&mut self, root: &deep::Expr) {
@@ -717,9 +672,6 @@ impl InferenceProduct {
         while let Some((stamped, bridged)) = pending.pop() {
             let stamped_key = epoch.canonical_key(expr_key(stamped));
             epoch.bridge_aliases.insert(expr_key(bridged), stamped_key);
-            if let Some(ordinal) = self.source_ordinals.get(&expr_key(stamped)).copied() {
-                self.source_ordinals.insert(expr_key(bridged), ordinal);
-            }
             match (stamped, bridged) {
                 (deep::Expr::Node(left, _), deep::Expr::Node(right, _)) => {
                     pending.extend(left.children_slice().iter().zip(right.children_slice()));
@@ -769,12 +721,6 @@ impl InferenceProduct {
         }
     }
 
-    pub(super) fn register_bridge_list(&mut self, stamped: &deep::Expr, bridged: &deep::List) {
-        let ordinal = self.source_ordinal_for_expr(stamped);
-        self.source_ordinals
-            .insert(std::ptr::from_ref(bridged).addr(), ordinal);
-    }
-
     pub(super) fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
         let Some(epoch) = self.active_epoch.take() else {
             errors.push(internal_owner_stamp_error(
@@ -818,9 +764,9 @@ impl InferenceProduct {
     }
 
     /// Apply the complete program substitution to the frozen owner stamps.
-    /// Most stamps are already concrete when their root finishes. Deferred
-    /// positional-expand shapes are intentionally selected by later roots,
-    /// so their earlier stamps need one final resolution before annotation.
+    /// Most stamps are already concrete when their root finishes, but a
+    /// variable an earlier root left open can be bound by a later one, so
+    /// every stamp gets one final resolution before annotation.
     pub(super) fn resolve_owner_types(&mut self, subst: &Subst) {
         let keys = self
             .owner_types

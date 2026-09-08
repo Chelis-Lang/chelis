@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """Run the complete Phase A hash-order determinism acceptance surface.
 
-One component was removed with its subject. `chelis-cli`'s
-`hash_order_stability` target ran K=24 fresh processes over programs whose
-settlement chose between two candidate `expand` shapes, which is the property
-chelis#1338 reported as nondeterministic. `spec/04-type-system.md` section
-4.7.2 gives `expand` and `insert` one result shape each, so there is nothing
-left to settle and #1338 is resolved by construction rather than by this
-oracle (chelis#1277 S2b). Every other component here is unrelated to that
-model and still runs.
+Three components were removed with their subject, and what remains is what was
+never about it. Phase A ordered the two deferred-shape stores so that the
+choice between two candidate `expand` shapes could not depend on hash
+iteration order, which is the property chelis#1338 reported as
+nondeterministic. `spec/04-type-system.md` section 4.7.2 gives `expand` and
+`insert` one result shape each, so there is nothing left to settle: #1338 is
+resolved by construction rather than by this oracle.
+
+Gone with the stores: `chelis-cli`'s `hash_order_stability` target, which ran
+K=24 fresh processes over programs whose settlement made that choice
+(chelis#1277 S2b); the raw-store compile-fail fixture, which proved the stores
+exposed no hash iteration API; and the `chelis-types` `hash_order_` unit rows,
+which asserted the source ordering of obligations that are no longer recorded
+(chelis#1277 S2c).
+
+The four components below never depended on the two-candidate model. The cache
+version test pins the serialized checker state, the executable-example and
+parity rows exercise `examples/hash_order_determinism.ch` on both lanes, and
+`issue_942_inferred_tensor_cast` covers `cast` over a shape-bearing producer.
 """
 
 from __future__ import annotations
@@ -21,24 +32,13 @@ from typing import Callable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS: tuple[tuple[str, ...], ...] = (
-    (sys.executable, "scripts/check_hash_order_compile_fail.py"),
-    (
-        "cargo",
-        "nextest",
-        "run",
-        "-p",
-        "chelis-types",
-        "--lib",
-        "hash_order_",
-        "--no-fail-fast",
-    ),
     (
         "cargo",
         "nextest",
         "run",
         "-p",
         "chelis-compiler-api",
-        "cache_format_version_tracks_ordered_deferred_constraints",
+        "cache_format_version_tracks_the_deferred_ledger_removal",
         "--no-fail-fast",
     ),
     (

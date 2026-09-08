@@ -763,7 +763,6 @@ impl Env {
             .into_iter()
             .filter(|v| {
                 subst.level_of_tvar(*v) > level
-                        && !subst.has_deferred_shape_constraint(*v)
                         // spec/04 §3.1.1: a variable minted for an in-group
                         // recursive instantiation stays monomorphic while its
                         // group is inferred, so a let-bound alias of a group
@@ -804,11 +803,7 @@ impl Env {
         let env_rvars = self.free_rvars(subst);
         let tvars = free_tvars(&ty)
             .into_iter()
-            .filter(|v| {
-                !env_tvars.contains(v)
-                    && !subst.has_deferred_shape_constraint(*v)
-                    && !crate::infer::recursion::tvar_pinned(*v)
-            })
+            .filter(|v| !env_tvars.contains(v) && !crate::infer::recursion::tvar_pinned(*v))
             .collect::<Vec<_>>();
         let tvar_restrictions = tvars
             .iter()

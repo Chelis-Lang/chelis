@@ -310,8 +310,7 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "chelis-python/extension-module,"
     "chelis-runtime/ownership-ledger,"
     "chelis-types/checkpoint-compile-probe,"
-    "chelis-types/generalize-sweep-oracle,"
-    "chelis-types/hash-order-compile-probe",
+    "chelis-types/generalize-sweep-oracle",
     "--", "-D", "warnings",
 ]
 FMT_CHECK: list[str] = ["cargo", "fmt", "--all", "--", "--check"]
@@ -380,13 +379,6 @@ DOCTEST_PIPELINE_CORE: list[str] = [
 CHECKPOINT_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_checkpoint_compile_fail.py",
-]
-# chelis#1338 Phase A: the deferred stores expose only canonical operations.
-# The out-of-workspace fixture deliberately attempts raw map iteration and
-# must stay rejected in both hosted lint-and-unit and the `--local` set.
-HASH_ORDER_COMPILE_FAIL: list[str] = [
-    MANAGED_PYTHON,
-    "scripts/check_hash_order_compile_fail.py",
 ]
 # The liveness proof for the ban itself. `clippy.toml` is read by nothing else
 # continuous, and no workspace source spells the banned types today, so
@@ -506,7 +498,6 @@ STAGES: dict[str, list[list[str]]] = {
         DOCTEST_COMPILER_API,
         DOCTEST_PIPELINE_CORE,
         CHECKPOINT_COMPILE_FAIL,
-        HASH_ORDER_COMPILE_FAIL,
         HASH_ORDER_PHASE_B_COMPILE_FAIL,
         CONFIGURATION_CLOSURE,
         PIPELINE_CORE_DEPENDENCY_GUARD,
@@ -563,7 +554,6 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     DOCTEST_COMPILER_API,
     DOCTEST_PIPELINE_CORE,
     CHECKPOINT_COMPILE_FAIL,
-    HASH_ORDER_COMPILE_FAIL,
     HASH_ORDER_PHASE_B_COMPILE_FAIL,
     CONFIGURATION_CLOSURE,
     PIPELINE_CORE_DEPENDENCY_GUARD,
