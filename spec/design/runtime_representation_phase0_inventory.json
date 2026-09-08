@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "ccbbbcfa04381c7618e33b867d078b8e59bc71dafe298dfb586414d6b942c69a",
+  "freeze_sha256": "9e78c58fbad46dbd16a3c922cccce32b8291fe2d3f48a19b4869a6f687e972db",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2900,6 +2900,70 @@
             "owner": "TensorElement for T"
           },
           {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for f64"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for f32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for F16Bits"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for Bf16Bits"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for i64"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for i32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for i16"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for i8"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "private :: Sealed for Bool8"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticIdentity for f64"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticIdentity for f32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticIdentity for i64"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticIdentity for i32"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticIdentity for i16"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticIdentity for i8"
+          },
+          {
+            "kind": "dtype-contract",
+            "owner": "ArithmeticIdentity for ()"
+          },
+          {
             "kind": "width-arithmetic",
             "owner": "assert_registration"
           }
@@ -3019,13 +3083,14 @@
           "witness_id": "phase0.mutate_element_binding",
           "expected_kind": "dtype-contract",
           "path": "crates/chelis-runtime/src/element.rs",
-          "implementation_sha256": "d2cca9e8fd228f5261ca942115d339fcc8515bf2e48f0c4dc0079e50539baede",
+          "implementation_sha256": "4a37ea35e2763315b8514c2250993dee40002cf34c8883e018f2328d35e763d4",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
           "expected_owners": [
-            "ElementStorage for UnregisteredElement"
+            "Storage for UnregisteredElement",
+            "private :: Sealed for UnregisteredElement"
           ],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },

@@ -227,6 +227,14 @@ Phase 1 command remains unimplemented until its other deliverables are green.
 
 ### C1 runtime element delivery boundary
 
+The inventory enumerates every trait implementation in the private `element`
+owner, not only implementations whose written trait name is `ElementStorage`.
+Only the exact storage, private-seal, arithmetic-identity, and blanket-projection
+rows are admitted. Import aliases, including aliases defined in another file,
+cannot hide an extra binding; an additional seal implementation is itself a
+new row. Qualified trait spelling and enclosing module ownership remain part
+of the row identity. The added-binding mutation exercises an ordinary alias.
+
 The next independently shippable slice seals the runtime's existing element
 implementations and binds their storage and arithmetic types to `DTypeContract`.
 It leaves the existing unsafe pointer methods at their frozen identities until
@@ -255,9 +263,10 @@ external and sibling-module sealing and incomplete/wrong registrations. Compile
 mutations use isolated copies of the real registration and trait declaration,
 with stubs only for the unchanged raw-access environment; positive controls
 also compile against the real runtime crate. The Phase 0 oracle executes this
-suite in release mode and enumerates every `ElementStorage` implementation. Its exact final
-owner set admits only these nine registrations, the derived blanket projection,
-and the compile-time assertion owner. The old nine unsealed bindings leave
+suite in release mode and inventories every trait implementation in the element
+owner. Its exact final set admits the nine storage registrations and private
+seals, the seven arithmetic identities, the derived blanket projection, and
+the compile-time assertion owner. The old nine unsealed bindings leave
 active debt; foundation rows remain immutable. No raw-access debt is relocated
 or reauthorized. Phase 1 still awaits checked metadata and its complete oracle.
 

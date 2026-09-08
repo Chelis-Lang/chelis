@@ -112,6 +112,35 @@ fn element_storage_bindings_are_individual_seams_even_for_unknown_markers() {
 }
 
 #[test]
+fn element_owner_inventories_every_trait_impl_without_resolving_imports() {
+    let path = "crates/chelis-runtime/src/element.rs";
+    for imports in [
+        "use ElementStorage as Storage;",
+        "use self::{ElementStorage as Storage};",
+        "use self::ElementStorage as First; use First as Storage;",
+        "use other_module::Storage;",
+    ] {
+        assert_eq!(
+            identities(path, &format!("{imports} impl Storage for Alias {{}}")),
+            vec![("dtype-contract".into(), "Storage for Alias".into())],
+            "a renamed or imported trait must remain an inventoried implementation"
+        );
+    }
+    assert_eq!(
+        identities(path, "impl private::Sealed for New {}"),
+        vec![("dtype-contract".into(), "private :: Sealed for New".into())]
+    );
+    assert_eq!(
+        identities(path, "mod nested { impl ElementStorage for f32 {} }"),
+        vec![(
+            "dtype-contract".into(),
+            "nested::ElementStorage for f32".into()
+        )]
+    );
+    assert!(identities(RUNTIME, "impl OrdinaryStorage for Plain {}").is_empty());
+}
+
+#[test]
 fn unparseable_rust_fails_closed() {
     let error = scan_rust_source(RUNTIME, "pub fn f( {").expect_err("invalid Rust must fail");
     assert!(

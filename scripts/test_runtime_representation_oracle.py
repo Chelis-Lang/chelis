@@ -233,7 +233,10 @@ class MutationContractTests(unittest.TestCase):
         self.assertTrue(any("element_contract" in leg.argv for leg in oracle.phase0_legs()))
         probe = next(p for p in oracle.phase0_mutation_probes()
                      if p.witness_id == "phase0.mutate_element_binding")
-        self.assertEqual(probe.expected_owners, ("ElementStorage for UnregisteredElement",))
+        self.assertEqual(probe.expected_owners, (
+            "Storage for UnregisteredElement", "private :: Sealed for UnregisteredElement",
+        ))
+        self.assertIn("impl Storage for UnregisteredElement", probe.mutate(""))
 
     def test_vocabulary_final_forms_do_not_admit_new_variants_or_owners(self) -> None:
         path = "crates/chelis-vocab/src/lib.rs"

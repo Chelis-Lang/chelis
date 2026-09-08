@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "ccbbbcfa04381c7618e33b867d078b8e59bc71dafe298dfb586414d6b942c69a"
+FREEZE_SHA256 = "9e78c58fbad46dbd16a3c922cccce32b8291fe2d3f48a19b4869a6f687e972db"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -185,6 +185,15 @@ ELEMENT_FINAL_CONTRACT_OWNERS = (
     "ElementStorage for i64", "ElementStorage for i32",
     "ElementStorage for i16", "ElementStorage for i8",
     "ElementStorage for Bool8", "TensorElement for T",
+    "private :: Sealed for f64", "private :: Sealed for f32",
+    "private :: Sealed for F16Bits", "private :: Sealed for Bf16Bits",
+    "private :: Sealed for i64", "private :: Sealed for i32",
+    "private :: Sealed for i16", "private :: Sealed for i8",
+    "private :: Sealed for Bool8",
+    "ArithmeticIdentity for f64", "ArithmeticIdentity for f32",
+    "ArithmeticIdentity for i64", "ArithmeticIdentity for i32",
+    "ArithmeticIdentity for i16", "ArithmeticIdentity for i8",
+    "ArithmeticIdentity for ()",
 )
 VOCAB_FINAL_CONTRACT_OWNERS = (
     "ArithmeticRepr::Ieee754Binary32",
@@ -815,13 +824,14 @@ def mutate_incomplete_arithmetic_repr(source: str) -> str:
 
 
 def mutate_element_binding(source: str) -> str:
-    """A fully written extra storage binding still needs exact registration."""
+    """An aliased extra binding and its private seal need exact registration."""
 
     return _append_probe(source, "UnregisteredElement", """
 #[derive(Clone, Copy)]
 struct UnregisteredElement(f32);
+use self::ElementStorage as Storage;
 impl private::Sealed for UnregisteredElement {}
-impl ElementStorage for UnregisteredElement {
+impl Storage for UnregisteredElement {
     const STORAGE_DTYPE: RuntimeDType = RuntimeDType::F32;
     const STORED_REPR: Repr = Repr::Ieee754Binary32;
     type ArithmeticStorage = f32;
@@ -1316,7 +1326,8 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         _probe("dtype-contract", "crates/chelis-vocab/src/lib.rs", mutate_incomplete_dtype),
         _probe("dtype-contract", VOCAB_OWNER, mutate_incomplete_arithmetic_repr),
         _probe("dtype-contract", ELEMENT_OWNER, mutate_element_binding,
-               expected_owners=("ElementStorage for UnregisteredElement",)),
+               expected_owners=("Storage for UnregisteredElement",
+                                "private :: Sealed for UnregisteredElement")),
         _probe("fixed-rank-metadata", "crates/chelis-python/src/lib.rs", mutate_fixed_rank_metadata),
         _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
         _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
