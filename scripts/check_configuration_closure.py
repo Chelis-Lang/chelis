@@ -235,9 +235,14 @@ NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
 )
 
 # Directories holding `.rs` sources that the workspace build deliberately does
-# not compile. Each is a standalone Cargo project driven by its own named gate,
-# which compiles it and asserts the expected rejection.
+# not compile. Each holds standalone compiler fixtures driven by its own named
+# gate, which checks their expected rejection or generated typed artifacts.
 UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
+    UncompiledException(
+        directory="scripts/fixtures/capacity_graph",
+        reason="standalone rustdoc fixtures; the owning suite compiles their typed artifacts",
+        owning_gate="scripts/test_capacity_census_graph.py",
+    ),
     UncompiledException(
         directory="crates/chelis-unord/tests/compile_fail",
         reason="standalone rejection fixtures; compiling them is the test",

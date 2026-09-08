@@ -22,6 +22,20 @@ from capacity_census_graph import (
 
 ROOT = Path(__file__).resolve().parent.parent
 SPAN = "chelis_compiler_api::schema::DiagnosticSpan"
+FIXTURE_ROOT = ROOT / "scripts/fixtures/capacity_graph"
+GRAPH_SOURCE = Path("graph.rs")
+SERDE_SOURCE = Path("serde/src/lib.rs")
+
+
+def assert_fixture_ownership(directory: Path) -> None:
+    """The source exception covers only inputs the actual rustdoc tests own."""
+    actual = {path.relative_to(directory) for path in directory.rglob("*.rs")}
+    expected = {GRAPH_SOURCE, SERDE_SOURCE}
+    if actual != expected:
+        raise AssertionError(
+            f"rustdoc fixture ownership differs: unowned={sorted(actual - expected)}, "
+            f"missing={sorted(expected - actual)}"
+        )
 
 
 def primitive(name):
@@ -660,9 +674,33 @@ class CarrierRecognition(unittest.TestCase):
             verify_transport(found, graph(b).numeric_leaves[0], [span_contract(found)])
 
 
+class FixtureOwnership(unittest.TestCase):
+    def test_only_actual_rustdoc_inputs_belong_to_fixture_gate(self):
+        assert_fixture_ownership(ROOT / "scripts/fixtures/capacity_graph")
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for source in ("graph.rs", "serde/src/lib.rs"):
+                path = directory / source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+            assert_fixture_ownership(directory)
+            unowned = directory / "unowned.rs"
+            unowned.write_text("pub struct HiddenNumeric(pub f64);")
+            with self.assertRaisesRegex(AssertionError, "unowned.rs"):
+                assert_fixture_ownership(directory)
+            unowned.unlink()
+            (directory / "graph.rs").unlink()
+            with self.assertRaisesRegex(AssertionError, "graph.rs"):
+                assert_fixture_ownership(directory)
+
+
 class ActualRustdoc(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        assert_fixture_ownership(FIXTURE_ROOT)
+
     def test_actual_serde_attributes_and_custom_impl_are_distinguished(self):
-        fixture = ROOT / "scripts/fixtures/capacity_graph/serde/Cargo.toml"
+        fixture = FIXTURE_ROOT / SERDE_SOURCE.parent.parent / "Cargo.toml"
         target = ROOT / "target/graph-fixture-target"
         result = subprocess.run(
             [
@@ -710,7 +748,7 @@ class ActualRustdoc(unittest.TestCase):
             )
 
     def test_actual_private_reexport_generic_and_recursive_artifact(self):
-        source = ROOT / "scripts/fixtures/capacity_graph/graph.rs"
+        source = FIXTURE_ROOT / GRAPH_SOURCE
         with tempfile.TemporaryDirectory(prefix="capacity-graph-") as temporary:
             out = Path(temporary)
             result = subprocess.run(

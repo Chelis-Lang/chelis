@@ -15,6 +15,11 @@ locked `serde/` crate establishes the actual rustdoc representation of serde
 attributes, derived implementations and a custom serializer. Its build uses
 one Cargo job and this worktree's `target/graph-fixture-target` cache.
 
+Configuration closure records this directory as standalone fixture source owned
+by the script suite. The suite rejects any missing or additional Rust file
+outside its two actual rustdoc inputs, so that directory entry cannot silently
+admit a new uncompiled fixture.
+
 Synthetic artifact mutations exercise unresolved imports, unsupported types,
 growing generic substitutions, discriminator and width changes, role swaps,
 ambiguous registrations, and mixed numeric siblings. The fixed point records
