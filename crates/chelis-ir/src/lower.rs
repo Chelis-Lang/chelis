@@ -17782,7 +17782,7 @@ mod regression_tests {
     #[test]
     fn deftype_tensor_invariant_metadata_does_not_trip_runtime_audit() {
         let src = r#"
-            (deftype {invariant: (fn {}
+            (deftype {opaque: true, invariant: (fn {}
                                    (params {} p)
                                    (app {}
                                      (var {} gte)
@@ -17812,7 +17812,7 @@ mod regression_tests {
     #[test]
     fn deftype_scalar_invariant_metadata_does_not_trip_runtime_audit() {
         let src = r#"
-            (deftype {invariant: (fn {}
+            (deftype {opaque: true, invariant: (fn {}
                                    (params {} p)
                                    (app {}
                                      (var {} and)

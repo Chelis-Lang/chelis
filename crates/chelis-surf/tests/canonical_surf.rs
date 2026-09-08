@@ -1785,3 +1785,74 @@ fn roundtrip_normalization_preserves_metadata_named_dtype_binders() {
         assert!(normalize_deep_for_surface_roundtrip(&bad).is_err());
     }
 }
+
+#[test]
+fn normalization_preserves_structural_metadata_containers() {
+    for (key, value) in [
+        ("property_preconditions", "(tuple {})"),
+        ("property_preconditions", "(tuple {} true)"),
+        ("property_preconditions", "(tuple {} (tuple {}))"),
+        ("property_contracts", "(tuple {})"),
+        ("property_contracts", "(tuple {} \"law\")"),
+        ("property_quantifiers", "(params {})"),
+        ("property_quantifiers", "(params {} x)"),
+    ] {
+        let source = format!("(def {{{key}: {value}}} f (lit {{}} 1))");
+        let deep = parse_deep(&source).unwrap();
+        let normalized = normalize_deep_for_surface_roundtrip(&deep).unwrap();
+        let printed = print_canonical(&normalized);
+        let shape = if key == "property_quantifiers" {
+            "params"
+        } else {
+            "tuple"
+        };
+        assert!(
+            printed.contains(&format!("{key}: ({shape} {{}}")),
+            "{printed}"
+        );
+        chelis_deep::metadata::validate_metadata(&normalized).unwrap();
+        let bad = legacy_deep(&format!("(def {{{key}: (lit {{}} 1)}} f (lit {{}} 1))")).unwrap();
+        assert!(normalize_deep_for_surface_roundtrip(&bad).is_err());
+    }
+}
+
+#[test]
+fn normalization_uses_metadata_roles_for_syntax_and_expressions() {
+    let deep = parse_deep(
+        "(def {custom: (tuple {span: \"id\"}), property_seed: (tuple {})} f (lit {} 1))",
+    )
+    .unwrap();
+    let printed = print_canonical(&normalize_deep_for_surface_roundtrip(&deep).unwrap());
+    assert!(printed.contains("custom: (tuple {})"), "{printed}");
+    assert!(
+        printed.contains("property_seed: (lit {type: (t-unit {})} ())"),
+        "{printed}"
+    );
+    assert!(!printed.contains("span:"), "{printed}");
+}
+
+#[test]
+fn normalization_retains_property_parameter_types_with_a_signature() {
+    let source = concat!(
+        "(defsig {} p (t-fn {} (t-prim {} int32) (t-prim {} bool))) ",
+        "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
+        "property_quantifiers: (params {} (x {type: (t-prim {} int32)})), ",
+        "property_preconditions: (tuple {})} p ",
+        "(fn {} (params {} (x {type: (t-prim {} int32)})) (lit {} true)))",
+    );
+    let normalized = normalize_deep_for_surface_roundtrip(&parse_deep(source).unwrap()).unwrap();
+    let printed = print_canonical(&normalized);
+    assert_eq!(
+        printed.matches("x {type: (t-prim {} int32)}").count(),
+        2,
+        "{printed}"
+    );
+    chelis_deep::metadata::validate_metadata(&normalized).unwrap();
+    resugar_program(&normalized).unwrap();
+    let bad = source.replacen(
+        "property_quantifiers: (params {} (x {type: (t-prim {} int32)}))",
+        "property_quantifiers: (params {} (x {type: (t-prim {} bool)}))",
+        1,
+    );
+    assert!(normalize_deep_for_surface_roundtrip(&legacy_deep(&bad).unwrap()).is_err());
+}

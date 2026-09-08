@@ -628,6 +628,14 @@ The metadata corpus also exercises nested runtime child roles through legacy
 carriers and typed ancestors, the string leaf inside resource effects, and
 normalization of dtype binders named after metadata. Distinct bound families
 must remain distinguishable after normalization; the oracle includes the
-canonical Surf suite that asserts this preservation.
+canonical Surf suite that asserts this preservation. Normalization dispatches
+through the same metadata-role declaration as stamping: data is preserved,
+syntax retains its container shape, and expression/type values admit their
+canonical rewrites. The role corpus covers empty and nonempty property
+containers as well as their malformed counterparts; CLI migration covers
+properties with empty preconditions. Property parameter annotations stay
+paired with their written quantifiers when redundant declaration/function
+types are removed; a neighbouring signature does not erase that metadata
+relationship.
 
 This slice addresses #1478 and #1330, not the other open #908 obligations.

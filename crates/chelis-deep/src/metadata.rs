@@ -60,9 +60,10 @@ enum Placement {
     PipeStage,
 }
 
-/// How stamping reads a payload, distinct from child-index roles.
+/// The payload role shared by stamping and metadata-preserving transformations.
+/// It is distinct from the roles of children inside that payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MetadataRole {
+pub enum MetadataRole {
     Syntax,
     Expression,
     Type,
@@ -129,7 +130,8 @@ fn classify(key: &str) -> KeyClass {
         None => KeyClass::Extension,
     }
 }
-pub(crate) fn role(key: &str) -> MetadataRole {
+/// Read the payload role declared by the per-key contract.
+pub fn role(key: &str) -> MetadataRole {
     match classify(key) {
         KeyClass::Registered(rule) => match rule.shape {
             S::Expression | S::Wrt => MetadataRole::Expression,
@@ -461,7 +463,7 @@ fn type_shape_error(root: View<'_>) -> Option<String> {
         };
         if !type_syntax_role_accepts_tag(role, tag) {
             return Some(format!(
-                "expected {role:?} type syntax, got {}",
+                "expected {role:?} type syntax, got `{}`",
                 tag.as_str()
             ));
         }

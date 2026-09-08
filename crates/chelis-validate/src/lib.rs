@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_resource_tag_in_effects() {
         assert_validates(
-            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} foo))} (t-prim {} f32)))\n",
+            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} \"foo\"))} (t-prim {} f32)))\n",
             "comment before nested `resource` tag",
         );
     }

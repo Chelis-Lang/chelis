@@ -381,3 +381,35 @@ fn tracked_surf_files(workspace: &Path) -> Vec<PathBuf> {
         .map(|path| workspace.join(path))
         .collect()
 }
+
+#[test]
+fn migration_preserves_empty_property_preconditions() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("property.ch");
+    for text in [
+        "@property p forall(): true\n",
+        "@property p forall(x: int32): x == x\n",
+    ] {
+        fs::write(&source, text).unwrap();
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+            .arg(&source)
+            .assert()
+            .success();
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["migrate", "surf", "--from", "0.18", "--check"])
+            .arg(&source)
+            .assert()
+            .success();
+    }
+    fs::write(&source, "@property p forall(x: int32):\n").unwrap();
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["migrate", "surf", "--from", "0.18", "--check"])
+        .arg(&source)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("panicked").not());
+}

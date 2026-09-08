@@ -148,7 +148,8 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
 /// immediately preceding matching `defsig` already carries the same types.
 /// Canonical Surf deliberately folds that Deep pair into one typed declaration,
 /// so desugaring necessarily recreates those redundant annotations. A
-/// disagreement is retained and therefore still fails the oracle.
+/// disagreement is retained and therefore still fails the oracle. Property
+/// parameter types remain paired with the written `property_quantifiers`.
 ///
 /// This narrow normalization is intentionally not
 /// [`chelis_deep::ast::strip_metadata`], which would erase language-relevant
@@ -355,12 +356,20 @@ fn strip_redundant_definition_types(
         return None;
     }
 
+    // Property quantifiers preserve the written parameter types and must
+    // match this params node. These annotations remain part of the property
+    // contract even when a neighbouring signature repeats them.
+    let preserve_parameter_types = meta_string(definition.meta, "chelis_role") == Some("property");
     let normalized_params = params
         .children
         .iter()
         .zip(&function_type.children[..params.children.len()])
         .map(|(param, expected_type)| {
-            let normalized = strip_matching_param_type(param, expected_type);
+            let normalized = if preserve_parameter_types {
+                param.clone()
+            } else {
+                strip_matching_param_type(param, expected_type)
+            };
             changed |= normalized != *param;
             normalized
         })
@@ -510,8 +519,30 @@ fn normalize_roundtrip_expr_with_context(
     expr: &DeepExpr,
     context: SurfaceMetadataContext,
 ) -> DeepExpr {
+    normalize_roundtrip_value(
+        expr,
+        context,
+        chelis_deep::metadata::MetadataRole::Expression,
+    )
+}
+
+fn normalize_roundtrip_value(
+    expr: &DeepExpr,
+    context: SurfaceMetadataContext,
+    role: chelis_deep::metadata::MetadataRole,
+) -> DeepExpr {
+    use chelis_deep::metadata::MetadataRole;
+    // The key owns its payload's shape. A structural tuple is a container,
+    // even when empty; only an expression/type payload admits unit rewriting.
+    // Data payloads are preserved without treating binder names as annotations.
+    let rewrite_shape = match role {
+        MetadataRole::Expression | MetadataRole::Type => true,
+        MetadataRole::Syntax => false,
+        MetadataRole::Preserved | MetadataRole::BinderMap => return expr.clone(),
+    };
     if let Ok(node) = node_ref(expr) {
-        if node.tag == DeepTag::Lit
+        if rewrite_shape
+            && node.tag == DeepTag::Lit
             && node.children.len() == 1
             && let Some(value) = node.children.first()
         {
@@ -548,7 +579,7 @@ fn normalize_roundtrip_expr_with_context(
                 );
             }
         }
-        if node.tag == DeepTag::Tuple && node.children.is_empty() {
+        if rewrite_shape && node.tag == DeepTag::Tuple && node.children.is_empty() {
             let unit_type = DeepExpr::Node(
                 Box::new(chelis_deep::node::Node::new(
                     DeepTag::TUnit,
@@ -569,7 +600,7 @@ fn normalize_roundtrip_expr_with_context(
                 node.span,
             );
         }
-        if node.tag == DeepTag::TTuple && node.children.is_empty() {
+        if rewrite_shape && node.tag == DeepTag::TTuple && node.children.is_empty() {
             return DeepExpr::Node(
                 Box::new(chelis_deep::node::Node::new(
                     DeepTag::TUnit,
@@ -627,9 +658,10 @@ fn normalize_roundtrip_expr_with_context(
                     .map(|(key, value)| {
                         (
                             key.clone(),
-                            normalize_roundtrip_expr_with_context(
+                            normalize_roundtrip_value(
                                 value,
                                 SurfaceMetadataContext::default(),
+                                chelis_deep::metadata::role(key),
                             ),
                         )
                     })
@@ -765,16 +797,11 @@ fn normalize_roundtrip_meta(
             .map(|(key, value)| {
                 (
                     key.clone(),
-                    if key == "dtype_bounds" {
-                        // Binder names are data, including names such as `span`.
-                        // The entry was validated before normalization began.
-                        value.clone()
-                    } else {
-                        normalize_roundtrip_expr_with_context(
-                            value,
-                            SurfaceMetadataContext::default(),
-                        )
-                    },
+                    normalize_roundtrip_value(
+                        value,
+                        SurfaceMetadataContext::default(),
+                        chelis_deep::metadata::role(key),
+                    ),
                 )
             })
             .collect(),

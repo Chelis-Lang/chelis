@@ -214,19 +214,19 @@ fn effect_only_reannotation_preserves_every_checked_context() {
 
 #[test]
 fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
-    type MutationCase = (&'static str, fn(&mut [Expr]));
+    type MutationCase = (&'static str, fn(&mut [Expr]), &'static str);
 
     let checked = checked_program();
     let cases: [MutationCase; 6] = [
-        ("body", mutate_body),
-        ("structure", mutate_structure),
-        ("type metadata", mutate_type_metadata),
-        ("eff metadata", mutate_eff_metadata),
-        ("span", mutate_span),
-        ("missing type stamp", remove_type_stamp),
+        ("body", mutate_body, "effects-only"),
+        ("structure", mutate_structure, "effects-only"),
+        ("type metadata", mutate_type_metadata, "effects-only"),
+        ("eff metadata", mutate_eff_metadata, "metadata `eff`"),
+        ("span", mutate_span, "effects-only"),
+        ("missing type stamp", remove_type_stamp, "effects-only"),
     ];
 
-    for (label, mutate) in cases {
+    for (label, mutate, diagnostic) in cases {
         let mut forged = checked.annotated_exprs().to_vec();
         mutate(&mut forged);
         let result = checked
@@ -239,8 +239,8 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
             result.errors
         );
         assert!(
-            result.errors[0].message.contains("effects-only"),
-            "{label} mutation must name the narrow ownership boundary: {:?}",
+            result.errors[0].message.contains(diagnostic),
+            "{label} mutation must name its metadata or ownership boundary: {:?}",
             result.errors
         );
     }
@@ -248,22 +248,28 @@ fn non_effect_reannotation_mutations_are_rejected_exactly_once() {
 
 #[test]
 fn effects_only_boundary_rejects_order_duplicates_and_multiple_effect_rows() {
-    type MutationCase = (&'static str, fn(&mut [Expr]));
+    type MutationCase = (&'static str, fn(&mut [Expr]), &'static str);
 
     let checked = checked_program();
     let cases: [MutationCase; 3] = [
         (
             "reordered non-effects metadata",
             reorder_non_effect_metadata,
+            "effects-only",
         ),
         (
             "duplicated non-effects metadata",
             duplicate_non_effect_metadata,
+            "metadata `span`",
         ),
-        ("duplicate effects rows", duplicate_effects_metadata),
+        (
+            "duplicate effects rows",
+            duplicate_effects_metadata,
+            "metadata `effects`",
+        ),
     ];
 
-    for (label, mutate) in cases {
+    for (label, mutate, diagnostic) in cases {
         let mut forged = checked.annotated_exprs().to_vec();
         mutate(&mut forged);
         let result = checked
@@ -276,8 +282,8 @@ fn effects_only_boundary_rejects_order_duplicates_and_multiple_effect_rows() {
             result.errors
         );
         assert!(
-            result.errors[0].message.contains("effects-only"),
-            "{label} must name the narrow ownership boundary: {:?}",
+            result.errors[0].message.contains(diagnostic),
+            "{label} must name its metadata or ownership boundary: {:?}",
             result.errors
         );
     }

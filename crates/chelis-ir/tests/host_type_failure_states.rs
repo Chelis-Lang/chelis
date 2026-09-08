@@ -193,7 +193,23 @@ fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
         Err(HostTypeDecodeError::MissingTypeMetadata)
     );
 
-    let invalid = parse_one("(lit {type: nope} 1)");
+    assert!(parse_str("(lit {type: nope} 1)").is_err());
+    // The decoder's defensive check remains reachable through legacy input.
+    let invalid = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::Lit), span),
+                Expr::Map(
+                    MetaMap {
+                        entries: vec![("type".into(), Expr::Atom(Atom::Name("nope".into()), span))],
+                    },
+                    span,
+                ),
+                Expr::Atom(Atom::Int(1), span),
+            ],
+        },
+        span,
+    );
     assert!(matches!(
         decode_host_type_metadata(&invalid),
         Err(HostTypeDecodeError::MalformedTypeSyntax { .. })

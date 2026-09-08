@@ -949,7 +949,8 @@ fn f6_deep_bridge_source_kind_is_skipped_not_error() {
   m
   (def {chelis_role: "property",
          property_source_kind: "bridge:c-earchin",
-         property_quantifiers: (params {} (x {type: (t-prim {} f32)}))}
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_preconditions: (tuple {})}
     bridged
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))

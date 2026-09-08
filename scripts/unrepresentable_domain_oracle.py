@@ -273,6 +273,8 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "chelis-types",
     "-p",
     "chelis-surf",
+    "-p",
+    "chelis-cli",
     "--test",
     "stamp_to_typed",
     "--test",
@@ -283,6 +285,8 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "metadata_ingress",
     "--test",
     "canonical_surf",
+    "--test",
+    "canonical_surf_roundtrip",
 )
 
 # chelis#1088. The compiler-API embedding surface is not reachable from the
