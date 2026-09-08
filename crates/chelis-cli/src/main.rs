@@ -1644,7 +1644,19 @@ fn install_eval_timeout(secs: u64) -> chelis_compiler_api::CancelTokenGuard {
         watchdog.cancel();
         std::thread::sleep(TIMEOUT_HARD_EXIT_GRACE);
         // Still alive: the cooperative path did not reach a node visit.
-        eprintln!("error: evaluation timed out after {secs}s (--timeout)");
+        //
+        // The suffix is the whole point of this line (chelis#1607). The
+        // cooperative path prints the same prefix through the ordinary error
+        // channel and exits 1 as well, so without it a forced exit and a clean
+        // unwind are one event to any reader, and they are not: this one killed
+        // the process, so destructors did not run and nothing was flushed. A
+        // user who sees it has learned something actionable, and a test can
+        // finally tell the two apart without timing them.
+        eprintln!(
+            "error: evaluation timed out after {secs}s (--timeout); \
+             cancellation did not complete within {grace}s, forced exit",
+            grace = TIMEOUT_HARD_EXIT_GRACE.as_secs()
+        );
         std::process::exit(1);
     });
     chelis_compiler_api::install_cancel_token(token)

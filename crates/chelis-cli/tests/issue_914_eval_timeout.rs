@@ -16,10 +16,19 @@
 //! ## Coverage
 //!
 //! Positive: `timeout_trips_on_a_slow_program` — the flag fires, with the
-//! documented message and a non-zero exit, and does so through *cooperative*
-//! cancellation rather than the watchdog's hard-exit backstop. The two are
-//! indistinguishable by output (same message, same exit code), so the
-//! wall-clock bound is what separates them; see the assertion's comment.
+//! documented message prefix and a non-zero exit.
+//!
+//! Which of the two timeout paths ran is deliberately NOT asserted here.
+//! Cooperative unwinding is CPU-bound work racing a fixed wall-clock grace, so
+//! on a contended machine the backstop legitimately wins and the process is
+//! force-killed; that is the design, and the user-visible outcome is the same
+//! failure. The rows below therefore assert only what `--timeout` promises,
+//! and the ordering property lives in the two `#[ignore]`d manual-gate rows at
+//! the bottom of this file, which are the ones with a precondition on load.
+//!
+//! Until chelis#1607 the two paths were indistinguishable by output and a
+//! wall-clock bound was the only thing separating them. The hard-exit path now
+//! says which it is, so they are separable by reading stderr, not timing it.
 //!
 //! Negative parity (the flag must not fire when it must not):
 //! * `generous_timeout_does_not_disturb_a_fast_program` — a fast program under
@@ -45,6 +54,8 @@
 
 use assert_cmd::Command;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::{TempDir, tempdir};
 
@@ -74,6 +85,21 @@ fn write_program(dir: &Path, name: &str, body: &str) -> PathBuf {
 /// before it hard-exits the process itself. Mirrored rather than exported
 /// because it is an internal policy constant, not a CLI contract.
 const HARD_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// The suffix `chelis-cli` appends when the watchdog gives up on cooperation
+/// and kills the process (chelis#1607). It is the only thing that distinguishes
+/// the hard-exit path from the cooperative one: both print the same prefix and
+/// both exit 1.
+const BACKSTOP_SUFFIX: &str = "forced exit";
+
+/// Slack over the backstop's own guarantee, for the default-suite rows.
+///
+/// The backstop terminates at `timeout + HARD_EXIT_GRACE`, and that is a
+/// wall-clock sleep in a detached thread, so even a starved runner delivers it
+/// within seconds of the deadline. Four times the entire budget leaves any
+/// scheduling delay far below the bound while a genuine hang, which is the only
+/// thing this bound now exists to catch, still fails.
+const TERMINATION_SLACK: Duration = Duration::from_secs(30);
 
 /// A dep-free reef package exporting one helper, plus the package root.
 ///
@@ -167,18 +193,14 @@ fn timeout_trips_on_a_slow_program() {
         stdout.trim().is_empty(),
         "a timed-out eval must not print a result, got stdout: {stdout}"
     );
-    // The ceiling is the hard-exit backstop boundary, not a generous
-    // round number. Measured: with the per-node token checks deleted from
-    // both eval lanes, this test still passed at 7.08s under the old
-    // `< 20` bound — the watchdog's `process::exit` prints a byte-identical
-    // message from a detached thread, so every other assertion here is
-    // satisfied by the backstop alone. Anything at or past
-    // `timeout + HARD_EXIT_GRACE` means cooperative cancellation did not
-    // fire, which is the thing this test exists to prove.
+    // Termination, not ordering. `--timeout` promises the run stops; the
+    // backstop promises it stops by `timeout + HARD_EXIT_GRACE` whatever the
+    // program does. Only a genuine hang, one that neither polls cancellation
+    // nor reaches the backstop, exceeds this. Which path ran is the ignored
+    // pair's business (chelis#1607).
     assert!(
-        elapsed < Duration::from_secs(2) + HARD_EXIT_GRACE,
-        "cancellation must unwind cooperatively before the watchdog's \
-         hard-exit backstop; took {elapsed:?}"
+        elapsed < Duration::from_secs(2) + HARD_EXIT_GRACE + TERMINATION_SLACK,
+        "a timed-out eval must terminate on its own; took {elapsed:?}"
     );
 }
 
@@ -200,6 +222,13 @@ fn generous_timeout_does_not_disturb_a_fast_program() {
     assert!(
         !stderr.contains("timed out"),
         "a fast program must not report a timeout, got: {stderr}"
+    );
+    // Shape check on the chelis#1607 line: the forced-exit wording is reserved
+    // for a run the watchdog actually killed, and must never appear on a run
+    // that finished by itself.
+    assert!(
+        !stderr.contains(BACKSTOP_SUFFIX),
+        "a successful run must not claim a forced exit, got: {stderr}"
     );
 }
 
@@ -254,15 +283,14 @@ fn timeout_message_is_absent_from_a_successful_run() {
 ///   `EvalInContextError::Compile` → `Box<dyn Error>`), so if that
 ///   flattening stopped special-casing `is_cancellation` the user would see
 ///   `chelis::eval::cancelled` instead of a timeout.
-/// * The run ended before the hard-exit backstop could fire. Without this
-///   the test is a tautology: the watchdog's `process::exit` prints a
-///   byte-identical message from a detached thread and would satisfy the
-///   first assertion even if the token never reached this eval lane at all.
-///   Cooperative cancellation returns at the first node visit after the
-///   deadline, so anything at or past `timeout + HARD_EXIT_GRACE` means the
-///   cooperative path did not fire. (A failure here on a heavily contended
-///   machine is the CPU-starvation diagnostic in `CLAUDE.md`, not a
-///   regression — re-run on a quiet box before believing it.)
+/// * The run terminated on its own rather than hanging.
+///
+/// It no longer claims the cooperative path ran. That claim was carried by a
+/// wall-clock bound, which cannot separate a forced exit from a slow one, and
+/// the property itself does not hold under contention. `BACKSTOP_SUFFIX` makes
+/// the paths separable by reading stderr, and the ignored rows at the bottom of
+/// this file assert both polarities of the ordering under their stated load
+/// preconditions (chelis#1607).
 #[test]
 fn timeout_trips_inside_a_reef_package() {
     let (_dir, root) = reef_package();
@@ -297,10 +325,10 @@ fn timeout_trips_inside_a_reef_package() {
         stdout.trim().is_empty(),
         "a timed-out eval must not print a result, got stdout: {stdout}"
     );
+    // Termination, not ordering; see the sibling row above.
     assert!(
-        elapsed < Duration::from_secs(2) + HARD_EXIT_GRACE,
-        "cancellation must unwind cooperatively before the watchdog's \
-         hard-exit backstop; took {elapsed:?}"
+        elapsed < Duration::from_secs(2) + HARD_EXIT_GRACE + TERMINATION_SLACK,
+        "a timed-out eval must terminate on its own; took {elapsed:?}"
     );
 }
 
@@ -335,5 +363,114 @@ fn generous_timeout_does_not_disturb_a_reef_package_eval() {
     assert!(
         !stderr.contains("timed out"),
         "a fast reef-package eval must not report a timeout, got: {stderr}"
+    );
+}
+
+// The ordering property, as a manual gate in both polarities (chelis#1607).
+// Measured unwind cost after `cancel()` on a 10-core macOS box: ~0.20 s idle,
+// ~0.68 s at 24 spinner threads, 2.0-3.15 s at 50, past the 5 s grace at 100.
+// `docs/manual_gates.md` carries the commands and the preconditions.
+
+/// Spin `threads` busy loops until the returned guard is dropped.
+///
+/// Threads rather than child processes: no binary to find, nothing to reap if
+/// the test panics, and the contention is identical because it is the same
+/// scheduler deciding who runs.
+struct Spinners {
+    stop: Arc<AtomicBool>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Spinners {
+    fn start(threads: usize) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handles = (0..threads)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || while !stop.load(Ordering::Relaxed) {})
+            })
+            .collect();
+        Self { stop, handles }
+    }
+}
+
+impl Drop for Spinners {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn slow_run_stderr() -> String {
+    let dir = tempdir().expect("tempdir");
+    let path = write_program(dir.path(), "slow.ch", SLOW_PROGRAM);
+    let (_code, _stdout, stderr) = eval(&[
+        "eval",
+        "--timeout",
+        "2",
+        "--file",
+        path.to_str().expect("utf-8 path"),
+    ]);
+    stderr
+}
+
+/// MANUAL GATE, ignored by default. Positive polarity of the ordering claim:
+/// on an idle machine cancellation unwinds cooperatively and the watchdog never
+/// forces the exit.
+///
+/// ```text
+/// cargo nextest run -p chelis-cli --test issue_914_eval_timeout \
+///     cooperative_unwind_precedes_the_backstop_on_an_idle_box -- --ignored
+/// ```
+///
+/// Precondition: an otherwise idle box, one-minute load average below the core
+/// count. Under contention this row fails truthfully rather than spuriously,
+/// which is the whole reason it is not in the default suite.
+#[test]
+#[ignore = "load-sensitive by construction; manual gate, see docs/manual_gates.md"]
+fn cooperative_unwind_precedes_the_backstop_on_an_idle_box() {
+    let stderr = slow_run_stderr();
+    assert!(
+        stderr.contains("evaluation timed out after 2s (--timeout)"),
+        "expected the documented timeout message, got stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains(BACKSTOP_SUFFIX),
+        "on an idle box cancellation must unwind before the watchdog forces \
+         the exit; got stderr: {stderr}"
+    );
+}
+
+/// MANUAL GATE, ignored by default. Negative polarity, and the twin that keeps
+/// the row above honest: starve the machine and the backstop must fire and say
+/// so. Without this, deleting every cancellation poll would leave the row above
+/// green on a fast box and nothing would notice.
+///
+/// ```text
+/// cargo nextest run -p chelis-cli --test issue_914_eval_timeout \
+///     a_starved_box_falls_back_to_the_forced_exit --test-threads=1 -- --ignored
+/// ```
+///
+/// Precondition: an otherwise idle box to start with, and `--test-threads=1`,
+/// because this row deliberately oversubscribes every core tenfold for the few
+/// seconds it runs. Expect it to make the machine unresponsive briefly.
+#[test]
+#[ignore = "oversubscribes the machine; manual gate, see docs/manual_gates.md"]
+fn a_starved_box_falls_back_to_the_forced_exit() {
+    let cores = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
+    // Ten runnable threads per core is the ratio measured to push the unwind
+    // past the 5 s grace; five was not enough (2.0-3.15 s of unwind).
+    let _spinners = Spinners::start(cores * 10);
+    let stderr = slow_run_stderr();
+    assert!(
+        stderr.contains(BACKSTOP_SUFFIX),
+        "a starved box must reach the watchdog's forced exit, and the line \
+         must say so; got stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("evaluation timed out after 2s (--timeout)"),
+        "the forced-exit line must still carry the documented prefix: {stderr}"
     );
 }
