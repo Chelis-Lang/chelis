@@ -1942,6 +1942,35 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
 /// program and another way for an evaluated one.
 type EntryDimGuard = (String, (String, usize), (String, usize));
 
+/// The unit-extent claims this graph checks at entry, as
+/// `(input label, axis)` pairs to read.
+///
+/// The claimed value is the literal 1, so unlike [`EntryDimGuard`] there is no
+/// canonical witness to carry: the guard compares one read against a constant.
+/// Everything else is shared with the class path, `derive_unit_extent_claims`
+/// and `member_load_axis` included, so a claim cannot be identified one way
+/// for a compiled program and another way for an evaluated one.
+fn entry_unit_extent_guards(dag: &Dag) -> Vec<(String, usize)> {
+    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
+        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
+        _ => None,
+    };
+    let mut guards = Vec::new();
+    for claim in crate::axis_sources::derive_unit_extent_claims(dag) {
+        if claim.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
+            continue;
+        }
+        let Some((load, axis)) = crate::axis_sources::member_load_axis(dag, &claim.member()) else {
+            continue;
+        };
+        let Some(name) = label(load) else {
+            continue;
+        };
+        guards.push((name, axis));
+    }
+    guards
+}
+
 fn entry_dim_guards(dag: &Dag) -> Vec<EntryDimGuard> {
     let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
         Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
@@ -2159,6 +2188,33 @@ where
         ));
     }
 
+    // The same-rank `expand`'s unit-extent claim, at the same point and by the
+    // same reading of the inputs as the class guard above.
+    // `spec/05-risc-primitives.md` section 2.4.1 makes the operation "a claim
+    // that the operand's extent at `axis` is 1" and sends a symbolic or
+    // runtime extent other than 1 to this guard.
+    //
+    // Order matters and B2h fixed it: the literal-extent check, then the class
+    // guard, then this, and only then `infer_symbolic_bindings_from_inputs`.
+    // The inference is a backstop that reports a targeted error for a symbol
+    // it cannot bind; running a claim guard after it would report the
+    // inference's message for a program whose real fault is a refuted claim.
+    for (label, axis) in entry_unit_extent_guards(dag) {
+        let Some(observed) = resolved_inputs
+            .get(&label)
+            .and_then(|value| value.shape.get(axis).copied())
+        else {
+            continue;
+        };
+        if observed == 1 {
+            continue;
+        }
+        return Err(format!(
+            "extent `1`: claimed = 1, {label} axis {axis} = {observed}\n\
+             numeric trap: domain in load at int64",
+        ));
+    }
+
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
         let mut bindings =
@@ -2211,6 +2267,19 @@ where
     // uninterruptible. Captured once here; the per-node cost is one relaxed
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
+
+    // The unit-extent claims section 4.7 places LOCAL, which the entry loop
+    // above cannot reach: it compares `resolved_inputs`, and a locally placed
+    // claim is about an extent no input carries, one an operation computes
+    // inside this function. Those are checked at the `expand` that makes them.
+    let local_unit_extent_claims: chelis_unord::UnordSet<usize> =
+        crate::axis_sources::derive_unit_extent_claims(dag)
+            .into_iter()
+            .filter(|claim| {
+                claim.placement(dag) == crate::axis_sources::GuardPlacement::Local
+            })
+            .map(|claim| claim.node.0)
+            .collect();
 
     for node in bound_dag.nodes() {
         if let Some(cancel) = &cancel
@@ -2518,6 +2587,21 @@ where
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
             RiscOp::Expand { axis, size } => {
                 let input = &values[&node.inputs[0]];
+                // The claim, where this node is the one that makes it and the
+                // derivation placed its guard here. `<op>` is `expand` rather
+                // than `load` because section 4.7 gives a locally placed guard
+                // "the source position of the operation that introduces the
+                // guarded extent", and that operation is this one.
+                if local_unit_extent_claims.contains(&node.id.0)
+                    && let Some(&observed) = input.shape.get(*axis)
+                    && observed != 1
+                {
+                    return Err(format!(
+                        "extent `1`: claimed = 1, node {} axis {axis} = {observed}\n\
+                         numeric trap: domain in expand at int64",
+                        node.id.0,
+                    ));
+                }
                 let size_value = resolve_eval_bound(size, node, &values, 0)?;
                 let mut out_shape = input.shape.clone();
                 if node.output_type.dims.len() == input.shape.len() + 1 {

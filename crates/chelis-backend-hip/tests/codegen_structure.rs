@@ -2354,3 +2354,68 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
         "i32 shrink kernel must use the int32_t C type"
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1277 S2b: the same-rank `expand`'s unit-extent claim on the HIP host
+// prologue.
+//
+// GPU-free by construction: the claim is an entry guard in the HOST prologue,
+// so the assertion is on the emitted text. A device run would prove the same
+// thing more expensively and only where a GPU exists.
+// ---------------------------------------------------------------------------
+
+/// The HIP host prologue guards the unit-extent claim, and renders [04-NUM-9].
+///
+/// `spec/05-risc-primitives.md` section 2.4.1 sends a symbolic operand extent
+/// other than 1 to "that claim's runtime extent guard", and
+/// `spec/04-type-system.md` section 4.7 places it at entry and renders it
+/// `numeric trap: domain in load at int64` when the operand is an input
+/// tensor's axis.
+///
+/// The `<op>` is `load`, not `expand`, by section 4.7's operand-class rule.
+/// The `abort()` this lane still emits for its `Name` bindings is the legacy
+/// rendering and is chelis#1112's to move; this guard does not adopt it.
+///
+/// EVIDENTIARY STATUS: regression test. Without the derivation the prologue
+/// emits no comparison against 1 at all, so both assertions fail.
+#[test]
+fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(3),
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_hip(&dag, "unit_claim").expect("HIP codegen");
+    let host = &result.c_source;
+    assert!(
+        host.contains("chelis_tensor_shape(inputs[0], 0) != 1"),
+        "the prologue compares the operand's axis against the claimed 1:\n{host}"
+    );
+    assert!(
+        host.contains("numeric trap: domain in load at int64"),
+        "and renders [04-NUM-9] rather than this lane's legacy abort:\n{host}"
+    );
+    assert!(
+        host.contains("extent `1`: claimed = 1, x axis 0 = %lld"),
+        "with section 4.7's context on its own line:\n{host}"
+    );
+}

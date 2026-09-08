@@ -2496,7 +2496,12 @@ pub(super) fn derive_ir_builtin_output_type(
     match func_name {
         "conv2d" => derive_conv2d_output_type(list, type_env).map(ShapeTypeFact::Exact),
         "stride" => derive_movement_rank_output_type(list, type_env, static_env, 0),
-        "expand" | "insert" => derive_movement_rank_output_type(list, type_env, static_env, 1),
+        // The two differ by exactly the axis `insert` adds.
+        // spec/04-type-system.md §4.7.2: "`expand` sets the extent at `axis`
+        // and leaves the rank unchanged; `insert` adds an axis of extent
+        // `size` at `axis` and produces rank `rank(x) + 1`."
+        "expand" => derive_movement_rank_output_type(list, type_env, static_env, 0),
+        "insert" => derive_movement_rank_output_type(list, type_env, static_env, 1),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.

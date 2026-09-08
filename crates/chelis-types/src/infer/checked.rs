@@ -312,7 +312,6 @@ pub(super) enum DeferredShapeRule {
         /// `expand` or `insert`. The replay must reach the same route arm the
         /// original call did, and the two differ in their result forms.
         builtin: &'static str,
-        source_ordinal: SourceOrdinal,
         axis_is_dim_name: bool,
         size_class: SizeClass,
         env: Box<Env>,
@@ -600,7 +599,6 @@ impl InferenceProduct {
                 ),
                 DeferredShapeRule::Expand {
                     builtin,
-                    source_ordinal,
                     axis_is_dim_name,
                     size_class,
                     env,
@@ -609,7 +607,6 @@ impl InferenceProduct {
                     &check.arg_exprs,
                     &check.arg_tys,
                     &check.result_ty,
-                    *source_ordinal,
                     *axis_is_dim_name,
                     *size_class,
                     env,

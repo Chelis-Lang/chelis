@@ -192,7 +192,6 @@ pub(super) fn infer_expand_app(
         &kids[1..],
         &arg_tys,
         &result_ty,
-        product.source_ordinal_for_list(list),
         axis_is_dim_name,
         size_class,
         env,

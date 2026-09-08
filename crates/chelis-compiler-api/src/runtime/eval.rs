@@ -2904,8 +2904,16 @@ impl<'a> EvalContext<'a> {
                 if count < 0 {
                     return Err(format!("{name} requires non-negative extent, got {count}"));
                 }
-                tensor_expand_host(name, &tensor, axis as usize, count as usize)
-                    .map(RuntimeValue::Tensor)
+                // One shape per operation (spec/04-type-system.md section
+                // 4.7.2), so the name selects the evaluator rather than a
+                // heuristic over the operand's shape.
+                if name == "insert" {
+                    tensor_insert_host(name, &tensor, axis as usize, count as usize)
+                        .map(RuntimeValue::Tensor)
+                } else {
+                    tensor_expand_host(name, &tensor, axis as usize, count as usize)
+                        .map(RuntimeValue::Tensor)
+                }
             }
             "softmax" => {
                 let tensor = expect_tensor_arg(args, 0)?;

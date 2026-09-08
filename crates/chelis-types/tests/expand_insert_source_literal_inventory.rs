@@ -80,14 +80,14 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     (
         "crates/chelis-compiler-api/src/runtime/eval.rs",
         2,
-        2,
-        "the host dispatch arm and the named-axis test both name the two spellings together",
+        3,
+        "the host dispatch arm and the named-axis test name the two spellings together; the extra `insert` is the dispatch's own branch, which routes the two evaluators by callee now that each operation has one result shape",
     ),
     (
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        0,
         1,
-        "`insert position`, the English phrase; the operation is named by the callee the evaluator passes in",
+        1,
+        "one each: `tensor_expand_host`'s `NumericTrap::Domain` names `expand` as the operation whose precondition it guards, and `insert position` is the English phrase in `tensor_insert_host`'s bounds message. Neither is a dispatch key; both functions take the callee from the evaluator",
     ),
     (
         "crates/chelis-compiler-api/src/runtime/named_axis.rs",
@@ -138,6 +138,12 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
         "a test program, renamed with the rest",
     ),
     (
+        "crates/chelis-ir/src/axis_sources.rs",
+        1,
+        0,
+        "one `expand`, in `UnitExtentClaim::trap_op`: the `<op>` slot section 4.7 gives a locally placed unit-extent claim. It is the rendered operation name, not a dispatch key, and there is no `insert` counterpart because `insert` makes no such claim",
+    ),
+    (
         "crates/chelis-ir/src/dag.rs",
         2,
         0,
@@ -164,9 +170,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/lower.rs",
-        28,
-        3,
-        "the lowering dispatch carries both. The surplus is embedded Deep fixtures spelling `(var {} expand)` and ten lowering diagnostics that still name `expand` on the shared arm. Those ten are fatal internal-desync raises and one registry-bound `deliberate_rejection!` construct string; reaching them from an `insert` program is not established, and the rejection registry is amended under a different discipline, so they are residual work rather than part of this change. Reachability is conditional, not settled: an `insert` program cannot get there only while the checker refuses the non-literal-axis and sourceless-size cases ahead of lowering. B2b's widening deletes the sourceless-size rejection and S2b's flip changes what `expand` admits, so re-check this row at both",
+        22,
+        10,
+        "the lowering dispatch carries both, and the shared movement arm now names its callee through `{callee}` rather than hard-coding `expand`: the named-collision raise, the operand-desync raise, the non-literal-axis construct, and both size diagnostics moved with the arm split, which is what took this row from 28/3 to 22/10, the last move being the chelis#318 extent-recovery fixture, whose program raises the rank and so spells `insert`. The surplus 23 are embedded Deep fixtures spelling `(var {} expand)` and prose in comments, neither of which a program can reach. Re-checked at S2b as the previous reason asked; B2b's widening of the sourceless-size rejection is still outstanding",
     ),
     (
         "crates/chelis-ir/src/tier2.rs",
@@ -225,8 +231,8 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     (
         "crates/chelis-types/src/infer/app_tensor.rs",
         1,
-        4,
-        "the one `expand` is guidance about the `expand`+`mul` lowering of an integer inner product; the `insert`s are the one-shape flag and the named-axis form's prose, which name the callee through `{builtin}`",
+        10,
+        "the one `expand` is guidance about the `expand`+`mul` lowering of an integer inner product. The `insert`s are the one-shape flag plus the diagnostics that name `insert` as the fix when a program asks `expand` to raise a rank: the named-axis rejection, the four-argument rejection, the axis-range message, and the rank message. Every one of them names its own callee through `{builtin}` and names `insert` as a literal because it is telling the user which other operation to write",
     ),
     ("crates/chelis-types/src/infer/common.rs", 1, 1, ""),
     (

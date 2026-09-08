@@ -940,6 +940,17 @@ impl Subst {
     }
 
     /// Attach a positional-expand obligation to its unresolved result.
+    ///
+    /// No production path calls this any more. `spec/04-type-system.md`
+    /// §4.7.2 gives `expand` and `insert` one result shape each, so
+    /// `check_expand_signature` computes each shape at the call and records
+    /// nothing; this was the only root producer of a deferred tensor, and the
+    /// two derived obligation kinds cannot arise without it. The store, its
+    /// settlement, and this recorder survive only for the tests below until
+    /// the removal slice deletes the mechanism whole (chelis#1277). It is
+    /// `#[cfg(test)]` so the production build carries no unreachable
+    /// recording path and the dead-code lint says so if one appears.
+    #[cfg(test)]
     pub(crate) fn record_deferred_expand_constraint(
         &self,
         v: TypeVar,

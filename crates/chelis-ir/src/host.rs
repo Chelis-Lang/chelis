@@ -11374,11 +11374,18 @@ fn actualize_tensor_helper_types(
                 .first()
                 .and_then(|id| inferred.get(id))
                 .and_then(|input| {
+                    // `RiscOp::Expand` carries both movement forms, told apart
+                    // by the node's output rank against its operand's, exactly
+                    // as `verify.rs`, `eval.rs` and the C emitter tell them
+                    // apart. Inserting unconditionally would give a same-rank
+                    // node a rank+1 helper type, which is a silently wrong
+                    // signature rather than a declined one.
                     let mut dims = input.dims.clone();
-                    if *axis > dims.len() {
+                    let inserts = node.output_type.dims.len() == dims.len() + 1;
+                    if (inserts && *axis > dims.len()) || (!inserts && *axis >= dims.len()) {
                         return None;
                     }
-                    let inserted = match size {
+                    let extent = match size {
                         crate::dag::RtDim::Lit(value) => crate::dag::DimInfo::Lit(*value),
                         crate::dag::RtDim::InputAxis {
                             tensor,
@@ -11394,7 +11401,11 @@ fn actualize_tensor_helper_types(
                         }
                         crate::dag::RtDim::ToEnd => return None,
                     };
-                    dims.insert(*axis, inserted);
+                    if inserts {
+                        dims.insert(*axis, extent);
+                    } else {
+                        dims[*axis] = extent;
+                    }
                     Some(TensorType {
                         dims,
                         precision: node.output_type.precision,

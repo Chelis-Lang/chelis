@@ -197,7 +197,6 @@ pub(super) fn finish_unified_app(
                     product.defer_shape_check(
                         DeferredShapeRule::Expand {
                             builtin: callee,
-                            source_ordinal: product.source_ordinal_for_list(list),
                             axis_is_dim_name,
                             size_class,
                             env: Box::new(env.clone()),
@@ -213,7 +212,6 @@ pub(super) fn finish_unified_app(
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
-                    product.source_ordinal_for_list(list),
                     axis_is_dim_name,
                     size_class,
                     env,

@@ -354,6 +354,34 @@ impl<'a> VerifiedDagView<'a> {
             .collect()
     }
 
+    /// The unit-extent claims whose guard section 4.7 places at entry.
+    ///
+    /// The sibling of [`Self::entry_dim_classes`], filtered by the same
+    /// placement rule through the same shared predicate.
+    pub fn entry_unit_extent_claims(self) -> Vec<crate::axis_sources::UnitExtentClaim> {
+        crate::axis_sources::derive_unit_extent_claims(self.dag)
+            .into_iter()
+            .filter(|claim| claim.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
+            .collect()
+    }
+
+    /// The `(Load, axis)` each entry-placed unit-extent claim reads.
+    ///
+    /// Both compiled lanes need the same three steps: derive the claims, keep
+    /// the ones section 4.7 places at entry, and resolve each to the input
+    /// tensor axis whose extent the guard compares. Doing it here rather than
+    /// twice is the same discipline `member_load_axis` records: the C
+    /// emitter's `member_input_slot` deliberately admits only the folded-read
+    /// spelling, because a `Load`'s own axis is already declared by the
+    /// binding loop, and reusing it here would silently drop every claim whose
+    /// operand IS an input tensor, which is the common case.
+    pub fn entry_unit_extent_reads(self) -> Vec<(NodeId, usize)> {
+        self.entry_unit_extent_claims()
+            .iter()
+            .filter_map(|claim| crate::axis_sources::member_load_axis(self.dag, &claim.member()))
+            .collect()
+    }
+
     pub fn symbolic_occurrences(self) -> Vec<SymbolicDimOccurrence> {
         crate::dag::symbolic_occurrences(self.dag)
     }

@@ -379,15 +379,15 @@ def replace_axis(x: tensor[1, f32]) -> tensor[8, f32] = expand(&x, 0, 8i64)
 }
 
 #[test]
-fn declared_rank_increasing_result_selects_expand_insertion() {
+fn declared_rank_increasing_result_takes_insert() {
     let errors = typecheck(
         r#"
-def insert_axis(x: tensor[1, f32]) -> tensor[8, 1, f32] = expand(&x, 0, 8i64)
+def insert_axis(x: tensor[1, f32]) -> tensor[8, 1, f32] = insert(&x, 0, 8i64)
 "#,
     );
     assert!(
         errors.is_empty(),
-        "a declared rank-plus-one result must select positional insertion:\n{}",
+        "a declared rank-plus-one result is `insert`'s shape:\n{}",
         summary(&errors)
     );
 }
