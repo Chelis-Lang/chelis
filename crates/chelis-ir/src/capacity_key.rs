@@ -505,7 +505,14 @@ fn axis_capacity_expr_inner(
                 node: source,
             }))
         }
-        AxisSource::OpComputed { op, axis } => {
+        // Both variants identify this verified program's local output axis.
+        // `ClassSupplied` says the operation consumes its stamped extent
+        // claim rather than computing a fresh extent, but the runtime class
+        // carries no proof object that CapacityKey may use to identify two
+        // independently supplied axes. Treating the originating axis as the
+        // atom preserves exact identity through pass-through operations and
+        // conservatively declines name- or guard-derived equality.
+        AxisSource::OpComputed { op, axis } | AxisSource::ClassSupplied { op, axis } => {
             Ok(CapacityExpr::Source(CapacitySource::OpComputed {
                 scope,
                 op,
@@ -725,6 +732,56 @@ mod tests {
             .unwrap()
             .into_key_for_test();
         assert_eq!(input.prove_equal(&relu), Ok(()));
+    }
+
+    #[test]
+    fn class_supplied_extent_retains_its_origin_through_pass_through() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let supplied = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let relu = dag.add_node(RiscOp::Relu, vec![supplied], ty, None);
+
+        let dag = verified(dag);
+        let supplied = capacity_key_for_node(dag.emission(), supplied)
+            .unwrap()
+            .into_key_for_test();
+        let relu = capacity_key_for_node(dag.emission(), relu)
+            .unwrap()
+            .into_key_for_test();
+        assert_eq!(supplied.prove_equal(&relu), Ok(()));
+    }
+
+    #[test]
+    fn same_spelled_class_supplied_extents_do_not_bypass_source_identity() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let left = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let right = dag.add_node(RiscOp::synth_const(Prim::F32, 1.0), vec![], ty, None);
+
+        let dag = verified(dag);
+        let left = capacity_key_for_node(dag.emission(), left)
+            .unwrap()
+            .into_key_for_test();
+        let right = capacity_key_for_node(dag.emission(), right)
+            .unwrap()
+            .into_key_for_test();
+        assert!(left.prove_equal(&right).is_err());
     }
 
     #[test]
