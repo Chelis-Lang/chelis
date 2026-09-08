@@ -111,7 +111,10 @@ import reap_orphans as reap  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SCHEMA_VERSION = 1
+# 2 added `probed_path` and `degraded` to the payload. Nothing consumes this
+# yet, but a version that does not move when the shape does is worse than no
+# version at all.
+SCHEMA_VERSION = 2
 
 EXIT_FREE = 0
 EXIT_BUSY = 1
@@ -299,11 +302,18 @@ def git_facts(worktree: Path, *, query: Query = git_query) -> dict:
         worktree=worktree,
     )
     lines = [line.strip() for line in out.splitlines() if line.strip()]
-    if len(lines) < 5:
+    if len(lines) != 5:
+        # `git rev-parse` separates its answers with newlines, and a path may
+        # contain one, so a path with an embedded newline yields more lines
+        # than values and `lines[:5]` would silently misalign. Since the
+        # re-anchor below feeds `toplevel` into every later query, a misaligned
+        # parse would fabricate a worktree rather than merely misprint one.
+        # There is no way to tell the two apart from this output, so say so.
         raise GitQueryError(
-            f"`git rev-parse` returned {len(lines)} lines, expected 5: {lines!r}"
+            f"`git rev-parse` returned {len(lines)} lines, expected exactly 5, "
+            f"so its values cannot be told apart: {lines!r}"
         )
-    git_dir, common_dir, toplevel, head, branch = lines[:5]
+    git_dir, common_dir, toplevel, head, branch = lines
     common = Path(common_dir)
     if not common.is_absolute():
         # `--git-common-dir` is reported relative to the directory git RAN in,

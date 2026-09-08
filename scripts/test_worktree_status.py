@@ -858,6 +858,32 @@ class RealRepositoryTests(unittest.TestCase):
         self.assertEqual(state["dirty"]["untracked"], ["nested/deeper/c.txt"])
         self.assertEqual(state["verdict"], status.VERDICT_NOT_CLEAN)
 
+    def test_a_worktree_path_with_a_newline_is_unknown_not_fabricated(self):
+        """`git rev-parse` separates its answers with newlines, so a path
+        containing one yields more lines than values. Slicing the first five
+        used to misalign them, and since the resolved root feeds every later
+        query, that fabricated a worktree instead of merely misprinting one.
+        The probe now says it cannot tell them apart."""
+        weird = Path(self._tmp.name) / "we\nird"
+        weird.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", "."], cwd=weird, check=True, capture_output=True
+        )
+        for key, value in (("user.email", "t@example.invalid"), ("user.name", "T")):
+            subprocess.run(
+                ["git", "config", key, value], cwd=weird, check=True, capture_output=True
+            )
+        (weird / "a.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=weird, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "init"], cwd=weird, check=True, capture_output=True
+        )
+        state = status.collect(weird, environ=self.environ, now=_now)
+        self.assertEqual(state["verdict"], status.VERDICT_UNKNOWN)
+        self.assertIn("git", [item["source"] for item in state["unknown"]])
+        self.assertIn("cannot be told apart", state["unknown"][0]["error"])
+        self.assertIsNone(state["git"])
+
     def test_probing_a_directory_that_is_not_a_repository_is_unknown(self):
         outside = Path(self._tmp.name) / "not-a-repo"
         outside.mkdir()
@@ -871,6 +897,9 @@ class OutputTests(unittest.TestCase):
         state = _collect()
         payload = json.loads(status.render_json(state))
         self.assertEqual(payload["schema_version"], status.SCHEMA_VERSION)
+        self.assertEqual(status.SCHEMA_VERSION, 2)
+        for key in ("probed_path", "degraded", "verdict", "exit_code", "unknown"):
+            self.assertIn(key, payload)
         self.assertEqual(payload["verdict"], status.VERDICT_FREE)
         self.assertEqual(payload["exit_code"], status.EXIT_FREE)
         self.assertEqual(payload["generated_at"], "2026-09-05T03:04:11Z")
