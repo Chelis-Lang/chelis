@@ -765,7 +765,16 @@ fn normalize_roundtrip_meta(
             .map(|(key, value)| {
                 (
                     key.clone(),
-                    normalize_roundtrip_expr_with_context(value, SurfaceMetadataContext::default()),
+                    if key == "dtype_bounds" {
+                        // Binder names are data, including names such as `span`.
+                        // The entry was validated before normalization began.
+                        value.clone()
+                    } else {
+                        normalize_roundtrip_expr_with_context(
+                            value,
+                            SurfaceMetadataContext::default(),
+                        )
+                    },
                 )
             })
             .collect(),

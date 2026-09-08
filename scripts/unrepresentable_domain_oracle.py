@@ -240,6 +240,8 @@ TOP_LEVEL_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
 
 # [03-META-1/2]: structural and expression-valued metadata rejection parity.
 METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
+    ("resource device is not a string", '(defsig {} f (t-fn {eff: (effects {} (resource {} 42))} (t-prim {} int32))) (def {} f (fn {} (params {}) (lit {} 1)))', "eff"),
+    ("nested expression name", '(def {property_seed: (app {} missing)} f (lit {} 1))', "property_seed"),
     ("integer path", '(module {surf_path: 1} m.path)', "surf_path"),
     ("node path", '(module {surf_path: (lit {} 1)} m.path)', "surf_path"),
     ("mismatched path", '(module {surf_path: "Totally.Different"} m.path)', "surf_path"),
@@ -251,6 +253,7 @@ METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
     ("incomplete dimension group", '(defdim {surf_dim_group_size: 2} n)', "surf_dim_group_size"),
 ]
 METADATA_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
+    ("resource device string", '(defsig {} f (t-fn {eff: (effects {} (resource {} "gpu:0"))} (t-prim {} int32))) (def {} f (fn {} (params {}) (lit {} 1)))'),
     ("matching path and opaque span", '(module {surf_path: "M.Path", span: ""} m.path (def {} f (lit {} 1)))'),
     ("extensions and preserved provenance", '(def {source: (macro_name {surf_future: 1, span: 2} original_name), custom: {inner: (lit {span: "id"} 2)}, span_future: (a b)} f (lit {} 1))'),
     ("dtype binder named like metadata", '(defsig {dtype_bounds: {span: float}} f (t-fn {} (t-var {} span) (t-var {} span))) (def {} f (fn {} (params {} (x {type: (t-var {} span)})) (var {} x)))'),
@@ -268,6 +271,8 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "chelis-deep",
     "-p",
     "chelis-types",
+    "-p",
+    "chelis-surf",
     "--test",
     "stamp_to_typed",
     "--test",
@@ -276,6 +281,8 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "metadata_contract",
     "--test",
     "metadata_ingress",
+    "--test",
+    "canonical_surf",
 )
 
 # chelis#1088. The compiler-API embedding surface is not reachable from the

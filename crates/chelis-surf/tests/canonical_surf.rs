@@ -1755,3 +1755,33 @@ use legacy_metadata::legacy_metadata_fixture;
 fn legacy_deep(source: &str) -> Result<Vec<chelis_deep::Expr>, chelis_deep::parser::ParseError> {
     Ok(legacy_metadata_fixture(source))
 }
+
+#[test]
+fn roundtrip_normalization_preserves_metadata_named_dtype_binders() {
+    for name in [
+        "p",
+        "span",
+        "loc",
+        "source",
+        "effects",
+        "invariant_amenability",
+        "surf_literal_style",
+    ] {
+        let source = format!("(defsig {{dtype_bounds: {{{name}: float}}}} f (t-var {{}} {name}))");
+        let deep = parse_deep(&source).unwrap();
+        let normalized = normalize_deep_for_surface_roundtrip(&deep).unwrap();
+        let printed = print_canonical(&normalized);
+        assert!(
+            printed.contains(&format!("{name}: float")),
+            "lost binder: {printed}"
+        );
+        let other = parse_deep(&source.replace(": float", ": int")).unwrap();
+        let other = print_canonical(&normalize_deep_for_surface_roundtrip(&other).unwrap());
+        assert_ne!(
+            printed, other,
+            "distinct bound families collapsed for {name}"
+        );
+        let bad = legacy_deep(&source.replace(": float", ": 42")).unwrap();
+        assert!(normalize_deep_for_surface_roundtrip(&bad).is_err());
+    }
+}

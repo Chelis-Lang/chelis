@@ -446,3 +446,136 @@ fn module_construction_checks_the_siblings_it_already_contains() {
     ));
     Node::try_new(DeepTag::Module, MetaMap::default(), children).unwrap();
 }
+
+#[test]
+fn resource_effect_metadata_requires_string_devices_at_every_ingress() {
+    for (owner, key, children) in [
+        ("t-fn", "eff", "(t-prim {} int32)"),
+        ("fn", "effects", "(params {}) (lit {} 1)"),
+    ] {
+        for device in ["\"gpu:0\"", "42", "unwrapped", "(lit {} 42)"] {
+            let source =
+                format!("({owner} {{{key}: (effects {{}} (resource {{}} {device}))}} {children})");
+            let valid = device == "\"gpu:0\"";
+            assert_eq!(parse_raw_str(&source).is_ok(), valid, "raw: {source}");
+            assert_eq!(parse_str(&source).is_ok(), valid, "stamped: {source}");
+            let legacy = legacy_metadata::legacy_metadata_fixture(&source);
+            assert_eq!(
+                chelis_deep::metadata::validate_metadata(&legacy).is_ok(),
+                valid,
+                "legacy: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn expression_metadata_validates_nested_runtime_roles_on_legacy_carriers() {
+    use chelis_deep::List;
+    let legacy_app = |child: Expr| {
+        Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::App), ZERO),
+                    Expr::Map(MetaMap::default(), ZERO),
+                    child,
+                ],
+            },
+            ZERO,
+        )
+    };
+    for key in [
+        "property_seed",
+        "property_samples",
+        "property_tolerance",
+        "property_preconditions",
+    ] {
+        for valid in [true, false] {
+            let child = if valid {
+                Expr::node(
+                    DeepTag::Var,
+                    MetaMap::default(),
+                    vec![Expr::Atom(Atom::Name("missing".into()), ZERO)],
+                    ZERO,
+                )
+            } else {
+                Expr::Atom(Atom::Name("missing".into()), ZERO)
+            };
+            // A typed runtime ancestor does not prove legacy descendants' roles.
+            let mut payload = Expr::node(
+                DeepTag::Tuple,
+                MetaMap::default(),
+                vec![legacy_app(child)],
+                ZERO,
+            );
+            if key == "property_preconditions" {
+                payload = Expr::node(DeepTag::Tuple, MetaMap::default(), vec![payload], ZERO);
+            }
+            let meta = MetaMap {
+                entries: vec![(key.into(), payload)],
+            };
+            let children = vec![
+                Expr::Atom(Atom::Name("f".into()), ZERO),
+                Expr::Atom(Atom::Int(1), ZERO),
+            ];
+            assert_eq!(
+                Node::try_new(DeepTag::Def, meta.clone(), children.clone()).is_ok(),
+                valid,
+                "constructor {key}"
+            );
+            let mut elements = vec![
+                Expr::Atom(Atom::Tag(DeepTag::Def), ZERO),
+                Expr::Map(meta, ZERO),
+            ];
+            elements.extend(children);
+            let legacy = vec![Expr::List(List { elements }, ZERO)];
+            assert_eq!(
+                chelis_deep::metadata::validate_metadata(&legacy).is_ok(),
+                valid,
+                "legacy {key}"
+            );
+        }
+    }
+}
+
+#[test]
+fn metadata_expressions_follow_runtime_roles_through_helpers() {
+    fn unbind_missing(expr: &mut Expr) {
+        if expr.tag() == Some(DeepTag::Var)
+            && matches!(expr, Expr::List(list, _) if matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(n), _)) if n == "missing"))
+        {
+            *expr = Expr::Atom(Atom::Name("missing".into()), ZERO);
+            return;
+        }
+        if let Expr::List(list, _) = expr {
+            list.elements.iter_mut().for_each(unbind_missing);
+        }
+    }
+    for payload in [
+        "(fn {} (params {} x) (app {} (var {} missing)))",
+        "(let {} (bind {} x (app {} (var {} missing))) (var {} x))",
+        "(match {} 1 (arm {} (pat-wild {}) () (app {} (var {} missing))))",
+        "(record {} T (kv {} x (app {} (var {} missing))))",
+        "(pipe {} 1 (app {} (var {} missing)))",
+        "(app {} (var {} missing))",
+    ] {
+        let mut payload = legacy_metadata::legacy_metadata_fixture(payload).remove(0);
+        for valid in [true, false] {
+            if !valid {
+                unbind_missing(&mut payload);
+            }
+            let meta = MetaMap {
+                entries: vec![("property_seed".into(), payload.clone())],
+            };
+            let candidate = Node::try_new(
+                DeepTag::Def,
+                meta,
+                vec![
+                    Expr::Atom(Atom::Name("f".into()), ZERO),
+                    Expr::Atom(Atom::Int(1), ZERO),
+                ],
+            );
+            assert_eq!(candidate.is_ok(), valid, "{payload:?}: {candidate:?}");
+        }
+    }
+}

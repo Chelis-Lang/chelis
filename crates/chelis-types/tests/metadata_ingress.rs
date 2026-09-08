@@ -3,37 +3,40 @@
 mod legacy_metadata;
 
 fn verdicts(source: &str) -> Vec<Vec<chelis_types::errors::CheckError>> {
+    verdicts_for(&legacy_metadata::legacy_metadata_fixture(source))
+}
+
+fn verdicts_for(exprs: &[chelis_deep::Expr]) -> Vec<Vec<chelis_types::errors::CheckError>> {
     use chelis_types::*;
-    let exprs = legacy_metadata::legacy_metadata_fixture(source);
     let library = chelis_deep::parser::parse_str("(def {} library_value (lit {} 1))").unwrap();
     let context = build_type_env_from_library(&library).unwrap();
     vec![
-        check_ir_program(&exprs)
+        check_ir_program(exprs)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        check_typed_program(&exprs)
+        check_typed_program(exprs)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        build_type_env_from_library(&exprs)
+        build_type_env_from_library(exprs)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        build_compiled_library_context(&exprs)
+        build_compiled_library_context(exprs)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        build_compiled_library_context_with_base(&context, &exprs)
+        build_compiled_library_context_with_base(&context, exprs)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        check_ir_with_context(&context, &exprs)
+        check_ir_with_context(&context, exprs)
             .err()
             .map(|e| e.errors)
             .unwrap_or_default(),
-        infer_ir_program(&exprs).errors,
-        infer_program(&exprs).errors,
+        infer_ir_program(exprs).errors,
+        infer_program(exprs).errors,
     ]
 }
 
@@ -80,5 +83,52 @@ fn metadata_admission_precedes_inference_on_every_checker_session() {
 fn valid_metadata_remains_admissible_on_every_checker_session() {
     for errors in verdicts("(def {span: \"producer_id\", doc: \"example\"} f (lit {} 1))") {
         assert!(errors.is_empty(), "{errors:?}");
+    }
+}
+
+#[test]
+fn nested_legacy_expression_roles_are_checked_before_publication() {
+    use chelis_deep::{Atom, DeepTag, Expr, List, MetaMap, Span};
+    let span = Span { offset: 0, len: 0 };
+    let list = |tag, children: Vec<Expr>| {
+        let mut elements = vec![
+            Expr::Atom(Atom::Tag(tag), span),
+            Expr::Map(MetaMap::default(), span),
+        ];
+        elements.extend(children);
+        Expr::List(List { elements }, span)
+    };
+    for valid in [true, false] {
+        let name = Expr::Atom(Atom::Name("missing".into()), span);
+        let callee = if valid {
+            list(DeepTag::Var, vec![name])
+        } else {
+            name
+        };
+        let meta = MetaMap {
+            entries: vec![("property_seed".into(), list(DeepTag::App, vec![callee]))],
+        };
+        let exprs = vec![Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Def), span),
+                    Expr::Map(meta, span),
+                    Expr::Atom(Atom::Name("f".into()), span),
+                    list(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span)]),
+                ],
+            },
+            span,
+        )];
+        for errors in verdicts_for(&exprs) {
+            if valid {
+                assert!(errors.is_empty(), "{errors:?}");
+            } else {
+                assert_eq!(errors.len(), 1, "{errors:?}");
+                assert!(
+                    errors[0].message.contains("metadata `property_seed`"),
+                    "{errors:?}"
+                );
+            }
+        }
     }
 }

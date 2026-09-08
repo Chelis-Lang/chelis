@@ -90,9 +90,9 @@ use Shape as S;
 rules! {
     "type" => S::Type, P::Any, "a type-expression node";
     "loc" => S::Loc, P::Any, "(loc string integer integer)";
-    "eff" => S::Effects, P::Tag(T::TFn), "an effects node of names or (resource {} device) entries on t-fn";
+    "eff" => S::Effects, P::Tag(T::TFn), "an effects node of names or (resource {} string) entries on t-fn";
     "dtype_bounds" => S::Bounds, P::Tag(T::Defsig), "a map from distinct binder names to float, int, or numeric on defsig";
-    "effects" => S::Effects, P::Tag(T::Fn), "an effects node of names or (resource {} device) entries on fn";
+    "effects" => S::Effects, P::Tag(T::Fn), "an effects node of names or (resource {} string) entries on fn";
     "source" => S::Source, P::Any, "a preserved structural (macro-name original-arg...) list";
     "wrt" => S::Wrt, P::Tag(T::Grad), "a variable or nonempty tuple of variables on grad";
     "span" => S::Span, P::Any, "a string without ASCII control characters (spec/03 §1.1.1)";
@@ -275,18 +275,92 @@ fn variable(v: View<'_>) -> bool {
     v.node(T::Var)
         .is_some_and(|n| n.children.len() == 1 && n.children[0].name().is_some())
 }
-fn expression(v: View<'_>) -> bool {
-    match v {
-        View::Raw(RawExpr::Atom(
-            RawAtom::Int(_) | RawAtom::Float(_) | RawAtom::Bool(_) | RawAtom::Str(_),
-            _,
-        ))
-        | View::Ast(Expr::Atom(Atom::Int(_) | Atom::Float(_) | Atom::Bool(_) | Atom::Str(_), _)) => {
-            true
+fn expression(root: View<'_>) -> bool {
+    use crate::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
+    // A Node proves its own immediate runtime slots. Its legacy descendants
+    // remain untrusted, so metadata expression admission cannot stop there.
+    let mut stack = vec![(root, true)];
+    while let Some((v, runtime)) = stack.pop() {
+        if matches!(
+            v,
+            View::Raw(RawExpr::Atom(
+                RawAtom::Int(_) | RawAtom::Float(_) | RawAtom::Bool(_) | RawAtom::Str(_),
+                _
+            )) | View::Ast(Expr::Atom(
+                Atom::Int(_) | Atom::Float(_) | Atom::Bool(_) | Atom::Str(_),
+                _
+            ))
+        ) {
+            continue;
         }
-        _ => v.parts().is_some_and(|p| p.tag.is_none_or(runtime_tag)),
+        let Some(p) = v.parts() else {
+            return false;
+        };
+        // Unknown forms retain their existing syntax-preserving diagnostic
+        // carrier. Their nested annotations are checked by the metadata walk.
+        let Some(tag) = p.tag else {
+            continue;
+        };
+        if runtime && !runtime_tag(tag) {
+            return false;
+        }
+        let count = p.children.len();
+        let arity_ok = match arity_contract(tag) {
+            AritySpec::Fixed(n) => count == n,
+            AritySpec::AtLeast(n) => count >= n,
+            AritySpec::Range(a, b) => (a..=b).contains(&count),
+        };
+        if !arity_ok {
+            return false;
+        }
+        for (i, child) in p.children.into_iter().enumerate() {
+            match child_stamp_role(tag, i, count) {
+                ChildStampRole::RuntimeExpr => {
+                    // An empty arm guard is the syntax for no guard.
+                    if tag == T::Arm && i == 1 && child.list().is_some_and(|v| v.is_empty()) {
+                        continue;
+                    }
+                    stack.push((child, true));
+                }
+                ChildStampRole::ExplicitInferenceBypass => {
+                    use crate::role::{
+                        BypassExpectation as B, bypass_child_expectation, is_declaration_tag,
+                        is_pattern_tag,
+                    };
+                    let child_tag = child.parts().and_then(|p| p.tag);
+                    let accepted = match bypass_child_expectation(tag, i) {
+                        B::RequiresTag(t) => child_tag == Some(t),
+                        B::RequiresDeclaration => child_tag.is_some_and(is_declaration_tag),
+                        B::RequiresPattern => child_tag.is_some_and(is_pattern_tag),
+                        B::FormExpecting => true,
+                    };
+                    if !accepted {
+                        return false;
+                    }
+                    stack.push((child, false));
+                }
+                ChildStampRole::Binder => {
+                    if tag == T::Fn {
+                        if child.node(T::Params).is_none() {
+                            return false;
+                        }
+                        stack.push((child, false));
+                    } else if !binder(child) {
+                        return false;
+                    }
+                }
+                // These payloads have their own syntax contract; they are not
+                // runtime expressions merely because an expression owns them.
+                ChildStampRole::Syntax
+                | ChildStampRole::Selector
+                | ChildStampRole::EffectHandler
+                | ChildStampRole::Type => {}
+            }
+        }
     }
+    true
 }
+
 fn runtime_tag(tag: DeepTag) -> bool {
     match tag {
         T::Fn
@@ -516,7 +590,9 @@ fn shape_valid(shape: Shape, v: View<'_>) -> bool {
         S::Type => type_shape_error(v).is_none(),
         S::Effects => v.node(T::Effects).is_some_and(|n| {
             n.children.iter().all(|v| {
-                v.name().is_some() || v.node(T::Resource).is_some_and(|n| n.children.len() == 1)
+                v.name().is_some()
+                    || v.node(T::Resource)
+                        .is_some_and(|n| n.children.len() == 1 && n.children[0].string().is_some())
             })
         }),
         S::Params => v

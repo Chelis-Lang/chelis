@@ -915,6 +915,7 @@ class TestMetadataContract(unittest.TestCase):
         self.assertIn(oracle.check_metadata_contract, oracle.OBLIGATIONS)
         self.assertIn("metadata_contract", oracle.STAMP_NEXTEST_COMMAND)
         self.assertIn("metadata_ingress", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("canonical_surf", oracle.STAMP_NEXTEST_COMMAND)
 
     def test_metadata_corpus_checks_both_verdicts_and_diagnostics(self) -> None:
         def check(path: Path) -> subprocess.CompletedProcess[str]:

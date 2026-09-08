@@ -583,8 +583,11 @@ Node construction, deserialization, and transactional replacement enforce
 local metadata invariants. Complete-tree ingress and programmatic validation
 also enforce parent/sibling placement. Constructor traversal stops at validated
 Node descendants after checking their placement relative to the new parent;
-ungated legacy carriers are traversed. This is an inductive Node guarantee,
-not a claim that the legacy `Expr::List` domain has been removed (#1029).
+ungated legacy carriers are traversed. Expression-valued metadata additionally
+checks recursive runtime roles through typed ancestors, whose construction
+alone does not prove the roles inside legacy descendants. This is an inductive
+metadata guarantee, not a claim that the legacy `Expr::List` domain has been
+removed (#1029).
 Binder-map payloads and historical `source` records are data roles. They do
 not acquire annotation rules from a coincidentally matching key spelling.
 Constructing a module checks dimension groups within its supplied children;
@@ -621,4 +624,10 @@ Acceptance is exit 0 and `ORACLE: PASS`. Its metadata obligation drives both
 constructor, deserializer, transactional replacement, and compiler-API ingress
 corpora. `scripts/gate.py` already runs this oracle in `integration` and
 `--local`, and hosted `Workspace Tests (Linux)` runs that integration stage.
+The metadata corpus also exercises nested runtime child roles through legacy
+carriers and typed ancestors, the string leaf inside resource effects, and
+normalization of dtype binders named after metadata. Distinct bound families
+must remain distinguishable after normalization; the oracle includes the
+canonical Surf suite that asserts this preservation.
+
 This slice addresses #1478 and #1330, not the other open #908 obligations.
