@@ -208,10 +208,9 @@ pub(super) fn extract_params(
                     continue;
                 };
                 let annotation =
-                    meta.entries
-                        .iter()
-                        .find(|(key, _)| key == "type")
-                        .map(|(_, value)| match resolver.resolve(value) {
+                    meta.metadata
+                        .ty()
+                        .map(|value| match resolver.resolve(value.expression()) {
                             Ok(ty) => ty.into_type(),
                             Err(witness) => propagate(&witness),
                         });
@@ -224,14 +223,13 @@ pub(super) fn extract_params(
                     continue;
                 };
                 let annotation = match param_list.elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => meta
-                        .entries
-                        .iter()
-                        .find(|(key, _)| key == "type")
-                        .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => ty.into_type(),
-                            Err(witness) => propagate(&witness),
-                        }),
+                    Some(deep::Expr::Map(meta, _)) => {
+                        meta.ty()
+                            .map(|value| match resolver.resolve(value.expression()) {
+                                Ok(ty) => ty.into_type(),
+                                Err(witness) => propagate(&witness),
+                            })
+                    }
                     _ => None,
                 };
                 params.push((name.to_string(), annotation));
@@ -241,14 +239,13 @@ pub(super) fn extract_params(
                     continue;
                 };
                 let annotation = match elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => meta
-                        .entries
-                        .iter()
-                        .find(|(key, _)| key == "type")
-                        .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => ty.into_type(),
-                            Err(witness) => propagate(&witness),
-                        }),
+                    Some(deep::Expr::Map(meta, _)) => {
+                        meta.ty()
+                            .map(|value| match resolver.resolve(value.expression()) {
+                                Ok(ty) => ty.into_type(),
+                                Err(witness) => propagate(&witness),
+                            })
+                    }
                     _ => None,
                 };
                 params.push((name.to_string(), annotation));
@@ -315,13 +312,9 @@ pub(super) fn infer_let(
                 // and the ascription was silently dropped. Unify the
                 // inferred RHS type against the declared type so the
                 // ascription propagates into downstream sig calls.
-                let final_ty = if let Some(declared_ty_expr) =
-                    stamped_parts(rhs_expr).and_then(|(_, meta, _)| {
-                        meta.entries
-                            .iter()
-                            .find(|(k, _)| k == "type")
-                            .map(|(_, v)| v)
-                    }) {
+                let final_ty = if let Some(declared_ty_expr) = stamped_parts(rhs_expr)
+                    .and_then(|(_, meta, _)| meta.ty().map(|v| v.expression()))
+                {
                     let declared_ty = match &rhs_type_metadata_resolution {
                         // A root metadata-aware RHS consumer records the exact
                         // result it owns. Reuse that result here so the same

@@ -1452,7 +1452,7 @@ fn deep_property_quantifiers_must_match_fn_params() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains(
-            "property_quantifiers must match fn parameters",
+            "metadata `property_quantifiers` requires parameter names and types",
         ));
 }
 

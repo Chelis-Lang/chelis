@@ -462,7 +462,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
     let exprs = support::parse_unchecked_legacy(
         "(def {} bad
            (let {} (bind {} value
-             (var {type: (t-prim {} f32 extra)} missing))
+             (var {type: (t-prim {} missing_dtype)} missing))
              (lit {} 0)))",
     );
     let result = check_ir_program(&exprs)
@@ -477,7 +477,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
         result
             .errors
             .iter()
-            .filter(|error| error.message.contains("missing"))
+            .filter(|error| error.message.contains("unbound variable: missing"))
             .count(),
         1,
         "the RHS root must report exactly once: {:?}",
@@ -487,7 +487,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
         result
             .errors
             .iter()
-            .filter(|error| error.message.contains("t-prim"))
+            .filter(|error| error.message.contains("missing_dtype"))
             .count(),
         1,
         "the malformed ascription root must report exactly once: {:?}",
@@ -499,7 +499,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
 fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
     let exprs = support::parse_unchecked_legacy(
         "(def {} duplicate (var {} missing))
-         (def {} duplicate (lit {type: (t-prim {} f32 extra)} 1.0))",
+         (def {} duplicate (lit {type: (t-prim {} missing_dtype)} 1.0))",
     );
     let result = check_ir_program(&exprs)
         .expect_err("duplicate declarations with independent roots must fail the checker");
@@ -509,7 +509,11 @@ fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
         "the duplicate plus both independent roots must each report once: {:?}",
         result.errors
     );
-    for needle in ["duplicate definition", "missing", "t-prim"] {
+    for needle in [
+        "duplicate definition",
+        "unbound variable: missing",
+        "missing_dtype",
+    ] {
         assert_eq!(
             result
                 .errors

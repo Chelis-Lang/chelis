@@ -291,7 +291,7 @@ fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
                         deep::Expr::Map(meta, _) => Some(meta),
                         _ => None,
                     })
-                    .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"))
+                    .is_some_and(|meta| meta.ty().is_some())
             {
                 return Some(
                     chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
@@ -307,20 +307,12 @@ fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
             }
             None
         }
-        deep::Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .find_map(|(_, value)| missing_shape_sensitive_app(value)),
-        deep::Expr::MetaExpr(meta, _) => missing_shape_sensitive_app(&meta.expr).or_else(|| {
-            meta.entries
-                .iter()
-                .find_map(|(_, value)| missing_shape_sensitive_app(value))
-        }),
+        deep::Expr::Map(map, _) => map.find_expression(missing_shape_sensitive_app),
+        deep::Expr::MetaExpr(meta, _) => missing_shape_sensitive_app(&meta.expr)
+            .or_else(|| meta.metadata.find_expression(missing_shape_sensitive_app)),
         deep::Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                if let Some(missing) = missing_shape_sensitive_app(value) {
-                    return Some(missing);
-                }
+            if let Some(missing) = node.meta().find_expression(missing_shape_sensitive_app) {
+                return Some(missing);
             }
             for child in node.children_iter() {
                 let child = match child {
@@ -341,9 +333,7 @@ fn missing_shape_sensitive_app(expr: &deep::Expr) -> Option<String> {
         deep::Expr::BareList(elements, _) => elements.iter().find_map(missing_shape_sensitive_app),
         deep::Expr::UnknownForm(data) => data
             .meta
-            .entries
-            .iter()
-            .find_map(|(_, value)| missing_shape_sensitive_app(value))
+            .find_expression(missing_shape_sensitive_app)
             .or_else(|| data.children.iter().find_map(missing_shape_sensitive_app)),
         deep::Expr::Atom(_, _) => None,
     }
@@ -385,7 +375,7 @@ fn check_err(src: &str, expected_kind: CheckErrorKind) {
 /// Deep, for the recursion-depth guard tests.
 fn deep_app_chain_node(depth: usize) -> deep::Expr {
     let sym = |s: &str| deep::Expr::Atom(deep::Atom::Name(s.to_string()), Span::new(0, 0));
-    let meta = || deep::Expr::Map(deep::MetaMap::default(), Span::new(0, 0));
+    let meta = || deep::Expr::Map(deep::Metadata::default(), Span::new(0, 0));
     let var = |n: &str| {
         deep::Expr::List(
             deep::List {

@@ -23,7 +23,7 @@ mod support;
 
 use chelis_deep::parser::parse_str;
 use chelis_deep::role::{AritySpec, ChildStampRole, arity_contract, child_stamp_role};
-use chelis_deep::{Atom, DeepTag, Expr, List, MetaMap, Span};
+use chelis_deep::{Atom, DeepTag, Expr, List, Metadata, Span};
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::infer_program;
 
@@ -91,13 +91,13 @@ fn stamped_body(tag: DeepTag) -> Expr {
             | ChildStampRole::ExplicitInferenceBypass => Expr::Atom(Atom::Int(0), zero()),
         })
         .collect();
-    Expr::node(tag, MetaMap::default(), children, zero())
+    Expr::node(tag, Metadata::default(), children, zero())
 }
 
 fn errors_for_stamped_body(tag: DeepTag) -> Vec<chelis_types::errors::CheckError> {
     let def = Expr::node(
         DeepTag::Def,
-        MetaMap::default(),
+        Metadata::default(),
         vec![
             Expr::Atom(Atom::Name("f".to_string()), zero()),
             stamped_body(tag),
@@ -210,7 +210,7 @@ fn untagged_list_in_expression_position_is_rejected_loudly() {
     );
     let def = Expr::node(
         DeepTag::Def,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Name("f".to_string()), zero()), untagged],
         zero(),
     );

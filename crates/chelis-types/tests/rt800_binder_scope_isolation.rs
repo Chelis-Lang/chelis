@@ -1,8 +1,6 @@
 //! Explicit declaration-local binder scope must not leak between siblings,
 //! sequential checks, worker threads, stacked contexts, or serialized caches.
 
-mod support;
-
 use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context};
 
 const LEGAL: &str = r#"
@@ -99,25 +97,14 @@ fn serialized_context_drops_transient_binder_scope() {
 }
 
 #[test]
-fn malformed_parameter_is_rejected_once_by_the_binder_owner() {
-    let exprs = support::parse_unchecked_legacy(
-        "(def {} bad (fn {} (params {} (x {type: (t-prim {} f32 extra)})) (var {} x)))",
-    );
-    let errors = check_ir_program(&exprs)
-        .expect_err("malformed binder syntax must fail")
-        .errors;
-    assert_eq!(
-        errors.len(),
-        1,
-        "malformed binder must report once: {errors:?}"
-    );
+fn malformed_parameter_type_is_rejected_once_at_annotation_admission() {
+    let malformed = "(def {} bad (fn {} (params {} (x {type: (t-prim {} f32 extra)})) (var {} x)))";
+    let error = chelis_deep::parser::parse_str(malformed).unwrap_err();
     assert!(
-        matches!(
-            errors[0].kind,
-            chelis_types::errors::CheckErrorKind::MalformedForm
-        ) && errors[0].message.contains("t-prim"),
-        "unexpected malformed-binder diagnostic: {errors:?}"
+        matches!(error, chelis_deep::parser::ParseError::Metadata(_)),
+        "{error}"
     );
+    assert!(error.to_string().contains("type"));
 }
 
 #[test]

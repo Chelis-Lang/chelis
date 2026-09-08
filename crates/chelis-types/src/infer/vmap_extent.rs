@@ -173,11 +173,8 @@ fn analyze_expr(
                 analyze_expr(&meta.expr, locals, summaries, movement_deps)
             }
             deep::Expr::Map(map, _) => {
-                let values = map
-                    .entries
-                    .iter()
-                    .map(|(_, value)| value.clone())
-                    .collect::<Vec<_>>();
+                let mut values = Vec::new();
+                map.visit_syntax(&mut |_, value| values.push(value.clone()));
                 union_children(&values, locals, summaries, movement_deps)
             }
             deep::Expr::UnknownForm(data) => {
@@ -389,15 +386,15 @@ fn walk_vmap_sites(
 
     match expr {
         deep::Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
+            map.visit_syntax(&mut |_, value| {
                 walk_vmap_sites(value, defs, summaries, errors);
-            }
+            });
         }
         deep::Expr::MetaExpr(meta, _) => {
             walk_vmap_sites(&meta.expr, defs, summaries, errors);
-            for (_, value) in &meta.entries {
+            meta.metadata.visit_syntax(&mut |_, value| {
                 walk_vmap_sites(value, defs, summaries, errors);
-            }
+            });
         }
         deep::Expr::BareList(elements, _) => {
             for child in elements {

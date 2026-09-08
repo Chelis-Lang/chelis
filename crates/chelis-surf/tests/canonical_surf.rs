@@ -44,8 +44,14 @@ fn assert_alias_formats_to(source: &str, expected: &str) {
     let authored_deep = desugar_program(&authored);
     let canonical_deep = desugar_program(&canonical);
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&authored_deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&canonical_deep)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&authored_deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&canonical_deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
         "canonical formatting changed the Deep meaning of {source:?}",
     );
 }
@@ -124,8 +130,14 @@ fn every_deep_string_has_one_reparseable_canonical_surf_spelling() {
     let redesugared =
         desugar_program(&parse_str(&surf).expect("resugared control string reparses"));
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        ),
     );
 }
 
@@ -141,8 +153,14 @@ fn hand_authored_deep_without_optional_surface_origin_metadata_roundtrips() {
 
         let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"));
         assert_eq!(
-            print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&deep)
+                    .expect("valid metadata for round-trip normalization")
+            ),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&redesugared)
+                    .expect("valid metadata for round-trip normalization")
+            ),
             "optional origin metadata must not break the Deep roundtrip for {deep_source}",
         );
     }
@@ -157,7 +175,10 @@ fn roundtrip_normalization_retains_non_default_surface_origin_metadata() {
     ))
     .expect("non-default surface metadata parses");
 
-    let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
+    let normalized = print_canonical(
+        &normalize_deep_for_surface_roundtrip(&deep)
+            .expect("valid metadata for round-trip normalization"),
+    );
 
     assert!(normalized.contains("surf_path: \"HTTP\""), "{normalized}");
     assert!(
@@ -168,56 +189,38 @@ fn roundtrip_normalization_retains_non_default_surface_origin_metadata() {
 
 #[test]
 fn mismatched_surface_path_fails_closed() {
-    let deep = parse_deep("(import-all {surf_path: \"Other\"} foo)")
-        .expect("known surface metadata parses for contract validation");
+    let error = parse_deep("(import-all {surf_path: \"Other\"} foo)")
+        .expect_err("invalid annotation rejected at ingress");
 
-    let error = resugar_program(&deep)
-        .expect_err("surface path metadata must agree with the lowered Deep path");
-
-    assert!(error.to_string().contains("lowered path child"), "{error}");
+    assert!(error.to_string().contains("path child"), "{error}");
 }
 
 #[test]
 fn normalization_retains_malformed_surface_path_marker() {
-    let deep = parse_deep("(import-all {surf_path: \"FOO\"} FOO)")
-        .expect("known surface metadata parses for normalization");
-
-    let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
-
-    assert!(
-        normalized.contains("surf_path: \"FOO\""),
-        "normalization must retain a marker that disagrees with a non-lowered path child: {normalized}",
-    );
+    let error = parse_deep("(import-all {surf_path: \"FOO\"} FOO)")
+        .expect_err("invalid annotation rejected at ingress");
+    assert!(error.to_string().contains("surf_path"));
 }
 
 #[test]
 fn dimension_group_marker_on_non_first_member_fails_closed() {
-    let deep = parse_deep(concat!(
+    let error = parse_deep(concat!(
         "(defdim {surf_dim_group_size: 2} rows)\n",
         "(defdim {surf_dim_group_size: 1} cols)\n",
     ))
-    .expect("known surface metadata parses for sequence validation");
+    .expect_err("invalid annotation rejected at ingress");
 
-    let error = resugar_program(&deep)
-        .expect_err("only the first member of a dimension group may carry the marker");
-
-    assert!(error.to_string().contains("first `defdim`"), "{error}");
+    assert!(error.to_string().contains("first member"), "{error}");
 }
 
 #[test]
 fn normalization_retains_misplaced_default_dimension_marker() {
-    let deep = parse_deep(concat!(
+    let error = parse_deep(concat!(
         "(defdim {surf_dim_group_size: 2} rows)\n",
         "(defdim {surf_dim_group_size: 1} cols)\n",
     ))
-    .expect("known surface metadata parses for normalization");
-
-    let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
-
-    assert!(
-        normalized.contains("(defdim {surf_dim_group_size: 1} cols)"),
-        "normalization must retain a default marker when it is misplaced: {normalized}",
-    );
+    .expect_err("invalid annotation rejected at ingress");
+    assert!(error.to_string().contains("surf_dim_group_size"));
 }
 
 #[test]
@@ -340,8 +343,14 @@ fn trailing_separators_parse_and_format_to_a_fixed_point() {
         let formatted_deep =
             desugar_program(&parse_str(&formatted).expect("formatted output parses"));
         assert_eq!(
-            print_canonical(&normalize_deep_for_surface_roundtrip(&authored_deep)),
-            print_canonical(&normalize_deep_for_surface_roundtrip(&formatted_deep)),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&authored_deep)
+                    .expect("valid metadata for round-trip normalization")
+            ),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&formatted_deep)
+                    .expect("valid metadata for round-trip normalization")
+            ),
             "separator removal changed Deep meaning for {source}",
         );
     }
@@ -477,8 +486,14 @@ fn zero_field_deep_records_and_record_patterns_keep_their_distinct_surface_form(
 
     let redesugared = desugar_program(&parse_str(&surf).expect("resugared records reparse"));
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        ),
     );
 }
 
@@ -492,8 +507,14 @@ fn explicitly_pure_function_round_trips_without_becoming_inferred() {
 
     let redesugared = desugar_program(&parse_str(&surf).expect("resugared Surf reparses"));
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        ),
     );
 }
 
@@ -596,8 +617,14 @@ fn constructor_references_calls_and_records_remain_structurally_distinct() {
     let constructor_call = parse_deep("(app {} (var {} None))").expect("Deep app parses");
     let bare_constructor = parse_deep("(var {} None)").expect("Deep var parses");
     assert_ne!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&constructor_call)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&bare_constructor))
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&constructor_call)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&bare_constructor)
+                .expect("valid metadata for round-trip normalization")
+        )
     );
 
     for source in ["value = None\n", "value = None()\n", "value = None {}\n"] {
@@ -649,8 +676,14 @@ fn contextual_signed_minimum_preserves_its_adopted_int64_type() {
     assert_eq!(surf, source);
     let redesugared = desugar_program(&parse_str(&surf).expect("signed minima reparse"));
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        ),
     );
 }
 
@@ -658,7 +691,8 @@ fn contextual_signed_minimum_preserves_its_adopted_int64_type() {
 fn out_of_range_deep_integer_metadata_fails_closed_without_normalizer_panic() {
     let mut deep = parse_deep("(lit {type: (t-prim {} int32)} -9223372036854775808)")
         .expect("structurally accepted Deep literal parses");
-    let normalized = normalize_deep_for_surface_roundtrip(&deep);
+    let normalized = normalize_deep_for_surface_roundtrip(&deep)
+        .expect("valid metadata for round-trip normalization");
     assert!(print_canonical(&normalized).contains("-9223372036854775808"));
     let error = resugar_expression(&deep.remove(0))
         .expect_err("out-of-range typed integer must not emit invalid Surf");
@@ -708,8 +742,14 @@ fn authored_expression_annotation_on_a_binding_survives_structural_resugaring() 
     );
     let redesugared = desugar_program(&parse_str(&surf).expect("resugared binding reparses"));
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        ),
     );
 }
 
@@ -724,8 +764,14 @@ fn empty_expression_and_type_tuples_normalize_to_unit_without_erasure() {
     assert_eq!(surf, "value: unit = ()\n");
     let redesugared = desugar_program(&parse_str(&surf).expect("unit Surf reparses"));
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared))
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        )
     );
 }
 
@@ -751,8 +797,14 @@ fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
         let original = parse_deep(&format!("(def {{}} value {deep_source})"))
             .expect("negative fixture wraps as a definition");
         assert_eq!(
-            print_canonical(&normalize_deep_for_surface_roundtrip(&original)),
-            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&original)
+                    .expect("valid metadata for round-trip normalization")
+            ),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&redesugared)
+                    .expect("valid metadata for round-trip normalization")
+            ),
             "Deep fixture: {deep_source}; Surf: {surf}"
         );
     }
@@ -770,8 +822,14 @@ fn negative_deep_literal_patterns_have_one_reparseable_surface_form() {
             .unwrap_or_else(|error| panic!("negative pattern did not reparse: {error}\n{surf}"));
         let redesugared = desugar_program(&reparsed);
         assert_eq!(
-            print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&deep)
+                    .expect("valid metadata for round-trip normalization")
+            ),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&redesugared)
+                    .expect("valid metadata for round-trip normalization")
+            ),
             "Deep fixture: {deep_source}; Surf: {surf}"
         );
     }
@@ -808,8 +866,14 @@ fn deep_application_callee_grouping_preserves_association_and_scope() {
         let original = parse_deep(&format!("(def {{}} value {deep_source})"))
             .expect("application fixture wraps as a definition");
         assert_eq!(
-            print_canonical(&normalize_deep_for_surface_roundtrip(&original)),
-            print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared)),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&original)
+                    .expect("valid metadata for round-trip normalization")
+            ),
+            print_canonical(
+                &normalize_deep_for_surface_roundtrip(&redesugared)
+                    .expect("valid metadata for round-trip normalization")
+            ),
             "Deep fixture: {deep_source}; Surf: {surf}"
         );
     }
@@ -824,8 +888,14 @@ fn standalone_checked_definition_type_becomes_a_real_surf_signature() {
     assert_eq!(surf, "value: int32 = 42\n");
     let redesugared = desugar_program(&parse_str(&surf).expect("typed binding reparses"));
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared))
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        )
     );
 }
 
@@ -970,15 +1040,13 @@ fn property_resugaring_rejects_provenance_that_surf_cannot_represent() {
 
 #[test]
 fn property_resugaring_rejects_quantifiers_that_disagree_with_fn_parameters() {
-    let deep = parse_deep(concat!(
+    let error = parse_deep(concat!(
         "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
         "property_quantifiers: (params {} (y {type: (t-prim {} f32)})), ",
         "property_preconditions: (tuple {})} ",
         "p (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
     ))
-    .expect("mismatched property Deep parses structurally");
-    let error = resugar_program(&deep)
-        .expect_err("property quantifiers must match the callable binder list exactly");
+    .expect_err("invalid annotation rejected at ingress");
     assert!(
         error.to_string().contains("property_quantifiers") && error.to_string().contains("match"),
         "unexpected quantifier mismatch error: {error}"
@@ -987,14 +1055,12 @@ fn property_resugaring_rejects_quantifiers_that_disagree_with_fn_parameters() {
 
 #[test]
 fn property_resugaring_rejects_missing_required_precondition_metadata() {
-    let deep = parse_deep(concat!(
+    let error = parse_deep(concat!(
         "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
         "property_quantifiers: (params {} (x {type: (t-prim {} f32)}))} ",
         "p (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
     ))
-    .expect("property without precondition metadata parses structurally");
-    let error = resugar_program(&deep)
-        .expect_err("required property metadata must not silently default to an empty tuple");
+    .expect_err("invalid annotation rejected at ingress");
     assert!(
         error.to_string().contains("property_preconditions"),
         "unexpected missing-precondition error: {error}"
@@ -1200,12 +1266,16 @@ fn pipe_call_stage_metadata_preserves_the_one_canonical_sugar() {
     let resugared = format_program(&resugar_program(&deep).expect("pipe stages resugar"));
     assert_eq!(resugared, source);
     assert_eq!(
-        print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-            &deep
-        )),
-        print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-            &desugar_program(&parse_str(&resugared).unwrap())
-        ))
+        print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&desugar_program(
+                &parse_str(&resugared).unwrap()
+            ))
+            .expect("valid metadata for round-trip normalization")
+        )
     );
 }
 
@@ -1234,10 +1304,16 @@ fn operator_named_and_finite_list_pipe_stages_keep_their_call_stage_sugar() {
 
     assert_eq!(rendered, source);
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&desugar_program(
-            &parse_str(&rendered).expect("resugared pipe stages reparse")
-        ))),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&desugar_program(
+                &parse_str(&rendered).expect("resugared pipe stages reparse")
+            ))
+            .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
         "an operator-named pipe stage must survive Surf -> Deep -> Surf -> Deep",
     );
 }
@@ -1275,10 +1351,16 @@ fn a_nested_stage_rebinding_the_pipe_parameter_keeps_its_sugar() {
     let rendered = format_program(&resugar_program(&deep).expect("the nested stage resugars"));
     assert_eq!(rendered, source);
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&desugar_program(
-            &parse_str(&rendered).expect("the resugared nested stage reparses")
-        ))),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&desugar_program(
+                &parse_str(&rendered).expect("the resugared nested stage reparses")
+            ))
+            .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
     );
 }
 
@@ -1344,73 +1426,46 @@ fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
 
 #[test]
 fn deep_surf_metadata_namespace_and_marker_values_are_closed() {
-    let unknown = parse_deep("(var {surf_future: true} x)")
-        .expect_err("unknown surf metadata key must be rejected at parse time");
-    assert!(
-        unknown
-            .to_string()
-            .contains("closed Surf metadata namespace")
-    );
-
-    let mut malformed = parse_deep(
-        "(pipe {} (var {} x) (fn {surf_pipe_stage: \"later\"} (params {} v) (var {} v)))",
-    )
-    .expect("known key parses for value validation");
-    let error = resugar_expression(&malformed.remove(0))
-        .expect_err("unknown call-stage marker value must fail closed");
-    assert!(error.to_string().contains("call-first"));
-
-    let mut malformed =
-        parse_deep("(lit {type: (t-prim {} f32), surf_literal_style: \"future\"} 1.0)")
-            .expect("known literal-style key parses for value validation");
-    let error = resugar_expression(&malformed.remove(0))
-        .expect_err("unknown literal-style marker value must fail closed");
-    assert!(error.to_string().contains("unsuffixed"));
-
-    let malformed = parse_deep(concat!(
-        "(let {} (bind {} x ",
-        "(lit {type: (t-prim {} int32), surf_binding_type: \"future\"} 1)) ",
-        "(var {} x))",
-    ))
-    .expect("known binding-style key parses for value validation");
-    let error = resugar_expression(&malformed[0])
-        .expect_err("unknown binding-style marker value must fail closed");
-    assert!(error.to_string().contains("inferred"));
-
-    for deep_source in [
-        "(var {surf_literal_style: \"future\"} x)",
-        "(var {surf_binding_type: \"future\"} x)",
-        "(var {surf_binding_type: \"inferred\"} x)",
-        "(var {surf_pipe_stage: \"call-first\"} x)",
-        "(var {surf_path: \"Demo\"} x)",
-        "(var {surf_dim_group_size: 1} x)",
+    for (source, key) in [
+        ("(var {surf_future: true} x)", "surf_future"),
+        (
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"later\"} (params {} v) (var {} v)))",
+            "surf_pipe_stage",
+        ),
+        (
+            "(lit {type: (t-prim {} f32), surf_literal_style: \"future\"} 1.0)",
+            "surf_literal_style",
+        ),
+        (
+            "(let {} (bind {} x (lit {surf_binding_type: \"future\"} 1)) (var {} x))",
+            "surf_binding_type",
+        ),
+        (
+            "(var {surf_literal_style: \"future\"} x)",
+            "surf_literal_style",
+        ),
+        (
+            "(var {surf_binding_type: \"future\"} x)",
+            "surf_binding_type",
+        ),
+        (
+            "(var {surf_binding_type: \"inferred\"} x)",
+            "surf_binding_type",
+        ),
+        (
+            "(var {surf_pipe_stage: \"call-first\"} x)",
+            "surf_pipe_stage",
+        ),
+        ("(var {surf_path: \"Demo\"} x)", "surf_path"),
+        ("(var {surf_dim_group_size: 1} x)", "surf_dim_group_size"),
+        (
+            "^{:surf_literal_style \"explicit\"} (var {} x)",
+            "surf_literal_style",
+        ),
     ] {
-        let mut malformed = parse_deep(deep_source).expect("known metadata key parses");
-        let rendered = print_canonical(&malformed);
-        let Err(error) = resugar_expression(&malformed.remove(0)) else {
-            panic!(
-                "known Surf metadata unexpectedly resugared outside its declared placement: {deep_source}: {rendered}"
-            );
-        };
-        assert!(
-            error.to_string().contains("metadata"),
-            "{deep_source}: {error}"
-        );
+        let error = parse_deep(source).unwrap_err();
+        assert!(error.to_string().contains(key), "{source}: {error}");
     }
-
-    let mut legacy_wrapper = parse_deep("^{:surf_literal_style \"explicit\"} (var {} x)")
-        .expect("legacy metadata expression parses");
-    let error = resugar_expression(&legacy_wrapper.remove(0))
-        .expect_err("surface metadata on a legacy metadata wrapper must fail closed");
-    assert!(error.to_string().contains("literal"));
-
-    let malformed =
-        parse_deep("(var {surf_binding_type: \"future\"} x)").expect("known metadata key parses");
-    assert!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&malformed))
-            .contains("surf_binding_type"),
-        "normalization must not erase malformed Surf metadata before validation"
-    );
 }
 
 #[test]
@@ -1461,8 +1516,14 @@ fn roundtrip_normalization_removes_only_parameter_types_redundant_with_defsig() 
     .expect("well-formed paired definition without redundant parameter metadata");
 
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redundant)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&without_redundancy))
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redundant)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&without_redundancy)
+                .expect("valid metadata for round-trip normalization")
+        )
     );
 
     let mismatched = parse_deep(concat!(
@@ -1471,8 +1532,11 @@ fn roundtrip_normalization_removes_only_parameter_types_redundant_with_defsig() 
     ))
     .expect("structurally valid but mismatched parameter metadata");
     assert!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&mismatched))
-            .contains("{type: (t-prim {} f64)}"),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&mismatched)
+                .expect("valid metadata for round-trip normalization")
+        )
+        .contains("{type: (t-prim {} f64)}"),
         "normalization must not hide a semantic disagreement"
     );
 }
@@ -1530,15 +1594,16 @@ fn property_resugaring_rejects_signatures_that_conflict_with_property_types() {
 #[test]
 fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
     let deep = parse_deep(concat!(
-        "(var {span: \"external\", loc: \"source\", ",
-        "source: (app {} (var {} macro_call)), ",
-        "effects: (effects {} IO), invariant_amenability: \"linear\", ",
-        "eff: (effects {} IO), type: (t-prim {} f32), ",
-        "surf_path: \"Module.Path\", surf_literal_style: \"explicit\", ",
-        "surf_binding_type: \"inferred\"} x)\n",
-    ))
-    .expect("metadata-rich Deep parses");
-    let normalized = print_canonical(&normalize_deep_for_surface_roundtrip(&deep));
+        "(module {surf_path: \"Module.Path\"} module.path ",
+        "(defsig {} x (t-fn {eff: (effects {})} (t-prim {} f32))) ",
+        "(def {span: \"external\", loc: (loc \"source.dp\" 1 2), source: (macro_call original)} x ",
+        "(fn {effects: (effects {})} (params {}) (lit {type: (t-prim {} f32)} 0.0))) ",
+        "(deftype {opaque: true, invariant: (fn {} (params {} p) true), invariant_amenability: \"linear\"} T () (variant {} T)))",
+    )).expect("metadata on valid owners");
+    let normalized = print_canonical(
+        &normalize_deep_for_surface_roundtrip(&deep)
+            .expect("valid metadata for round-trip normalization"),
+    );
 
     for derived in [
         "span:",
@@ -1552,16 +1617,10 @@ fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
             "derived key survived: {normalized}"
         );
     }
-    for semantic in [
-        "eff:",
-        "type:",
-        "surf_path:",
-        "surf_literal_style:",
-        "surf_binding_type:",
-    ] {
+    for semantic in ["eff:", "type:", "opaque:", "invariant:"] {
         assert!(
             normalized.contains(semantic),
-            "semantic or misplaced surface key was erased: {normalized}"
+            "semantic key was erased: {normalized}"
         );
     }
 
@@ -1570,7 +1629,10 @@ fn roundtrip_normalization_strips_only_enumerated_derived_metadata() {
         "(lit {surf_literal_style: \"explicit\", surf_binding_type: \"inferred\"} 1))\n",
     ))
     .expect("legal origin markers parse");
-    let normalized_legal = print_canonical(&normalize_deep_for_surface_roundtrip(&legal_markers));
+    let normalized_legal = print_canonical(
+        &normalize_deep_for_surface_roundtrip(&legal_markers)
+            .expect("valid metadata for round-trip normalization"),
+    );
     assert!(!normalized_legal.contains("surf_literal_style:"));
     assert!(!normalized_legal.contains("surf_binding_type:"));
 }
@@ -1587,8 +1649,14 @@ fn deep_resugaring_recovers_dimension_and_precision_quantifiers() {
 
     assert_eq!(resugared, source);
     assert_eq!(
-        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
-        print_canonical(&normalize_deep_for_surface_roundtrip(&redesugared))
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        )
     );
 }
 
@@ -1607,12 +1675,14 @@ fn tuple_destructuring_resugars_without_losing_linearity_markers() {
 
     assert_eq!(resugared, source);
     assert_eq!(
-        print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-            &deep
-        )),
-        print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-            &redesugared
-        ))
+        print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)
+                .expect("valid metadata for round-trip normalization")
+        ),
+        print_canonical(
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("valid metadata for round-trip normalization")
+        )
     );
 }
 
@@ -1638,4 +1708,103 @@ fn synthesized_destructuring_temporaries_do_not_capture_authored_names() {
         deep.contains("__chelis_tmp1") && deep.contains("destructure: true"),
         "the synthesized discard binding must skip the authored name: {deep}"
     );
+}
+
+#[test]
+fn roundtrip_normalization_preserves_metadata_named_dtype_binders() {
+    for name in [
+        "p",
+        "span",
+        "loc",
+        "source",
+        "effects",
+        "invariant_amenability",
+        "surf_literal_style",
+    ] {
+        let source = format!("(defsig {{dtype_bounds: {{{name}: float}}}} f (t-var {{}} {name}))");
+        let deep = parse_deep(&source).unwrap();
+        let normalized = normalize_deep_for_surface_roundtrip(&deep).unwrap();
+        let printed = print_canonical(&normalized);
+        assert!(
+            printed.contains(&format!("{name}: float")),
+            "lost binder: {printed}"
+        );
+        let other = parse_deep(&source.replace(": float", ": int")).unwrap();
+        let other = print_canonical(&normalize_deep_for_surface_roundtrip(&other).unwrap());
+        assert_ne!(
+            printed, other,
+            "distinct bound families collapsed for {name}"
+        );
+        assert!(parse_deep(&source.replace(": float", ": 42")).is_err());
+    }
+}
+
+#[test]
+fn normalization_preserves_structural_metadata_containers() {
+    for (key, value) in [
+        ("property_preconditions", "(tuple {})"),
+        ("property_preconditions", "(tuple {} true)"),
+        ("property_preconditions", "(tuple {} (tuple {}))"),
+        ("property_contracts", "(tuple {})"),
+        ("property_contracts", "(tuple {} \"law\")"),
+        ("property_quantifiers", "(params {})"),
+        ("property_quantifiers", "(params {} x)"),
+    ] {
+        let source = format!("(def {{{key}: {value}}} f (lit {{}} 1))");
+        let deep = parse_deep(&source).unwrap();
+        let normalized = normalize_deep_for_surface_roundtrip(&deep).unwrap();
+        let printed = print_canonical(&normalized);
+        let shape = if key == "property_quantifiers" {
+            "params"
+        } else {
+            "tuple"
+        };
+        assert!(
+            printed.contains(&format!("{key}: ({shape} {{}}")),
+            "{printed}"
+        );
+        chelis_deep::metadata::validate_metadata(&normalized).unwrap();
+        assert!(parse_deep(&format!("(def {{{key}: (lit {{}} 1)}} f (lit {{}} 1))")).is_err());
+    }
+}
+
+#[test]
+fn normalization_uses_metadata_roles_for_syntax_and_expressions() {
+    let deep = parse_deep(
+        "(def {custom: (tuple {span: \"id\"}), property_seed: (tuple {})} f (lit {} 1))",
+    )
+    .unwrap();
+    let printed = print_canonical(&normalize_deep_for_surface_roundtrip(&deep).unwrap());
+    assert!(printed.contains("custom: (tuple {})"), "{printed}");
+    assert!(
+        printed.contains("property_seed: (lit {type: (t-unit {})} ())"),
+        "{printed}"
+    );
+    assert!(!printed.contains("span:"), "{printed}");
+}
+
+#[test]
+fn normalization_retains_property_parameter_types_with_a_signature() {
+    let source = concat!(
+        "(defsig {} p (t-fn {} (t-prim {} int32) (t-prim {} bool))) ",
+        "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
+        "property_quantifiers: (params {} (x {type: (t-prim {} int32)})), ",
+        "property_preconditions: (tuple {})} p ",
+        "(fn {} (params {} (x {type: (t-prim {} int32)})) (lit {} true)))",
+    );
+    let normalized = normalize_deep_for_surface_roundtrip(&parse_deep(source).unwrap()).unwrap();
+    let printed = print_canonical(&normalized);
+    assert_eq!(
+        printed.matches("x {type: (t-prim {} int32)}").count(),
+        2,
+        "{printed}"
+    );
+    chelis_deep::metadata::validate_metadata(&normalized).unwrap();
+    resugar_program(&normalized).unwrap();
+    let bad = source.replacen(
+        "property_quantifiers: (params {} (x {type: (t-prim {} int32)}))",
+        "property_quantifiers: (params {} (x {type: (t-prim {} bool)}))",
+        1,
+    );
+    assert!(parse_deep(&bad).is_err());
 }

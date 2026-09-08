@@ -31,7 +31,7 @@ use chelis_deep::parser::parse_str;
 use chelis_deep::path::{ResolveError, splice_function_body, spliced_function_def};
 use chelis_deep::span::Span;
 use chelis_deep::tag::DeepTag;
-use chelis_deep::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
+use chelis_deep::{Atom, Expr, List, MetaExpr, Metadata, UnknownFormData};
 
 fn sp() -> Span {
     Span::new(0, 0)
@@ -45,7 +45,7 @@ fn raw(tag: &str) -> Expr {
         List {
             elements: vec![
                 Expr::Atom(Atom::Name(tag.to_string()), sp()),
-                Expr::Map(MetaMap::default(), sp()),
+                Expr::Map(Metadata::default(), sp()),
                 Expr::Atom(Atom::Int(0), sp()),
             ],
         },
@@ -57,22 +57,25 @@ fn raw(tag: &str) -> Expr {
 fn stamped_lit() -> Expr {
     Expr::node(
         DeepTag::Lit,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Int(1), sp())],
         sp(),
     )
 }
 
-fn meta_with(key: &str, value: Expr) -> MetaMap {
-    MetaMap {
-        entries: vec![(key.to_string(), value)],
-    }
+fn meta_with(key: &str, value: Expr) -> Metadata {
+    let mut metadata = Metadata::default();
+    metadata
+        .extensions_mut()
+        .insert(key.into(), value)
+        .expect("valid extension fixture");
+    metadata
 }
 
 /// Assert the construction gate rejects `payload` in child position and
 /// names the raw tag it found.
 fn assert_child_rejected(payload: Expr, expected_tag: &str) {
-    let result = Node::try_new(DeepTag::App, MetaMap::default(), vec![payload]);
+    let result = Node::try_new(DeepTag::App, Metadata::default(), vec![payload]);
     match result {
         Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == expected_tag => {}
         other => panic!("expected a RawVocabularyTag(`{expected_tag}`) rejection, got {other:?}"),
@@ -81,15 +84,12 @@ fn assert_child_rejected(payload: Expr, expected_tag: &str) {
 
 /// Assert the construction gate rejects `payload` in metadata position.
 fn assert_metadata_rejected(payload: Expr, expected_tag: &str) {
-    let result = Node::try_new(
-        DeepTag::App,
-        meta_with("probe", payload),
-        vec![stamped_lit()],
-    );
-    match result {
-        Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == expected_tag => {}
-        other => panic!("expected a RawVocabularyTag(`{expected_tag}`) rejection, got {other:?}"),
-    }
+    let mut metadata = Metadata::default();
+    let error = metadata
+        .extensions_mut()
+        .insert("probe".into(), payload)
+        .unwrap_err();
+    assert!(error.to_string().contains(expected_tag), "{error}");
 }
 
 // ── Leg 1: the Deserialize entry point ───────────────────────────────
@@ -130,7 +130,7 @@ fn json_of(expr: &Expr) -> Value {
 fn stamped_var_json() -> Value {
     json_of(&Expr::node(
         DeepTag::Var,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Name("x".to_string()), sp())],
         sp(),
     ))
@@ -154,7 +154,7 @@ fn deserialize_rejects_a_raw_tag_directly_below_a_stamped_child() {
 
     let mut outer = json_of(&Expr::node(
         DeepTag::App,
-        MetaMap::default(),
+        Metadata::default(),
         vec![stamped_lit()],
         sp(),
     ));
@@ -170,7 +170,7 @@ fn deserialize_rejects_a_raw_tag_two_stamped_levels_down() {
 
     let mut middle = json_of(&Expr::node(
         DeepTag::App,
-        MetaMap::default(),
+        Metadata::default(),
         vec![stamped_lit()],
         sp(),
     ));
@@ -178,7 +178,7 @@ fn deserialize_rejects_a_raw_tag_two_stamped_levels_down() {
 
     let mut top = json_of(&Expr::node(
         DeepTag::App,
-        MetaMap::default(),
+        Metadata::default(),
         vec![stamped_lit()],
         sp(),
     ));
@@ -197,7 +197,7 @@ fn deserialize_rejects_a_raw_tag_in_a_stamped_child_metadata() {
 
     let mut outer = json_of(&Expr::node(
         DeepTag::App,
-        MetaMap::default(),
+        Metadata::default(),
         vec![stamped_lit()],
         sp(),
     ));
@@ -212,7 +212,7 @@ fn deserialize_rejects_a_raw_tag_in_the_outermost_node_itself() {
     // stamped child, the outer node's own scan is what rejects it.
     let mut outer = json_of(&Expr::node(
         DeepTag::App,
-        MetaMap::default(),
+        Metadata::default(),
         vec![stamped_lit()],
         sp(),
     ));
@@ -227,10 +227,10 @@ fn deserialize_accepts_the_same_tree_without_the_smuggled_tag() {
     // not because the hand-built JSON was malformed.
     let clean = Expr::node(
         DeepTag::App,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::node(
             DeepTag::Var,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("x".to_string()), sp())],
             sp(),
         )],
@@ -252,7 +252,7 @@ fn deserialize_accepts_the_same_tree_without_the_smuggled_tag() {
 fn try_replace_child_rejects_a_raw_tag_below_carriers() {
     let mut node = Node::try_new(
         DeepTag::App,
-        MetaMap::default(),
+        Metadata::default(),
         vec![stamped_lit(), stamped_lit()],
     )
     .expect("clean node constructs");
@@ -271,13 +271,13 @@ fn try_replace_children_rejects_a_raw_tag_beside_a_stamped_child() {
     // payload: stopping the scan at that sibling must not stop the scan of
     // the rest of the vector.
     let mut node =
-        Node::try_new(DeepTag::App, MetaMap::default(), vec![stamped_lit()]).expect("clean node");
+        Node::try_new(DeepTag::App, Metadata::default(), vec![stamped_lit()]).expect("clean node");
 
     let rejected = node.try_replace_children(vec![
         stamped_lit(),
         Expr::UnknownForm(Box::new(UnknownFormData {
             head: "future-form".to_string(),
-            meta: MetaMap::default(),
+            meta: Metadata::default(),
             children: vec![raw("fn")],
             span: sp(),
         })),
@@ -291,19 +291,24 @@ fn try_replace_children_rejects_a_raw_tag_beside_a_stamped_child() {
 
 #[test]
 fn try_replace_meta_rejects_a_raw_tag_below_nested_carriers() {
-    let mut node =
-        Node::try_new(DeepTag::App, MetaMap::default(), vec![stamped_lit()]).expect("clean node");
-
+    let mut metadata = meta_with("probe", stamped_lit());
+    let before = metadata.clone();
     let buried = Expr::BareList(
-        vec![Expr::Map(meta_with("inner", raw("match")), sp())],
+        vec![Expr::MetaExpr(
+            MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(raw("match")),
+            },
+            sp(),
+        )],
         sp(),
     );
-    let rejected = node.try_replace_meta(meta_with("probe", buried));
-    assert!(matches!(
-        rejected,
-        Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "match"
-    ));
-    assert!(node.meta().entries.is_empty(), "rejection is atomic");
+    let error = metadata
+        .extensions_mut()
+        .replace("probe".into(), buried)
+        .unwrap_err();
+    assert!(error.to_string().contains("match"));
+    assert_eq!(metadata, before, "rejection is atomic");
 }
 
 // ── Leg 3: the path.rs splice surface ────────────────────────────────
@@ -336,11 +341,11 @@ fn splice_payload_shapes() -> Vec<(&'static str, Expr, &'static str)> {
             "app",
         ),
         (
-            "raw in an UnknownForm's metadata",
+            "raw in an UnknownForm child",
             Expr::UnknownForm(Box::new(UnknownFormData {
                 head: "future-form".to_string(),
-                meta: meta_with("probe", raw("if")),
-                children: vec![],
+                meta: Metadata::default(),
+                children: vec![raw("if")],
                 span: sp(),
             })),
             "if",
@@ -354,8 +359,8 @@ fn splice_payload_shapes() -> Vec<(&'static str, Expr, &'static str)> {
             "raw in a MetaExpr wrapping a stamped node",
             Expr::MetaExpr(
                 MetaExpr {
-                    entries: vec![("probe".to_string(), raw("tuple"))],
-                    expr: Box::new(stamped_lit()),
+                    metadata: Metadata::default(),
+                    expr: Box::new(Expr::BareList(vec![stamped_lit(), raw("tuple")], sp())),
                 },
                 sp(),
             ),
@@ -421,7 +426,7 @@ fn splice_accepts_a_clean_stamped_body() {
 fn metaexpr_expr_slot_is_scanned_in_both_positions() {
     let carrier = Expr::MetaExpr(
         MetaExpr {
-            entries: vec![],
+            metadata: Metadata::default(),
             expr: Box::new(Expr::BareList(vec![raw("lit")], sp())),
         },
         sp(),
@@ -432,48 +437,25 @@ fn metaexpr_expr_slot_is_scanned_in_both_positions() {
 
 #[test]
 fn metaexpr_metadata_is_scanned_in_both_positions() {
-    let carrier = Expr::MetaExpr(
-        MetaExpr {
-            entries: vec![("probe".to_string(), raw("app"))],
-            expr: Box::new(stamped_lit()),
-        },
-        sp(),
-    );
-    assert_child_rejected(carrier.clone(), "app");
-    assert_metadata_rejected(carrier, "app");
+    let value = serde_json::json!({ "MetaExpr": [{"entries": [["probe", raw("app")]], "expr": stamped_lit()}, sp()] });
+    let error = serde_json::from_value::<Expr>(value).unwrap_err();
+    assert!(error.to_string().contains("app"));
+    assert_metadata_rejected(raw("app"), "app");
 }
 
 #[test]
 fn a_six_deep_carrier_chain_is_scanned_to_the_bottom() {
-    // BareList > List > Map > MetaExpr > UnknownForm > raw. None of these
-    // carriers is gated, so depth buys an attacker nothing.
-    let chain = Expr::BareList(
-        vec![Expr::List(
-            List {
-                elements: vec![Expr::Map(
-                    meta_with(
-                        "one",
-                        Expr::MetaExpr(
-                            MetaExpr {
-                                entries: vec![],
-                                expr: Box::new(Expr::UnknownForm(Box::new(UnknownFormData {
-                                    head: "future-form".to_string(),
-                                    meta: MetaMap::default(),
-                                    children: vec![raw("match")],
-                                    span: sp(),
-                                }))),
-                            },
-                            sp(),
-                        ),
-                    ),
-                    sp(),
-                )],
+    let mut chain = raw("match");
+    for _ in 0..3 {
+        chain = Expr::BareList(vec![chain], sp());
+        chain = Expr::MetaExpr(
+            MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(chain),
             },
             sp(),
-        )],
-        sp(),
-    );
-
+        );
+    }
     assert_child_rejected(chain.clone(), "match");
     assert_metadata_rejected(chain, "match");
 }
@@ -508,30 +490,23 @@ fn every_public_entry_point_refuses_to_place_a_raw_tag_below_a_stamped_node() {
 
     // 1. The boundary constructor.
     assert!(matches!(
-        Node::try_new(DeepTag::App, MetaMap::default(), payload.clone()),
+        Node::try_new(DeepTag::App, Metadata::default(), payload.clone()),
         Err(NodeError::RawVocabularyTag { .. })
     ));
 
     // 2. The internal constructor.
     let panicked =
-        std::panic::catch_unwind(|| Node::new(DeepTag::App, MetaMap::default(), payload.clone()));
+        std::panic::catch_unwind(|| Node::new(DeepTag::App, Metadata::default(), payload.clone()));
     assert!(panicked.is_err(), "Node::new must panic on the violation");
 
     // 3. The typed producer.
     let panicked = std::panic::catch_unwind(|| {
-        Expr::node(DeepTag::App, MetaMap::default(), payload.clone(), sp())
+        Expr::node(DeepTag::App, Metadata::default(), payload.clone(), sp())
     });
     assert!(panicked.is_err(), "Expr::node must panic on the violation");
 
-    // 4. Metadata, not just children.
-    assert!(matches!(
-        Node::try_new(
-            DeepTag::App,
-            meta_with("probe", raw("lit")),
-            vec![stamped_lit()],
-        ),
-        Err(NodeError::RawVocabularyTag { .. })
-    ));
+    // 4. Metadata rejects the raw payload before it can reach any AST carrier.
+    assert_metadata_rejected(raw("lit"), "lit");
 
     // 5. The wire boundary (covered in depth by leg 1).
     let mut smuggled = stamped_var_json();
@@ -540,7 +515,7 @@ fn every_public_entry_point_refuses_to_place_a_raw_tag_below_a_stamped_node() {
 
     // 6. The mutators (covered in depth by leg 2).
     let mut node =
-        Node::try_new(DeepTag::App, MetaMap::default(), vec![stamped_lit()]).expect("clean node");
+        Node::try_new(DeepTag::App, Metadata::default(), vec![stamped_lit()]).expect("clean node");
     assert!(node.try_replace_children(payload).is_err());
     assert_eq!(node.child_count(), 1);
 }

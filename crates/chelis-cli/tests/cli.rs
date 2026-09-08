@@ -6195,11 +6195,8 @@ fn validate_deep_identifies_a_headless_top_level_form_like_check_does() {
 
 #[test]
 fn validate_deep_rejects_invalid_effects_children() {
-    // chelis#1088: `(effects ...)` is a metadata value in real Deep, never a
-    // top-level form, so the fixture now sits where it actually occurs. That
-    // position is invisible to the Pest leg, which walks node children; the
-    // AST-side sweep `check` has always used is what reaches it, and
-    // `validate --deep` now runs that sweep too.
+    // Effect payloads are validated at shared metadata ingress before the
+    // executable grammar or semantic effect consumers run.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad_effects.dp");
     write_file(
@@ -6213,19 +6210,18 @@ fn validate_deep_rejects_invalid_effects_children() {
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("`effects` must contain"));
+        .stderr(predicate::str::contains("metadata `eff`"));
 }
 
 #[test]
 fn validate_deep_rejects_invalid_resource_arity() {
     // chelis#1088: likewise nested where a `resource` entry really appears.
-    // The stamped ingress reaches the arity first and names the tag; the Pest
-    // arity arm remains the second line of defence.
+    // Shared metadata admission owns this nested shape rejection.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad_resource.dp");
     write_file(
         &path,
-        "(defsig {} f (t-fn {eff: (effects {} (resource {} x y))} (t-prim {} f32)))\n",
+        "(defsig {} f (t-fn {eff: (effects {} (resource {} \"x\" \"y\"))} (t-prim {} f32)))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -6235,7 +6231,7 @@ fn validate_deep_rejects_invalid_resource_arity() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("resource"))
-        .stderr(predicate::str::contains("wrong child count"));
+        .stderr(predicate::str::contains("metadata `eff`"));
 }
 
 #[test]

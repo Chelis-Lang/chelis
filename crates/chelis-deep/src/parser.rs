@@ -2,19 +2,6 @@ use crate::ast::Expr;
 use crate::lexer::{self, Token, TokenKind};
 use thiserror::Error;
 
-/// Returns true when `b` is a forbidden ASCII byte in a `span` metadata
-/// value per `spec/03-deep-syntax.md` §1.1.1: U+0000..=U+001F (except
-/// U+0020 space) or U+007F (DEL).
-///
-/// Mirrored in `chelis_ir::span_sanitize::is_forbidden_byte`. The two
-/// definitions are kept in sync via the spec — any change to the
-/// forbidden set must update both `spec/03-deep-syntax.md` §1.1.1 and
-/// both implementations together.
-#[inline]
-fn is_forbidden_span_byte(b: u8) -> bool {
-    b <= 0x1F || b == 0x7F
-}
-
 /// Render a forbidden byte for diagnostic messages, using a printable
 /// canonical form. `\n`, `\r`, `\t`, `\0` get their backslash form;
 /// other forbidden bytes (other C0 controls and U+007F) are shown as
@@ -29,28 +16,10 @@ fn forbidden_byte_repr(b: u8) -> String {
     }
 }
 
-fn validate_surf_metadata_key(key: &str, offset: usize) -> Result<(), ParseError> {
-    if key.starts_with("surf_")
-        && !matches!(
-            key,
-            "surf_path"
-                | "surf_dim_group_size"
-                | "surf_pipe_stage"
-                | "surf_literal_style"
-                | "surf_binding_type"
-        )
-    {
-        return Err(ParseError::Expected {
-            expected: "a key in the closed Surf metadata namespace (`surf_path`, `surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, or `surf_binding_type`)".to_string(),
-            found: key.to_string(),
-            offset,
-        });
-    }
-    Ok(())
-}
-
 #[derive(Debug, Error)]
 pub enum ParseError {
+    #[error("{0}")]
+    Metadata(crate::metadata::MetadataError),
     #[error("lex error: {0}")]
     Lex(#[from] lexer::LexError),
 
@@ -292,27 +261,8 @@ impl<'a> RawParser<'a> {
                     });
                 }
             };
-            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
             let value = self.parse_expr()?;
-
-            // Span-charset enforcement (spec §1.1.1)
-            if key == "span"
-                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
-                && let Some((idx, b)) = s
-                    .as_bytes()
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .find(|(_, b)| is_forbidden_span_byte(*b))
-            {
-                return Err(ParseError::ForbiddenSpanChar {
-                    value_offset: value_span.offset,
-                    byte_in_value: idx,
-                    code_point: u32::from(b),
-                    repr: forbidden_byte_repr(b),
-                });
-            }
 
             entries.push((key, value));
         }
@@ -365,7 +315,6 @@ impl<'a> RawParser<'a> {
                     });
                 }
             };
-            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
             let colon_tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
@@ -384,24 +333,6 @@ impl<'a> RawParser<'a> {
             }
 
             let value = self.parse_expr()?;
-
-            // Span-charset enforcement (spec §1.1.1)
-            if key == "span"
-                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
-                && let Some((idx, b)) = s
-                    .as_bytes()
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .find(|(_, b)| is_forbidden_span_byte(*b))
-            {
-                return Err(ParseError::ForbiddenSpanChar {
-                    value_offset: value_span.offset,
-                    byte_in_value: idx,
-                    code_point: u32::from(b),
-                    repr: forbidden_byte_repr(b),
-                });
-            }
 
             entries.push((key, value));
 
@@ -531,15 +462,24 @@ pub fn stamp_tags(exprs: &mut [Expr]) {
                 }
             }
             Expr::Map(map, _) => {
-                for (_, value) in map.entries.iter_mut() {
-                    stamp(value);
-                }
+                *map = map
+                    .map_expressions(&mut |value, _| {
+                        let mut value = value.clone();
+                        stamp(&mut value);
+                        value
+                    })
+                    .expect("stamping preserves metadata shape");
             }
             Expr::MetaExpr(meta, _) => {
                 stamp(&mut meta.expr);
-                for (_, value) in meta.entries.iter_mut() {
-                    stamp(value);
-                }
+                meta.metadata = meta
+                    .metadata
+                    .map_expressions(&mut |value, _| {
+                        let mut value = value.clone();
+                        stamp(&mut value);
+                        value
+                    })
+                    .expect("stamping preserves metadata shape");
             }
             Expr::Atom(_, _) => {}
             Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
@@ -552,9 +492,25 @@ pub fn stamp_tags(exprs: &mut [Expr]) {
 
 /// The raw parser mirrors the typed parser but constructs `RawExpr`/`RawAtom`
 /// instead of `Expr`/`Atom`. No tag stamping, no typed-literal collapse.
+fn parse_raw_syntax(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
+    RawParser::new(tokens).parse_exprs()
+}
+
 pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
-    let mut parser = RawParser::new(tokens);
-    parser.parse_exprs()
+    let exprs = parse_raw_syntax(tokens)?;
+    crate::metadata::validate_raw(&exprs).map_err(|error| {
+        if let Some((byte_in_value, code_point)) = error.forbidden_span_char {
+            ParseError::ForbiddenSpanChar {
+                value_offset: error.span.offset,
+                byte_in_value,
+                code_point: u32::from(code_point),
+                repr: forbidden_byte_repr(code_point),
+            }
+        } else {
+            ParseError::Metadata(error)
+        }
+    })?;
+    Ok(exprs)
 }
 
 /// Parse a source string into raw expressions (lex + parse_raw).
@@ -613,7 +569,7 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
 /// declarations.
 pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_syntax(&tokens)?;
     let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
         // [03-PROG-3] puts the zero-form rejection at the position where a
         // top-level form was required, the end of the input.
@@ -764,11 +720,8 @@ mod tests {
                     node.children_slice()[0],
                     Expr::Atom(Atom::Int(7), _)
                 ));
-                assert!(node.meta().entries.iter().any(|(key, _)| key == "type"));
-                assert!(node.meta().entries.iter().any(|(key, value)| {
-                    key == "literal_source"
-                        && matches!(value, Expr::Atom(Atom::Name(name), _) if name == "integer")
-                }));
+                assert!(node.meta().ty().is_some());
+                assert!(node.meta().literal_source().is_some());
             }
             other => panic!("expected lit Node, got {other:?}"),
         }
@@ -883,7 +836,7 @@ mod tests {
         match &exprs[0] {
             Expr::Node(node, _) => {
                 assert_eq!(node.tag(), crate::tag::DeepTag::Def);
-                assert!(node.meta().entries.is_empty());
+                assert!(node.meta().is_empty());
                 // Def has 2 children: the name binder and the (fn ...) node
                 assert_eq!(node.child_count(), 2);
                 match &node.children_slice()[0] {
@@ -905,15 +858,14 @@ mod tests {
 
     #[test]
     fn parse_metadata() {
-        let exprs = p("^{:type f32} x");
+        let exprs = p("^{:type (t-prim {} f32)} x");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::MetaExpr(meta, _) => {
-                assert_eq!(meta.entries.len(), 1);
-                assert_eq!(meta.entries[0].0, "type");
-                match &meta.entries[0].1 {
-                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f32"),
-                    other => panic!("expected Symbol(f32), got {:?}", other),
+                assert_eq!(meta.metadata.values().count(), 1);
+                match meta.metadata.ty().unwrap().expression() {
+                    Expr::Node(node, _) => assert_eq!(node.tag(), crate::DeepTag::TPrim),
+                    other => panic!("expected type node, got {:?}", other),
                 }
                 match meta.expr.as_ref() {
                     Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "x"),
@@ -926,13 +878,16 @@ mod tests {
 
     #[test]
     fn parse_metadata_multiple_entries() {
-        let exprs = p("^{:type f32 :pure true} (add x y)");
+        let exprs = p("^{:type (t-prim {} f32) :pure true} (add x y)");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::MetaExpr(meta, _) => {
-                assert_eq!(meta.entries.len(), 2);
-                assert_eq!(meta.entries[0].0, "type");
-                assert_eq!(meta.entries[1].0, "pure");
+                assert!(meta.metadata.ty().is_some());
+                assert_eq!(meta.metadata.extensions().iter().count(), 1);
+                assert!(matches!(
+                    meta.metadata.extensions().get("pure"),
+                    Some(Expr::Atom(Atom::Bool(true), _))
+                ));
                 match meta.expr.as_ref() {
                     Expr::BareList(elems, _) => match &elems[0] {
                         Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
@@ -1047,11 +1002,11 @@ mod tests {
 
     #[test]
     fn span_covers_meta_expr() {
-        let exprs = p("^{:type f32} x");
+        let exprs = p("^{:type (t-prim {} f32)} x");
         let span = exprs[0].span();
-        // '^' at 0, 'x' at 13 with len 1 → end 14
+        // The metadata wrapper span includes its complete type node and body.
         assert_eq!(span.offset, 0);
-        assert_eq!(span.end(), 14);
+        assert_eq!(span.end(), "^{:type (t-prim {} f32)} x".len());
     }
 
     // ── Empty input ────────────────────────────────────────────

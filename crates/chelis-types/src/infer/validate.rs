@@ -506,9 +506,9 @@ pub(super) fn walk_for_tensor_precision(
             if list.elements.len() >= 2
                 && let deep::Expr::Map(map, _) = &list.elements[1]
             {
-                for (_, v) in &map.entries {
+                map.visit_syntax(&mut |_, v| {
                     walk_for_tensor_precision(v, errors, seen, def_context);
-                }
+                });
             }
 
             // Recurse into children (elements after index 1).
@@ -517,14 +517,14 @@ pub(super) fn walk_for_tensor_precision(
             }
         }
         deep::Expr::Map(map, _) => {
-            for (_, v) in &map.entries {
+            map.visit_syntax(&mut |_, v| {
                 walk_for_tensor_precision(v, errors, seen, def_context);
-            }
+            });
         }
         deep::Expr::MetaExpr(meta, _) => {
-            for (_, v) in &meta.entries {
+            meta.metadata.visit_syntax(&mut |_, v| {
                 walk_for_tensor_precision(v, errors, seen, def_context);
-            }
+            });
             walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
         }
         deep::Expr::Atom(_, _) => {}
@@ -674,11 +674,7 @@ fn inline_param_parts(elements: &[deep::Expr]) -> Option<(String, Option<deep::E
         return None;
     };
     let ty = match elements.get(1) {
-        Some(deep::Expr::Map(meta, _)) => meta
-            .entries
-            .iter()
-            .find(|(k, _)| k == "type")
-            .map(|(_, v)| v.clone()),
+        Some(deep::Expr::Map(meta, _)) => meta.ty().map(|v| v.expression().clone()),
         _ => None,
     };
     Some((name.clone(), ty))
@@ -707,11 +703,7 @@ pub(super) fn param_name_and_inline_type(
             let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
-            let ty = meta
-                .entries
-                .iter()
-                .find(|(k, _)| k == "type")
-                .map(|(_, v)| v.clone());
+            let ty = meta.metadata.ty().map(|v| v.expression().clone());
             Some((name.clone(), ty))
         }
         _ => None,
@@ -811,15 +803,15 @@ pub(super) fn walk_for_poly_op_constraint_violations(
             }
         }
         deep::Expr::Map(map, _) => {
-            for (_, v) in &map.entries {
+            map.visit_syntax(&mut |_, v| {
                 walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
-            }
+            });
         }
         deep::Expr::MetaExpr(meta, _) => {
             walk_for_poly_op_constraint_violations(&meta.expr, defs, type_env, scope, errors);
-            for (_, v) in &meta.entries {
+            meta.metadata.visit_syntax(&mut |_, v| {
                 walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
-            }
+            });
         }
         deep::Expr::Atom(_, _) => {}
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
@@ -1045,10 +1037,7 @@ pub(super) fn resolve_var_type_in_scope(
 pub(super) fn annotated_type_of_expr(expr: &deep::Expr) -> Option<deep::Expr> {
     // chelis#1107: carrier-preserving read.
     let (_, meta, _) = stamped_parts(expr)?;
-    meta.entries
-        .iter()
-        .find(|(k, _)| k == "type")
-        .map(|(_, v)| v.clone())
+    meta.ty().map(|v| v.expression().clone())
 }
 
 /// Walk a polymorphic def's body looking for `(app (var op) arg1 arg2 ...)`
@@ -1546,7 +1535,7 @@ pub(super) fn validate_ir_expr(
             StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
+            map.visit_syntax(&mut |_, value| {
                 validate_ir_expr(
                     value,
                     type_env,
@@ -1555,11 +1544,11 @@ pub(super) fn validate_ir_expr(
                     declared_signatures,
                     errors,
                 );
-            }
+            });
             StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
+            meta.metadata.visit_syntax(&mut |_, value| {
                 validate_ir_expr(
                     value,
                     type_env,
@@ -1568,7 +1557,7 @@ pub(super) fn validate_ir_expr(
                     declared_signatures,
                     errors,
                 );
-            }
+            });
             validate_ir_expr(
                 &meta.expr,
                 type_env,
@@ -1708,14 +1697,14 @@ fn dim_to_deep_expr_with(dim: &Dim, make_node: NodeBuilder) -> deep::Expr {
 pub(super) fn node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
     let mut elements = vec![
         deep::Expr::Atom(deep::Atom::Tag(tag), zero_span()),
-        deep::Expr::Map(deep::MetaMap::default(), zero_span()),
+        deep::Expr::Map(deep::Metadata::default(), zero_span()),
     ];
     elements.extend(children);
     deep::Expr::List(deep::List { elements }, zero_span())
 }
 
 pub(super) fn stamped_node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
-    deep::Expr::node(tag, deep::MetaMap::default(), children, zero_span())
+    deep::Expr::node(tag, deep::Metadata::default(), children, zero_span())
 }
 
 pub(super) fn symbol_expr(name: &str) -> deep::Expr {
@@ -1957,8 +1946,8 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
     stack_guard!("expr_type_expr", expr, None);
     match expr {
         deep::Expr::Node(node, _) => {
-            if let Some((_, ty)) = node.meta().entries.iter().find(|(key, _)| key == "type") {
-                return Some(ty.clone());
+            if let Some(ty) = node.meta().ty() {
+                return Some(ty.expression().clone());
             }
             if node.tag() == DeepTag::Var
                 && let Some(name) = node.children_slice().first().and_then(symbol_name)
@@ -1969,9 +1958,9 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
         }
         deep::Expr::List(list, _) => {
             if let Some(meta) = get_meta(list)
-                && let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type")
+                && let Some(ty) = meta.ty()
             {
-                return Some(ty.clone());
+                return Some(ty.expression().clone());
             }
             if get_tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
@@ -2026,10 +2015,10 @@ pub(super) fn extend_ir_env_with_fn_params(
             }
             _ => continue,
         };
-        let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") else {
+        let Some(ty) = meta.ty() else {
             continue;
         };
-        scoped.insert(name.to_string(), ty.clone());
+        scoped.insert(name.to_string(), ty.expression().clone());
     }
     scoped
 }
@@ -2169,28 +2158,14 @@ pub(super) fn validator_error(
 /// carries no `:span` metadata so the unmodified message is used.
 pub(super) fn validator_span_suffix(call_site: &deep::List) -> Option<String> {
     let meta = get_meta(call_site)?;
-    for (key, value) in &meta.entries {
-        if key == "span"
-            && let deep::Expr::Atom(deep::Atom::Str(s), _) = value
-        {
-            return Some(format!("(at {s})"));
-        }
-    }
-    None
+    meta.span_id().map(|v| format!("(at {})", v.value()))
 }
 
 /// Extract the `:span` metadata string from a list node, if present.
 /// Used to propagate external span identifiers into check diagnostics.
 pub(super) fn list_span_id(list: &deep::List) -> Option<&str> {
     let meta = get_meta(list)?;
-    for (key, value) in &meta.entries {
-        if key == "span"
-            && let deep::Expr::Atom(deep::Atom::Str(s), _) = value
-        {
-            return Some(s.as_str());
-        }
-    }
-    None
+    meta.span_id().map(|v| v.value())
 }
 
 /// Parse the start byte offset from a span identifier string.
@@ -2712,7 +2687,7 @@ pub(super) fn build_tensor_type_expr_with_batch(
     prec: deep::Expr,
 ) -> deep::Expr {
     let zero = zero_span();
-    let empty_meta = || deep::MetaMap { entries: vec![] };
+    let empty_meta = || deep::Metadata::default();
     let make_d_lit = |v: i64| {
         deep::Expr::List(
             deep::List {
@@ -2829,10 +2804,7 @@ pub(super) fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<S
                         || matches!(tag, DeepTag::PatVar | DeepTag::PatAs)
                         || should_attach_type_metadata(tag)
                 });
-                if requires_stamp
-                    && !get_meta(list)
-                        .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"))
-                {
+                if requires_stamp && !get_meta(list).is_some_and(|meta| meta.ty().is_some()) {
                     traces.push(format!(
                         "annotated `{}` node is missing its type stamp",
                         tag.map(DeepTag::as_str).unwrap_or("<untagged-list>")

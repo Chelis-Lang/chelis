@@ -729,52 +729,20 @@ const PROBABILITY_DEEP_WELL_FORMED_INVARIANT: &str = r#"
 
 #[test]
 fn malformed_invariant_metadata_fails_closed_at_decode() {
-    // FINDING 2 (red test): the deftype declares an `invariant` whose
-    // metadata is a bare literal, NOT the `(fn {} (params {} <binder>)
-    // <body>)` shape. A structurally-valid payload (`value: 0.3`, which a
-    // well-formed `[0, 1]` invariant would happily accept) must STILL be
-    // rejected -- the predicate cannot be evaluated, so the value cannot be
-    // safely materialized (spec/10 §4.1, fail-closed).
-    //
-    // Before the fix this WRONGLY returns Ok: the collector skipped the
-    // malformed metadata, leaving `Probability` with no table entry, so
-    // `revalidate_adt_value` treated it as invariant-free and decoded the
-    // payload with zero check (a fail-OPEN soundness hole).
-    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
-    let err = try_decode_adt_value(&exprs, &prob_payload(0.3)).expect_err(
-        "a malformed declared invariant must fail closed: a structurally-valid \
-         payload cannot be safely materialized without a usable predicate",
-    );
-    match err {
-        DecodeError::Invariant(msg) => {
-            assert!(
-                msg.contains("malformed"),
-                "names the malformed-metadata rejection: {msg}"
-            );
-            assert!(
-                msg.contains("Probability"),
-                "names the declaring opaque type: {msg}"
-            );
-        }
-        other => panic!(
-            "a malformed declared invariant is an invariant-class (fail-closed) \
-             decode failure, not a structural one, got {other:?}"
-        ),
-    }
+    let error = chelis_deep::parser::parse_str(PROBABILITY_DEEP_MALFORMED_INVARIANT)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invariant"), "{error}");
 }
 
 #[test]
 fn malformed_invariant_rejects_every_payload_no_pass_through() {
-    // Parity: the malformed invariant must reject across the board (no value
-    // can be materialized), not just one probe. This pins that the fix is a
-    // categorical fail-closed, not a value-dependent fluke.
-    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
-    for v in [0.0_f64, 0.5_f64, 1.0_f64, -0.5_f64, 1.5_f64] {
-        assert!(
-            try_decode_adt_value(&exprs, &prob_payload(v)).is_err(),
-            "malformed invariant must reject payload {v} (fail-closed, never a \
-             pass-through decode)"
-        );
+    for value in [0.0_f64, 0.5, 1.0, -0.5, 1.5] {
+        let bad = serde_json::json!({"entries": [["invariant", chelis_deep::Expr::Atom(chelis_deep::Atom::Float(value), chelis_deep::Span::new(0, 0))]]});
+        let error = serde_json::from_value::<chelis_deep::Metadata>(bad)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invariant"));
     }
 }
 

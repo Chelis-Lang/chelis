@@ -10,6 +10,7 @@ pub mod dtype_bounds;
 pub mod effect_kind;
 pub mod lexer;
 pub mod literal_source;
+pub mod metadata;
 pub mod node;
 pub mod parser;
 pub mod path;
@@ -22,10 +23,12 @@ pub mod stamp_to_typed;
 pub mod tag;
 pub mod validate;
 
-pub use ast::{Atom, CastMode, Expr, List, MetaExpr, MetaMap, UnknownFormData, cast_mode_of};
-pub use dtype_bounds::{
-    DTYPE_BOUNDS_KEY, DtypeBoundsError, DtypeFamily, decode_dtype_bounds, encode_dtype_bounds,
-};
+pub use ast::{Atom, CastMode, Expr, List, MetaExpr, UnknownFormData, cast_mode_of};
+pub mod annotations;
+pub use annotations::Metadata;
+mod annotations_codec;
+mod annotations_transform;
+pub use dtype_bounds::{DTYPE_BOUNDS_KEY, DtypeFamily, decode_dtype_bounds, encode_dtype_bounds};
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
 pub use literal_source::{

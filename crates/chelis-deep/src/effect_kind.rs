@@ -3,32 +3,21 @@
 
 use chelis_vocab::{EffectKind, EffectKindDecodeError, EffectKindInput};
 
-use crate::{Atom, Expr, List};
+use crate::{Expr, List};
 
 /// Decode the `effect:` metadata of a canonical `handle-effect` list.
 ///
-/// Shape errors are deliberately distinct from unknown symbols.  Every
-/// semantic consumer calls this adapter before dispatch, so no stage can
-/// invent a missing or malformed effect kind.
+/// Payload construction rules out malformed and unknown kinds. Absence is
+/// still an explicit error; consumers cannot invent a default effect.
 pub fn decode_effect_kind(list: &List) -> Result<EffectKind, EffectKindDecodeError<'_>> {
     let Some(Expr::Map(metadata, _)) = list.elements.get(1) else {
         return EffectKind::decode(EffectKindInput::Missing);
     };
 
-    let mut effect_values = metadata
-        .entries
-        .iter()
-        .filter_map(|(key, value)| (key == "effect").then_some(value));
-    let Some(value) = effect_values.next() else {
-        return EffectKind::decode(EffectKindInput::Missing);
-    };
-    if effect_values.next().is_some() {
-        return EffectKind::decode(EffectKindInput::Malformed);
-    }
-    match value {
-        Expr::Atom(Atom::Name(symbol), _) => EffectKind::decode(EffectKindInput::Symbol(symbol)),
-        _ => EffectKind::decode(EffectKindInput::Malformed),
-    }
+    metadata
+        .effect()
+        .map(|v| *v.value())
+        .ok_or(EffectKindDecodeError::Missing)
 }
 
 #[cfg(test)]
@@ -71,21 +60,18 @@ mod tests {
             decode_effect_kind(&list("(handle-effect {} (lit {} 1) (lit {} 2))")),
             Err(EffectKindDecodeError::Missing)
         );
-        assert_eq!(
-            decode_effect_kind(&list("(handle-effect {effect: 1} (lit {} 1) (lit {} 2))")),
-            Err(EffectKindDecodeError::Malformed)
-        );
-        assert_eq!(
-            decode_effect_kind(&list(
-                "(handle-effect {effect: random, effect: resource} (lit {} 1) (lit {} 2))"
-            )),
-            Err(EffectKindDecodeError::Malformed)
-        );
-        assert_eq!(
-            decode_effect_kind(&list(
-                "(handle-effect {effect: teleport} (lit {} 1) (lit {} 2))"
-            )),
-            Err(EffectKindDecodeError::Unknown { symbol: "teleport" })
-        );
+        for metadata in [
+            "effect: 1",
+            "effect: random, effect: resource",
+            "effect: teleport",
+        ] {
+            let source = format!("(handle-effect {{{metadata}}} (lit {{}} 1) (lit {{}} 2))");
+            assert!(
+                parse_str(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("effect")
+            );
+        }
     }
 }

@@ -650,6 +650,14 @@ fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
         let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
             panic!("expected a stamp rejection, got: {error:?}");
         };
+        if let StampErrorKind::NodeError(chelis_deep::node::NodeError::Metadata(ref error)) =
+            stamp.kind
+        {
+            assert_eq!(error.key, "type");
+            let detail = error.detail.as_deref().expect("type-role diagnostic");
+            assert!(detail.contains("NominalArgument") && detail.contains("d-rank"));
+            continue;
+        }
         assert!(
             matches!(
                 stamp.kind,

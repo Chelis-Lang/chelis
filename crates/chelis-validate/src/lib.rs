@@ -767,6 +767,13 @@ mod tests {
     }
 
     #[test]
+    fn deep_metadata_preserves_arbitrary_macro_argument_syntax() {
+        let source = "(def {source: (macro_name {surf_future: 1, span: 2} ((original_name) ^{:type f32} x))} f (lit {} 1))";
+        validate_deep(source).unwrap();
+        validate_deep("(def {source: 1} f (lit {} 1))").unwrap_err();
+    }
+
+    #[test]
     fn deep_rejects_invalid_effects_children() {
         // chelis#1088: `(effects ...)` is only ever a metadata value in real
         // Deep, never a top-level form, so the fixture now sits where it
@@ -777,7 +784,10 @@ mod tests {
         let source = "(defsig {} f (t-fn {eff: (effects {} 1)} (t-prim {} f32)))";
         let error = validate_deep(source).expect_err("non-symbol effects child should fail");
         let rendered = error.to_string();
-        assert!(rendered.contains("`effects` must contain"), "{rendered}");
+        assert!(
+            rendered.contains("metadata `eff`") && rendered.contains("effects node"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -790,7 +800,7 @@ mod tests {
         let error = validate_deep(source).expect_err("resource arity should fail");
         let rendered = error.to_string();
         assert!(rendered.contains("resource"), "{rendered}");
-        assert!(rendered.contains("wrong child count"), "{rendered}");
+        assert!(rendered.contains("metadata `eff`"), "{rendered}");
     }
 
     #[test]
@@ -958,7 +968,7 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_resource_tag_in_effects() {
         assert_validates(
-            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} foo))} (t-prim {} f32)))\n",
+            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} \"foo\"))} (t-prim {} f32)))\n",
             "comment before nested `resource` tag",
         );
     }
@@ -1158,15 +1168,20 @@ mod tests {
     /// two implementations that have to agree with that sentence.
     #[test]
     fn deep_admits_the_declared_metadata_key_charset() {
-        for key in [
-            "dtype_bounds",
-            "chelis_role",
-            "surf_path",
-            "_leading",
-            "Upper",
+        for (key, source) in [
+            (
+                "dtype_bounds",
+                "(defsig {dtype_bounds: {p: float}} f (t-var {} p))",
+            ),
+            (
+                "chelis_role",
+                "(def {chelis_role: \"custom\"} f (lit {} 1))",
+            ),
+            ("surf_path", "(module {surf_path: \"M.Path\"} m.path)"),
+            ("_leading", "(def {_leading: x} f (lit {} 1))"),
+            ("Upper", "(def {Upper: x} f (lit {} 1))"),
         ] {
-            let source = format!("(defsig {{{key}: x}} f (t-var {{}} p))\n");
-            validate_deep(&source)
+            validate_deep(source)
                 .unwrap_or_else(|e| panic!("`{key}` is a legal metadata key: {e}"));
         }
         // The no-hyphen rule that keeps Deep symbols portable still holds.

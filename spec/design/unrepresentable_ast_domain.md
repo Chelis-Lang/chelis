@@ -197,8 +197,8 @@ pub enum Expr {
     Atom(Atom, Span),
     Node(Node, Span),
     BareList(Vec<Expr>, Span),
-    UnknownForm { head: String, meta: MetaMap, children: Vec<Expr>, span: Span },
-    Map(MetaMap, Span),
+    UnknownForm { head: String, meta: Metadata, children: Vec<Expr>, span: Span },
+    Map(Metadata, Span),
     MetaExpr(MetaExpr, Span),
 }
 
@@ -222,7 +222,7 @@ pub enum ChildRef<'a> {
     Bypass(&'a Expr),
 }
 
-pub struct Node { /* private: tag: DeepTag, meta: MetaMap, children: Vec<Expr> */ }
+pub struct Node { /* private: tag: DeepTag, meta: Metadata, children: Vec<Expr> */ }
 ```
 
 ### Staging (Minimal — Technique C)
@@ -387,7 +387,7 @@ This file. All design forks resolved before implementation.
 - Write `stamp_to_typed(exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError>`
   implementing the per-role table above
 - Stamp-pass conversion: `RawExpr::MetaExpr` → `Expr::MetaExpr`,
-  `RawExpr::Map` → `Expr::Map(MetaMap)`
+  `RawExpr::Map` → `Expr::Map(Metadata)`
 - `StampError` distinct from `ParseError`
 - Desugar: `MacroDef` as separate return; uses `try_new`
 - `expand_program` new signature
@@ -569,3 +569,83 @@ The same change set recorded four related decisions:
   repeat the manual scratch-variant shape.
 
 (Further divergences to be recorded here.)
+
+## Metadata value domain (#1478, #1330, #1567)
+
+`spec/03-deep-syntax.md` [03-META-1/2] owns annotation shapes, roles and
+uniqueness. The AST represents each of the 30 compiler-owned keys with a
+dedicated payload, and keeps producer extensions in a separate map. Text and
+serde ingress decode raw entries once; consumers use typed getters and
+role-aware traversal. Raw syntax views belong to the private codec and its
+shape validator, not to downstream compiler APIs.
+
+Payload construction enforces local shape. Node construction, deserialization
+and transactional replacement enforce placement on the owning node. Complete
+program boundaries additionally check parent/sibling relationships, including
+Surf dimension groups. These boundaries still defend against ungated legacy
+`Expr::List` structure; general List retirement belongs to #1029.
+Runtime and type wrappers validate recursive roles, including legacy children
+inside otherwise validated nodes. Semantic type, effect and binder resolution
+remains with the owning checkers: a well-shaped annotation does not establish
+semantic agreement or make a producer's claim trustworthy.
+
+The checker validates annotation placement before inference across direct,
+library and context entry points. This produces one shape/placement diagnostic
+before unrelated semantic failures. Tests that formerly forged invalid
+metadata now exercise parser, constructor or deserializer rejection; checker
+placement and ordinary legacy child-role attacks remain independent controls.
+
+Surf declaration validation rejects repeated dtype bounds and conflicting
+bound ownership before desugaring. The public round-trip normalizer returns
+`Result` and validates its input before rewriting. Normalization preserves
+bound-family distinctions and quantifier annotations, including present empty
+containers, and removes derived annotations inside structural containers
+through a separate annotation callback. It never submits those container
+roots to a generic expression rewrite.
+
+This is one shippable slice because changing the AST storage without migrating
+all producers, readers, transforms and serialization boundaries together would
+leave either uncompilable consumers or a second permissive annotation API.
+It resolves the metadata instances above, not every remaining #908 obligation.
+
+### Dedicated AST annotations and extensions
+
+The [03-META-1/2] annotation contract uses private, sparse `Metadata` storage.
+Each compiler-owned entry is a closed variant with a dedicated payload; its
+variant determines its key. `ExtensionMap` is separate and rejects compiler
+keys and the closed `surf_*` namespace. Default empty metadata allocates no storage.
+Insertion rejects an existing key; replacement is an explicit operation.
+
+Structural payloads own their structure: quantifiers contain binders,
+preconditions contain runtime expressions, contracts contain strings, effect
+sets contain names or resource strings, and dtype bounds contain distinct
+binder names and family choices. Their container annotations and spans survive
+transformations, including present-but-empty containers. Variable targets
+preserve single-variable versus one-element-tuple spelling. Genuine runtime
+and type payloads use immutable validated expression wrappers with fallible
+reconstruction. Preserved macro source owns raw syntax data.
+
+`Node`, `UnknownForm`, map expressions, prefix metadata and metadata inside
+legacy lists all carry the same typed representation. Private text and serde
+codecs retain the external spellings and serde entry shape, collecting raw
+entries before rejecting duplicates and decoding their roles. No consumer
+reconstructs or queries a registered entry with a string key. Role-aware
+visitors distinguish runtime expressions, types, binders, structural members,
+extensions and preserved source; structural roots cannot become unit literals.
+Rebuilding a node replaces coupled children and annotations atomically.
+
+This representation concerns AST annotations only. It neither depends on nor
+absorbs checked tensor storage metadata (#889) or exact capacity identity
+(#888). Lowering interface and shared-fixture changes require explicit review
+within that boundary. General legacy-list retirement (#1029), the remainder
+of the accessor migration (#1125), and macro hygiene remain separate work.
+
+The authoritative oracle remains
+`.venv/bin/python scripts/unrepresentable_domain_oracle.py`. Its typed metadata
+obligation covers all 30 registered keys, duplicate extensions, constructor
+and replacement admission, old/current serde ingress, source-data exceptions,
+role-preserving transformations, compile-fail API/privacy controls with
+positive companions, and a source guard against iterator readers that compare registered keys as strings.
+The #1567 scalar and tensor duplicate-stamp witnesses must reject in both
+orders before check, evaluation, compiled execution or resugaring can select
+one stamp. Exact single-stamp controls retain their numerical results.

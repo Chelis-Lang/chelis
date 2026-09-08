@@ -167,19 +167,14 @@ fn spec_deep_3tuple_format() {
             }
             Expr::MetaExpr(meta, _) => {
                 check_3tuple(&meta.expr);
-                for (_, v) in &meta.entries {
-                    check_3tuple(v);
-                }
+                meta.metadata.visit_syntax(&mut |_, v| check_3tuple(v));
             }
             Expr::Map(map, _) => {
-                for (_, v) in &map.entries {
-                    check_3tuple(v);
-                }
+                map.visit_syntax(&mut |_, v| check_3tuple(v));
             }
             Expr::Node(node, _) => {
-                for (_, value) in &node.meta().entries {
-                    check_3tuple(value);
-                }
+                node.meta()
+                    .visit_syntax(&mut |_, value| check_3tuple(value));
                 for child in node.children_iter() {
                     match child {
                         chelis_deep::node::ChildRef::Expr(expr)
@@ -198,9 +193,7 @@ fn spec_deep_3tuple_format() {
                 }
             }
             Expr::UnknownForm(data) => {
-                for (_, value) in &data.meta.entries {
-                    check_3tuple(value);
-                }
+                data.meta.visit_syntax(&mut |_, value| check_3tuple(value));
                 for child in &data.children {
                     check_3tuple(child);
                 }

@@ -4003,9 +4003,7 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
             }
         }
         Expr::Map(map, _) => {
-            for (_, v) in &map.entries {
-                collect_numeric_tprims(v, prims);
-            }
+            map.visit_syntax(&mut |_, v| collect_numeric_tprims(v, prims));
         }
         Expr::MetaExpr(me, _) => collect_numeric_tprims(&me.expr, prims),
         Expr::Node(node, span) => {
@@ -4029,9 +4027,7 @@ fn collect_referenced_adts(expr: &Expr, names: &mut BTreeSet<String>) {
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_referenced_adts(value, names);
-            }
+            map.visit_syntax(&mut |_, value| collect_referenced_adts(value, names));
         }
         Expr::MetaExpr(meta, _) => collect_referenced_adts(&meta.expr, names),
         Expr::Node(node, span) => {
@@ -4067,9 +4063,7 @@ fn collect_adt_numeric_dependencies(
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_adt_numeric_dependencies(value, definitions);
-            }
+            map.visit_syntax(&mut |_, value| collect_adt_numeric_dependencies(value, definitions));
         }
         Expr::MetaExpr(meta, _) => collect_adt_numeric_dependencies(&meta.expr, definitions),
         Expr::Node(node, span) => {
@@ -4157,9 +4151,9 @@ fn collect_untagged_numeric_tprims(
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_untagged_numeric_tprims(value, nominal_adts, prims);
-            }
+            map.visit_syntax(&mut |_, value| {
+                collect_untagged_numeric_tprims(value, nominal_adts, prims)
+            });
         }
         Expr::MetaExpr(meta, _) => {
             collect_untagged_numeric_tprims(&meta.expr, nominal_adts, prims);
@@ -4255,15 +4249,7 @@ fn scan_exported_numeric_defs(
                 ) {
                     signatures.insert(name.to_string(), signature);
                     if let Some(Expr::Map(meta, _)) = declaration.elements.get(1) {
-                        let bounds = chelis_deep::decode_dtype_bounds(meta).unwrap_or_else(|e| {
-                            panic!(
-                                "{}MALFORMED DTYPE-FAMILY BOUND on `{file_label}::{name}`: {e}. \
-                                 A bound the census cannot decode is public numeric surface it \
-                                 cannot see.{}",
-                                teaching_header(),
-                                teaching_footer()
-                            )
-                        });
+                        let bounds = chelis_deep::decode_dtype_bounds(meta);
                         if !bounds.is_empty() {
                             declared_bounds.insert(name.to_string(), bounds);
                         }
@@ -4366,9 +4352,7 @@ fn scan_deftypes_with_adts(
                 }
             }
             Expr::Map(map, _) => {
-                for (_, v) in &map.entries {
-                    walk(v, file_label, adt_prims, rows);
-                }
+                map.visit_syntax(&mut |_, v| walk(v, file_label, adt_prims, rows));
             }
             Expr::MetaExpr(me, _) => walk(&me.expr, file_label, adt_prims, rows),
             Expr::Node(node, span) => {

@@ -21,7 +21,7 @@
 //!   `deftype` type-parameter list -- are consumed by their owning form and
 //!   must keep checking cleanly. Those are the over-rejection controls.
 
-use chelis_deep::{Atom, DeepTag, Expr, MetaMap, Span, parse_and_stamp};
+use chelis_deep::{Atom, DeepTag, Expr, Metadata, Span, parse_and_stamp};
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{check_ir_program, check_typed_program};
 
@@ -117,13 +117,13 @@ fn programmatic_non_empty_bare_list_in_expression_position_is_rejected_loudly() 
         vec![
             Expr::node(
                 DeepTag::Lit,
-                MetaMap::default(),
+                Metadata::default(),
                 vec![Expr::Atom(Atom::Int(1), zero())],
                 zero(),
             ),
             Expr::node(
                 DeepTag::Lit,
-                MetaMap::default(),
+                Metadata::default(),
                 vec![Expr::Atom(Atom::Int(2), zero())],
                 zero(),
             ),
@@ -132,7 +132,7 @@ fn programmatic_non_empty_bare_list_in_expression_position_is_rejected_loudly() 
     );
     let def = Expr::node(
         DeepTag::Def,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Name("f".to_string()), zero()), body],
         zero(),
     );

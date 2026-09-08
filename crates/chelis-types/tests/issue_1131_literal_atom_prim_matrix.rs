@@ -56,7 +56,6 @@ fn every_cross_family_atom_prim_pair_is_rejected() {
         "(lit {type: (t-prim {} string)} 1)",
         "(lit {type: (t-prim {} string)} false)",
         "(lit {type: (t-prim {} int32), literal_source: integer} 1)",
-        "(lit {type: (t-prim {} f32), literal_source: float} 1)",
         "(lit {type: (t-prim {} f32), literal_source: integer} 1.0)",
         "(lit {literal_source: integer} 1)",
     ] {
@@ -90,4 +89,10 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
         errors.is_empty(),
         "Surf's suffix/context producers emitted contradictory atoms: {errors:#?}"
     );
+}
+
+#[test]
+fn unknown_literal_origin_is_rejected_at_annotation_admission() {
+    let error = parse_str("(lit {type: (t-prim {} f32), literal_source: float} 1)").unwrap_err();
+    assert!(error.to_string().contains("literal_source"));
 }

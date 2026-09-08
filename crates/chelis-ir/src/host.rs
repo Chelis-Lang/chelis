@@ -7,7 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_deep::decode_effect_kind;
 use chelis_types::adt::{AdtDef, AdtRegistry, TypeAliasDef};
 use chelis_types::infer::type_to_deep_expr;
@@ -144,29 +144,21 @@ fn take_host_work_profile() -> HostWorkProfile {
     HOST_WORK_PROFILE.with(|profile| std::mem::take(&mut *profile.borrow_mut()))
 }
 
+fn deep_metadata_nodes(metadata: &chelis_deep::Metadata) -> usize {
+    let mut total = 0;
+    metadata.visit_expressions(&mut |value, _| total += deep_expr_nodes(value));
+    total
+}
 fn deep_expr_nodes(expr: &Expr) -> usize {
     1 + match expr {
         Expr::Atom(_, _) => 0,
-        Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .map(|(_, value)| deep_expr_nodes(value))
-            .sum(),
+        Expr::Map(map, _) => deep_metadata_nodes(map),
         Expr::MetaExpr(meta, _) => {
-            deep_expr_nodes(&meta.expr)
-                + meta
-                    .entries
-                    .iter()
-                    .map(|(_, value)| deep_expr_nodes(value))
-                    .sum::<usize>()
+            deep_expr_nodes(&meta.expr) + deep_metadata_nodes(&meta.metadata)
         }
         Expr::List(list, _) => list.elements.iter().map(deep_expr_nodes).sum(),
         Expr::Node(node, _) => {
-            node.meta()
-                .entries
-                .iter()
-                .map(|(_, value)| deep_expr_nodes(value))
-                .sum::<usize>()
+            deep_metadata_nodes(node.meta())
                 + node
                     .children_slice()
                     .iter()
@@ -175,11 +167,7 @@ fn deep_expr_nodes(expr: &Expr) -> usize {
         }
         Expr::BareList(elements, _) => elements.iter().map(deep_expr_nodes).sum(),
         Expr::UnknownForm(data) => {
-            data.meta
-                .entries
-                .iter()
-                .map(|(_, value)| deep_expr_nodes(value))
-                .sum::<usize>()
+            deep_metadata_nodes(&data.meta)
                 + data.children.iter().map(deep_expr_nodes).sum::<usize>()
         }
     }
@@ -2440,15 +2428,9 @@ pub fn find_direct_builtin_call(program: &CheckedProgram, builtins: &[&str]) -> 
                 }
                 list.elements.iter().find_map(|expr| find(expr, builtins))
             }
-            Expr::Map(map, _) => map
-                .entries
-                .iter()
-                .find_map(|(_, value)| find(value, builtins)),
-            Expr::MetaExpr(meta, _) => find(&meta.expr, builtins).or_else(|| {
-                meta.entries
-                    .iter()
-                    .find_map(|(_, value)| find(value, builtins))
-            }),
+            Expr::Map(map, _) => map.find_expression(|value| find(value, builtins)),
+            Expr::MetaExpr(meta, _) => find(&meta.expr, builtins)
+                .or_else(|| meta.metadata.find_expression(|value| find(value, builtins))),
             Expr::Atom(_, _) => None,
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
@@ -3981,6 +3963,16 @@ fn lower_host_function(
     }))
 }
 
+fn callable_type_metadata(ty: Option<&Expr>) -> chelis_deep::Metadata {
+    ty.map(|ty| {
+        chelis_deep::Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(ty.clone())
+                .expect("checked callable type"),
+        ))
+    })
+    .unwrap_or_default()
+}
+
 fn synthesize_callable_application(
     body: &Expr,
     params: &[HostParam],
@@ -3990,25 +3982,11 @@ fn synthesize_callable_application(
     let span = body.span();
     let mut elements = vec![
         Expr::Atom(Atom::Tag(DeepTag::App), span),
-        Expr::Map(
-            chelis_deep::ast::MetaMap {
-                entries: ret_type_expr
-                    .cloned()
-                    .map(|ret| vec![("type".to_string(), ret)])
-                    .unwrap_or_default(),
-            },
-            span,
-        ),
+        Expr::Map(callable_type_metadata(ret_type_expr), span),
         body.clone(),
     ];
     for (index, param) in params.iter().enumerate() {
-        let var_meta = chelis_deep::ast::MetaMap {
-            entries: param_type_exprs
-                .and_then(|tys| tys.get(index))
-                .cloned()
-                .map(|ty| vec![("type".to_string(), ty)])
-                .unwrap_or_default(),
-        };
+        let var_meta = callable_type_metadata(param_type_exprs.and_then(|tys| tys.get(index)));
         elements.push(Expr::List(
             List {
                 elements: vec![
@@ -5147,7 +5125,7 @@ fn malformed_host_authority(
 /// `(app mul x b)` form lowers cleanly.
 fn beta_reduce_pipe_stage(stage: &Expr, acc: Expr) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::{Atom, List, MetaMap};
+    use chelis_deep::ast::{Atom, List, Metadata};
     let span = Span::new(0, 0);
     if let Expr::List(stage_list, _) = stage
         && tag(stage_list) == Some(DeepTag::Fn)
@@ -5175,7 +5153,7 @@ fn beta_reduce_pipe_stage(stage: &Expr, acc: Expr) -> Expr {
     }
     let elements = vec![
         Expr::Atom(Atom::Tag(DeepTag::App), span),
-        Expr::Map(MetaMap::default(), span),
+        Expr::Map(Metadata::default(), span),
         stage.clone(),
         acc,
     ];
@@ -5219,20 +5197,25 @@ fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
         }
         Expr::MetaExpr(meta, span) => {
             let inner = substitute_var(&meta.expr, name, replacement);
-            let entries = meta
-                .entries
-                .iter()
-                .map(|(key, value)| (key.clone(), substitute_var(value, name, replacement)))
-                .collect();
+            let metadata = meta
+                .metadata
+                .map_expressions(&mut |value, _| substitute_var(value, name, replacement))
+                .expect("substitution preserves annotation roles");
             Expr::MetaExpr(
                 chelis_deep::ast::MetaExpr {
                     expr: Box::new(inner),
-                    entries,
+                    metadata,
                 },
                 *span,
             )
         }
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        Expr::Map(metadata, span) => Expr::Map(
+            metadata
+                .map_expressions(&mut |value, _| substitute_var(value, name, replacement))
+                .expect("substitution preserves annotation roles"),
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
@@ -5263,14 +5246,10 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Atom(Atom::Name(n), _) => n == name,
         Expr::Atom(_, _) => false,
-        Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .any(|(_, value)| expr_mentions_name(value, name)),
+        Expr::Map(map, _) => map.any_expression(|value| expr_mentions_name(value, name)),
         Expr::MetaExpr(meta, _) => {
-            meta.entries
-                .iter()
-                .any(|(_, value)| expr_mentions_name(value, name))
+            meta.metadata
+                .any_expression(|value| expr_mentions_name(value, name))
                 || expr_mentions_name(&meta.expr, name)
         }
         Expr::List(list, _) => list
@@ -5279,9 +5258,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
             .any(|element| expr_mentions_name(element, name)),
         Expr::Node(node, _) => {
             node.meta()
-                .entries
-                .iter()
-                .any(|(_, value)| expr_mentions_name(value, name))
+                .any_expression(|value| expr_mentions_name(value, name))
                 || node
                     .children_slice()
                     .iter()
@@ -5292,9 +5269,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
             .any(|element| expr_mentions_name(element, name)),
         Expr::UnknownForm(data) => {
             data.meta
-                .entries
-                .iter()
-                .any(|(_, value)| expr_mentions_name(value, name))
+                .any_expression(|value| expr_mentions_name(value, name))
                 || data
                     .children
                     .iter()
@@ -7968,7 +7943,7 @@ fn try_lower_general_list_grad_app(
     };
     let has_explicit_wrt = matches!(
         callee.elements.get(1),
-        Some(Expr::Map(meta, _)) if meta.entries.iter().any(|(key, _)| key == "wrt")
+        Some(Expr::Map(meta, _)) if meta.wrt().is_some()
     );
 
     let mut rewritten_elements = list.elements.clone();
@@ -8209,11 +8184,13 @@ fn grad_wrt_param_names(grad_list: &List, param_names: &[String]) -> Option<Vec<
         Some(Expr::Map(meta, _)) => meta,
         _ => return Some(param_names.to_vec()),
     };
-    let Some((_, wrt_expr)) = meta.entries.iter().find(|(key, _)| key == "wrt") else {
+    let Some(targets) = meta.wrt() else {
         return Some(param_names.to_vec());
     };
-    let mut names = Vec::new();
-    collect_wrt_names(wrt_expr, &mut names)?;
+    let names: Vec<String> = targets
+        .variables()
+        .map(|var| var.name().value().clone())
+        .collect();
     // Each named target must actually be a parameter of the differentiated
     // function. A name that is not a parameter is a container/field access
     // we don't support.
@@ -8221,32 +8198,6 @@ fn grad_wrt_param_names(grad_list: &List, param_names: &[String]) -> Option<Vec<
         Some(names)
     } else {
         None
-    }
-}
-
-fn collect_wrt_names(expr: &Expr, out: &mut Vec<String>) -> Option<()> {
-    match expr {
-        Expr::Atom(Atom::Name(name), _) => {
-            out.push(name.clone());
-            Some(())
-        }
-        Expr::List(list, _) => match tag(list) {
-            Some(DeepTag::Var) => {
-                let name = children(list).first().and_then(symbol_name)?;
-                out.push(name.to_string());
-                Some(())
-            }
-            Some(DeepTag::Tuple) => {
-                for child in children(list) {
-                    collect_wrt_names(child, out)?;
-                }
-                Some(())
-            }
-            // Field access / index / anything else => container, reject.
-            _ => None,
-        },
-        Expr::MetaExpr(meta, _) => collect_wrt_names(&meta.expr, out),
-        _ => None,
     }
 }
 
@@ -9900,7 +9851,12 @@ fn substitute_expr(
     match expr {
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             chelis_deep::ast::MetaExpr {
-                entries: meta.entries.clone(),
+                metadata: meta
+                    .metadata
+                    .map_expressions(&mut |value, _| {
+                        substitute_expr(value, substitutions, shadowed)
+                    })
+                    .expect("substitution preserves annotation roles"),
                 expr: Box::new(substitute_expr(&meta.expr, substitutions, shadowed)),
             },
             *span,
@@ -10433,12 +10389,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
                 List {
                     elements: vec![
                         Expr::Atom(Atom::Tag(DeepTag::Var), *span),
-                        Expr::Map(
-                            chelis_deep::ast::MetaMap {
-                                entries: Vec::new(),
-                            },
-                            *span,
-                        ),
+                        Expr::Map(chelis_deep::Metadata::default(), *span),
                         Expr::Atom(Atom::Name(name), *span),
                     ],
                 },
@@ -11983,9 +11934,7 @@ fn visit_semantic_expr_children(expr: &Expr, mut visit: impl FnMut(&Expr)) {
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                visit(value);
-            }
+            map.visit_expressions(&mut |value, _| visit(value));
         }
         Expr::MetaExpr(meta, _) => visit(&meta.expr),
         Expr::BareList(elements, _) => {
@@ -12583,7 +12532,7 @@ fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim>
             .and_then(symbol_name)
             .and_then(chelis_types::types::Prim::parse_name)
     };
-    if let Some((_, type_expr)) = meta.entries.iter().find(|(key, _)| key == "type")
+    if let Some(type_expr) = meta.ty().map(|ty| ty.expression())
         && let Some(prim) = prim_of_t_prim(type_expr)
     {
         return prim.is_float().then_some(prim);
@@ -12608,27 +12557,11 @@ fn binder_float_literal_keeps_f32_source(operand: &Expr, target: &HostTypeTerm) 
     {
         return false;
     }
-    // Round 5 P1: read the FIRST `type` entry, which is what the checker
-    // (`visit_binder_literal_uses`, via `.find`) and the interpreter
-    // (`lit_meta_type_var_name`) both do. Requiring exactly one made this
-    // predicate STRICTER than the readers that decide whether the program is
-    // accepted at all, so a `lit` carrying two `type` stamps type-checked,
-    // evaluated with the narrow applied, and compiled without it: one accepted
-    // program with two answers depending on which lane read it.
-    //
-    // `surf_literal_style` keeps its exactly-one requirement, and the
-    // asymmetry is deliberate rather than an oversight: the checker consumes
-    // `has_exact_unsuffixed_style` and REJECTS a duplicated style key, so
-    // strictness there has a rejecting counterpart and cannot fail open. There
-    // is no equivalent checker guard on `type`. Whether a duplicated `type`
-    // key should be malformed Deep at the ingress under [04-TOT-3] is a
-    // well-formedness question for its own slice; until it is answered, the
-    // lanes must at least agree.
+    // Unique typed annotations give every lane the same binder identity.
     let binder_typed = source
         .metadata()
-        .entries
-        .iter()
-        .find_map(|(key, value)| (key == "type").then_some(value))
+        .ty()
+        .map(|value| value.expression())
         .is_some_and(|ty| chelis_deep::exact_type_variable_name(ty).is_some());
     binder_typed
         && matches!(
@@ -12915,10 +12848,9 @@ fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
         Expr::Node(node, _) => node.meta(),
         _ => return None,
     };
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| decode_host_type_or_raise(value, &active_type_subst()))
+    meta.ty()
+        .map(|ty| ty.expression())
+        .map(|value| decode_host_type_or_raise(value, &active_type_subst()))
 }
 
 fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
@@ -12930,10 +12862,9 @@ fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
         Expr::Node(node, _) => node.meta(),
         _ => return None,
     };
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .and_then(|(_, value)| parse_fn_type_expr(value))
+    meta.ty()
+        .map(|ty| ty.expression())
+        .and_then(parse_fn_type_expr)
 }
 
 fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
@@ -15058,7 +14989,7 @@ fn children(list: &List) -> &[Expr] {
 }
 
 /// Borrow a canonical stamped node without reconstructing a legacy `List`.
-fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
         Expr::List(list, _) => {
             let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
@@ -15208,10 +15139,7 @@ fn param_declared_type_expr(param: &Expr) -> Option<Expr> {
         Expr::Node(node, _) => node.meta(),
         _ => return None,
     };
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, ty)| ty.clone())
+    meta.ty().map(|ty| ty.expression()).cloned()
 }
 
 /// The declared return type of a top-level def, read from its sibling
@@ -15745,10 +15673,9 @@ def bad[b](box: Box[b]) -> bool =
                 .children
                 .iter()
                 .find_map(|child| issue_1205_find_named_app(child, expected)),
-            Expr::Map(map, _) => map
-                .entries
-                .iter()
-                .find_map(|(_, value)| issue_1205_find_named_app(value, expected)),
+            Expr::Map(map, _) => {
+                map.find_expression(|value| issue_1205_find_named_app(value, expected))
+            }
             Expr::Atom(_, _) => None,
         }
     }
@@ -15987,10 +15914,7 @@ def bad[b](box: Box[b]) -> bool =
                 Expr::MetaExpr(meta, _) => find_to_tensor(&meta.expr),
                 Expr::BareList(elements, _) => elements.iter().find_map(find_to_tensor),
                 Expr::UnknownForm(data) => data.children.iter().find_map(find_to_tensor),
-                Expr::Map(map, _) => map
-                    .entries
-                    .iter()
-                    .find_map(|(_, value)| find_to_tensor(value)),
+                Expr::Map(map, _) => map.find_expression(|value| find_to_tensor(value)),
                 Expr::Atom(_, _) => None,
             }
         }

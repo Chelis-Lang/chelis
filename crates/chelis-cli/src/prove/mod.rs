@@ -1,10 +1,11 @@
 use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
-use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, Metadata};
 #[cfg(not(feature = "chelis-prove"))]
 use chelis_surf::ast::{BinOp, LetBinding, LetPattern};
 use chelis_surf::ast::{Decl, Expr, Literal, Param, TypeExpr};
@@ -1170,8 +1171,11 @@ fn deep_string(value: &str) -> DeepExpr {
     DeepExpr::Atom(DeepAtom::Str(value.to_string()), deep_span())
 }
 
-fn deep_map(entries: Vec<(String, DeepExpr)>) -> DeepExpr {
-    DeepExpr::Map(MetaMap { entries }, deep_span())
+fn deep_map(values: Vec<M>) -> DeepExpr {
+    DeepExpr::Map(
+        Metadata::try_from_values(values).expect("distinct producer annotations"),
+        deep_span(),
+    )
 }
 
 fn deep_list(elements: Vec<DeepExpr>) -> DeepExpr {
@@ -1179,17 +1183,25 @@ fn deep_list(elements: Vec<DeepExpr>) -> DeepExpr {
 }
 
 fn deep_node(tag: &str, children: Vec<DeepExpr>) -> DeepExpr {
-    let mut elements = vec![deep_symbol(tag), deep_map(Vec::new())];
+    let mut elements = vec![
+        DeepExpr::Atom(
+            DeepAtom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
+            deep_span(),
+        ),
+        deep_map(Vec::new()),
+    ];
     elements.extend(children);
     deep_list(elements)
 }
 
-fn deep_node_meta(
-    tag: &str,
-    entries: Vec<(String, DeepExpr)>,
-    children: Vec<DeepExpr>,
-) -> DeepExpr {
-    let mut elements = vec![deep_symbol(tag), deep_map(entries)];
+fn deep_node_meta(tag: &str, entries: Vec<M>, children: Vec<DeepExpr>) -> DeepExpr {
+    let mut elements = vec![
+        DeepExpr::Atom(
+            DeepAtom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
+            deep_span(),
+        ),
+        deep_map(entries),
+    ];
     elements.extend(children);
     deep_list(elements)
 }
@@ -1219,9 +1231,9 @@ fn deep_proposition(preconditions: &[DeepExpr], body: &DeepExpr) -> DeepExpr {
 fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     deep_node_meta(
         "lit",
-        vec![(
-            "type".to_string(),
-            deep_node("t-prim", vec![deep_symbol(ty_name)]),
+        vec![M::Type(
+            TypeSyntax::try_new(deep_node("t-prim", vec![deep_symbol(ty_name)]))
+                .expect("primitive type"),
         )],
         vec![value],
     )
@@ -2022,7 +2034,7 @@ fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
     /// The decoded tag, metadata, and children of a form on either admitted
     /// carrier. Deliberately local: the shared total accessor is a separate
     /// change (PP7 slice E5b).
-    fn decoded(expr: &DeepExpr) -> Option<(DeepTag, &MetaMap, &[DeepExpr])> {
+    fn decoded(expr: &DeepExpr) -> Option<(DeepTag, &Metadata, &[DeepExpr])> {
         match expr {
             DeepExpr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
             DeepExpr::List(list, _) => match (list.tag(), list.elements.get(1)) {
@@ -2037,10 +2049,8 @@ fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
             return;
         };
         if tag == DeepTag::Deftype {
-            let opaque = meta.entries.iter().any(|(key, value)| {
-                key == "opaque" && matches!(value, DeepExpr::Atom(DeepAtom::Bool(true), _))
-            });
-            let has_invariant = meta.entries.iter().any(|(key, _)| key == "invariant");
+            let opaque = meta.opaque().is_some();
+            let has_invariant = meta.invariant().is_some();
             if opaque && has_invariant {
                 *acc += 1;
             }
@@ -2227,15 +2237,17 @@ fn discover_deep_properties_expr(
                             name: name.to_string(),
                             source: path.to_path_buf(),
                             source_kind,
-                            source_id: deep_string_meta(meta, "property_source_id")
+                            source_id: meta
+                                .property_source_id()
+                                .map(|value| value.value().as_str())
                                 .map(ToString::to_string),
                             params,
                             preconditions: deep_property_preconditions(meta).unwrap_or_default(),
                             body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
                                 format!("property `{name}` def body must be a callable `fn`")
                             })?,
-                            samples: deep_int_meta(meta, "property_samples"),
-                            seed: deep_int_meta(meta, "property_seed").map(|value| value as u64),
+                            samples: deep_int_meta(meta.property_samples()),
+                            seed: deep_int_meta(meta.property_seed()).map(|value| value as u64),
                         });
                     }
                 }
@@ -2276,15 +2288,17 @@ fn discover_deep_properties_expr(
                         name: name.to_string(),
                         source: path.to_path_buf(),
                         source_kind,
-                        source_id: deep_string_meta(meta, "property_source_id")
+                        source_id: meta
+                            .property_source_id()
+                            .map(|value| value.value().as_str())
                             .map(ToString::to_string),
                         params,
                         preconditions: deep_property_preconditions(meta).unwrap_or_default(),
                         body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
                             format!("property `{name}` def body must be a callable `fn`")
                         })?,
-                        samples: deep_int_meta(meta, "property_samples"),
-                        seed: deep_int_meta(meta, "property_seed").map(|value| value as u64),
+                        samples: deep_int_meta(meta.property_samples()),
+                        seed: deep_int_meta(meta.property_seed()).map(|value| value as u64),
                     });
                 }
             }
@@ -2297,25 +2311,27 @@ fn discover_deep_properties_expr(
     Ok(())
 }
 
-fn has_chelis_property_role(meta: &MetaMap) -> bool {
-    meta.entries
-        .iter()
-        .any(|(key, value)| key == "chelis_role" && string_value(value) == Some("property"))
+fn has_chelis_property_role(meta: &Metadata) -> bool {
+    meta.chelis_role()
+        .is_some_and(|role| role.value() == "property")
+}
+fn has_legacy_property_role(meta: &Metadata) -> bool {
+    meta.extensions()
+        .get("c_earchin_role")
+        .and_then(string_value)
+        == Some("property_witness")
 }
 
-fn has_legacy_property_role(meta: &MetaMap) -> bool {
-    meta.entries.iter().any(|(key, value)| {
-        key == "c_earchin_role" && string_value(value) == Some("property_witness")
-    })
-}
-
-fn property_source_kind(meta: &MetaMap, name: &str) -> Result<Option<String>, String> {
+fn property_source_kind(meta: &Metadata, name: &str) -> Result<Option<String>, String> {
     let has_chelis = has_chelis_property_role(meta);
     let has_legacy = has_legacy_property_role(meta);
     if !has_chelis && !has_legacy {
         return Ok(None);
     }
-    let Some(kind) = deep_meta_value(meta, "property_source_kind").and_then(string_value) else {
+    let Some(kind) = meta
+        .property_source_kind()
+        .map(|value| value.value().spelling())
+    else {
         if has_legacy {
             return Ok(Some("bridge:c-earchin".to_string()));
         }
@@ -2331,28 +2347,15 @@ fn property_source_kind(meta: &MetaMap, name: &str) -> Result<Option<String>, St
     Ok(Some(kind.to_string()))
 }
 
-fn meta_map(expr: &DeepExpr) -> Option<&MetaMap> {
+fn meta_map(expr: &DeepExpr) -> Option<&Metadata> {
     match expr {
         DeepExpr::Map(map, _) => Some(map),
         _ => None,
     }
 }
 
-fn deep_meta_value<'a>(meta: &'a MetaMap, key: &str) -> Option<&'a DeepExpr> {
-    meta.entries
-        .iter()
-        .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
-}
-
-fn deep_int_meta(meta: &MetaMap, key: &str) -> Option<usize> {
-    match deep_meta_value(meta, key).and_then(deep_int_value) {
-        Some(value) if value >= 0 => Some(value as usize),
-        _ => None,
-    }
-}
-
-fn deep_string_meta<'a>(meta: &'a MetaMap, key: &str) -> Option<&'a str> {
-    deep_meta_value(meta, key).and_then(string_value)
+fn deep_int_meta(value: Option<&chelis_deep::annotations::RuntimeExpression>) -> Option<usize> {
+    usize::try_from(deep_int_value(value?.expression())?).ok()
 }
 
 fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
@@ -2368,106 +2371,32 @@ fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
     }
 }
 
-fn deep_property_params(meta: &MetaMap) -> Option<Vec<Param>> {
-    let quantifiers = deep_meta_value(meta, "property_quantifiers")?;
-    match quantifiers {
-        DeepExpr::Node(node, _) => {
-            if node.tag() != DeepTag::Params {
-                return None;
-            }
-            let mut params = Vec::new();
-            for child in node.children_slice() {
-                match child {
-                    DeepExpr::Atom(chelis_deep::Atom::Name(name), span) => {
-                        params.push(Param {
-                            name: name.clone(),
-                            ty: None,
-                            span: *span,
-                        });
-                    }
-                    DeepExpr::List(param_list, span) => {
-                        let Some(name) = param_list.elements.first().and_then(symbol_text) else {
-                            continue;
-                        };
-                        let ty = param_list
-                            .elements
-                            .get(1)
-                            .and_then(meta_map)
-                            .and_then(|meta| deep_meta_value(meta, "type"))
-                            .and_then(type_expr_from_deep);
-                        params.push(Param {
-                            name: name.to_string(),
-                            ty,
-                            span: *span,
-                        });
-                    }
-                    DeepExpr::BareList(elems, span) => {
-                        let Some(name) = elems.first().and_then(symbol_text) else {
-                            continue;
-                        };
-                        let ty = elems
-                            .get(1)
-                            .and_then(meta_map)
-                            .and_then(|meta| deep_meta_value(meta, "type"))
-                            .and_then(type_expr_from_deep);
-                        params.push(Param {
-                            name: name.to_string(),
-                            ty,
-                            span: *span,
-                        });
-                    }
-                    _ => continue,
-                }
-            }
-            Some(params)
-        }
-        DeepExpr::List(list, _) => {
-            if list_tag_from_list(list) != Some(DeepTag::Params) {
-                return None;
-            }
-            let mut params = Vec::new();
-            for child in list.elements.iter().skip(2) {
-                let DeepExpr::List(param_list, span) = child else {
-                    continue;
-                };
-                let Some(name) = param_list.elements.first().and_then(symbol_text) else {
-                    continue;
-                };
-                let ty = param_list
-                    .elements
-                    .get(1)
-                    .and_then(meta_map)
-                    .and_then(|meta| deep_meta_value(meta, "type"))
-                    .and_then(type_expr_from_deep);
-                params.push(Param {
-                    name: name.to_string(),
-                    ty,
-                    span: *span,
-                });
-            }
-            Some(params)
-        }
-        _ => None,
-    }
+fn deep_property_params(meta: &Metadata) -> Option<Vec<Param>> {
+    meta.property_quantifiers()?
+        .values()
+        .iter()
+        .map(|binder| {
+            let ty = match binder.metadata().ty() {
+                Some(ty) => Some(type_expr_from_deep(ty.expression())?),
+                None => None,
+            };
+            Some(Param {
+                name: binder.name().value().clone(),
+                ty,
+                span: binder.span(),
+            })
+        })
+        .collect()
 }
 
-fn deep_property_preconditions(meta: &MetaMap) -> Option<Vec<DeepExpr>> {
-    let preconds = deep_meta_value(meta, "property_preconditions")?;
-    match preconds {
-        DeepExpr::Node(node, _) => {
-            if node.tag() != DeepTag::Tuple {
-                return None;
-            }
-            Some(node.children_slice().to_vec())
-        }
-        DeepExpr::List(list, _) => {
-            if list_tag_from_list(list) != Some(DeepTag::Tuple) {
-                return None;
-            }
-            Some(list.elements.iter().skip(2).cloned().collect())
-        }
-        _ => None,
-    }
+fn deep_property_preconditions(meta: &Metadata) -> Option<Vec<DeepExpr>> {
+    Some(
+        meta.property_preconditions()?
+            .values()
+            .iter()
+            .map(|value| value.expression().clone())
+            .collect(),
+    )
 }
 
 fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
@@ -2619,7 +2548,8 @@ fn deep_fn_params(expr: &DeepExpr) -> Option<Vec<Param>> {
                                     .elements
                                     .get(1)
                                     .and_then(meta_map)
-                                    .and_then(|meta| deep_meta_value(meta, "type"))
+                                    .and_then(|meta| meta.ty())
+                                    .map(|ty| ty.expression())
                                     .and_then(type_expr_from_deep);
                                 out.push(Param {
                                     name: name.to_string(),
@@ -2632,7 +2562,8 @@ fn deep_fn_params(expr: &DeepExpr) -> Option<Vec<Param>> {
                                 let ty = elems
                                     .get(1)
                                     .and_then(meta_map)
-                                    .and_then(|meta| deep_meta_value(meta, "type"))
+                                    .and_then(|meta| meta.ty())
+                                    .map(|ty| ty.expression())
                                     .and_then(type_expr_from_deep);
                                 out.push(Param {
                                     name: name.to_string(),
@@ -2672,7 +2603,8 @@ fn deep_fn_params(expr: &DeepExpr) -> Option<Vec<Param>> {
                     .elements
                     .get(1)
                     .and_then(meta_map)
-                    .and_then(|meta| deep_meta_value(meta, "type"))
+                    .and_then(|meta| meta.ty())
+                    .map(|ty| ty.expression())
                     .and_then(type_expr_from_deep);
                 out.push(Param {
                     name: name.to_string(),
@@ -2703,7 +2635,8 @@ fn deep_fn_params_from_bare_list(elems: &[DeepExpr]) -> Option<Vec<Param>> {
                     .elements
                     .get(1)
                     .and_then(meta_map)
-                    .and_then(|meta| deep_meta_value(meta, "type"))
+                    .and_then(|meta| meta.ty())
+                    .map(|ty| ty.expression())
                     .and_then(type_expr_from_deep);
                 out.push(Param {
                     name: name.to_string(),

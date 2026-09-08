@@ -30,7 +30,7 @@ use chelis_compiler_api::schema::{
 /// A well-formed module every door accepts at ingress. It carries the
 /// `target` function the mutating doors address, so a rejection from one of
 /// them is never "no such function".
-const VALID_MODULE: &str = r#"(module {}
+const VALID_MODULE: &str = r#"(module {surf_path: "Phase3.Ingress", doc: "ingress control"}
   phase3.ingress
   (export {} target)
   (defsig {}
@@ -85,6 +85,36 @@ const COMMENTS_ONLY_PROGRAM: &str = "; a comment\n\n; another\n";
 /// with the identification [03-PROG-2] or [03-PROG-3] requires the diagnostic
 /// to carry.
 const REJECTED_MODULES: &[(&str, &str, &str)] = &[
+    (
+        "integer surface path",
+        "(module {surf_path: 1} phase3.ingress (def {} target (lit {} 1)))",
+        "surf_path",
+    ),
+    (
+        "mismatched surface path",
+        "(module {surf_path: \"Other\"} phase3.ingress (def {} target (lit {} 1)))",
+        "surf_path",
+    ),
+    (
+        "nested malformed metadata",
+        "(module {} phase3.ingress (def {custom: {inner: (lit {span: 1} 1)}} target (lit {} 1)))",
+        "span",
+    ),
+    (
+        "bare differentiation name",
+        "(module {} phase3.ingress (def {} target (grad {wrt: unwrapped} (var {} f))))",
+        "wrt",
+    ),
+    (
+        "bare property expression",
+        "(module {} phase3.ingress (def {property_seed: unwrapped} target (lit {} 1)))",
+        "property_seed",
+    ),
+    (
+        "duplicate metadata",
+        "(module {} phase3.ingress (def {span: \"a\", span: \"b\"} target (lit {} 1)))",
+        "span",
+    ),
     (
         "bare name at a RuntimeExpr slot",
         BARE_NAME_BODY_MODULE,

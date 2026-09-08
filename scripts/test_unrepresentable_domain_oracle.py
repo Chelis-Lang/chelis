@@ -631,6 +631,7 @@ class TestObligationRoster(unittest.TestCase):
                 oracle.check_stamp_pass_integration_tests,
                 oracle.check_compiler_api_ingress,
                 oracle.check_name_in_expr_rejected,
+                oracle.check_metadata_contract,
             ],
         )
 
@@ -907,6 +908,44 @@ class TestRepoRoot(unittest.TestCase):
     def test_repo_root_has_cargo_toml(self) -> None:
         self.assertTrue((oracle.REPO_ROOT / "Cargo.toml").is_file())
 
+
+
+class TestMetadataContract(unittest.TestCase):
+    def test_metadata_obligation_is_continuous_and_executes_its_suite(self) -> None:
+        self.assertIn(oracle.check_metadata_contract, oracle.OBLIGATIONS)
+        self.assertIn("metadata_contract", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("typed_metadata", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("typed_metadata_api", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("issue_1544_binder_cast_precision", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("metadata_ingress", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("canonical_surf", oracle.STAMP_NEXTEST_COMMAND)
+        self.assertIn("canonical_surf_roundtrip", oracle.STAMP_NEXTEST_COMMAND)
+
+    def test_metadata_corpus_checks_both_verdicts_and_diagnostics(self) -> None:
+        def check(path: Path) -> subprocess.CompletedProcess[str]:
+            source = path.read_text()
+            bad = next((key for _, text, key in oracle.METADATA_REJECTED_FIXTURES if text == source), None)
+            report = {"score": 0.0 if bad else 1.0, "errors": [f"metadata `{bad}`"] if bad else []}
+            return subprocess.CompletedProcess([], 2 if bad else 0, json.dumps(report), "")
+        def validate(path: Path) -> subprocess.CompletedProcess[str]:
+            result = check(path)
+            return subprocess.CompletedProcess([], result.returncode, result.stdout, "")
+        with patch.object(oracle, "run_chelis_check", side_effect=check), patch.object(oracle, "run_chelis_validate", side_effect=validate):
+            oracle.check_metadata_contract()
+
+    def test_metadata_rejection_cannot_be_a_false_green_or_empty_error(self) -> None:
+        for report, code in [({"score": 1.0, "errors": []}, 0), ({"score": 0.0, "errors": []}, 2), ({"score": 1.0, "errors": ["surf_path"]}, 2), ({"score": 0.0, "errors": ["unrelated"]}, 2)]:
+            result = subprocess.CompletedProcess([], code, json.dumps(report), "")
+            with self.subTest(report=report), patch.object(oracle, "run_chelis_check", return_value=result), patch.object(oracle, "run_chelis_validate", return_value=result):
+                with self.assertRaises(oracle.OracleFailure):
+                    oracle.check_metadata_contract()
+
+    def test_metadata_grammar_leg_cannot_accept_a_rejected_fixture(self) -> None:
+        check = subprocess.CompletedProcess([], 2, json.dumps({"score": 0, "errors": ["surf_path"]}), "")
+        validate = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(oracle, "run_chelis_check", return_value=check), patch.object(oracle, "run_chelis_validate", return_value=validate):
+            with self.assertRaises(oracle.OracleFailure):
+                oracle.check_metadata_contract()
 
 if __name__ == "__main__":
     unittest.main()

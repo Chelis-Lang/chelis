@@ -1,0 +1,2493 @@
+[
+  [
+    {
+      "Node": [
+        {
+          "tag": "Var",
+          "meta": {
+            "entries": [
+              [
+                "type",
+                {
+                  "Node": [
+                    {
+                      "tag": "TPrim",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Name": "f32"
+                            },
+                            {
+                              "offset": 23,
+                              "len": 3
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 12,
+                      "len": 15
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 29,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 31
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Var",
+          "meta": {
+            "entries": [
+              [
+                "loc",
+                {
+                  "BareList": [
+                    [
+                      {
+                        "Atom": [
+                          {
+                            "Name": "loc"
+                          },
+                          {
+                            "offset": 12,
+                            "len": 3
+                          }
+                        ]
+                      },
+                      {
+                        "Atom": [
+                          {
+                            "Str": "source.dp"
+                          },
+                          {
+                            "offset": 16,
+                            "len": 11
+                          }
+                        ]
+                      },
+                      {
+                        "Atom": [
+                          {
+                            "Int": 1
+                          },
+                          {
+                            "offset": 28,
+                            "len": 1
+                          }
+                        ]
+                      },
+                      {
+                        "Atom": [
+                          {
+                            "Int": 2
+                          },
+                          {
+                            "offset": 30,
+                            "len": 1
+                          }
+                        ]
+                      }
+                    ],
+                    {
+                      "offset": 11,
+                      "len": 21
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 34,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 36
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "TFn",
+          "meta": {
+            "entries": [
+              [
+                "eff",
+                {
+                  "Node": [
+                    {
+                      "tag": "Effects",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": []
+                    },
+                    {
+                      "offset": 12,
+                      "len": 12
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Node": [
+                {
+                  "tag": "TUnit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": []
+                },
+                {
+                  "offset": 26,
+                  "len": 11
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 38
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Defsig",
+          "meta": {
+            "entries": [
+              [
+                "dtype_bounds",
+                {
+                  "Map": [
+                    {
+                      "entries": [
+                        [
+                          "p",
+                          {
+                            "Atom": [
+                              {
+                                "Name": "float"
+                              },
+                              {
+                                "offset": 27,
+                                "len": 5
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    },
+                    {
+                      "offset": 23,
+                      "len": 10
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 35,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "TVar",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Name": "p"
+                        },
+                        {
+                          "offset": 47,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 37,
+                  "len": 12
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 50
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Fn",
+          "meta": {
+            "entries": [
+              [
+                "effects",
+                {
+                  "Node": [
+                    {
+                      "tag": "Effects",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": []
+                    },
+                    {
+                      "offset": 14,
+                      "len": 12
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Node": [
+                {
+                  "tag": "Params",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": []
+                },
+                {
+                  "offset": 28,
+                  "len": 11
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 48,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 40,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 51
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Var",
+          "meta": {
+            "entries": [
+              [
+                "source",
+                {
+                  "BareList": [
+                    [
+                      {
+                        "Atom": [
+                          {
+                            "Name": "macro_name"
+                          },
+                          {
+                            "offset": 15,
+                            "len": 10
+                          }
+                        ]
+                      },
+                      {
+                        "Atom": [
+                          {
+                            "Name": "x"
+                          },
+                          {
+                            "offset": 26,
+                            "len": 1
+                          }
+                        ]
+                      }
+                    ],
+                    {
+                      "offset": 14,
+                      "len": 14
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 30,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 32
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Grad",
+          "meta": {
+            "entries": [
+              [
+                "wrt",
+                {
+                  "Node": [
+                    {
+                      "tag": "Var",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Name": "x"
+                            },
+                            {
+                              "offset": 20,
+                              "len": 1
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 12,
+                      "len": 10
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Node": [
+                {
+                  "tag": "Var",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Name": "f"
+                        },
+                        {
+                          "offset": 32,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 24,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 35
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Var",
+          "meta": {
+            "entries": [
+              [
+                "span",
+                {
+                  "Atom": [
+                    {
+                      "Str": ""
+                    },
+                    {
+                      "offset": 12,
+                      "len": 2
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 16,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 18
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "chelis_role",
+                {
+                  "Atom": [
+                    {
+                      "Str": "custom"
+                    },
+                    {
+                      "offset": 19,
+                      "len": 8
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 29,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 39,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 31,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 42
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_source_kind",
+                {
+                  "Atom": [
+                    {
+                      "Str": "user"
+                    },
+                    {
+                      "offset": 28,
+                      "len": 6
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 36,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 46,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 38,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 49
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_quantifiers",
+                {
+                  "Node": [
+                    {
+                      "tag": "Params",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Name": "x"
+                            },
+                            {
+                              "offset": 39,
+                              "len": 1
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 28,
+                      "len": 13
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 43,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 53,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 45,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 56
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_preconditions",
+                {
+                  "Node": [
+                    {
+                      "tag": "Tuple",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Bool": true
+                            },
+                            {
+                              "offset": 40,
+                              "len": 4
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 30,
+                      "len": 15
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 47,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 57,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 49,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 60
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_source_id",
+                {
+                  "Atom": [
+                    {
+                      "Str": "ears:1"
+                    },
+                    {
+                      "offset": 26,
+                      "len": 8
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 36,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 46,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 38,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 49
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_tolerance",
+                {
+                  "Node": [
+                    {
+                      "tag": "Var",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Name": "tolerance"
+                            },
+                            {
+                              "offset": 34,
+                              "len": 9
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 26,
+                      "len": 18
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 46,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 56,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 48,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 59
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_seed",
+                {
+                  "Node": [
+                    {
+                      "tag": "Lit",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Int": 1
+                            },
+                            {
+                              "offset": 29,
+                              "len": 1
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 21,
+                      "len": 10
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 33,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 43,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 35,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 46
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_samples",
+                {
+                  "Node": [
+                    {
+                      "tag": "Lit",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Int": 2
+                            },
+                            {
+                              "offset": 32,
+                              "len": 1
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 24,
+                      "len": 10
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 36,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 46,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 38,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 49
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Def",
+          "meta": {
+            "entries": [
+              [
+                "property_contracts",
+                {
+                  "Node": [
+                    {
+                      "tag": "Tuple",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Atom": [
+                            {
+                              "Str": "a"
+                            },
+                            {
+                              "offset": 36,
+                              "len": 3
+                            }
+                          ]
+                        },
+                        {
+                          "Atom": [
+                            {
+                              "Str": "b"
+                            },
+                            {
+                              "offset": 40,
+                              "len": 3
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 26,
+                      "len": 18
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "f"
+                },
+                {
+                  "offset": 46,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 56,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 48,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 59
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Deftype",
+          "meta": {
+            "entries": [
+              [
+                "opaque",
+                {
+                  "Atom": [
+                    {
+                      "Bool": true
+                    },
+                    {
+                      "offset": 18,
+                      "len": 4
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "T"
+                },
+                {
+                  "offset": 24,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "BareList": [
+                [],
+                {
+                  "offset": 26,
+                  "len": 2
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Variant",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Name": "T"
+                        },
+                        {
+                          "offset": 41,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 29,
+                  "len": 14
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 44
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Deftype",
+          "meta": {
+            "entries": [
+              [
+                "opaque",
+                {
+                  "Atom": [
+                    {
+                      "Bool": true
+                    },
+                    {
+                      "offset": 18,
+                      "len": 4
+                    }
+                  ]
+                }
+              ],
+              [
+                "invariant",
+                {
+                  "Node": [
+                    {
+                      "tag": "Fn",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Node": [
+                            {
+                              "tag": "Params",
+                              "meta": {
+                                "entries": []
+                              },
+                              "children": [
+                                {
+                                  "Atom": [
+                                    {
+                                      "Name": "x"
+                                    },
+                                    {
+                                      "offset": 53,
+                                      "len": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "offset": 42,
+                              "len": 13
+                            }
+                          ]
+                        },
+                        {
+                          "Atom": [
+                            {
+                              "Bool": true
+                            },
+                            {
+                              "offset": 56,
+                              "len": 4
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 35,
+                      "len": 26
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "T"
+                },
+                {
+                  "offset": 63,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "BareList": [
+                [],
+                {
+                  "offset": 65,
+                  "len": 2
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Variant",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Name": "T"
+                        },
+                        {
+                          "offset": 80,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 68,
+                  "len": 14
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 83
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Deftype",
+          "meta": {
+            "entries": [
+              [
+                "opaque",
+                {
+                  "Atom": [
+                    {
+                      "Bool": true
+                    },
+                    {
+                      "offset": 18,
+                      "len": 4
+                    }
+                  ]
+                }
+              ],
+              [
+                "invariant",
+                {
+                  "Node": [
+                    {
+                      "tag": "Fn",
+                      "meta": {
+                        "entries": []
+                      },
+                      "children": [
+                        {
+                          "Node": [
+                            {
+                              "tag": "Params",
+                              "meta": {
+                                "entries": []
+                              },
+                              "children": [
+                                {
+                                  "Atom": [
+                                    {
+                                      "Name": "x"
+                                    },
+                                    {
+                                      "offset": 53,
+                                      "len": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "offset": 42,
+                              "len": 13
+                            }
+                          ]
+                        },
+                        {
+                          "Atom": [
+                            {
+                              "Bool": true
+                            },
+                            {
+                              "offset": 56,
+                              "len": 4
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "offset": 35,
+                      "len": 26
+                    }
+                  ]
+                }
+              ],
+              [
+                "invariant_amenability",
+                {
+                  "Atom": [
+                    {
+                      "Str": "linear"
+                    },
+                    {
+                      "offset": 86,
+                      "len": 8
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "T"
+                },
+                {
+                  "offset": 96,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "BareList": [
+                [],
+                {
+                  "offset": 98,
+                  "len": 2
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Variant",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Name": "T"
+                        },
+                        {
+                          "offset": 113,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 101,
+                  "len": 14
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 116
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Module",
+          "meta": {
+            "entries": [
+              [
+                "surf_path",
+                {
+                  "Atom": [
+                    {
+                      "Str": "M.Path"
+                    },
+                    {
+                      "offset": 20,
+                      "len": 8
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "m.path"
+                },
+                {
+                  "offset": 30,
+                  "len": 6
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 37
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Defdim",
+          "meta": {
+            "entries": [
+              [
+                "surf_dim_group_size",
+                {
+                  "Atom": [
+                    {
+                      "Int": 2
+                    },
+                    {
+                      "offset": 30,
+                      "len": 1
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "n"
+                },
+                {
+                  "offset": 33,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 35
+        }
+      ]
+    },
+    {
+      "Node": [
+        {
+          "tag": "Defdim",
+          "meta": {
+            "entries": []
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "m"
+                },
+                {
+                  "offset": 47,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 36,
+          "len": 13
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Pipe",
+          "meta": {
+            "entries": []
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Int": 1
+                },
+                {
+                  "offset": 9,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Fn",
+                  "meta": {
+                    "entries": [
+                      [
+                        "surf_pipe_stage",
+                        {
+                          "Atom": [
+                            {
+                              "Str": "call-first"
+                            },
+                            {
+                              "offset": 33,
+                              "len": 12
+                            }
+                          ]
+                        }
+                      ]
+                    ]
+                  },
+                  "children": [
+                    {
+                      "Node": [
+                        {
+                          "tag": "Params",
+                          "meta": {
+                            "entries": []
+                          },
+                          "children": [
+                            {
+                              "Atom": [
+                                {
+                                  "Name": "x"
+                                },
+                                {
+                                  "offset": 58,
+                                  "len": 1
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "offset": 47,
+                          "len": 13
+                        }
+                      ]
+                    },
+                    {
+                      "Node": [
+                        {
+                          "tag": "Var",
+                          "meta": {
+                            "entries": []
+                          },
+                          "children": [
+                            {
+                              "Atom": [
+                                {
+                                  "Name": "x"
+                                },
+                                {
+                                  "offset": 69,
+                                  "len": 1
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "offset": 61,
+                          "len": 10
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 11,
+                  "len": 61
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 73
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Lit",
+          "meta": {
+            "entries": [
+              [
+                "surf_literal_style",
+                {
+                  "Atom": [
+                    {
+                      "Str": "explicit"
+                    },
+                    {
+                      "offset": 26,
+                      "len": 10
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Int": 1
+                },
+                {
+                  "offset": 38,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 40
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Bind",
+          "meta": {
+            "entries": []
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 9,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": [
+                      [
+                        "surf_binding_type",
+                        {
+                          "Atom": [
+                            {
+                              "Str": "inferred"
+                            },
+                            {
+                              "offset": 36,
+                              "len": 10
+                            }
+                          ]
+                        }
+                      ]
+                    ]
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 48,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 11,
+                  "len": 39
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 51
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Var",
+          "meta": {
+            "entries": [
+              [
+                "lin",
+                {
+                  "Atom": [
+                    {
+                      "Name": "borrow"
+                    },
+                    {
+                      "offset": 11,
+                      "len": 6
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 19,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 21
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Var",
+          "meta": {
+            "entries": [
+              [
+                "doc",
+                {
+                  "Atom": [
+                    {
+                      "Str": "documentation"
+                    },
+                    {
+                      "offset": 11,
+                      "len": 15
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 28,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 30
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "HandleEffect",
+          "meta": {
+            "entries": [
+              [
+                "effect",
+                {
+                  "Atom": [
+                    {
+                      "Name": "random"
+                    },
+                    {
+                      "offset": 24,
+                      "len": 6
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 40,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 32,
+                  "len": 10
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 2
+                        },
+                        {
+                          "offset": 51,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 43,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 54
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Lit",
+          "meta": {
+            "entries": [
+              [
+                "literal_source",
+                {
+                  "Atom": [
+                    {
+                      "Name": "integer"
+                    },
+                    {
+                      "offset": 22,
+                      "len": 7
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Int": 1
+                },
+                {
+                  "offset": 31,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 33
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Bind",
+          "meta": {
+            "entries": [
+              [
+                "destructure",
+                {
+                  "Atom": [
+                    {
+                      "Bool": true
+                    },
+                    {
+                      "offset": 20,
+                      "len": 4
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 26,
+                  "len": 1
+                }
+              ]
+            },
+            {
+              "Node": [
+                {
+                  "tag": "Lit",
+                  "meta": {
+                    "entries": []
+                  },
+                  "children": [
+                    {
+                      "Atom": [
+                        {
+                          "Int": 1
+                        },
+                        {
+                          "offset": 36,
+                          "len": 1
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "offset": 28,
+                  "len": 10
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 39
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "MetaExpr": [
+        {
+          "entries": [
+            [
+              "type",
+              {
+                "Node": [
+                  {
+                    "tag": "TPrim",
+                    "meta": {
+                      "entries": []
+                    },
+                    "children": [
+                      {
+                        "Atom": [
+                          {
+                            "Name": "f32"
+                          },
+                          {
+                            "offset": 19,
+                            "len": 3
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "offset": 8,
+                    "len": 15
+                  }
+                ]
+              }
+            ]
+          ],
+          "expr": {
+            "Atom": [
+              {
+                "Name": "x"
+              },
+              {
+                "offset": 25,
+                "len": 1
+              }
+            ]
+          }
+        },
+        {
+          "offset": 0,
+          "len": 26
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "Node": [
+        {
+          "tag": "Var",
+          "meta": {
+            "entries": [
+              [
+                "custom",
+                {
+                  "Map": [
+                    {
+                      "entries": [
+                        [
+                          "nested",
+                          {
+                            "Node": [
+                              {
+                                "tag": "Var",
+                                "meta": {
+                                  "entries": []
+                                },
+                                "children": [
+                                  {
+                                    "Atom": [
+                                      {
+                                        "Name": "x"
+                                      },
+                                      {
+                                        "offset": 31,
+                                        "len": 1
+                                      }
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "offset": 23,
+                                "len": 10
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    },
+                    {
+                      "offset": 14,
+                      "len": 20
+                    }
+                  ]
+                }
+              ],
+              [
+                "source",
+                {
+                  "BareList": [
+                    [
+                      {
+                        "Atom": [
+                          {
+                            "Name": "macro"
+                          },
+                          {
+                            "offset": 45,
+                            "len": 5
+                          }
+                        ]
+                      },
+                      {
+                        "Map": [
+                          {
+                            "entries": [
+                              [
+                                "duplicate",
+                                {
+                                  "Atom": [
+                                    {
+                                      "Int": 1
+                                    },
+                                    {
+                                      "offset": 63,
+                                      "len": 1
+                                    }
+                                  ]
+                                }
+                              ],
+                              [
+                                "duplicate",
+                                {
+                                  "Atom": [
+                                    {
+                                      "Int": 2
+                                    },
+                                    {
+                                      "offset": 77,
+                                      "len": 1
+                                    }
+                                  ]
+                                }
+                              ]
+                            ]
+                          },
+                          {
+                            "offset": 51,
+                            "len": 28
+                          }
+                        ]
+                      }
+                    ],
+                    {
+                      "offset": 44,
+                      "len": 36
+                    }
+                  ]
+                }
+              ]
+            ]
+          },
+          "children": [
+            {
+              "Atom": [
+                {
+                  "Name": "x"
+                },
+                {
+                  "offset": 82,
+                  "len": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "offset": 0,
+          "len": 84
+        }
+      ]
+    }
+  ]
+]

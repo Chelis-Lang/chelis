@@ -458,15 +458,8 @@ fn rt_p4_branded_bytes_agree_across_lanes() {
     assert_eq!(c, h, "C vs HIP branded bytes must agree");
 }
 
-/// The effect-kind rejection must agree between the eval lane and the
-/// build lane on the same `.dp`. Re-baselined at the chelis#793 rebase:
-/// the CHECKER's handle-effect case (chelis#731 P1) now rejects the
-/// unknown kind FIRST in both lanes - the earliest competent stage - so
-/// the surviving parity surface is the checker's `MalformedForm`
-/// diagnostic naming the kind, identical in content across lanes; the
-/// chelis#730 rows 9/20 lowering raises are defense-in-depth behind it
-/// and no longer reachable from this surface (the section I1 interlock,
-/// honored from both sides).
+/// Text admission rejects unknown effect kinds before either execution lane.
+/// The diagnostic retains the offending kind and agrees across eval and build.
 #[test]
 fn rt_p4_effect_kind_bytes_agree_across_lanes() {
     let dp = "(defsig {} f (t-fn {} (t-prim {} f32)))\n\n(def {}\n  f\n  (fn {}\n    (params {})\n    \
@@ -480,7 +473,7 @@ fn rt_p4_effect_kind_bytes_agree_across_lanes() {
             for (lane, text) in [("eval", &e), ("build", &b_err)] {
                 assert!(
                     text.contains("unknown effect kind `teleport`"),
-                    "{lane} must reject with the checker diagnostic naming the \
+                    "{lane} must reject with the admission diagnostic naming the \
                      kind; got: {text}"
                 );
             }

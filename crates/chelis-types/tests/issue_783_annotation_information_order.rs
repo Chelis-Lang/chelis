@@ -4,7 +4,7 @@ use chelis_deep::{Atom, DeepTag, Expr, parse_and_stamp};
 use chelis_types::check_ir_program;
 
 fn find_matmul_type(expr: &Expr) -> Option<Expr> {
-    let (tag, meta, children): (DeepTag, &chelis_deep::MetaMap, &[Expr]) = match expr {
+    let (tag, meta, children): (DeepTag, &chelis_deep::Metadata, &[Expr]) = match expr {
         Expr::Node(node, _) => (node.tag(), node.meta(), node.children_slice()),
         Expr::List(list, _) => (
             list.tag()?,
@@ -23,11 +23,7 @@ fn find_matmul_type(expr: &Expr) -> Option<Expr> {
             _ => false,
         })
     {
-        return meta
-            .entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| value.clone());
+        return meta.ty().map(|ty| ty.expression().clone());
     }
     children.iter().find_map(find_matmul_type)
 }

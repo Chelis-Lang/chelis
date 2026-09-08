@@ -126,8 +126,8 @@ fn literal_seed_read_at_full_i64_width() {
     let sp = Span::new(0, 0);
     let node = |tag: &str, children: Vec<Expr>| {
         let mut elements = vec![
-            Expr::Atom(Atom::Name(tag.to_string()), sp),
-            Expr::Map(MetaMap::default(), sp),
+            Expr::Atom(Atom::Tag(DeepTag::parse(tag).unwrap()), sp),
+            Expr::Map(Metadata::default(), sp),
         ];
         elements.extend(children);
         Expr::List(List { elements }, sp)
@@ -144,9 +144,9 @@ fn literal_seed_read_at_full_i64_width() {
                 elements: vec![
                     Expr::Atom(Atom::Tag(DeepTag::Lit), sp),
                     Expr::Map(
-                        MetaMap {
-                            entries: vec![("type".to_string(), t_int32)],
-                        },
+                        Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+                            chelis_deep::annotations::TypeSyntax::try_new(t_int32).unwrap(),
+                        )),
                         sp,
                     ),
                     Expr::Atom(Atom::Int(n), sp),

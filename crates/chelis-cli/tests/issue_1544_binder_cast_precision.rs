@@ -105,30 +105,14 @@ const DUPLICATED_TYPE_STAMP: &str = "(module {surf_path: \"Bind.Main\"}\n\
      (defsig {} main (t-fn {} (t-prim {} int64)))\n\
      (def {} main (fn {} (params {}) (app {} (var {} addk) (lit {type: (t-prim {} int64)} 0)))))\n";
 
-/// Round 5 P1, regression test. One accepted program, one answer, both lanes.
-///
-/// The host-specialization join required EXACTLY ONE `type` metadata entry,
-/// which made it stricter than the two readers that decide whether a program is
-/// accepted at all: the checker's `visit_binder_literal_uses` and the
-/// interpreter's `lit_meta_type_var_name` both take the FIRST entry. So this
-/// program type-checked, evaluated with the f32 narrow applied, and compiled
-/// WITHOUT it, giving `16777216` from `chelis eval` and `16777217` from the
-/// compiled C. All three readers now take the first entry.
-///
-/// Failing closed in the lowering lane instead would have traded a wrong value
-/// for a lane split, with C rejecting what the checker and eval accept. Whether
-/// a duplicated `type` key should be malformed Deep at the ingress under
-/// [04-TOT-3] is a well-formedness question for its own slice.
-///
-/// `surf_literal_style` deliberately keeps its exactly-one requirement: the
-/// checker consumes the same predicate and rejects a duplicate of that key, so
-/// strictness there has a rejecting counterpart and cannot fail open.
+/// A single type stamp preserves the source narrow in both execution lanes.
+/// Duplicate stamps are now rejected uniformly by [03-META-1], below.
 #[test]
-fn a_duplicated_type_stamp_gives_one_answer_on_both_lanes() {
+fn a_single_type_stamp_gives_one_answer_on_both_lanes() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
     let unit = root.join("dup_type.dp");
-    fs::write(&unit, DUPLICATED_TYPE_STAMP).expect("write fixture");
+    fs::write(&unit, single_type_stamp(DUPLICATED_TYPE_STAMP)).expect("write fixture");
 
     let interpreted = text(&run(root, &["eval", "--file", "dup_type.dp"]));
     assert!(
@@ -192,22 +176,14 @@ const DUPLICATED_TYPE_STAMP_TENSOR: &str = "(module {surf_path: \"Bind.Main\"}\n
            (app {} (var {} to_tensor)\n\
              (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 0) (var {} Nil)))))))\n";
 
-/// Round 5 P1 on the tensor lane, regression test.
-///
-/// The scalar row above proves the host join; this one proves `lower.rs`,
-/// which reads the same stamp through a separate predicate and had made the
-/// same exactly-one choice. The two lanes reach the f32 source differently, so
-/// the assertion here is the VALUE rather than a plan line: the tensor lane
-/// finalizes the literal at f32 directly and emits no `f64 -> f32` narrow.
-///
-/// Proved red on f86f479e6, where `chelis check` accepts this unit, `chelis
-/// eval` prints `[16777216]`, and the compiled C prints `[16777217]`.
+/// The single-stamp control also preserves the source narrow on the tensor
+/// lowering lane, which finalizes the literal directly at f32.
 #[test]
-fn a_duplicated_type_stamp_gives_one_answer_on_the_tensor_lane() {
+fn a_single_type_stamp_gives_one_answer_on_the_tensor_lane() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
     let unit = root.join("dup_tensor.dp");
-    fs::write(&unit, DUPLICATED_TYPE_STAMP_TENSOR).expect("write fixture");
+    fs::write(&unit, single_type_stamp(DUPLICATED_TYPE_STAMP_TENSOR)).expect("write fixture");
 
     let expected = "main = tensor(shape=[1], data=[16777216])";
     let interpreted = text(&run(root, &["eval", "--file", "dup_tensor.dp"]));
@@ -348,4 +324,44 @@ fn ascription_is_not_literal_adoption() {
         "module Bind.Main\nexport (main)\ndef scale[p: Float](x: p) -> p = mul(x, (0.1 : p))\ndef main() -> f64 = scale(3.0f64)\n",
         "[04-INF-6]",
     );
+}
+
+fn single_type_stamp(source: &str) -> String {
+    source.replace(
+        "type: (t-var {} p), type: (t-var {} p)",
+        "type: (t-var {} p)",
+    )
+}
+
+#[test]
+fn duplicate_type_stamps_reject_before_every_execution_lane() {
+    for source in [DUPLICATED_TYPE_STAMP, DUPLICATED_TYPE_STAMP_TENSOR] {
+        for stamps in [
+            "type: (t-var {} p), type: (t-var {} p)",
+            "type: (t-var {} p), type: (t-prim {} f32)",
+            "type: (t-prim {} f32), type: (t-var {} p)",
+            "type: (t-prim {} f32), type: (t-prim {} f64)",
+            "type: (t-prim {} f64), type: (t-prim {} f32)",
+        ] {
+            let source = source.replace("type: (t-var {} p), type: (t-var {} p)", stamps);
+            let dir = tempdir().unwrap();
+            fs::write(dir.path().join("duplicate.dp"), &source).unwrap();
+            for args in [
+                vec!["check", "duplicate.dp"],
+                vec!["eval", "--file", "duplicate.dp"],
+                vec!["surf", "duplicate.dp"],
+                vec!["validate", "--deep", "duplicate.dp"],
+                vec!["build", "duplicate.dp", "--target", "c", "--output", "out"],
+            ] {
+                let output = run(dir.path(), &args);
+                assert!(!output.status.success(), "{args:?}: {}", text(&output));
+                let output = text(&output);
+                assert!(
+                    output.contains("exactly one occurrence of this metadata key")
+                        && output.contains("type"),
+                    "{args:?}: {output}"
+                );
+            }
+        }
+    }
 }

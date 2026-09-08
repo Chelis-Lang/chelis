@@ -6,10 +6,13 @@
 //! AST position. This module never substitutes `()` or a comment for source
 //! code.
 
-use chelis_deep::ast::{Atom, Expr as DeepExpr, MetaMap};
+use chelis_deep::annotations::{
+    BindingTypeOrigin, EffectMember, LiteralStyle, MetadataKey as K, MetadataValue as M, TypeSyntax,
+};
+use chelis_deep::ast::{Atom, Expr as DeepExpr, Metadata};
 use chelis_deep::{DeepTag, DtypeFamily, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::UnordMap;
-use chelis_vocab::{EffectKind, EffectKindInput};
+use chelis_vocab::EffectKind;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -21,6 +24,8 @@ use crate::ast::{
 /// Failure to structurally resugar a Deep expression.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResugarError {
+    #[error("{0}")]
+    InvalidMetadata(#[from] chelis_deep::metadata::MetadataError),
     #[error("expected a canonical Deep node, found {found}")]
     ExpectedNode { found: String },
 
@@ -84,7 +89,7 @@ pub enum ResugarError {
 #[derive(Clone, Copy)]
 struct NodeRef<'a> {
     tag: DeepTag,
-    meta: &'a MetaMap,
+    meta: &'a Metadata,
     children: &'a [DeepExpr],
     span: Span,
 }
@@ -95,7 +100,7 @@ struct NodeRef<'a> {
 /// Keeping construction and rendering separate makes it impossible for this
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
-    validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
+    chelis_deep::metadata::validate_metadata(std::slice::from_ref(expr))?;
     validate_binder_literal_adoption(expr, &[], &[])?;
     resugar_expression_inner(expr)
 }
@@ -103,7 +108,7 @@ pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     let node = node_ref(expr)?;
     let annotation = (node.tag != DeepTag::Lit)
-        .then(|| meta_value(node.meta, "type").map(resugar_type))
+        .then(|| node.meta.ty().map(|v| v.expression()).map(resugar_type))
         .flatten()
         .transpose()?;
     let span = node.span;
@@ -124,9 +129,7 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// erased a canonical source distinction such as module-path casing or a
 /// grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
-    for expr in exprs {
-        validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
-    }
+    chelis_deep::metadata::validate_metadata(exprs)?;
     let declarations = resugar_declaration_sequence(exprs)?;
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
@@ -142,19 +145,24 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
 /// `surf_dim_group_size` markers, are consumed while choosing the Surf AST and
 /// then ignored by this Deep-side comparison only when their values and
 /// placements satisfy the closed surface metadata contract. Non-default,
-/// malformed, or misplaced markers remain visible. Exact `type` entries on a
+/// non-default markers remain visible. Malformed or misplaced metadata returns
+/// an error before normalization can erase it. Exact `type` entries on a
 /// `def`, its function value, and its parameters are also removed when the
 /// immediately preceding matching `defsig` already carries the same types.
 /// Canonical Surf deliberately folds that Deep pair into one typed declaration,
 /// so desugaring necessarily recreates those redundant annotations. A
-/// disagreement is retained and therefore still fails the oracle.
+/// disagreement is retained and therefore still fails the oracle. Property
+/// parameter types remain paired with the written `property_quantifiers`.
 ///
 /// This narrow normalization is intentionally not
 /// [`chelis_deep::ast::strip_metadata`], which would erase language-relevant
 /// information and could make a false round trip look green.
-pub fn normalize_deep_for_surface_roundtrip(exprs: &[DeepExpr]) -> Vec<DeepExpr> {
+pub fn normalize_deep_for_surface_roundtrip(
+    exprs: &[DeepExpr],
+) -> Result<Vec<DeepExpr>, ResugarError> {
+    chelis_deep::metadata::validate_metadata(exprs)?;
     let normalized = exprs.iter().map(normalize_roundtrip_expr).collect();
-    normalize_declaration_sequence_roundtrip(normalized)
+    Ok(normalize_declaration_sequence_roundtrip(normalized))
 }
 
 fn normalize_declaration_sequence_roundtrip(exprs: Vec<DeepExpr>) -> Vec<DeepExpr> {
@@ -186,7 +194,8 @@ fn strip_correctly_placed_default_dimension_markers(exprs: &mut [DeepExpr]) {
             index += 1;
             continue;
         }
-        let Some(DeepExpr::Atom(Atom::Int(size), _)) = meta_value(node.meta, "surf_dim_group_size")
+        let Some(DeepExpr::Atom(Atom::Int(size), _)) =
+            node.meta.surf_dim_group_size().map(|v| v.expression())
         else {
             index += 1;
             continue;
@@ -200,15 +209,8 @@ fn strip_correctly_placed_default_dimension_markers(exprs: &mut [DeepExpr]) {
             continue;
         }
         if group_size == 1 {
-            let meta = MetaMap {
-                entries: node
-                    .meta
-                    .entries
-                    .iter()
-                    .filter(|(key, _)| key != "surf_dim_group_size")
-                    .cloned()
-                    .collect(),
-            };
+            let mut meta = node.meta.clone();
+            meta.remove(K::SurfDimGroupSize);
             exprs[index] = rebuild_node_like(
                 &exprs[index],
                 node.tag,
@@ -229,7 +231,7 @@ fn materialize_standalone_definition_signatures(exprs: Vec<DeepExpr>) -> Vec<Dee
             continue;
         };
         let Some(definition_type) = (definition.tag == DeepTag::Def)
-            .then(|| meta_value(definition.meta, "type"))
+            .then(|| definition.meta.ty().map(|v| v.expression()))
             .flatten()
         else {
             normalized.push(definition_expr);
@@ -253,7 +255,7 @@ fn materialize_standalone_definition_signatures(exprs: Vec<DeepExpr>) -> Vec<Dee
         let signature = DeepExpr::Node(
             Box::new(chelis_deep::node::Node::new(
                 DeepTag::Defsig,
-                MetaMap::default(),
+                Metadata::default(),
                 vec![definition.children[0].clone(), definition_type.clone()],
             )),
             definition.span,
@@ -351,12 +353,21 @@ fn strip_redundant_definition_types(
         return None;
     }
 
+    // Property quantifiers preserve the written parameter types and must
+    // match this params node. These annotations remain part of the property
+    // contract even when a neighbouring signature repeats them.
+    let preserve_parameter_types =
+        definition.meta.chelis_role().map(|v| v.value().as_str()) == Some("property");
     let normalized_params = params
         .children
         .iter()
         .zip(&function_type.children[..params.children.len()])
         .map(|(param, expected_type)| {
-            let normalized = strip_matching_param_type(param, expected_type);
+            let normalized = if preserve_parameter_types {
+                param.clone()
+            } else {
+                strip_matching_param_type(param, expected_type)
+            };
             changed |= normalized != *param;
             normalized
         })
@@ -388,47 +399,31 @@ fn strip_redundant_definition_types(
     ))
 }
 
-fn strip_matching_type_metadata(meta: &MetaMap, expected_type: &DeepExpr) -> (MetaMap, bool) {
-    let Some(actual_type) = meta_value(meta, "type") else {
+fn strip_matching_type_metadata(meta: &Metadata, expected_type: &DeepExpr) -> (Metadata, bool) {
+    let Some(actual_type) = meta.ty().map(|v| v.expression()) else {
         return (meta.clone(), false);
     };
     if !same_deep_shape(actual_type, expected_type) {
         return (meta.clone(), false);
     }
-    (
-        MetaMap {
-            entries: meta
-                .entries
-                .iter()
-                .filter(|(key, _)| key != "type")
-                .cloned()
-                .collect(),
-        },
-        true,
-    )
+    let mut result = meta.clone();
+    result.remove(K::Type);
+    (result, true)
 }
 
 fn strip_matching_param_type(param: &DeepExpr, expected_type: &DeepExpr) -> DeepExpr {
     match param {
         DeepExpr::MetaExpr(meta, span) => {
-            let Some((_, actual_type)) = meta.entries.iter().find(|(key, _)| key == "type") else {
-                return param.clone();
-            };
-            if !same_deep_shape(actual_type, expected_type) {
+            let (metadata, matched) = strip_matching_type_metadata(&meta.metadata, expected_type);
+            if !matched {
                 return param.clone();
             }
-            let entries = meta
-                .entries
-                .iter()
-                .filter(|(key, _)| key != "type")
-                .cloned()
-                .collect::<Vec<_>>();
-            if entries.is_empty() {
+            if metadata.is_empty() {
                 (*meta.expr).clone()
             } else {
                 DeepExpr::MetaExpr(
-                    chelis_deep::ast::MetaExpr {
-                        entries,
+                    chelis_deep::MetaExpr {
+                        metadata,
                         expr: meta.expr.clone(),
                     },
                     *span,
@@ -456,20 +451,16 @@ fn strip_matching_param_type_items(
     let [name, DeepExpr::Map(meta, map_span)] = items else {
         return None;
     };
-    let actual_type = meta_value(meta, "type")?;
+    let actual_type = meta.ty().map(|v| v.expression())?;
     if !same_deep_shape(actual_type, expected_type) {
         return None;
     }
-    let entries = meta
-        .entries
-        .iter()
-        .filter(|(key, _)| key != "type")
-        .cloned()
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
+    let mut metadata = meta.clone();
+    metadata.remove(K::Type);
+    if metadata.is_empty() {
         return Some(name.clone());
     }
-    let items = vec![name.clone(), DeepExpr::Map(MetaMap { entries }, *map_span)];
+    let items = vec![name.clone(), DeepExpr::Map(metadata, *map_span)];
     Some(if bare {
         DeepExpr::BareList(items, span)
     } else {
@@ -485,7 +476,7 @@ fn same_deep_shape(left: &DeepExpr, right: &DeepExpr) -> bool {
 fn rebuild_node_like(
     original: &DeepExpr,
     tag: DeepTag,
-    meta: MetaMap,
+    meta: Metadata,
     children: Vec<DeepExpr>,
     span: Span,
 ) -> DeepExpr {
@@ -506,8 +497,30 @@ fn normalize_roundtrip_expr_with_context(
     expr: &DeepExpr,
     context: SurfaceMetadataContext,
 ) -> DeepExpr {
+    normalize_roundtrip_value(
+        expr,
+        context,
+        chelis_deep::metadata::MetadataRole::Expression,
+    )
+}
+
+fn normalize_roundtrip_value(
+    expr: &DeepExpr,
+    context: SurfaceMetadataContext,
+    role: chelis_deep::metadata::MetadataRole,
+) -> DeepExpr {
+    use chelis_deep::metadata::MetadataRole;
+    // The key owns its payload's shape. A structural tuple is a container,
+    // even when empty; only an expression/type payload admits unit rewriting.
+    // Data payloads are preserved without treating binder names as annotations.
+    let rewrite_shape = match role {
+        MetadataRole::Expression | MetadataRole::Type => true,
+        MetadataRole::Syntax => false,
+        MetadataRole::Preserved | MetadataRole::BinderMap => return expr.clone(),
+    };
     if let Ok(node) = node_ref(expr) {
-        if node.tag == DeepTag::Lit
+        if rewrite_shape
+            && node.tag == DeepTag::Lit
             && node.children.len() == 1
             && let Some(value) = node.children.first()
         {
@@ -516,7 +529,7 @@ fn normalize_roundtrip_expr_with_context(
                 if suffix.is_some_and(|suffix| suffix.is_float()) {
                     let suffix = suffix.expect("float suffix was checked");
                     let mut meta = normalize_roundtrip_meta(node.meta, Some(node.tag), context);
-                    meta.entries.retain(|(key, _)| key != "literal_source");
+                    meta.remove(K::LiteralSource);
                     let converted = DeepExpr::Node(
                         Box::new(chelis_deep::node::Node::new(
                             DeepTag::Lit,
@@ -544,18 +557,19 @@ fn normalize_roundtrip_expr_with_context(
                 );
             }
         }
-        if node.tag == DeepTag::Tuple && node.children.is_empty() {
+        if rewrite_shape && node.tag == DeepTag::Tuple && node.children.is_empty() {
             let unit_type = DeepExpr::Node(
                 Box::new(chelis_deep::node::Node::new(
                     DeepTag::TUnit,
-                    MetaMap::default(),
+                    Metadata::default(),
                     Vec::new(),
                 )),
                 node.span,
             );
             let mut meta = normalize_roundtrip_meta(node.meta, Some(node.tag), context);
-            meta.entries.retain(|(key, _)| key != "type");
-            meta.entries.push(("type".to_string(), unit_type));
+            meta.replace(M::Type(
+                TypeSyntax::try_new(unit_type).expect("unit type syntax"),
+            ));
             return DeepExpr::Node(
                 Box::new(chelis_deep::node::Node::new(
                     DeepTag::Lit,
@@ -565,7 +579,7 @@ fn normalize_roundtrip_expr_with_context(
                 node.span,
             );
         }
-        if node.tag == DeepTag::TTuple && node.children.is_empty() {
+        if rewrite_shape && node.tag == DeepTag::TTuple && node.children.is_empty() {
             return DeepExpr::Node(
                 Box::new(chelis_deep::node::Node::new(
                     DeepTag::TUnit,
@@ -584,7 +598,6 @@ fn normalize_roundtrip_expr_with_context(
                     child,
                     SurfaceMetadataContext {
                         binding_value: node.tag == DeepTag::Bind && index % 2 == 1,
-                        pipe_stage: node.tag == DeepTag::Pipe && index > 0,
                     },
                 )
             })
@@ -617,20 +630,11 @@ fn normalize_roundtrip_expr_with_context(
         ),
         DeepExpr::MetaExpr(meta, span) => DeepExpr::MetaExpr(
             chelis_deep::ast::MetaExpr {
-                entries: meta
-                    .entries
-                    .iter()
-                    .filter(|(key, _)| !is_roundtrip_derived_key(key))
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            normalize_roundtrip_expr_with_context(
-                                value,
-                                SurfaceMetadataContext::default(),
-                            ),
-                        )
-                    })
-                    .collect(),
+                metadata: normalize_roundtrip_meta(
+                    &meta.metadata,
+                    None,
+                    SurfaceMetadataContext::default(),
+                ),
                 expr: Box::new(normalize_roundtrip_expr_with_context(
                     &meta.expr,
                     SurfaceMetadataContext::default(),
@@ -728,7 +732,7 @@ fn normalized_application(name: &str, arguments: Vec<DeepExpr>, span: Span) -> D
     let function = DeepExpr::Node(
         Box::new(chelis_deep::node::Node::new(
             DeepTag::Var,
-            MetaMap::default(),
+            Metadata::default(),
             vec![DeepExpr::Atom(Atom::Name(name.to_string()), span)],
         )),
         span,
@@ -739,7 +743,7 @@ fn normalized_application(name: &str, arguments: Vec<DeepExpr>, span: Span) -> D
     DeepExpr::Node(
         Box::new(chelis_deep::node::Node::new(
             DeepTag::App,
-            MetaMap::default(),
+            Metadata::default(),
             children,
         )),
         span,
@@ -747,73 +751,60 @@ fn normalized_application(name: &str, arguments: Vec<DeepExpr>, span: Span) -> D
 }
 
 fn normalize_roundtrip_meta(
-    meta: &MetaMap,
+    meta: &Metadata,
     tag: Option<DeepTag>,
     context: SurfaceMetadataContext,
-) -> MetaMap {
-    MetaMap {
-        entries: meta
-            .entries
-            .iter()
-            .filter(|(key, value)| {
-                !is_roundtrip_derived_key(key)
-                    && !is_valid_surface_origin_marker(key, value, tag, context)
-            })
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    normalize_roundtrip_expr_with_context(value, SurfaceMetadataContext::default()),
-                )
-            })
-            .collect(),
-    }
-}
-
-fn is_valid_surface_origin_marker(
-    key: &str,
-    value: &DeepExpr,
-    tag: Option<DeepTag>,
-    context: SurfaceMetadataContext,
-) -> bool {
-    match key {
-        "surf_literal_style" => {
-            tag == Some(DeepTag::Lit)
-                && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "unsuffixed" | "explicit"))
+) -> Metadata {
+    fn remove_derived(metadata: &mut Metadata, tag: Option<DeepTag>, binding_value: bool) {
+        for key in [
+            K::Span,
+            K::Loc,
+            K::Source,
+            K::Effects,
+            K::InvariantAmenability,
+        ] {
+            metadata.remove(key);
         }
-        "surf_binding_type" => {
-            context.binding_value
-                && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "inferred" | "explicit"))
+        if tag == Some(DeepTag::Lit) {
+            metadata.remove(K::SurfLiteralStyle);
         }
-        _ => false,
+        if binding_value {
+            metadata.remove(K::SurfBindingType);
+        }
     }
+    let mut metadata = meta
+        .try_map_expressions_with_annotations::<chelis_deep::metadata::MetadataError>(
+            &mut |value, role| {
+                Ok(normalize_roundtrip_value(
+                    value,
+                    SurfaceMetadataContext::default(),
+                    role,
+                ))
+            },
+            &mut |mut metadata, owner| {
+                remove_derived(&mut metadata, owner, false);
+                Ok(metadata)
+            },
+        )
+        .expect("normalization preserves typed payload roles");
+    remove_derived(&mut metadata, tag, context.binding_value);
+    metadata
 }
 
 fn strip_reconstructible_surface_metadata(
     tag: DeepTag,
     children: &[DeepExpr],
-    mut meta: MetaMap,
-) -> MetaMap {
-    meta.entries.retain(|(key, value)| match key.as_str() {
-        "surf_path" if matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll) => {
-            children.first().and_then(atom_name).is_none_or(|lowered| {
-                !matches!(
-                    value,
-                    DeepExpr::Atom(Atom::Str(path), _)
-                        if path == &default_surface_path(lowered)
-                            && path.to_ascii_lowercase() == lowered
-                )
-            })
-        }
-        _ => true,
-    });
+    mut meta: Metadata,
+) -> Metadata {
+    if matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll)
+        && let Some(path) = meta.surf_path()
+        && let Some(lowered) = children.first().and_then(atom_name)
+        && path.value() == &default_surface_path(lowered)
+        && path.value().to_ascii_lowercase() == lowered
+    {
+        meta.remove(K::SurfPath);
+    }
     meta
-}
-
-fn is_roundtrip_derived_key(key: &str) -> bool {
-    matches!(
-        key,
-        "span" | "loc" | "source" | "effects" | "invariant_amenability"
-    )
 }
 
 fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
@@ -904,7 +895,12 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                             expected: "an adjacent `(defdim ...)` group member",
                         });
                     }
-                    if meta_value(member.meta, "surf_dim_group_size").is_some() {
+                    if member
+                        .meta
+                        .surf_dim_group_size()
+                        .map(|v| v.expression())
+                        .is_some()
+                    {
                         return Err(ResugarError::InvalidSurfaceMetadata {
                             key: "surf_dim_group_size".to_string(),
                             expected: surface_metadata_expectation("surf_dim_group_size"),
@@ -946,7 +942,7 @@ fn resugar_definition(
     let name = name_child(&definition, 0)?.to_string();
     let value_node = node_ref(&definition.children[1]).ok();
     let signature_type = signature.map(|signature| &signature.children[1]);
-    let definition_type = meta_value(definition.meta, "type");
+    let definition_type = definition.meta.ty().map(|v| v.expression());
     if let (Some(signature_type), Some(definition_type)) = (signature_type, definition_type)
         && !same_deep_shape(signature_type, definition_type)
     {
@@ -958,7 +954,7 @@ fn resugar_definition(
     }
     let function_type = value_node
         .filter(|node| node.tag == DeepTag::Fn)
-        .and_then(|node| meta_value(node.meta, "type"));
+        .and_then(|node| node.meta.ty().map(|v| v.expression()));
     let outer_type = signature_type.or(definition_type);
     if let (Some(outer_type), Some(function_type)) = (outer_type, function_type)
         && !same_deep_shape(outer_type, function_type)
@@ -986,7 +982,7 @@ fn resugar_definition(
     }
     validate_binder_literal_adoption(&definition.children[1], &declared_binders, &dtype_bounds)?;
 
-    if meta_string(definition.meta, "chelis_role") == Some("property") {
+    if definition.meta.chelis_role().map(|v| v.value().as_str()) == Some("property") {
         return resugar_property(declared_type, definition, name);
     }
 
@@ -1075,12 +1071,14 @@ fn resugar_property(
     }
     exact(&function, 2)?;
 
-    let source_kind = meta_string(definition.meta, "property_source_kind").ok_or_else(|| {
-        ResugarError::InvalidSurfaceMetadata {
+    let source_kind = definition
+        .meta
+        .property_source_kind()
+        .map(|v| v.value().spelling())
+        .ok_or_else(|| ResugarError::InvalidSurfaceMetadata {
             key: "property_source_kind".to_string(),
             expected: "the string `user` on a Surf-representable property",
-        }
-    })?;
+        })?;
     if source_kind != "user" {
         return Err(ResugarError::UnrepresentablePropertyProvenance {
             name,
@@ -1088,30 +1086,34 @@ fn resugar_property(
             value: source_kind.to_string(),
         });
     }
-    if let Some(source_id) = meta_value(definition.meta, "property_source_id") {
-        let value = match source_id {
-            DeepExpr::Atom(Atom::Str(value), _) => value.clone(),
-            value => chelis_deep::printer::print_canonical(std::slice::from_ref(value))
-                .trim()
-                .to_string(),
-        };
+    if let Some(source_id) = definition.meta.property_source_id() {
         return Err(ResugarError::UnrepresentablePropertyProvenance {
             name,
             key: "property_source_id",
-            value,
+            value: source_id.value().clone(),
         });
     }
-
-    let params_expr = meta_value(definition.meta, "property_quantifiers").ok_or_else(|| {
+    let quantifiers = definition.meta.property_quantifiers().ok_or_else(|| {
         ResugarError::InvalidSurfaceMetadata {
             key: "property_quantifiers".to_string(),
-            expected: "a `(params {} ...)` value matching the property `fn` parameter list",
+            expected: "property quantifiers matching the function parameters",
         }
     })?;
+    let params_value = DeepExpr::node(
+        DeepTag::Params,
+        quantifiers.metadata().clone(),
+        quantifiers
+            .values()
+            .iter()
+            .map(|binder| binder.to_expression())
+            .collect(),
+        quantifiers.span(),
+    );
+    let params_expr = &params_value;
     if !same_deep_shape(params_expr, &function.children[0]) {
         return Err(ResugarError::InvalidSurfaceMetadata {
             key: "property_quantifiers".to_string(),
-            expected: "a `(params {} ...)` value matching the property `fn` parameter list",
+            expected: "property quantifiers matching the function parameters",
         });
     }
     let params = resugar_params(params_expr)?;
@@ -1154,66 +1156,38 @@ fn resugar_property(
             });
         }
     }
-    let preconditions_value =
-        meta_value(definition.meta, "property_preconditions").ok_or_else(|| {
-            ResugarError::InvalidSurfaceMetadata {
-                key: "property_preconditions".to_string(),
-                expected: "a `(tuple {} ...)` value",
-            }
-        })?;
-    let tuple = node_ref(preconditions_value)?;
-    if tuple.tag != DeepTag::Tuple {
-        return Err(ResugarError::InvalidChild {
-            tag: definition.tag.as_str(),
-            index: 1,
-            expected: "tuple-valued `property_preconditions` metadata",
-        });
-    }
-    let preconditions = tuple
-        .children
+    let preconditions = definition
+        .meta
+        .property_preconditions()
+        .ok_or_else(|| ResugarError::InvalidSurfaceMetadata {
+            key: "property_preconditions".to_string(),
+            expected: "property preconditions",
+        })?
+        .values()
         .iter()
-        .map(resugar_expression_inner)
+        .map(|value| resugar_expression_inner(value.expression()))
         .collect::<Result<Vec<_>, _>>()?;
     let mut options = Vec::new();
-    for (key, value) in &definition.meta.entries {
-        let option = match key.as_str() {
-            "property_tolerance" => Some(PropertyOption::Tolerance(
-                resugar_expression_inner(value)?,
-                value.span(),
+    for value in definition.meta.values() {
+        match value {
+            M::PropertyTolerance(v) => options.push(PropertyOption::Tolerance(
+                resugar_expression_inner(v.expression())?,
+                v.span(),
             )),
-            "property_seed" => Some(PropertyOption::Seed(
-                resugar_expression_inner(value)?,
-                value.span(),
+            M::PropertySeed(v) => options.push(PropertyOption::Seed(
+                resugar_expression_inner(v.expression())?,
+                v.span(),
             )),
-            "property_samples" => Some(PropertyOption::Samples(
-                resugar_expression_inner(value)?,
-                value.span(),
+            M::PropertySamples(v) => options.push(PropertyOption::Samples(
+                resugar_expression_inner(v.expression())?,
+                v.span(),
             )),
-            "property_contracts" => {
-                let contracts = node_ref(value)?;
-                if contracts.tag != DeepTag::Tuple {
-                    return Err(ResugarError::InvalidChild {
-                        tag: definition.tag.as_str(),
-                        index: 1,
-                        expected: "tuple-valued `property_contracts` metadata",
-                    });
-                }
-                for contract in contracts.children {
-                    let DeepExpr::Atom(Atom::Str(identifier), span) = contract else {
-                        return Err(ResugarError::InvalidChild {
-                            tag: definition.tag.as_str(),
-                            index: 1,
-                            expected: "string property contract identifiers",
-                        });
-                    };
-                    options.push(PropertyOption::Contract(identifier.clone(), *span));
-                }
-                None
-            }
-            _ => None,
-        };
-        if let Some(option) = option {
-            options.push(option);
+            M::PropertyContracts(v) => options.extend(
+                v.values()
+                    .iter()
+                    .map(|id| PropertyOption::Contract(id.value().clone(), id.span())),
+            ),
+            _ => {}
         }
     }
 
@@ -1270,7 +1244,7 @@ fn resugar_import(node: NodeRef<'_>) -> Result<Decl, ResugarError> {
 }
 
 fn resugar_surface_path(node: &NodeRef<'_>, index: usize) -> Result<String, ResugarError> {
-    if let Some(path) = meta_string(node.meta, "surf_path") {
+    if let Some(path) = node.meta.surf_path().map(|v| v.value().as_str()) {
         return Ok(path.to_string());
     }
     let lowered = name_child(node, index)?;
@@ -1292,7 +1266,7 @@ fn default_surface_path(lowered: &str) -> String {
 }
 
 fn surf_group_size(node: &NodeRef<'_>) -> Result<usize, ResugarError> {
-    let Some(value) = meta_value(node.meta, "surf_dim_group_size") else {
+    let Some(value) = node.meta.surf_dim_group_size().map(|v| v.expression()) else {
         return Ok(1);
     };
     let DeepExpr::Atom(Atom::Int(size), _) = value else {
@@ -1334,19 +1308,11 @@ fn resugar_type_definition(node: NodeRef<'_>) -> Result<Decl, ResugarError> {
         .iter()
         .map(resugar_variant)
         .collect::<Result<Vec<_>, _>>()?;
-    let opaque = match meta_value(node.meta, "opaque") {
-        None => false,
-        Some(DeepExpr::Atom(Atom::Bool(value), _)) => *value,
-        Some(_) => {
-            return Err(ResugarError::InvalidChild {
-                tag: node.tag.as_str(),
-                index: 1,
-                expected: "boolean `opaque` metadata",
-            });
-        }
-    };
-    let invariant = meta_value(node.meta, "invariant")
-        .map(resugar_invariant)
+    let opaque = node.meta.opaque().is_some();
+    let invariant = node
+        .meta
+        .invariant()
+        .map(|value| resugar_invariant(&value.to_expression()))
         .transpose()?;
     if invariant.is_some() && !opaque {
         return Err(ResugarError::InvalidChild {
@@ -1462,145 +1428,6 @@ fn structural_name_list(expr: &DeepExpr, owner: DeepTag) -> Result<Vec<String>, 
 #[derive(Clone, Copy, Default)]
 struct SurfaceMetadataContext {
     binding_value: bool,
-    pipe_stage: bool,
-}
-
-fn validate_surface_metadata_tree(
-    expr: &DeepExpr,
-    context: SurfaceMetadataContext,
-) -> Result<(), ResugarError> {
-    match expr {
-        DeepExpr::Node(node, _) => {
-            validate_surface_node_metadata(node.tag(), node.meta(), node.children_slice(), context)?
-        }
-        DeepExpr::List(list, _) => {
-            if let (Some(DeepExpr::Atom(Atom::Tag(tag), _)), Some(DeepExpr::Map(meta, _))) =
-                (list.elements.first(), list.elements.get(1))
-            {
-                validate_surface_node_metadata(*tag, meta, &list.elements[2..], context)?;
-            } else {
-                for item in &list.elements {
-                    validate_surface_metadata_tree(item, SurfaceMetadataContext::default())?;
-                }
-            }
-        }
-        DeepExpr::Map(meta, _) => {
-            validate_non_node_surface_metadata(&meta.entries)?;
-            for (_, value) in &meta.entries {
-                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            }
-        }
-        DeepExpr::MetaExpr(meta, _) => {
-            validate_non_node_surface_metadata(&meta.entries)?;
-            for (_, value) in &meta.entries {
-                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            }
-            validate_surface_metadata_tree(&meta.expr, SurfaceMetadataContext::default())?;
-        }
-        DeepExpr::BareList(items, _) => {
-            for item in items {
-                validate_surface_metadata_tree(item, SurfaceMetadataContext::default())?;
-            }
-        }
-        DeepExpr::UnknownForm(data) => {
-            validate_non_node_surface_metadata(&data.meta.entries)?;
-            for (_, value) in &data.meta.entries {
-                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            }
-            for child in &data.children {
-                validate_surface_metadata_tree(child, SurfaceMetadataContext::default())?;
-            }
-        }
-        DeepExpr::Atom(..) => {}
-    }
-    Ok(())
-}
-
-fn validate_non_node_surface_metadata(entries: &[(String, DeepExpr)]) -> Result<(), ResugarError> {
-    for (key, _) in entries {
-        if !key.starts_with("surf_") {
-            continue;
-        }
-        if !is_known_surface_metadata_key(key) {
-            return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() });
-        }
-        return Err(ResugarError::InvalidSurfaceMetadata {
-            key: key.clone(),
-            expected: surface_metadata_expectation(key),
-        });
-    }
-    Ok(())
-}
-
-fn validate_surface_node_metadata(
-    tag: DeepTag,
-    meta: &MetaMap,
-    children: &[DeepExpr],
-    context: SurfaceMetadataContext,
-) -> Result<(), ResugarError> {
-    for (key, value) in &meta.entries {
-        if !key.starts_with("surf_") {
-            validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            continue;
-        }
-        let valid = match key.as_str() {
-            "surf_path" => {
-                matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll)
-                    && matches!(
-                        value,
-                        DeepExpr::Atom(Atom::Str(path), _)
-                            if children.first().and_then(atom_name).is_some_and(
-                                |lowered| path.to_ascii_lowercase() == lowered
-                            )
-                    )
-            }
-            "surf_dim_group_size" => {
-                tag == DeepTag::Defdim
-                    && matches!(value, DeepExpr::Atom(Atom::Int(size), _) if *size > 0)
-            }
-            "surf_pipe_stage" => {
-                tag == DeepTag::Fn
-                    && context.pipe_stage
-                    && matches!(value, DeepExpr::Atom(Atom::Str(marker), _) if marker == "call-first")
-            }
-            "surf_literal_style" => {
-                tag == DeepTag::Lit
-                    && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "unsuffixed" | "explicit"))
-            }
-            "surf_binding_type" => {
-                context.binding_value
-                    && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "inferred" | "explicit"))
-            }
-            _ => return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() }),
-        };
-        if !valid {
-            return Err(ResugarError::InvalidSurfaceMetadata {
-                key: key.clone(),
-                expected: surface_metadata_expectation(key),
-            });
-        }
-    }
-    for (index, child) in children.iter().enumerate() {
-        validate_surface_metadata_tree(
-            child,
-            SurfaceMetadataContext {
-                binding_value: tag == DeepTag::Bind && index % 2 == 1,
-                pipe_stage: tag == DeepTag::Pipe && index > 0,
-            },
-        )?;
-    }
-    Ok(())
-}
-
-fn is_known_surface_metadata_key(key: &str) -> bool {
-    matches!(
-        key,
-        "surf_path"
-            | "surf_dim_group_size"
-            | "surf_pipe_stage"
-            | "surf_literal_style"
-            | "surf_binding_type"
-    )
 }
 
 fn surface_metadata_expectation(key: &str) -> &'static str {
@@ -2090,19 +1917,6 @@ fn node_ref(expr: &DeepExpr) -> Result<NodeRef<'_>, ResugarError> {
             });
         }
     };
-    if let Some((key, _)) = node.meta.entries.iter().find(|(key, _)| {
-        key.starts_with("surf_")
-            && !matches!(
-                key.as_str(),
-                "surf_path"
-                    | "surf_dim_group_size"
-                    | "surf_pipe_stage"
-                    | "surf_literal_style"
-                    | "surf_binding_type"
-            )
-    }) {
-        return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() });
-    }
     Ok(node)
 }
 
@@ -2356,22 +2170,14 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
 }
 
 fn decode_effect_kind(node: NodeRef<'_>) -> Result<EffectKind, ResugarError> {
-    let mut values = node
-        .meta
-        .entries
-        .iter()
-        .filter_map(|(key, value)| (key == "effect").then_some(value));
-    let input = match (values.next(), values.next()) {
-        (None, _) => EffectKindInput::Missing,
-        (Some(_), Some(_)) => EffectKindInput::Malformed,
-        (Some(DeepExpr::Atom(Atom::Name(symbol), _)), None) => EffectKindInput::Symbol(symbol),
-        (Some(_), None) => EffectKindInput::Malformed,
-    };
-    EffectKind::decode(input).map_err(|_| ResugarError::InvalidChild {
-        tag: node.tag.as_str(),
-        index: 1,
-        expected: "one canonical name-valued `effect` metadata entry",
-    })
+    node.meta
+        .effect()
+        .map(|v| *v.value())
+        .ok_or(ResugarError::InvalidChild {
+            tag: node.tag.as_str(),
+            index: 1,
+            expected: "a handled effect kind",
+        })
 }
 
 fn resugar_literal(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
@@ -2390,23 +2196,9 @@ fn resugar_literal_impl(
     validate_literal_type(&node)?;
     reject_non_finite_float(&node.children[0])?;
     let suffix = literal_suffix(node.meta)?;
-    let style = match meta_value(node.meta, "surf_literal_style") {
-        None => None,
-        Some(DeepExpr::Atom(Atom::Str(value), _))
-            if matches!(value.as_str(), "unsuffixed" | "explicit") =>
-        {
-            Some(value.as_str())
-        }
-        Some(_) => {
-            return Err(ResugarError::InvalidChild {
-                tag: node.tag.as_str(),
-                index: 1,
-                expected: "`surf_literal_style` equal to `\"unsuffixed\"` or `\"explicit\"`",
-            });
-        }
-    };
-    let suppress_suffix = style == Some("unsuffixed");
-    let preserve_default_suffix = preserve_default_suffix || style == Some("explicit");
+    let style = node.meta.surf_literal_style().map(|v| *v.value());
+    let suppress_suffix = style == Some(LiteralStyle::Unsuffixed);
+    let preserve_default_suffix = preserve_default_suffix || style == Some(LiteralStyle::Explicit);
     if let DeepExpr::Atom(Atom::Int(value), _) = &node.children[0]
         && *value == i64::MIN
         && suffix == Some(LiteralSuffix::I64)
@@ -2543,8 +2335,8 @@ fn default_literal_suffix_is_semantic_in_cast(
 }
 
 fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
-    let integer_source = integer_literal_source(node.meta)?;
-    let Some(ty) = meta_value(node.meta, "type") else {
+    let integer_source = integer_literal_source(node.meta);
+    let Some(ty) = node.meta.ty().map(|v| v.expression()) else {
         return if integer_source {
             Err(invalid_literal_pair())
         } else {
@@ -2591,21 +2383,8 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
     }
 }
 
-fn integer_literal_source(meta: &MetaMap) -> Result<bool, ResugarError> {
-    let mut values = meta
-        .entries
-        .iter()
-        .filter(|(key, _)| key == "literal_source")
-        .map(|(_, value)| value);
-    let Some(value) = values.next() else {
-        return Ok(false);
-    };
-    if values.next().is_some()
-        || !matches!(value, DeepExpr::Atom(Atom::Name(name), _) if name == "integer")
-    {
-        return Err(invalid_literal_pair());
-    }
-    Ok(true)
+fn integer_literal_source(meta: &Metadata) -> bool {
+    meta.literal_source().is_some()
 }
 
 fn invalid_literal_pair() -> ResugarError {
@@ -2694,21 +2473,7 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
     let mut bindings = Vec::with_capacity(binding_node.children.len() / 2);
     for pair in binding_node.children.as_chunks::<2>().0 {
         let value_node = node_ref(&pair[1])?;
-        let binding_style = match meta_value(value_node.meta, "surf_binding_type") {
-            None => None,
-            Some(DeepExpr::Atom(Atom::Str(value), _))
-                if matches!(value.as_str(), "inferred" | "explicit") =>
-            {
-                Some(value.as_str())
-            }
-            Some(_) => {
-                return Err(ResugarError::InvalidChild {
-                    tag: value_node.tag.as_str(),
-                    index: 1,
-                    expected: "`surf_binding_type` equal to `\"inferred\"` or `\"explicit\"`",
-                });
-            }
-        };
+        let binding_style = value_node.meta.surf_binding_type().map(|v| *v.value());
         bindings.push(LetBinding {
             pattern: LetPattern::Var(
                 atom_name(&pair[0])
@@ -2720,7 +2485,7 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                     .to_string(),
                 binding_node.span,
             ),
-            ty: if binding_style == Some("inferred") {
+            ty: if binding_style == Some(BindingTypeOrigin::Inferred) {
                 None
             } else {
                 type_metadata(&pair[1]).transpose()?
@@ -2746,7 +2511,7 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
         return Ok(None);
     }
     let root_bind = node_ref(&node.children[0])?;
-    if root_bind.tag != DeepTag::Bind || meta_bool(root_bind.meta, "destructure") != Some(true) {
+    if root_bind.tag != DeepTag::Bind || root_bind.meta.destructure().is_none() {
         return Ok(None);
     }
     exact(&root_bind, 2)?;
@@ -2760,7 +2525,7 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
             break;
         }
         let bind = node_ref(&let_node.children[0])?;
-        if bind.tag != DeepTag::Bind || meta_bool(bind.meta, "destructure") != Some(true) {
+        if bind.tag != DeepTag::Bind || bind.meta.destructure().is_none() {
             break;
         }
         exact(&bind, 2)?;
@@ -2912,10 +2677,9 @@ fn resugar_param(expr: &DeepExpr) -> Result<Param, ResugarError> {
             expected: "a parameter name",
         })?;
         let ty = meta
-            .entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| resugar_type(value))
+            .metadata
+            .ty()
+            .map(|value| resugar_type(value.expression()))
             .transpose()?;
         return Ok(Param {
             name: name.to_string(),
@@ -2948,11 +2712,14 @@ fn resugar_param(expr: &DeepExpr) -> Result<Param, ResugarError> {
             expected: "parameter type metadata",
         });
     };
-    let ty_expr = meta_value(meta, "type").ok_or(ResugarError::InvalidChild {
-        tag: DeepTag::Params.as_str(),
-        index: 0,
-        expected: "parameter `type` metadata",
-    })?;
+    let ty_expr = meta
+        .ty()
+        .map(|v| v.expression())
+        .ok_or(ResugarError::InvalidChild {
+            tag: DeepTag::Params.as_str(),
+            index: 0,
+            expected: "parameter `type` metadata",
+        })?;
     Ok(Param {
         name: name.to_string(),
         ty: Some(resugar_type(ty_expr)?),
@@ -2973,11 +2740,7 @@ fn parameter_type_metadata(expr: &DeepExpr) -> Result<Option<&DeepExpr>, Resugar
                 expected: "a parameter name",
             });
         }
-        return Ok(meta
-            .entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| value));
+        return Ok(meta.metadata.ty().map(|value| value.expression()));
     }
 
     let items = structural_items(expr).ok_or(ResugarError::InvalidChild {
@@ -2999,7 +2762,8 @@ fn parameter_type_metadata(expr: &DeepExpr) -> Result<Option<&DeepExpr>, Resugar
             expected: "a parameter name",
         });
     }
-    meta_value(meta, "type")
+    meta.ty()
+        .map(|v| v.expression())
         .map(Some)
         .ok_or(ResugarError::InvalidChild {
             tag: DeepTag::Params.as_str(),
@@ -3133,22 +2897,8 @@ fn resugar_kv_pattern(expr: &DeepExpr) -> Result<(String, Pattern), ResugarError
 
 fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     let node = node_ref(expr)?;
-    let Some(marker) = meta_value(node.meta, "surf_pipe_stage") else {
+    if node.meta.surf_pipe_stage().is_none() {
         return resugar_expression_inner(expr);
-    };
-    let DeepExpr::Atom(Atom::Str(marker), _) = marker else {
-        return Err(ResugarError::InvalidChild {
-            tag: node.tag.as_str(),
-            index: 1,
-            expected: "string `surf_pipe_stage` metadata",
-        });
-    };
-    if marker != "call-first" || node.tag != DeepTag::Fn {
-        return Err(ResugarError::InvalidChild {
-            tag: node.tag.as_str(),
-            index: 1,
-            expected: "validated `surf_pipe_stage: \"call-first\"` on a function stage",
-        });
     }
     let lambda = resugar_expression_inner(expr)?;
     let Expr::Lambda(params, body, span) = lambda else {
@@ -3287,13 +3037,13 @@ fn deep_mentions_free_name(expr: &DeepExpr, name: &str) -> bool {
         && node.children.len() == 2
         && params_bind_name(&node.children[0], name)
     {
-        return meta_mentions_free_name(&node.meta.entries, name);
+        return meta_mentions_free_name(node.meta, name);
     }
     match expr {
         DeepExpr::Atom(Atom::Name(found), _) => found == name,
         DeepExpr::Atom(..) => false,
         DeepExpr::Node(node, _) => {
-            meta_mentions_free_name(&node.meta().entries, name)
+            meta_mentions_free_name(node.meta(), name)
                 || node
                     .children_slice()
                     .iter()
@@ -3303,16 +3053,16 @@ fn deep_mentions_free_name(expr: &DeepExpr, name: &str) -> bool {
             .elements
             .iter()
             .any(|element| deep_mentions_free_name(element, name)),
-        DeepExpr::Map(meta, _) => meta_mentions_free_name(&meta.entries, name),
+        DeepExpr::Map(meta, _) => meta_mentions_free_name(meta, name),
         DeepExpr::MetaExpr(meta, _) => {
-            meta_mentions_free_name(&meta.entries, name)
+            meta_mentions_free_name(&meta.metadata, name)
                 || deep_mentions_free_name(&meta.expr, name)
         }
         DeepExpr::BareList(items, _) => {
             items.iter().any(|item| deep_mentions_free_name(item, name))
         }
         DeepExpr::UnknownForm(data) => {
-            meta_mentions_free_name(&data.meta.entries, name)
+            meta_mentions_free_name(&data.meta, name)
                 || data
                     .children
                     .iter()
@@ -3325,10 +3075,8 @@ fn deep_mentions_free_name(expr: &DeepExpr, name: &str) -> bool {
 ///
 /// Keys are drawn from a closed vocabulary rather than from the program, so
 /// a key that happens to spell the parameter is not an occurrence of it.
-fn meta_mentions_free_name(entries: &[(String, DeepExpr)], name: &str) -> bool {
-    entries
-        .iter()
-        .any(|(_, value)| deep_mentions_free_name(value, name))
+fn meta_mentions_free_name(metadata: &Metadata, name: &str) -> bool {
+    metadata.any_syntax(&mut |value| deep_mentions_free_name(value, name))
 }
 
 /// Report whether a Deep `params` child binds `name`.
@@ -3361,9 +3109,12 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             actual: node.children.len(),
         });
     }
-    let wrt = meta_value(node.meta, "wrt")
-        .map(resugar_wrt_names)
-        .transpose()?;
+    let wrt = node.meta.wrt().map(|targets| {
+        targets
+            .variables()
+            .map(|v| v.name().value().clone())
+            .collect()
+    });
     if node.children.len() == 2 && wrt.is_none() {
         return Err(ResugarError::InvalidChild {
             tag: node.tag.as_str(),
@@ -3376,37 +3127,6 @@ fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         wrt,
         node.span,
     ))
-}
-
-fn resugar_wrt_names(expr: &DeepExpr) -> Result<Vec<String>, ResugarError> {
-    if let Ok(node) = node_ref(expr) {
-        match node.tag {
-            DeepTag::Var => return Ok(vec![name_child(&node, 0)?.to_string()]),
-            DeepTag::Tuple => {
-                return node
-                    .children
-                    .iter()
-                    .map(|child| {
-                        let var = node_ref(child)?;
-                        if var.tag != DeepTag::Var {
-                            return Err(ResugarError::InvalidChild {
-                                tag: DeepTag::Grad.as_str(),
-                                index: 1,
-                                expected: "variable-valued `wrt` metadata",
-                            });
-                        }
-                        Ok(name_child(&var, 0)?.to_string())
-                    })
-                    .collect();
-            }
-            _ => {}
-        }
-    }
-    Err(ResugarError::InvalidChild {
-        tag: DeepTag::Grad.as_str(),
-        index: 1,
-        expected: "a variable or tuple of variables in `wrt` metadata",
-    })
 }
 
 fn resugar_finite_list(node: &NodeRef<'_>) -> Result<Option<Vec<Expr>>, ResugarError> {
@@ -3530,30 +3250,9 @@ fn is_empty_structural_list(expr: &DeepExpr) -> bool {
     structural_items(expr).is_some_and(<[DeepExpr]>::is_empty)
 }
 
-fn meta_value<'a>(meta: &'a MetaMap, key: &str) -> Option<&'a DeepExpr> {
-    meta.entries
-        .iter()
-        .find(|(candidate, _)| candidate == key)
-        .map(|(_, value)| value)
-}
-
-fn meta_string<'a>(meta: &'a MetaMap, key: &str) -> Option<&'a str> {
-    match meta_value(meta, key) {
-        Some(DeepExpr::Atom(Atom::Str(value), _)) => Some(value),
-        _ => None,
-    }
-}
-
-fn meta_bool(meta: &MetaMap, key: &str) -> Option<bool> {
-    match meta_value(meta, key) {
-        Some(DeepExpr::Atom(Atom::Bool(value), _)) => Some(*value),
-        _ => None,
-    }
-}
-
 fn type_metadata(expr: &DeepExpr) -> Option<Result<TypeExpr, ResugarError>> {
     let node = node_ref(expr).ok()?;
-    meta_value(node.meta, "type").map(resugar_type)
+    node.meta.ty().map(|v| v.expression()).map(resugar_type)
 }
 
 fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
@@ -3745,7 +3444,7 @@ fn is_infer_type(ty: &TypeExpr) -> bool {
 
 /// Rebuild binders in first-occurrence order without dropping unused bounds.
 fn resugar_dtype_bound_binders(
-    meta: &MetaMap,
+    meta: &Metadata,
     quantifiers: &[String],
 ) -> Result<Vec<TypeBinder>, ResugarError> {
     let bounds = decode_resugar_dtype_bounds(meta)?;
@@ -3767,12 +3466,10 @@ fn resugar_dtype_bound_binders(
     Ok(binders)
 }
 
-fn decode_resugar_dtype_bounds(meta: &MetaMap) -> Result<Vec<(String, DtypeFamily)>, ResugarError> {
-    decode_dtype_bounds(meta).map_err(|_| ResugarError::InvalidChild {
-        tag: "defsig",
-        index: 1,
-        expected: "a well-formed `dtype_bounds` metadata map",
-    })
+fn decode_resugar_dtype_bounds(
+    meta: &Metadata,
+) -> Result<Vec<(String, DtypeFamily)>, ResugarError> {
+    Ok(decode_dtype_bounds(meta))
 }
 
 /// Reject a Deep tree that would lose type-binder provenance when printed as
@@ -3836,63 +3533,36 @@ fn collect_quantified_variables(
 
 fn resugar_effect_metadata(expr: &DeepExpr) -> Result<Option<Vec<EffectExpr>>, ResugarError> {
     let node = node_ref(expr)?;
-    let Some(effects) = meta_value(node.meta, "eff") else {
+    let Some(effects) = node.meta.eff() else {
         return Ok(None);
     };
-    let effects = node_ref(effects)?;
-    if effects.tag != DeepTag::Effects {
-        return Err(ResugarError::InvalidChild {
-            tag: node.tag.as_str(),
-            index: 1,
-            expected: "an `(effects ...)` value in `eff` metadata",
-        });
-    }
     effects
-        .children
+        .values()
         .iter()
         .map(|effect| match effect {
-            DeepExpr::Atom(Atom::Name(name), span) => match name.as_str() {
-                "diff" => Ok(EffectExpr::Diff(*span)),
-                "random" => Ok(EffectExpr::Random(*span)),
-                "accum" => Ok(EffectExpr::Accum(*span)),
-                "io" => Ok(EffectExpr::Io(*span)),
-                "test" => Ok(EffectExpr::Test(*span)),
+            EffectMember::Name(name) => match name.value().as_str() {
+                "diff" => Ok(EffectExpr::Diff(name.span())),
+                "random" => Ok(EffectExpr::Random(name.span())),
+                "accum" => Ok(EffectExpr::Accum(name.span())),
+                "io" => Ok(EffectExpr::Io(name.span())),
+                "test" => Ok(EffectExpr::Test(name.span())),
                 _ => Err(ResugarError::InvalidChild {
                     tag: DeepTag::Effects.as_str(),
                     index: 0,
                     expected: "a canonical effect name or resource node",
                 }),
             },
-            _ => {
-                let resource = node_ref(effect)?;
-                if resource.tag != DeepTag::Resource || resource.children.len() != 1 {
-                    return Err(ResugarError::InvalidChild {
-                        tag: DeepTag::Effects.as_str(),
-                        index: 0,
-                        expected: "a canonical effect name or resource node",
-                    });
-                }
-                let DeepExpr::Atom(Atom::Str(device), _) = &resource.children[0] else {
-                    return Err(ResugarError::InvalidChild {
-                        tag: DeepTag::Resource.as_str(),
-                        index: 0,
-                        expected: "a device string",
-                    });
-                };
-                Ok(EffectExpr::Resource(device.clone(), resource.span))
-            }
+            EffectMember::Resource(resource) => Ok(EffectExpr::Resource(
+                resource.name().value().clone(),
+                resource.span(),
+            )),
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
 }
 
-fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError> {
-    let Some(value) = meta
-        .entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
-    else {
+fn literal_suffix(meta: &Metadata) -> Result<Option<LiteralSuffix>, ResugarError> {
+    let Some(value) = meta.ty().map(|value| value.expression()) else {
         return Ok(None);
     };
     if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TUnit) {

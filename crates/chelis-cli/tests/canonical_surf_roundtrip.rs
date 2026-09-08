@@ -102,10 +102,12 @@ fn macro_program_round_trips_after_expansion_modulo_derived_metadata() {
     .expect("roundtrip Deep output parses");
     assert_eq!(
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original)
+                .expect("valid metadata for round-trip normalization"),
         ),
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
+                .expect("valid metadata for round-trip normalization"),
         )
     );
 }
@@ -162,10 +164,12 @@ fn checked_deep_resugars_without_losing_expression_types() {
     .expect("roundtrip Deep parses");
     assert_eq!(
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&checked),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&checked)
+                .expect("valid metadata for round-trip normalization"),
         ),
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
+                .expect("valid metadata for round-trip normalization"),
         )
     );
 }
@@ -327,10 +331,12 @@ fn repository_surf_corpus_obeys_the_normalized_deep_retraction_law() {
         .expect("roundtrip Deep parses");
         assert_eq!(
             chelis_deep::printer::print_canonical(
-                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original),
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original)
+                    .expect("valid metadata for round-trip normalization"),
             ),
             chelis_deep::printer::print_canonical(
-                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip),
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
+                    .expect("valid metadata for round-trip normalization"),
             ),
             "normalized Deep retraction law failed for {}",
             path.display()
@@ -374,4 +380,36 @@ fn tracked_surf_files(workspace: &Path) -> Vec<PathBuf> {
         .filter(|path| !path.is_empty())
         .map(|path| workspace.join(path))
         .collect()
+}
+
+#[test]
+fn migration_preserves_empty_property_preconditions() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("property.ch");
+    for text in [
+        "@property p forall(): true\n",
+        "@property p forall(x: int32): x == x\n",
+    ] {
+        fs::write(&source, text).unwrap();
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+            .arg(&source)
+            .assert()
+            .success();
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["migrate", "surf", "--from", "0.18", "--check"])
+            .arg(&source)
+            .assert()
+            .success();
+    }
+    fs::write(&source, "@property p forall(x: int32):\n").unwrap();
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["migrate", "surf", "--from", "0.18", "--check"])
+        .arg(&source)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("panicked").not());
 }
