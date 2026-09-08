@@ -1862,6 +1862,45 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     live
 }
 
+/// The eval lane's entry guards: for each `Entry`-placed class, the claim
+/// name and the two input-tensor axes a guard compares, named by input label
+/// so the caller's own bindings answer them.
+///
+/// One derivation, three lanes (C2.7): this reads the same
+/// `derive_runtime_dim_classes` and the same `member_load_axis` the C and HIP
+/// emitters read, so a claim cannot be identified one way for a compiled
+/// program and another way for an evaluated one.
+type EntryDimGuard = (String, (String, usize), (String, usize));
+
+fn entry_dim_guards(dag: &Dag) -> Vec<EntryDimGuard> {
+    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
+        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
+        _ => None,
+    };
+    let mut guards = Vec::new();
+    for class in crate::axis_sources::derive_runtime_dim_classes(dag) {
+        if class.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
+            continue;
+        }
+        let crate::axis_sources::DimClaim::Name(name) = &class.claim else {
+            continue;
+        };
+        let mut witnesses = class.members.iter().filter_map(|member| {
+            let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+            Some((label(load)?, axis))
+        });
+        let Some(canonical) = witnesses.next() else {
+            continue;
+        };
+        for witness in witnesses {
+            if witness != canonical {
+                guards.push((name.clone(), canonical.clone(), witness));
+            }
+        }
+    }
+    guards
+}
+
 fn eval_tensor_internal<F>(
     dag: &Dag,
     live: Option<&[bool]>,
@@ -1991,6 +2030,55 @@ where
     // uninterruptible. Captured once here; the per-node cost is one relaxed
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
+
+    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
+    // grouping the C and HIP lanes read. Both derivations call
+    // `axis_sources::split_by_scope`: the prologues read
+    // `derive_dim_witnesses`, the guard sites and this lane read
+    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
+    // the scoping in the first alone, which is two derivations that can
+    // disagree. `spec/04-type-system.md` section 4.7 evaluates
+    // a class whose operands are all interface values "at function entry, in
+    // declared signature order, before any other operation of the function",
+    // so they run here, once every input is resolved and before the first
+    // node evaluates.
+    //
+    // The classes come from `dag`, not `bound_dag`: binding substitutes each
+    // resolved symbol into the types, so on the bound graph the claims are
+    // literals and no `Name` class survives to guard. The EXTENTS come from
+    // `resolved_inputs`, which is the point - a claim is checked against what
+    // the caller actually passed, and reading the inputs rather than the
+    // evaluated `values` keeps the guard independent of the live mask. A
+    // witness the caller did not supply is skipped: chelis#991 makes a dead
+    // generic declaration's input not a requirement of the selected root, and
+    // an absent witness cannot disagree with anything.
+    for (name, canonical, member) in entry_dim_guards(dag) {
+        let extent = |witness: (&str, usize)| {
+            resolved_inputs
+                .get(witness.0)
+                .and_then(|value| value.shape.get(witness.1).copied())
+        };
+        let (Some(left), Some(right)) = (
+            extent((canonical.0.as_str(), canonical.1)),
+            extent((member.0.as_str(), member.1)),
+        ) else {
+            continue;
+        };
+        if left == right {
+            continue;
+        }
+        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
+        // `load` because section 4.7 fixes it for a guard whose operands are
+        // all interface values: "the `load` primitive of the later witness in
+        // signature order". The context is its own line, as the same
+        // paragraph requires, and carries the disagreeing names, the axis and
+        // each observed value.
+        return Err(format!(
+            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
+             numeric trap: domain in load at int64",
+            canonical.0, canonical.1, member.0, member.1,
+        ));
+    }
 
     for node in bound_dag.nodes() {
         if let Some(cancel) = &cancel

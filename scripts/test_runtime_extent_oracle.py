@@ -86,30 +86,52 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         ids = [row.id for row in rows]
         self.assertEqual(ids, sorted(set(ids)))
         for required in (
-            "class.load_load",
-            "class.load_op_output",
-            "class.no_movement_consumer",
-            "class.op_output_op_output",
-            "class.shared_member_node",
-            "class.splice_f_of_n_n",
-            "expand.arith_size.named_claim",
-            "expand.foreign_claim.same_tensor_set_axis",
-            "expand.kept_axis.op_declared_source",
-            "expand.literal_claim.cross_tensor_read",
-            "expand.literal_claim.inlined_root",
-            "expand.named_claim.cross_tensor_read",
+            "class.load_load.c",
+            "class.load_load.eval",
+            "class.load_op_output.c",
+            "class.load_op_output.eval",
+            "class.no_movement_consumer.c",
+            "class.no_movement_consumer.eval",
+            "class.op_output_op_output.c",
+            "class.op_output_op_output.eval",
+            "class.shared_member_node.c",
+            "class.shared_member_node.eval",
+            "class.splice_f_of_n_n.c",
+            "class.splice_f_of_n_n.eval",
+            "expand.arith_size.named_claim.c",
+            "expand.arith_size.named_claim.eval",
+            "expand.foreign_claim.same_tensor_set_axis.c",
+            "expand.foreign_claim.same_tensor_set_axis.eval",
+            "expand.kept_axis.op_declared_source.c",
+            "expand.kept_axis.op_declared_source.eval",
+            "expand.literal_claim.cross_tensor_read.c",
+            "expand.literal_claim.cross_tensor_read.eval",
+            "expand.literal_claim.inlined_root.c",
+            "expand.literal_claim.inlined_root.eval",
+            "expand.named_claim.cross_tensor_read.c",
+            "expand.named_claim.cross_tensor_read.eval",
+            "expand.op_declared_source.hip_prologue",
             "expand.piped_shape_read.lint_fix",
-            "expand.positional.replacement",
-            "expand.positional.replacement_zero",
+            "expand.positional.replacement.c",
+            "expand.positional.replacement.eval",
+            "expand.positional.replacement.non_unit_source_static",
+            "expand.positional.replacement.non_unit_source_traps.c",
+            "expand.positional.replacement.non_unit_source_traps.eval",
+            "expand.positional.replacement_zero.c",
+            "expand.positional.replacement_zero.eval",
             "expand.record_projection.size",
-            "expand.shape_derived.declared_result_survives",
-            "guard_order.effect_after",
-            "guard_order.effect_before",
-            "guard_order.trap_after",
-            "guard_order.trap_before",
+            "expand.shape_derived.declared_result_survives.c",
+            "expand.shape_derived.declared_result_survives.eval",
+            "guard_order.effect_after.eval",
+            "guard_order.effect_before.eval",
+            "guard_order.trap_after.c",
+            "guard_order.trap_after.eval",
+            "guard_order.trap_before.c",
+            "guard_order.trap_before.eval",
             "ir.axis_source.cardinality",
             "rebuild.classes_after_each_pass",
-            "reshape.named_claim.node_target",
+            "reshape.named_claim.node_target.c",
+            "reshape.named_claim.node_target.eval",
             "shrink.elementwise_const.build",
             "shrink.to_end.nonzero_start",
         ):
@@ -123,9 +145,17 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "typed_unsupported(#1482)",
         )
         # chelis#665 and the class/guard rows stay at their main baseline
-        # until Slice B's second half.
-        self.assertEqual(by_id["expand.kept_axis.op_declared_source"].baseline, "ice")
-        self.assertEqual(by_id["expand.kept_axis.op_declared_source"].exit_state, "ice")
+        # until Slice B's second half. Both lanes carry the same baseline:
+        # the row is split because its guard lands per lane, not because the
+        # lanes start anywhere different.
+        for lane in ("c", "eval"):
+            row = by_id[f"expand.kept_axis.op_declared_source.{lane}"]
+            self.assertEqual(row.baseline, "ice")
+            self.assertEqual(row.exit_state, "ice")
+        # The HIP prologue row is new in Slice B's second half and starts at
+        # the same `require_load_source` panic, on the one lane that has it.
+        hip = by_id["expand.op_declared_source.hip_prologue"]
+        self.assertEqual(hip.baseline, "ice")
 
     def test_phase_a_bytes_and_digest_are_unchanged_by_multi_phase_plumbing(self) -> None:
         rows = ORACLE.generated_phase_a_corpus()
@@ -425,7 +455,8 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         shortfall = ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["b"])
         self.assertNotIn("ir.axis_source.cardinality", shortfall)
         self.assertNotIn("shrink.elementwise_const.build", shortfall)
-        self.assertIn("expand.kept_axis.op_declared_source", shortfall)
+        self.assertIn("expand.kept_axis.op_declared_source.c", shortfall)
+        self.assertIn("expand.kept_axis.op_declared_source.eval", shortfall)
         self.assertEqual(ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["a"]), ())
 
     def test_authoritative_run_rejects_dirty_worktree(self) -> None:

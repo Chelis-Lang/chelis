@@ -181,6 +181,69 @@ fn runtime_lib_path() -> PathBuf {
 }
 
 /// Write generated C + harness, compile, run, return stdout. None = compile/run failure.
+/// Compile and run like [`compile_and_run_kernel`], but return the exit
+/// status and BOTH streams instead of `None` on failure.
+///
+/// chelis#1277: a runtime extent guard's whole observable is a nonzero exit
+/// with a trap line on stderr, which the success-only helper discards - it
+/// `eprintln!`s stderr and returns `None`, so a caller cannot assert on the
+/// trap it was testing for. This shares that helper's compile plumbing rather
+/// than duplicating the runtime-library discovery and include copying.
+fn compile_and_run_kernel_capturing(
+    test_name: &str,
+    c_source: &str,
+    harness: &str,
+) -> (bool, String) {
+    // chelis#1492's collision class: a probe path built here rather than
+    // through `common::probe_dir` is a shared directory two concurrent tests
+    // can land in. `probe_dir_discipline` scans for exactly this line.
+    let probe = common::probe_dir(&format!("exec_{test_name}"));
+    let dir = probe.path().to_path_buf();
+    fs::write(dir.join("kernel.c"), c_source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let include_dir = runtime_include_dir();
+    for hdr in &[
+        "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
+        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
+        fs::write(dir.join(hdr), src).unwrap();
+    }
+    let bin = dir.join("trap_bin");
+    let compile = Command::new("gcc")
+        .arg("-O2")
+        .args(simd_isa_flags())
+        .args([
+            "-std=c11",
+            "-I",
+            dir.to_str().unwrap(),
+            dir.join("kernel.c").to_str().unwrap(),
+            dir.join("main.c").to_str().unwrap(),
+            runtime_lib_path().to_str().unwrap(),
+            "-lm",
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to invoke gcc");
+    // A compile failure is never a skip. The success-only helper returns
+    // `None` for it, and a caller that treats `None` as "no toolchain" then
+    // passes vacuously on a kernel that did not build - so this one fails
+    // loudly instead, and its callers need no escape branch.
+    assert!(
+        compile.status.success(),
+        "COMPILE FAILED [{test_name}]:\n{}\nKernel C:\n{c_source}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&bin).output().expect("failed to run binary");
+    let mut text = String::from_utf8_lossy(&run.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    (run.status.success(), text)
+}
+
 fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
     let probe = common::probe_dir(&format!("exec_{test_name}"));
     let dir = probe.path().to_path_buf();
@@ -4446,4 +4509,1174 @@ fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
         lhs_bits: &[0x7fc1, 0x8000, 0, 0xbf80, 0x3f80, 1],
         rhs_bits: &[0x7fc3, 0x7f80, 0x8000, 0xffc3, 0xbf80, 0x7f80],
     });
+}
+
+// ---- chelis#1277 Slice B: runtime extent guards, driven with runtime inputs ----
+//
+// A CLI-rooted program cannot observe these guards on C. When `main` calls the
+// def on literal shapes, every claim in the inlined kernel is provable from
+// literals, so a violation is a check-time type error and no runtime guard is
+// reachable. The guard is observable only when the EXPORTED kernel is driven
+// with runtime inputs, which is what this harness does. That mirrors the
+// eval-lane finding: the lane that can observe the guard is not the lane a
+// `.ch` fixture reaches.
+//
+// A note that is now history rather than a caveat: before #1509,
+// `make_view_typed_1d` kept ONE `static` shape array, so a second view
+// overwrote the first and both tensors reported the same extent - which would
+// have made a mismatch row pass while comparing a value with itself. #1509's
+// opaque-tensor cut replaced the struct literal with
+// `chelis_tensor_entry_borrow` over a LOCAL shape array, so each view now
+// carries its own extent and the shared helper is safe for this row.
+
+/// Two `Load`s declaring one symbolic dim, BOTH read for data. The class is
+/// all-interface, so `spec/04-type-system.md` section 4.7 places its guard at
+/// entry and names the `load` primitive.
+///
+/// An earlier version left `p` unread, which is section 4.7's "regardless of
+/// data use" case and the stronger row. It is not testable here: the
+/// derivation groups `Name` claims among root-reachable witnesses only, so a
+/// witness no result reaches forms no class and gets no guard. That gap is a
+/// recorded residual owned by B2b, and this row is deliberately the weaker
+/// one it can still prove rather than a rewritten row reporting a lock it no
+/// longer holds. The entry guard runs in the prologue, before any operation,
+/// so consuming `p` in the body does not let the elementwise operand check
+/// preempt it - which the disagreeing case below measures rather than
+/// assumes.
+fn two_witness_dag() -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    let named = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named(), None);
+    let p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], named(), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![x], named(), None);
+    let out = dag.add_node(RiscOp::Add, vec![negated, p], named(), None);
+    dag.add_root(out);
+    dag
+}
+
+#[test]
+fn an_all_interface_class_traps_at_entry_when_its_witnesses_disagree() {
+    let dag = two_witness_dag();
+    let result = codegen_with_options(
+        &dag,
+        "guard_entry",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void guard_entry(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[2] = {{1.0f, 2.0f}};
+    float pd[3] = {{1.0f, 2.0f, 3.0f}};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 2), make_view_1d(pd, 3)}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    guard_entry(inputs, 2, outputs, 1);
+    printf("NO TRAP\n");
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("guard_entry", &result.c_source, &harness);
+    assert!(!ok, "witnesses of `n` disagree at 2 and 3: {out}");
+    assert!(
+        !out.contains("NO TRAP"),
+        "the guard runs at ENTRY, before any other operation: {out}"
+    );
+    assert!(
+        out.contains("numeric trap: domain in load at int64"),
+        "section 4.7 makes this an [04-NUM-9] guard naming the `load`: {out}"
+    );
+    // NOT `out.contains('n')`. That was satisfied by "numeric", "domain in"
+    // and "int64" in the trap line itself, so it asserted nothing about the
+    // context line it was meant to check: round 1 replaced the whole context
+    // `fprintf` with a literal and both driven rows still passed. Section 4.7
+    // requires the disagreeing SOURCE NAMES, the AXIS and each OBSERVED
+    // VALUE, so assert that content, which cannot survive the line being
+    // replaced.
+    assert!(
+        out.contains("extent `n`"),
+        "the context line names the disagreeing claim: {out}"
+    );
+    assert!(
+        out.contains("x axis 0 = 2"),
+        "and the canonical witness with its observed extent: {out}"
+    );
+    assert!(
+        out.contains("p axis 0 = 3"),
+        "and the disagreeing witness with its observed extent: {out}"
+    );
+}
+
+/// The positive twin: agreeing witnesses run to completion. Without it, a
+/// guard that trapped on every class would satisfy the row above.
+#[test]
+fn an_all_interface_class_runs_when_its_witnesses_agree() {
+    let dag = two_witness_dag();
+    let result = codegen_with_options(
+        &dag,
+        "guard_entry_ok",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void guard_entry_ok(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[2] = {{1.0f, 2.0f}};
+    float pd[2] = {{3.0f, 4.0f}};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 2), make_view_1d(pd, 2)}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    guard_entry_ok(inputs, 2, outputs, 1);
+    printf("RAN %.1f\n", ((float*)chelis_tensor_read_view(outputs[0]).data)[0]);
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("guard_entry_ok", &result.c_source, &harness);
+    assert!(ok, "agreeing witnesses must execute: {out}");
+    assert!(out.contains("RAN 2.0"), "and produce neg(x) + p: {out}");
+}
+
+// ---- chelis#1277 b2.4: one guard per axis, and the ABI check narrowed ----
+//
+// Two spellings of one axis reach the prologue: the binding view sees a
+// `Load`'s own axis as an `ExternalAxis` member, and the class view sees a
+// folded `shape(t, k)` read of that same tensor as an `InputAxis` member.
+// Before the dedupe both were emitted, so an axis could be guarded twice or,
+// where the claim's other witness is dropped as unused, compared with itself.
+// A tautology and a duplicate are the two ways a guard can be present in the
+// text and absent in effect, which is why both directions are pinned here
+// rather than only the count.
+
+fn expand_reading_own_axis_dag(x_dim: DimInfo, out_dim: DimInfo) -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let mut dag = Dag::new();
+    let scalar = TensorType {
+        dims: vec![],
+        precision: Prim::F32,
+    };
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], scalar, None);
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![x_dim],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, x],
+        TensorType {
+            dims: vec![out_dim],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(out);
+    dag
+}
+
+/// The claim's only other witness is the axis the canonical value was read
+/// from, so the comparison is `n != n`. chelis#1374's emitted kernel carried
+/// exactly this: `int64_t n = chelis_tensor_shape(inputs[1], 0);` followed by
+/// `if (chelis_tensor_shape(inputs[1], 0) != n)`.
+///
+/// EVIDENTIARY STATUS: regression test. Measured failing on the emitted C
+/// before the dedupe.
+#[test]
+fn a_member_reading_the_canonical_axis_emits_no_guard() {
+    let dag = expand_reading_own_axis_dag(
+        DimInfo::Named("n".into(), None),
+        DimInfo::Named("n".into(), None),
+    );
+    let src = codegen(&dag, "selfcmp").expect("codegen").c_source;
+    assert!(
+        src.contains("int64_t n = chelis_tensor_shape(inputs[1], 0);"),
+        "the canonical value is still declared: {src}"
+    );
+    assert!(
+        !src.contains("if (chelis_tensor_shape(inputs[1], 0) != n)"),
+        "and nothing compares it with itself: {src}"
+    );
+}
+
+/// A `Literal` claim over an input axis whose static size the checker
+/// resolved to the same literal. The legacy ABI static-dim check and the
+/// class guard are then the identical comparison, and the ABI one runs first
+/// and `abort()`s, so `spec/04-type-system.md` section 4.7's [04-NUM-9] trap
+/// is unreachable. chelis#1377's shape.
+///
+/// EVIDENTIARY STATUS: regression test. `main` emits both lines in this
+/// order; measured before the narrowing.
+#[test]
+fn a_literal_class_guard_replaces_the_abi_static_dim_check_on_that_axis() {
+    let dag = expand_reading_own_axis_dag(DimInfo::Named("n".into(), Some(4)), DimInfo::Lit(4));
+    let src = codegen(&dag, "litclaim").expect("codegen").c_source;
+    assert!(
+        !src.contains("input `x` axis 0 expected 4"),
+        "the ABI check no longer preempts the extent guard: {src}"
+    );
+    assert!(
+        src.contains("if (chelis_tensor_shape(inputs[1], 0) != 4)"),
+        "the class guards the same axis against the same literal: {src}"
+    );
+    assert!(
+        src.contains("chelis_numeric_trap(\"numeric trap: domain in load at int64\")"),
+        "and renders [04-NUM-9]: {src}"
+    );
+}
+
+/// The narrowing's exact complement, in two directions. Without these the
+/// change above could have deleted the ABI check outright and still passed:
+/// an axis no class guards keeps it, and a `Name` claim - whose guard
+/// compares against another input's RUNTIME extent rather than against the
+/// declared size - keeps it too, because dropping it there would lose a
+/// comparison rather than rename one.
+///
+/// EVIDENTIARY STATUS: disposition lock, and measured as one. Reverting the
+/// narrowing leaves this row green, because `main` already emits both lines;
+/// what it pins is that the narrowing did not widen into a deletion. Its
+/// three siblings above are regression tests, measured red on the same
+/// revert.
+#[test]
+fn the_abi_static_dim_check_survives_where_no_literal_class_guards_the_axis() {
+    use chelis_ir::dag::{Dag, RiscOp, TensorType};
+    let mut dag = Dag::new();
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(4)],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let out = dag.add_node(RiscOp::Neg, vec![x], ty, None);
+    dag.add_root(out);
+    let src = codegen(&dag, "noclass").expect("codegen").c_source;
+    assert!(
+        src.contains("input `x` axis 0 expected 4"),
+        "a program with no runtime extent keeps the C ABI boundary check: {src}"
+    );
+
+    // A `Name` claim over a statically sized axis: the class guards
+    // `inputs[1]` axis 0 against `n`, which is read from another input, so
+    // the static comparison is not the same comparison and stays.
+    let named = expand_reading_own_axis_dag(
+        DimInfo::Named("n".into(), Some(4)),
+        DimInfo::Named("n".into(), Some(4)),
+    );
+    let src = codegen(&named, "nameclaim").expect("codegen").c_source;
+    assert!(
+        src.contains("input `x` axis 0 expected 4"),
+        "a Name claim does not license dropping the static check: {src}"
+    );
+}
+
+/// Three witnesses of one claim, two of which name the same axis through
+/// different sources: `y`'s `Load` axis (an `ExternalAxis` member) and the
+/// `expand` size's folded read of `y` (an `InputAxis` member). The axis is
+/// guarded once. chelis#1374's fixture with its `x` parameter kept alive,
+/// which is the form whose emitted kernel carried the duplicate.
+///
+/// EVIDENTIARY STATUS: regression test, measured at two occurrences before
+/// the dedupe.
+#[test]
+fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let named = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named(), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], named(), None);
+    let widened = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, y],
+        named(),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Add, vec![widened, x], named(), None);
+    dag.add_root(out);
+
+    let src = codegen(&dag, "dedupe").expect("codegen").c_source;
+    let slot_of = |label: &str| {
+        let marker = format!("input `{label}` at slot ");
+        src.find(&marker)
+            .and_then(|at| src[at + marker.len()..].chars().next())
+            .unwrap_or_else(|| panic!("`{label}` has an assigned slot"))
+    };
+    // Both operands are read from the class's own witnesses, so the guard
+    // names two slots rather than a declared variable.
+    let guard = format!(
+        "if (chelis_tensor_shape(inputs[{}], 0) != chelis_tensor_shape(inputs[{}], 0))",
+        slot_of("y"),
+        slot_of("x"),
+    );
+    assert_eq!(src.matches(&guard).count(), 1, "one axis, one guard: {src}");
+}
+
+/// Two all-interface classes, both mismatching, whose claim names sort in the
+/// OPPOSITE order from their assigned slots. `spec/04-type-system.md` section
+/// 4.7 runs interface guards "at function entry, in declared signature
+/// order", and never "by binding name, hash iteration, or node identity";
+/// the legacy `symbolic_bindings` grouped in a `BTreeMap<String, _>` and
+/// would report `adim` first.
+///
+/// This row is driven rather than CLI-rooted for the reason the block header
+/// above gives, and the CLI form is worse than merely unobservable here:
+/// `def main() = f(...)` over literal tensors inlines `f` into the root, so
+/// every extent becomes a literal, the classes disappear, and the program
+/// runs to completion printing a tensor. That is a static type error nobody
+/// raises, which is S2b's rejection to add, not a guard this slice can place.
+///
+/// EVIDENTIARY STATUS: regression test. On `main` neither class exists.
+#[test]
+fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
+    use chelis_ir::dag::{Dag, RiscOp, TensorType};
+    let dim = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let zz = dag.add_node(
+        RiscOp::Load { name: "zz".into() },
+        vec![],
+        dim("zdim"),
+        None,
+    );
+    let aa = dag.add_node(
+        RiscOp::Load { name: "aa".into() },
+        vec![],
+        dim("adim"),
+        None,
+    );
+    let p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], dim("zdim"), None);
+    let q = dag.add_node(RiscOp::Load { name: "q".into() }, vec![], dim("adim"), None);
+    // All four witnesses are READ, and both classes still have to reach one
+    // result, so the `adim` pair is reduced to a scalar and broadcast back
+    // over `zdim`. The unread form is section 4.7's stronger case and is not
+    // testable here; see `two_witness_dag`.
+    let zsum = dag.add_node(RiscOp::Add, vec![zz, p], dim("zdim"), None);
+    let asum = dag.add_node(RiscOp::Add, vec![aa, q], dim("adim"), None);
+    let folded = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![asum],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let spread = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::RtDim::InputAxis {
+                tensor: 1,
+                axis: chelis_ir::dag::RtAxis::Lit(0),
+            },
+        },
+        vec![folded, zsum],
+        dim("zdim"),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Add, vec![zsum, spread], dim("zdim"), None);
+    dag.add_root(out);
+
+    let result = codegen_with_options(
+        &dag,
+        "entry_order",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void entry_order(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float zd[2] = {{1.0f, 2.0f}};
+    float ad[2] = {{1.0f, 2.0f}};
+    float pd[3] = {{1.0f, 2.0f, 3.0f}};
+    float qd[1] = {{1.0f}};
+    chelis_tensor* inputs[4] = {{
+        make_view_1d(zd, 2), make_view_1d(ad, 2),
+        make_view_1d(pd, 3), make_view_1d(qd, 1)
+    }};
+    chelis_tensor* outputs[1] = {{NULL}};
+    entry_order(inputs, 4, outputs, 1);
+    printf("NO TRAP\n");
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("entry_order", &result.c_source, &harness);
+    assert!(!ok, "both classes mismatch: {out}");
+    assert!(
+        out.contains("extent `zdim`"),
+        "`zdim` occupies the earlier slot and is reported first: {out}"
+    );
+    assert!(
+        !out.contains("adim"),
+        "`adim` sorts first by name but its guard runs second: {out}"
+    );
+    assert!(
+        out.contains("numeric trap: domain in load at int64"),
+        "an all-interface class renders [04-NUM-9]: {out}"
+    );
+}
+
+/// chelis#1377's C row, driven. A declared `tensor[4, f32]` result over an
+/// `expand` sized by a runtime read of an input axis: when that axis is not
+/// 4, section 4.7 owes an [04-NUM-9] trap at entry, and until b2.4 the
+/// legacy ABI static-dim check aborted first with a rendering the atom does
+/// not permit.
+///
+/// The issue's own reproducer is `def main() = f(...)` over literal tensors,
+/// and that half does NOT reach this guard: the root inlines `f`, every
+/// extent becomes a literal, and the kernel allocates `{5}` for a
+/// `tensor[4]` result with no guard and no rejection. The runtime half is
+/// this row; the static half is S2b's rejection, and the two are why the row
+/// is recorded `lane_divergent` rather than `silent_unguarded`.
+///
+/// EVIDENTIARY STATUS: regression test for the rendering and the position -
+/// on `main` the same input produces `input `x` axis 0 expected 4, got 5`
+/// and `abort()`. The positive twin is a disposition lock.
+#[test]
+fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_c() {
+    let dag = expand_reading_own_axis_dag(DimInfo::Named("n".into(), Some(4)), DimInfo::Lit(4));
+    let result = codegen_with_options(
+        &dag,
+        "lit_entry",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let run = |name: &str, extent: usize| {
+        let values = (0..extent)
+            .map(|i| format!("{}.0f", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void lit_entry(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float bd[1] = {{7.0f}};
+    float xd[{extent}] = {{{values}}};
+    int64_t scalar_shape[1] = {{1}};
+    chelis_tensor* b = chelis_tensor_entry_borrow(0, scalar_shape, CHELIS_DTYPE_F32, bd, sizeof(float));
+    chelis_tensor* inputs[2] = {{b, make_view_1d(xd, {extent})}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    lit_entry(inputs, 2, outputs, 1);
+    printf("RAN %lld\n", (long long)chelis_tensor_shape(outputs[0], 0));
+    return 0;
+}}
+"#
+        );
+        compile_and_run_kernel_capturing(name, &result.c_source, &harness)
+    };
+
+    let (ok, out) = run("lit_entry", 5);
+    assert!(!ok, "a declared tensor[4] over a read of 5: {out}");
+    assert!(
+        out.contains("numeric trap: domain in load at int64"),
+        "section 4.7 renders this [04-NUM-9], not the ABI check's abort: {out}"
+    );
+    assert!(
+        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        "with the claim, the axis and each observed value: {out}"
+    );
+    assert!(
+        !out.contains("expected 4, got"),
+        "and the legacy static-dim check no longer preempts it: {out}"
+    );
+
+    let (ok, out) = run("lit_entry_ok", 4);
+    assert!(ok, "the agreeing extent must execute: {out}");
+    assert!(
+        out.contains("RAN 4"),
+        "and produce the declared shape: {out}"
+    );
+}
+
+// ---- chelis#1277 b2.4: the LOCAL half of section 4.7's placement ----
+
+/// A class whose operands are not all interface values takes "the source
+/// position of the operation that introduces the guarded extent". Here the
+/// claim `n` is witnessed by `x`'s own axis (an interface value) and by the
+/// `expand` size's read of a STRIDED tensor, whose extent does not exist
+/// until the stride runs. So the class is Local, its guard belongs at the
+/// `expand`, and it renders [04-NUM-9] like the entry guards do.
+///
+/// EVIDENTIARY STATUS: regression test for the RENDERING - `main` emits
+/// `chelis: runtime dim `n` mismatch at node 3 axis 0` followed by `abort()`
+/// at this site, which [04-NUM-9] does not permit - and a disposition lock
+/// for the position, which `main` already gets right through chelis#616's
+/// `runtime_dim_sites`.
+fn local_class_dag() -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let named = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named("n"), None);
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![x],
+        named("s"),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, strided],
+        named("n"),
+        None,
+    );
+    dag.add_root(out);
+    dag
+}
+
+#[test]
+fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
+    let dag = local_class_dag();
+    let result = codegen_with_options(
+        &dag,
+        "local_guard",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+    assert!(
+        !result.c_source.contains("chelis: runtime dim `n` mismatch"),
+        "the legacy rendering is gone: {}",
+        result.c_source
+    );
+    assert!(
+        result
+            .c_source
+            .contains("chelis_numeric_trap(\"numeric trap: domain in expand at int64\")"),
+        "and `<op>` names the operation introducing the extent: {}",
+        result.c_source
+    );
+
+    let run = |name: &str, extent: usize| {
+        let values = (0..extent)
+            .map(|i| format!("{}.0f", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void local_guard(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[{extent}] = {{{values}}};
+    float bd[1] = {{7.0f}};
+    int64_t scalar_shape[1] = {{1}};
+    chelis_tensor* b = chelis_tensor_entry_borrow(0, scalar_shape, CHELIS_DTYPE_F32, bd, sizeof(float));
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, {extent}), b}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    local_guard(inputs, 2, outputs, 1);
+    printf("RAN %lld\n", (long long)chelis_tensor_shape(outputs[0], 0));
+    return 0;
+}}
+"#
+        );
+        compile_and_run_kernel_capturing(name, &result.c_source, &harness)
+    };
+
+    // `stride(x, 2)` yields `ceil(n / 2)`, so the claim `n` and the extent
+    // the `expand` actually reads agree only at n = 1.
+    let (ok, out) = run("local_guard", 3);
+    assert!(!ok, "ceil(3/2) = 2 is not the claimed 3: {out}");
+    assert!(
+        out.contains("numeric trap: domain in expand at int64"),
+        "the local guard renders [04-NUM-9]: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 3,"),
+        "with the claim and its observed value: {out}"
+    );
+    assert!(
+        !out.contains("NO TRAP") && !out.contains("RAN "),
+        "and preempts the operation it guards: {out}"
+    );
+
+    let (ok, out) = run("local_guard_ok", 1);
+    assert!(ok, "ceil(1/2) = 1 agrees and must execute: {out}");
+    assert!(
+        out.contains("RAN 1"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// A LOCAL member whose own dim the checker resolved is not a guard site.
+///
+/// The rule keys on PROVENANCE, the same axis section 4.7 uses to place a
+/// guard at entry or at the introducing operation. A local member's extent is
+/// the shape of a tensor THIS function computed, so when the checker resolved
+/// its dim to a literal the read equals that literal by construction and the
+/// comparison could only catch a compiler bug - which C2.4 already declines
+/// for a literal claim matching a literal size. An INTERFACE member's
+/// resolved size is a claim about what the caller must pass and proves
+/// nothing, so it is guarded and never exempted: that is chelis#1377's entry
+/// row, and `an_interface_member_of_a_mixed_class_is_still_checked` measures
+/// it for the mixed case where the class as a whole is Local.
+///
+/// EVIDENTIARY STATUS: regression test, measured both ways - reverting the
+/// predicate emits this site. It is NOT a disposition lock: `main` forms no
+/// class here at all, so there is nothing for a lock to hold.
+#[test]
+fn a_local_member_the_checker_resolved_is_not_a_guard_site() {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let resolved = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), Some(4))],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], resolved(), None);
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Named("s".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, strided],
+        resolved(),
+        None,
+    );
+    dag.add_root(out);
+
+    let src = codegen(&dag, "resolved_local").expect("codegen").c_source;
+
+    // The POSITIVE half, in the same shape with the claim left unresolved, so
+    // neither assertion is satisfiable by an empty file and the pair
+    // discriminates the predicate rather than the presence of output.
+    let mut open = Dag::new();
+    let unresolved = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let ox = open.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        unresolved(),
+        None,
+    );
+    let ob = open.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let ostrided = open.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![ox],
+        TensorType {
+            dims: vec![DimInfo::Named("s".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let oout = open.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![ob, ostrided],
+        unresolved(),
+        None,
+    );
+    open.add_root(oout);
+    let open_src = codegen(&open, "open_local").expect("codegen").c_source;
+    assert!(
+        open_src.contains("node 3 axis 0 = %lld"),
+        "an unresolved Local member is still a guard site: {open_src}"
+    );
+    // The discriminating assertion names the SITE, not a bare absence of
+    // `extent`: the input preamble's static-dim check and chelis#616's
+    // `emit_static_dim_guard` also compare against 4 in this program, and an
+    // earlier draft asserting `!= 4)` passed on those with and without the
+    // predicate, saying nothing about the guard under test.
+    assert!(
+        !src.contains("node 3 axis 0 = %lld"),
+        "a local member the checker resolved is the compiler's own proof and \
+         owes no runtime self-check: {src}"
+    );
+    // And the interface half is untouched: `x`'s own axis still carries the
+    // ABI check, so the narrowing did not widen into deleting the caller's
+    // obligation.
+    assert!(
+        src.contains("input `x` axis 0 expected 4"),
+        "an interface member's resolved size is a caller claim and stays checked: {src}"
+    );
+}
+
+/// P2-2's measurement, kept as a row. A class MIXING an interface member with
+/// a local one is `Local` as a whole, because `placement` returns `Entry`
+/// only when every member is an interface value. The question that raises: is
+/// the INTERFACE member still checked, given that the entry path skips Local
+/// classes and the local path applies the resolved-dim skip?
+///
+/// It is, and by the ABI static-dim check rather than by a class guard. The
+/// b2.4 narrowing that drops that check is built from `entry_dim_classes()`
+/// alone, so it never fires for a member of a Local class, and the caller's
+/// obligation on `x` axis 0 survives. Driving the kernel with the wrong
+/// extent for `x` aborts on it.
+///
+/// EVIDENTIARY STATUS: regression test for the narrowing's boundary. It fails
+/// if the ABI narrowing is ever widened from `entry_dim_classes()` to every
+/// class, which is the change that would leave this axis unchecked.
+#[test]
+fn an_interface_member_of_a_mixed_class_is_still_checked() {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let resolved = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), Some(4))],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], resolved(), None);
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    // Interface member: an `expand` sized by a folded read of the INPUT `x`.
+    let from_input = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, x],
+        resolved(),
+        None,
+    );
+    // Local member: an `expand` sized by a folded read of a COMPUTED tensor.
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Named("s".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let from_computed = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, strided],
+        resolved(),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Add,
+        vec![from_input, from_computed],
+        resolved(),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_with_options(
+        &dag,
+        "mixed_class",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+    assert!(
+        result.c_source.contains("input `x` axis 0 expected 4"),
+        "the caller's obligation on the interface member survives: {}",
+        result.c_source
+    );
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void mixed_class(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[5] = {{1.0f, 2.0f, 3.0f, 4.0f, 5.0f}};
+    float bd[1] = {{7.0f}};
+    int64_t scalar_shape[1] = {{1}};
+    chelis_tensor* b = chelis_tensor_entry_borrow(0, scalar_shape, CHELIS_DTYPE_F32, bd, sizeof(float));
+    chelis_tensor* inputs[2] = {{b, make_view_1d(xd, 5)}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    mixed_class(inputs, 2, outputs, 1);
+    printf("NO TRAP\n");
+    return 0;
+}}
+"#
+    );
+    let (ok, out) = compile_and_run_kernel_capturing("mixed_class", &result.c_source, &harness);
+    assert!(
+        !ok,
+        "a caller passing 5 for a declared 4 must not run: {out}"
+    );
+    assert!(
+        !out.contains("NO TRAP"),
+        "and must not reach the body: {out}"
+    );
+}
+
+/// The narrow case round 2 asked to be measured: an INTERFACE member carrying
+/// a literal claim on an input whose own declared dim is SYMBOLIC, in a class
+/// a computed co-member places `Local`.
+///
+/// Every check that could cover `x` axis 0 is out of the way by construction:
+/// the ABI static-dim preamble needs a `known_dim_size` and `n` has none; the
+/// entry path takes `entry_dim_classes()` and this class is Local; and the
+/// local path takes `Name` claims only, so a `Literal` claim contributes no
+/// site at all. The question is whether anything traps when the caller passes
+/// the wrong extent.
+///
+/// **Nothing traps, and `main` does not either.** Measured both ways by
+/// running this exact DAG on a tree built from `6b00299b6`: no ABI check, no
+/// entry guard, no local guard, and the kernel runs to `shape=4` on a caller
+/// that passed 5. So this is a PRE-EXISTING gap that this slice neither
+/// introduces nor worsens, not a regression, and closing it needs per-MEMBER
+/// placement - an interface member guarded at entry regardless of what its
+/// class's other members are - which is a mechanism change and belongs with
+/// B2b's derivation work rather than here.
+///
+/// EVIDENTIARY STATUS: disposition lock on a pre-existing gap, not a
+/// regression test. It goes red when someone closes the gap, which is the
+/// point: the row names the case so the closure is deliberate.
+fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let four = || TensorType {
+        dims: vec![DimInfo::Lit(4)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let from_input = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, x],
+        four(),
+        None,
+    );
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Named("s".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let from_computed = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, strided],
+        four(),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Add, vec![from_input, from_computed], four(), None);
+    dag.add_root(out);
+    dag
+}
+
+#[test]
+fn a_literal_claim_on_a_symbolic_input_in_a_local_class_is_unguarded() {
+    let dag = symbolic_input_mixed_class_dag();
+    let result = codegen_with_options(
+        &dag,
+        "sym_mixed",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+    // Every check that could cover the interface member is absent, and each
+    // for its own reason: no `known_dim_size` on a symbolic `n`, the entry
+    // path takes Entry classes only, and the local path takes `Name` claims
+    // only.
+    assert!(!result.c_source.contains("input `x` axis 0 expected"));
+    assert_eq!(
+        result.c_source.matches("numeric trap: domain in").count(),
+        0,
+        "no guard of any kind covers this axis: {}",
+        result.c_source
+    );
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void sym_mixed(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[5] = {{1.0f, 2.0f, 3.0f, 4.0f, 5.0f}};
+    float bd[1] = {{7.0f}};
+    int64_t scalar_shape[1] = {{1}};
+    chelis_tensor* b = chelis_tensor_entry_borrow(0, scalar_shape, CHELIS_DTYPE_F32, bd, sizeof(float));
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 5), b}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    sym_mixed(inputs, 2, outputs, 1);
+    printf("NO TRAP shape=%lld\n", (long long)chelis_tensor_shape(outputs[0], 0));
+    return 0;
+}}
+"#
+    );
+    let (ok, out) = compile_and_run_kernel_capturing("sym_mixed", &result.c_source, &harness);
+    assert!(ok, "the gap is silent rather than trapping: {out}");
+    assert!(
+        out.contains("NO TRAP shape=4"),
+        "a caller passing 5 for a claimed 4 runs to completion, as it does on \
+         `main`: {out}"
+    );
+}
+
+/// The row that fails without the local-member narrowing, and the `Name`
+/// sibling of the unguarded-gap row above.
+///
+/// A `Name` class over an INTERFACE member reading `y`'s axis and a LOCAL
+/// co-member reading a strided tensor. Both declaring inputs are symbolic, so
+/// no ABI static-dim check covers either; the co-member places the class
+/// `Local`, so the entry path skips it; and the claim is a `Name`, so the
+/// local path does take it. The interface member's own dim is RESOLVED, which
+/// is exactly the shape the resolved-dim proof would exempt if it were
+/// applied to every member of a Local class instead of to local members only.
+///
+/// With the narrowing the interface member keeps its site and a caller
+/// passing disagreeing extents traps. Without it the member is skipped and
+/// the kernel is silent - and nothing else catches it, which is what makes
+/// this the coverage the narrowing was missing.
+///
+/// EVIDENTIARY STATUS: regression test for the narrowing, measured both ways.
+/// It also shows the narrowing buys a check `main` never had: `main` forms no
+/// class here at all.
+#[test]
+fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let open = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let resolved = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), Some(4))],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], open("n"), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], open("m"), None);
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    // Interface member: the size folds a read of the INPUT `y`, while the
+    // claim `n` is declared from `x`, so the comparison is between two
+    // different inputs rather than a value with itself.
+    let from_input = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, y],
+        resolved(),
+        None,
+    );
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![x],
+        open("s"),
+        None,
+    );
+    let from_computed = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, strided],
+        resolved(),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Add,
+        vec![from_input, from_computed],
+        resolved(),
+        None,
+    );
+    dag.add_root(out);
+
+    let result = codegen_with_options(
+        &dag,
+        "iface_resolved",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+    assert!(
+        !result.c_source.contains("axis 0 expected"),
+        "no ABI static-dim check covers a symbolic declared dim: {}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("node 3 axis 0 = %lld"),
+        "the interface member of a Local class keeps its site: {}",
+        result.c_source
+    );
 }

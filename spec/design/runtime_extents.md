@@ -230,15 +230,39 @@ enum RtAxis {
     Node(usize),        // absolute input slot of a rank-0 int32 node (#1298)
 }
 
+enum DimClaim {
+    Name(String),       // a binder name, whatever extent is also known for it
+    Literal(usize),     // a literal extent; the class's canonical value itself
+}
+
+struct ClassMember {
+    node: NodeId,
+    axis: usize,
+    source: AxisSource, // this axis's `output_axis_sources` entry
+}
+
 struct RuntimeDimClass {
-    claim: Dim,                       // the stamped binder name or literal
-    members: Vec<(NodeId, usize)>,    // output axes carrying the claim; first canonical
+    claim: DimClaim,
+    members: Vec<ClassMember>,        // output axes carrying the claim; first canonical
 }
 
 // Derived, never stored: computed with `output_axis_sources` from the DAG a
 // lane consumes, after the last rewrite.
 fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
 ```
+
+Both fields are wider than a `Dim` and a `(NodeId, usize)` pair for reasons
+that are structural rather than convenient. The claim is its own two-variant
+type because the grouping key must not carry an extent beside the name: a type
+that does splits `Named("n", Some(4))` from `Named("n", None)`, which are one
+claim, so a program whose dimension is statically bound loses the guard
+between its two witnesses precisely when the extent is known. `DimClaim` also
+keeps the literal case distinct, which C2.4 needs because a literal claim is
+the canonical VALUE rather than a first member. A member carries the
+`AxisSource` that grouping read, so the quantity a guard compares is the one
+that put the member in the class; re-deriving it at emission would reintroduce
+the possibility of guarding a different value from the one grouped, which is
+the defect class this slice removes.
 
 - **C2.1 Exact representation invariant.** `inputs[0]` is the tensor operand.
   `RtDim::Node(i)` is an absolute slot in the same node's `inputs` with
@@ -299,7 +323,39 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   claim, a binder name or a literal, that the checker attached to more than
   one witness is one `RuntimeDimClass`, computed by
   `derive_runtime_dim_classes` from the DAG a lane consumes, after the last
-  rewrite, at the same point as `output_axis_sources` (C4.5). Grouping is by
+  rewrite, at the same point as `output_axis_sources` (C4.5). A claim's identity is the stamped name TOGETHER WITH THE SCOPE THAT
+  INTRODUCED IT. A binder is scoped to the signature that declares it, and
+  grouping by name alone identifies two extents that merely share a spelling
+  - the defect this slice removes from the backend walk, reappearing one
+  level up in the grouping. Measured: `rank_poly_tier3`'s
+  `named_axis_eval_parity_corners` declares `total(x: &tensor[seq, f32])` and
+  `use2(x: &tensor[batch, seq, f32])`, both lowered into one `__global__`
+  kernel, and grouping by name alone identified a 3-element axis with a
+  2-element one and trapped a correct program at run time.
+
+  The DAG does not carry signature scope, and `root_reach` approximates it by
+  reachability from the graph's results. The approximation is exact across
+  independent results. Under inlining it is unproved either way: a callee
+  inlined into one result might bring its binders with it, but two attempts to
+  construct that collision found call-site substitution (`k := m` at the call)
+  prevented it, so this section records the inlined case as untested rather
+  than as a known false positive. **It is also blind to an
+  interface witness no result reaches, whose claim forms no class and gets no
+  guard.** That contradicts `spec/04` §4.7, which exempts no parameter:
+  `f(x: tensor[n, f32], p: tensor[n, f32])` declares that `p`'s axis is `n`
+  whether or not the body reads `p`, and a caller passing a disagreeing `p`
+  has violated the signature. The requirement stands and this derivation
+  cannot honour it, because the only mechanism that separates same-named
+  claims across signatures - an unreached witness falling out of its class -
+  is the same mechanism that drops an unread one. A merged kernel is not
+  distinguishable from a single-signature one where scoping runs: the
+  measured parity kernel carries one explicit root, eight `Load`s and twelve
+  nodes. The gap is a residual owned by B2b, whose fix is scope carried on
+  the dimension itself; its instances are the two driven rows in
+  `crates/chelis-backend-c/tests/exec_compile.rs`, which now lock the weaker
+  consumed-witness property and say so.
+
+  Within one scope, grouping is by
   the stamped claim, which is the output of the typed identity proof (C1.2)
   and is what `symbolic_bindings` (`dag.rs:2283`) groups by today for names;
   a member is an output axis `(node, axis)` carrying the claim, and what
@@ -311,7 +367,29 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   inserts is a member whatever slot its `InputAxis` names, so a same-tensor
   read under a foreign claim ([#1376]) is guarded, while a same-tensor read
   under a proved identity costs no guard because C1.2's static proof leaves
-  no claim. A literal claim is the class's canonical value itself. A literal
+  no claim. A literal claim is the class's canonical value itself. Whether a
+  member owes a guard turns on PROVENANCE, the same axis section 4.7 uses to
+  place a guard at entry or at the introducing operation. A LOCAL member's
+  extent is produced by the compiler inside this function, so a resolved
+  static size on its own dim is the checker's proof: comparing the produced
+  value against the literal it was produced from can only catch a compiler
+  bug, and C2.4 already declines that for a literal claim matching a literal
+  size. An INTERFACE member's resolved size is a claim about what the caller
+  must pass and proves nothing, which is why [#1377]'s input axis is guarded
+  rather than exempted. That decision lives in the derivation and not in an
+  emitter: only the C emitter reads local sites today, so a second answer
+  elsewhere would be a latent divergence rather than a live one, and C2.7's
+  point is that it cannot become one.
+
+  A local site whose claim is neither resolved nor declared would have nothing
+  to compare against. Measured over 481 programs lifted from `crates/*/tests`:
+  319 emit C, all 319 compile under `clang -O2 -fsyntax-only`, and none
+  reports an undeclared identifier. The derivation's own reason is that a
+  `Name` class needs two members, and a class with no interface witness and no
+  op-declared witness has no site to declare from - so the case is unreachable
+  by construction rather than merely unobserved, and if it were ever reached
+  the emitter would name an undeclared identifier and fail the build loudly
+  rather than emit a wrong guard. A literal
   claim on an anonymous runtime extent (`-> tensor[8, f32]` over `expand(b,
   0, mul(shape(x, 0), 2i64))`) is therefore a class whose canonical value is
   the literal and whose one member is the scalar-sourced set axis, and a
@@ -330,10 +408,22 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
     iteration or display name. `spec/04` §4.7 decides the order the entry
     guards of a class with interface members run in, and gives an entry that
     declares no signature its ABI input-slot order;
-  - no guard is ever discharged: an all-interface class runs its guard at
-    entry regardless of data use, and a local member's producer is an
-    observable root under `spec/06` §5.2 because the guard can trap, so DCE
-    keeps every member's operands live;
+  - no guard is ever discharged, and the two member kinds reach that
+    differently. An INTERFACE witness (a `Load` axis a class groups) is an
+    observable root under `spec/06` §5.2 because its guard runs at entry
+    regardless of data use, so dead-code elimination keeps it live even when
+    nothing reads the tensor; without that its claim is left with one witness,
+    the class dissolves and the guard silently disappears, which is [#1376]'s
+    shape from the emitter's side. A LOCAL member needs no such forcing,
+    because its guard exists only if the operation introducing the extent is
+    in the DAG a lane consumes after the last rewrite (C4.5): a claim on a
+    dead local intermediate produces no guard, since the value it claims is
+    never produced, and a claim on a node a rewrite REPLACED re-forms on the
+    replacement's axis rather than keeping the replaced node alive. Forcing
+    local members live instead makes liveness circular - a dead node carrying
+    a claim becomes a member, and the membership then keeps it alive - which
+    resurrects the dense-product path that `specialize` has just replaced with
+    a `BlasMatmul`;
   - two classes may share a node, each with its own guard, and derivation
     yields one member per `(node, axis)`, so `splice_dag` mapping both
     parameters of `f(n, n)` to one `NodeId` (`lower.rs:7830-7838`) produces
@@ -380,10 +470,13 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
     at `lane_divergent` (the M1 abort stub) and stays there until [#1383]
     lands `expand` emission and symbolic-dim `Load` support under the
     Metal backend plan. This plan adds no Metal emission.
-  - Host path: a program the CLI routes to the host lane (evidence item 4:
-    host-rooted or root-free on HIP, root-free only on Metal) already
-    executes `Node` bounds through the C emitter, and those rows keep
-    executing.
+  - Host path on `build`: a program the CLI routes to the host lane
+    (evidence item 4: host-rooted or root-free on HIP, root-free only on
+    Metal) already executes `Node` bounds through the C emitter, and those
+    rows keep executing. This bullet is about the C-emitted host program and
+    says nothing about `chelis eval`, whose host lane is the interpreter in
+    `crates/chelis-compiler-api/src/runtime/eval.rs` and is treated in the
+    Slice B section below.
   - Wire: `Expand.size` changes from a display string to `WireRtDim`, which
     gains an `input_axis { tensor, axis }` variant; nothing is serialized
     for classes, since every consumer derives them from the names and
@@ -414,14 +507,15 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   decisions (only their wording changes under [#1367]), so
   every row keeps its `main` baseline through Slice A except the
   spec-conformance rows Slice A itself owns (zero extents, the `vmap` rule,
-  constructed results). Slice B deletes all of them in the same change that
-  places the guards on every lane and removes lowering's
-  `fallback_expand_type` override of the stamped result type
-  (`lower.rs:9139-9147`), so no intermediate commit may accept a value the
-  IR cannot carry or execute a claimed extent without its guard, and a row
-  `main` already executes without its guard ([#1374], [#1375], [#1376],
-  [#1377]) keeps that baseline, recorded as `silent_unguarded` or
-  `lane_divergent`, until that change. Slice B likewise replaces
+  constructed results). Slice B deletes all of them, and what the
+  invariant constrains is the order rather than the change boundary: the
+  guards land on every lane, and lowering's `fallback_expand_type` override
+  of the stamped result type (`lower.rs:9139-9147`) is removed, in a change
+  that precedes the one deleting the provenance walk, so no commit in either
+  may accept a value the IR cannot carry or execute a claimed extent without
+  its guard, and a row `main` already executes without its guard ([#1374],
+  [#1375], [#1376], [#1377]) keeps that baseline, recorded as
+  `silent_unguarded` or `lane_divergent`, until the guards land. Slice B likewise replaces
   `symbolic_occurrences`, `op_declared_output_axes`, and
   `shape_source_for_axis` with `output_axis_sources`, and
   `symbolic_bindings` with `derive_runtime_dim_classes`; a reshape `Sym`
@@ -788,6 +882,164 @@ two rejection sites, and, once nothing reads it, of `shape_deps`. Close
 and any residue of [#592]. [#1397]'s declared-result-dimension erasure closes
 here; its general wildcard-root boundary remains tracked by that issue and is
 not absorbed into this resolver.
+
+**The eval lane is two evaluators, and Slice B's eval guard reaches only one
+of them today.** `chelis eval` routes a `Lane::Tensor` root through
+`chelis_ir::eval` (`compiler.rs:2567`), which is where C1.3's eval placement
+and the class derivation live. It routes every other root through the host
+interpreter (`runtime/mod.rs:419`, `runtime/eval.rs:727 eval_app`), which
+applies a user `def` by interpreting its body directly, never consults the
+lowering map, and evaluates `expand`, `pad`, `shrink`, `stride` and `reshape`
+through direct implementations (`host_ops.rs:1425`, `1564`, `1617`, `1667`,
+`2150`) that build no DAG and, in `tensor_expand_host`'s own words, "have no
+access to user annotations". A `def main() = f(...)` program - the form of
+every [#1374], [#1376] and [#1377] reproducer - takes the second route. On that
+route the binders are recovered: `apply_resolved_callable_with_arg_types`
+(`runtime/eval.rs:1115`, chelis#1382) binds `n` and `m` from the actual
+argument shapes, and `eval_fn` (`runtime/eval.rs:678`) stores the declared
+result type on the closure. What the route lacks is the comparison: nothing
+checks the produced value's shape against that declared result, and the
+movement ops that produce it build no DAG, so no class is derived and no guard
+exists. That is why those rows are `silent_unguarded` on eval, and a guard
+placed in `chelis_ir::eval` alone leaves them so. No `.ch` form carrying a
+claim reaches the DAG evaluator through `chelis eval --file` today: a nullary
+def is an owed root the host applies (`realizability.rs:138-145`,
+`fn(nullary-root)`); a top-level binding or a def-free expression over
+`to_tensor` inputs is Host because `to_tensor` is `Realizability::HostOnly`
+(`builtins.rs:1480`) and the classification is transitive; and every
+reproducer's callee reads `shape(...)` in its `expand` size, which is
+`HostOnly` too (`builtins.rs:1260`; `realizability.rs:466-476`;
+`lower.rs:2749`), so the callee is Host under both the manifest's and the
+lowerer's classification. A claim-free `Universal`-only binding such as
+`x = insert(scalar_to_tensor(cast(1.0, f32)), 0, 2i64)` does manifest a
+`Lane::Tensor` root, so through the CLI the DAG evaluator serves claim-free
+tensor bindings only, and host-lane application is the primary eval path for
+user tensor code that carries a claim. The CLI supplies no input bindings for
+a parameterized tensor entry.
+
+This lands as its own pull request, **B2h**, after B2a and before B2b: B2a
+places the conforming guard in the DAG evaluator, which today has no guard at
+all for a cross-tensor `InputAxis` claim, and moves the C rows; B2h makes the
+host lane reach it and moves the eval rows, and B2h's pull request carries the
+routing-mechanism paragraph of this section, whose gate criterion its own
+measurement pins; B2b widens acceptance
+only once both guards are in place. B2h's claim is byte-identical `chelis
+eval` output for every program that evaluates today, proved by total capture
+over the executable corpus, plus the eval-lane rows of [#1374], [#1376] and
+[#1377] moving to `executes_exactly`.
+
+**Row ownership across the three pull requests.** The phase-b corpus carries
+one row per lane wherever a guard lands per lane, because B2a, B2h and B2b
+move different lanes at different times and a single-valued row cannot record
+one lane at its exit state while another waits. Three consequences are worth
+naming here rather than leaving to the corpus file:
+
+- [#1375] is `reshape.named_claim.node_target` alone. Both its lanes stay at
+  baseline and belong to a later pull request, B2r, after B2h: `reshape` is on
+  the shared kernel keep-list (`chelis-ir/src/host.rs`'s
+  `should_keep_tensor_expr_in_host_lane`), stale since Slice A gave reshape
+  targets their `RtDim` carrier, so a reshape-rooted def is emitted into the C
+  host program rather than lowered to a kernel and no class-derived guard
+  reaches it; B2h's routing is blocked on the same list for the eval lane. One
+  pull request therefore closes [#1375] on both lanes rather than two
+  half-moves.
+
+  `expand.foreign_claim.same_tensor_set_axis` is [#1376], not [#1375], and is
+  NOT part of that handover: it is the same-tensor `shape()` size under a
+  foreign named claim, its `.c` row moves with this slice's guards, and its
+  `.eval` row is B2h's like the other expand rows. An earlier revision of this
+  paragraph carried a mislabel from the corpus row's own comment; the two rows
+  differ in which operation roots the def, which is exactly what decides
+  whether a kernel exists to guard.
+- The `guard_order.effect_*` rows exist only on the eval lane. On C the
+  effect is not merely unorderable against a guard, it is ABSENT: a bound
+  `print` inside an `IO`-effect body emits no corresponding statement at all
+  (the string does not appear in the emitted translation unit), so a row
+  asserting that an effect runs before a guard would assert something the
+  lane never does at any guard placement. The trap-based controls cover both
+  ordering directions on C.
+- A row's receipt must name a test registered in the phase's targets before
+  that row may reach an exit state; receipts on rows still at a start state
+  are deliberately unchecked, so a receipt naming a not-yet-authored test is
+  a plan rather than a defect.
+
+- The three unit-source rows (`expand.positional.replacement.non_unit_source_static`
+  and `...non_unit_source_traps.{c,eval}`) stay at baseline and belong to
+  **S2b**, the pull request that implements the single-meaning `expand`. Once
+  `expand` is the broadcast primitive and the rank-increasing form has its own
+  name, the removal of lowering's `fallback_expand_type` override, the
+  unit-extent claim these rows assert, and the static literal-non-unit
+  rejection are all one change to the checker's single `expand` rule; splitting
+  them across two pull requests would put the guard and the widening it guards
+  in different changes, which C2.7 forbids. The `Literal(1)` claim machinery
+  they need is already in the class derivation.
+
+- **A CLI-rooted program is not the exported kernel, and three C rows turn on
+  that.** Measured at b2.4 against a current binary. `def main() = f(...)`
+  over literal tensors inlines `f` into the root: every extent becomes a
+  literal, the classes disappear, and a violation is a static type error
+  nobody raises rather than a runtime guard anything can observe. So C-lane
+  guard placement and rendering are proved by DRIVEN rows that compile the
+  exported kernel and call it with runtime inputs
+  (`crates/chelis-backend-c/tests/exec_compile.rs`), and the CLI file keeps
+  only the order controls, which need a caller. This is the same shape as the
+  eval-lane finding above: the lane that can observe the guard is not the lane
+  a `.ch` fixture reaches.
+
+  Three rows do not move with this slice's guards, for reasons upstream of
+  placement.
+
+  - [#1374] and [#1376] stay at baseline and belong to their own issues. In
+    both, the exported kernel does not contain the disagreement: nothing in
+    the body reads the parameter whose extent the result claims, so lowering
+    never passes it, and the checker had already unified the surviving
+    input's binder with the declared result's. What reaches the derivation is
+    a DAG whose claim and source are the same axis. The contract the issues
+    are about - the result matches the CALLER's argument - is erased before
+    any class exists, and restoring it means retaining that parameter or
+    rejecting the call, neither of which is Slice B's.
+  - [#1377]'s `.c` row is `lane_divergent` and splits. The runtime half moves
+    with this slice: the exported kernel traps at entry under [04-NUM-9], and
+    the input preamble's static-dim check, which emitted the identical
+    comparison and aborted first, is narrowed away for exactly that overlap.
+    The rooted half is S2b's static rejection.
+  - [#665]'s `.c` row stays at `ice`. b2.3 routed the interface BINDING
+    consumers through the derived witnesses; `symbolic_occurrences` has a
+    second consumer it did not route, the C emitter's `runtime_dim_sites`,
+    which is the chelis#616 declare-or-guard map deciding where an
+    op-computed extent is DECLARED, and its bucket-4c sweep still panics. The
+    row closes with C4.4's declaration-consumer replacement, not with a guard.
+
+- **The `shrink.elementwise_const.build` row's remaining const case, sized but
+  not confirmed.** S2a's single-meaning `insert` makes an instance of [#1482]
+  reachable from source that the old spelling avoided: the failing node is a
+  synthesized `Const` with a rank-2 output whose second dim is anonymous with
+  no value, so `declared_shape_sources` yields one source for two axes and
+  codegen produces the registered receipt.
+
+  The fix is the smallest of the three candidates. `declared_shape_sources`
+  already yields a source for a `Named(_, None)` axis when the name is
+  non-anonymous OR the node carries a rank-matching `shape_dep`, returning
+  `None` only for an anonymous name with neither, so giving that const its
+  `shape_dep` at the lowering site turns it into a source with no change to
+  the derivation. It is not the derivation reading the const's folded value: a
+  `Const` is a scalar payload splatted to a shape, so its value carries no
+  extent and cannot supply one. It is not C4.4's declaration-by-axis-source
+  either, which names an extent the emitter already has rather than sourcing
+  an axis that has none. One site, and the same shape as [#1313]'s repair,
+  which removed the mechanism for ReLU rather than sourcing the const.
+
+  **Unconfirmed, and deliberately so.** `insert` does not exist on the branch
+  that sized this, the `expand` spelling of the witness builds cleanly there,
+  and [#1313] already removed ReLU's synthesized zero, so the const that
+  survives in the `insert` spelling was never observed. If its sibling is not
+  in scope at its lowering site the answer becomes "the checker must stamp the
+  extent", which is a different owner and a different size. The row does not
+  move on this estimate.
+
+  [#597]'s `.c` row likewise stays at baseline and belongs to S2b, with the
+  three unit-source rows below: it fails at lowering with a RANK mismatch,
+  which is `fallback_expand_type` having no replacement branch.
 
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant

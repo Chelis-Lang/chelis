@@ -64,6 +64,18 @@ pub enum AxisSource {
     /// The operation computes this extent by its own output-shape rule, so
     /// it is a fresh extent rather than any input's runtime dimension.
     OpComputed { op: NodeId, axis: usize },
+    /// The extent is supplied BY the claim this axis carries, rather than
+    /// determined by the operation: a `Const`'s declared named dimension, or
+    /// a chelis#616 sibling-shaped fill, is sized by whatever the class
+    /// resolves to.
+    ///
+    /// This kind exists because the axis is neither a witness of its claim
+    /// nor a fresh extent. Guarding it against the class's canonical member
+    /// would compare a value with itself, and calling it `OpComputed` says
+    /// the operation decided an extent it actually consumed - which is what
+    /// [`declared_shape_sources`] meant by "as far as this derivation is
+    /// concerned" before there was a kind for it.
+    ClassSupplied { op: NodeId, axis: usize },
 }
 
 /// An anonymous output dimension is not a referenceable symbol: nothing
@@ -199,7 +211,7 @@ fn declared_shape_sources(dag: &Dag, node: &DagNode) -> Vec<AxisSource> {
         .filter_map(|(axis, dim)| match dim {
             DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => Some(literal(*value)),
             DimInfo::Named(name, None) if !is_anonymous(name) || sibling_shaped => {
-                Some(AxisSource::OpComputed { op: node.id, axis })
+                Some(AxisSource::ClassSupplied { op: node.id, axis })
             }
             DimInfo::Named(_, None) => None,
         })
@@ -675,7 +687,12 @@ pub(crate) fn check_node_axis_sources(
                     ));
                 }
             }
-            AxisSource::OpComputed { op, axis: computed } => {
+            // `ClassSupplied` carries the same self-reference contract as
+            // `OpComputed`: both name this node and this axis, and differ
+            // only in whether the operation decided the extent or consumed
+            // one the claim supplies.
+            AxisSource::OpComputed { op, axis: computed }
+            | AxisSource::ClassSupplied { op, axis: computed } => {
                 if *op != node.id || *computed != axis {
                     return Err(receipt(
                         format!(
@@ -691,6 +708,605 @@ pub(crate) fn check_node_axis_sources(
         }
     }
     Ok(())
+}
+
+/// The stamped extent claim a class groups by.
+///
+/// Grouping is by the CLAIM, "which is the output of the typed identity proof
+/// (C1.2) and is what `symbolic_bindings` groups by today for names"
+/// (`spec/design/runtime_extents.md` C2.4). A [`DimInfo`] is the wrong key
+/// because `Named("n", Some(4))` and `Named("n", None)` are one claim and a
+/// bare `Lit(4)` is a different one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DimClaim {
+    /// A binder name, whether or not its extent is also statically known.
+    Name(String),
+    /// A literal extent. "A literal claim is the class's canonical value
+    /// itself" (C2.4), so a literal class guards every member against the
+    /// literal rather than against a first member.
+    Literal(usize),
+}
+
+/// One output axis carrying a class's claim.
+///
+/// `source` is the axis's [`output_axis_sources`] entry, carried rather than
+/// re-derived: the guard emitters need it to build the comparison expression,
+/// and re-deriving per member at emission would let the value a guard compares
+/// disagree with the source that grouping saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassMember {
+    pub node: NodeId,
+    pub axis: usize,
+    pub source: AxisSource,
+}
+
+/// Where C1.3 places a class's guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardPlacement {
+    /// Every operand is an interface value, so the guard runs at function
+    /// entry in assigned-slot order, before any other operation of the
+    /// function (`spec/04-type-system.md` section 4.7).
+    Entry,
+    /// At least one operand is locally computed, so the guard takes the
+    /// source position of the operation that introduces the guarded extent.
+    Local,
+}
+
+/// One derived runtime-dimension equality class.
+///
+/// Derived, never stored: computed from the DAG a lane consumes, after the
+/// last rewrite, at the same point as [`output_axis_sources`] (C4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDimClass {
+    pub claim: DimClaim,
+    /// The output axes carrying the claim. For a [`DimClaim::Name`] the first
+    /// member is canonical and every later member is one equality guard
+    /// against it; for a [`DimClaim::Literal`] the literal is the canonical
+    /// value and every member is one guard against it.
+    pub members: Vec<ClassMember>,
+}
+
+/// The `Load` whose axis this operand names, and that axis, when the operand
+/// is an input tensor's axis at all.
+///
+/// `spec/04-type-system.md` section 4.7 lists "an input tensor's axis" as an
+/// interface value, and the DAG spells one two ways: a `Load`'s own output
+/// axis, recorded as [`AxisSource::ExternalAxis`], and a folded
+/// `shape(t, k)` read of that same tensor, recorded as
+/// [`AxisSource::InputAxis`]. `spec/05` section 2.4.1 admits the second as an
+/// extent read "directly from that tensor's shape metadata", so the two are
+/// one category and every consumer asking "is this operand an input tensor's
+/// axis" must accept both.
+///
+/// Three consumers ask it - guard placement, the interface bindings the C and
+/// HIP prologues declare and guard from, and the C emitter's entry sites - and
+/// they ask it HERE so they cannot drift. Answering it separately at each site
+/// is what produced four instances of one defect: `placement` classified a
+/// folded read as local, then `symbolic_bindings_interface` dropped the
+/// declaration for a name whose only interface witness is a folded read,
+/// which stopped the emitted C compiling.
+///
+/// "A `cast` takes the placement of the value it casts" (section 4.7, same
+/// paragraph), so the walk looks through `Cast`/`CastTrunc` to the value cast:
+/// an `int32` parameter reaching an extent through `cast(m, int64)` lands its
+/// carrier at the Cast, not at the `Load`, and classifying by the immediate
+/// producer would place one claim two ways depending on a width conversion.
+/// The walk is bounded by the node count, so a malformed graph cannot spin.
+///
+/// `None` means the operand is not an input tensor's axis: a computed
+/// producer, an extent an operation computes, or a literal.
+pub fn member_load_axis(dag: &Dag, member: &ClassMember) -> Option<(NodeId, usize)> {
+    match member.source {
+        AxisSource::ExternalAxis { load, axis } => {
+            matches!(dag.get(load)?.op, RiscOp::Load { .. }).then_some((load, axis))
+        }
+        AxisSource::InputAxis { input, axis } => {
+            let RtAxis::Lit(read_axis) = axis;
+            let load = load_through_casts(dag, member.node, input)?;
+            Some((load, read_axis as usize))
+        }
+        _ => None,
+    }
+}
+
+/// The `Load` reachable from `node`'s input `slot` through zero or more
+/// width conversions, if any. Shared by [`member_load_axis`] and by
+/// `RuntimeDimClass::placement`'s `ScalarInput` arm, which asks the same
+/// question of a scalar rather than of an axis.
+pub(crate) fn load_through_casts(dag: &Dag, node: NodeId, slot: usize) -> Option<NodeId> {
+    let mut current = *dag.get(node)?.inputs.get(slot)?;
+    for _ in 0..dag.nodes().len() {
+        let producer = dag.get(current)?;
+        match producer.op {
+            RiscOp::Load { .. } => return Some(current),
+            RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {
+                current = *producer.inputs.first()?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+impl RuntimeDimClass {
+    /// C1.3's placement for this class.
+    ///
+    /// `spec/04-type-system.md` section 4.7: "A guard whose operands are all
+    /// interface values (an input tensor's axis, a scalar parameter, or a
+    /// literal) is evaluated at function entry". Every other class compares
+    /// at least one locally computed value and takes the source position of
+    /// the operation that introduces the guarded extent.
+    pub fn placement(&self, dag: &Dag) -> GuardPlacement {
+        // Section 4.7 keys on the guard's OPERANDS, not on whether the axis
+        // belongs to a `Load`: "a guard whose operands are all interface
+        // values (an input tensor's axis, a scalar parameter, or a literal)
+        // is evaluated at function entry", against "a guard that compares a
+        // locally computed value (checked integer arithmetic, a
+        // user-function result, or an extent an operation computes)".
+        //
+        // So a folded `shape(y, k)` read is an INTERFACE value: `spec/05`
+        // section 2.4.1 admits `InputAxis` as an `expand` extent read
+        // "directly from that tensor's shape metadata", so the quantity the
+        // guard compares is an input tensor's axis, exactly the first item in
+        // section 4.7's list. Treating only `ExternalAxis` as interface
+        // confused "is this axis a `Load`'s own" with "is this operand an
+        // input's axis", and made every folded cross-tensor read a local
+        // guard.
+        // `ScalarInput` straddles section 4.7's line: it records only WHICH
+        // SLOT holds the extent, and that slot is either a scalar PARAMETER
+        // (interface) or the arithmetic that produced one (locally computed).
+        // The DAG keeps the difference - the slot names a node and that node
+        // has an op - so this is decided by reading it, not by adding a
+        // second representation to carry it.
+        // A slot holds an interface value only when its producer is a `Load`.
+        // Section 4.7's list says "an input TENSOR's axis" and "a scalar
+        // PARAMETER": a folded read of a COMPUTED tensor's axis, like a
+        // computed scalar, does not exist until its producer runs, so its
+        // guard cannot be evaluated at entry "before any other operation of
+        // the function".
+        // "A `cast` takes the placement of the value it casts" (section 4.7,
+        // the same paragraph as the interface list). A cast is how a scalar
+        // parameter of the wrong width reaches an extent - an `int32`
+        // parameter `m` in `reshape(x, [cast(m, int64)])` lands its
+        // `RtDim::Node` at the Cast, not at the `Load` - so classifying by
+        // the slot's IMMEDIATE producer would place the same claim two
+        // different ways depending on a width conversion. Look through the
+        // cast to the value cast: a cast of a parameter is interface, a cast
+        // of arithmetic is local.
+        //
+        // The walk is bounded by the node count, so a malformed graph cannot
+        // spin here.
+        let interface = |member: &ClassMember| match member.source {
+            AxisSource::Literal { .. } => true,
+            AxisSource::ExternalAxis { .. } | AxisSource::InputAxis { .. } => {
+                member_load_axis(dag, member).is_some()
+            }
+            // `ScalarInput` asks the same question of a scalar rather than of
+            // an axis, so it shares the walk but not the axis it resolves to.
+            AxisSource::ScalarInput { input } => {
+                load_through_casts(dag, member.node, input).is_some()
+            }
+            AxisSource::OpComputed { .. } | AxisSource::ClassSupplied { .. } => false,
+        };
+        if self.members.iter().all(interface) {
+            GuardPlacement::Entry
+        } else {
+            GuardPlacement::Local
+        }
+    }
+}
+
+/// The ABI input slot of each `Load` name, assigned by first occurrence in
+/// node order.
+///
+/// This is the key `spec/04-type-system.md` section 4.7 names: "an entry that
+/// declares no signature orders those guards by its ABI input-slot order
+/// instead", closing with "Whatever rule assigns the slots, the guard order
+/// follows the assigned slots, and never a separate traversal by binding
+/// name, hash iteration, or node identity."
+///
+/// Both lowering paths land on this one key. `lower_fn` registers parameter
+/// `Load`s in declared order, so first occurrence IS declared signature
+/// order there; the subexpression path pre-creates them in a deliberately
+/// name-sorted order and declares no signature, so the ABI branch governs and
+/// that order is the assigned one. It is also exactly what the C emitter's
+/// `input_labels` assigns, so a guard's order here and its slot there cannot
+/// disagree.
+fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
+    let name = match &dag.get(load)?.op {
+        RiscOp::Load { name } => name.as_str(),
+        _ => return None,
+    };
+    let mut slot = 0usize;
+    let mut seen: Vec<&str> = Vec::new();
+    for node in dag.nodes() {
+        if let RiscOp::Load { name: other } = &node.op {
+            if other.as_str() == name {
+                return Some(slot);
+            }
+            if !seen.contains(&other.as_str()) {
+                seen.push(other.as_str());
+                slot += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The claim stamped on one output axis, or `None` when the axis carries no
+/// referenceable claim.
+///
+/// An ANONYMOUS dimension is not a claim: nothing renders it, distinct
+/// runtime extents share the spelling, and grouping by it would identify
+/// unrelated axes, which is the string-matching defect this module removes.
+fn axis_claim(dim: &DimInfo) -> Option<DimClaim> {
+    match dim {
+        DimInfo::Lit(value) => Some(DimClaim::Literal(*value)),
+        DimInfo::Named(name, _) if !is_anonymous(name) => Some(DimClaim::Name(name.clone())),
+        DimInfo::Named(_, _) => None,
+    }
+}
+
+/// Whether the operation SETS this output axis rather than forwarding an
+/// input axis through it.
+///
+/// C2.4: "Only an output axis that C4.2 maps to an unchanged input axis is
+/// pass-through and not a member; the axis an operation sets or inserts is a
+/// member whatever slot its `InputAxis` names."
+///
+/// A set axis and a pass-through axis can both carry `AxisSource::InputAxis`,
+/// because a folded `shape()` read is exactly "this axis's extent is that
+/// tensor's axis". They are distinguished here rather than by inspecting the
+/// variant, and the match is deliberately small: `Expand` and `Reshape` are
+/// the only owners whose `RtDim` may be `InputAxis` (C1.7's owner matrix), so
+/// every other `InputAxis` source is a forwarded axis.
+fn sets_axis(op: &RiscOp, axis: usize) -> bool {
+    match op {
+        RiscOp::Expand { axis: set, .. } => axis == *set,
+        // A `Reshape` target mints a fresh extent only when it computes one.
+        // C4.2 lists the four target carriers, and C2.4 says a reshape-only
+        // `Sym` target "keeps binding to its class's canonical value exactly
+        // as it does today" - it RESTATES a symbol declared elsewhere rather
+        // than declaring one, so it is no more a witness than a passed-through
+        // axis. A `Lit` target is static and equally not a witness.
+        RiscOp::Reshape { new_shape } => matches!(
+            new_shape.get(axis),
+            Some(RtDim::Node(_) | RtDim::InputAxis { .. })
+        ),
+        _ => false,
+    }
+}
+
+/// Whether this axis is a member of its claim's class.
+///
+/// Three rules, each from a normative sentence:
+///
+/// - A pass-through axis is not a member (C2.4, above). Its extent IS the
+///   input's, so there is nothing to compare.
+/// - An axis whose source is the literal its claim states is statically
+///   proved, and section 4.7.2 conditions the guard on a claim "that is not
+///   statically proven equal to `size`". No claim survives, so no member.
+/// - Under a LITERAL claim an external `Load` axis is not a member. A
+///   declared literal input extent is validated against the caller at the C
+///   ABI boundary by the input shape preamble, which is a different
+///   obligation from an extent class and covers programs containing no
+///   runtime extent at all. Treating it as a member would mint a class for
+///   every literal-shaped input.
+fn is_member(op: &RiscOp, axis: usize, claim: &DimClaim, source: &AxisSource) -> bool {
+    match source {
+        AxisSource::InputAxis { .. } if !sets_axis(op, axis) => false,
+        AxisSource::Literal { value } => !matches!(
+            claim,
+            DimClaim::Literal(claimed) if i64::try_from(*claimed) == Ok(*value)
+        ),
+        AxisSource::ExternalAxis { .. } => matches!(claim, DimClaim::Name(_)),
+        // Sized by the claim, so there is nothing to compare it against.
+        AxisSource::ClassSupplied { .. } => false,
+        _ => true,
+    }
+}
+
+/// Every stamped claim witness in `dag`, before the guard rule filters it.
+///
+/// [`derive_runtime_dim_classes`] is this list filtered to the claims that owe
+/// a guard. Consumers that need the DECLARATION rather than the guard - the C
+/// prologue's `int64_t n = inputs[s]->shape[a];`, `symbolic_params`, and
+/// `bind_symbolic_dims`' exemption - need the unfiltered list, because a claim
+/// with one witness still has to be declared even though it has nothing to
+/// disagree with.
+///
+/// Unlike [`derive_runtime_dim_classes`] this keeps a name whose extent is
+/// already statically bound, since the legacy occurrence pass distinguishes
+/// `Named(n, None)` from `Named(n, Some(k))` and the C prologue declares only
+/// the former.
+/// Which scope each node belongs to, as one bit-set per node.
+///
+/// C2.4: a claim's identity is the name TOGETHER WITH the scope that
+/// introduced it. A binder is scoped to the signature that declares it, and
+/// the DAG carries that scope only sometimes.
+///
+/// A kernel lowered from ONE signature has exactly one scope, and every
+/// interface witness belongs to it regardless of data use, because there is
+/// nothing else it could belong to. `spec/04-type-system.md` section 4.7's
+/// guard checks that a declared extent agrees with the value observed, and a
+/// signature declaring `f(x: tensor[n, f32], p: tensor[n, f32])` is violated
+/// by a caller whose `p` disagrees whether or not the body reads `p`.
+///
+/// A MERGED kernel - the `__global__` top-level kind, where independent
+/// top-level results are lowered into one function - does not carry that
+/// scope: two signatures' binders coexist in it, and grouping by name alone
+/// identifies extents from different signatures. Root reachability
+/// approximates the scope there. It is exact across independent results,
+/// approximate under inlining, since a callee inlined into one result brings
+/// its binders with it, and blind to an interface witness no result reaches,
+/// which forms no class; that last case is a recorded residual.
+///
+/// **The two are NOT told apart, and that is the shipped limit.** Measured:
+/// the merged kernel `named_axis__global__tensor_2` reports one explicit
+/// root, eight `Load`s and twelve nodes, so by result count it is identical
+/// to a single-signature kernel. Every discriminator the graph offers puts it
+/// on the single-signature side, and the mechanism that does separate its two
+/// `seq` claims - reachability leaving an unreached witness with an empty
+/// scope - is the same mechanism that drops an interface witness no operation
+/// reads. They are one rule seen from two sides, so this derivation cannot
+/// honour section 4.7's "regardless of data use" for an unread witness and
+/// separate two signatures at the same time.
+///
+/// Reachability is therefore applied everywhere. `Name` claims group among
+/// root-reachable witnesses only, and a claim whose witness no result reaches
+/// forms no class. That gap is a recorded residual, owned by B2b, whose fix
+/// is scope carried on the dimension; the alternative traps correct programs,
+/// which is the one thing this slice must not ship.
+fn root_reach(dag: &Dag) -> Vec<u128> {
+    // A DAG that declares no results carries no result-scoping information,
+    // so it is ONE scope - the behavior every caller had before scoping
+    // existed. Widening a class rather than splitting it is the conservative
+    // direction: the derivation can then only guard more, never silently
+    // guard less.
+    //
+    // Measured, and it is why there is no sink-based fallback here: every
+    // kernel the C emitter lowers carries an explicit root, including the
+    // merged `__global__` one this scoping exists for
+    // (`named_axis__global__tensor_2`: one root, eight `Load`s, twelve
+    // nodes), and the eval lane passes its roots explicitly. Inventing
+    // "results" from sinks for a graph that declares none only reaches
+    // hand-built fixtures, where it split classes the fixture meant as one
+    // signature.
+    let results = dag.roots();
+    if results.is_empty() || results.len() > 128 {
+        return vec![u128::MAX; dag.len()];
+    }
+    let mut reach = vec![0u128; dag.len()];
+    for (index, result) in results.iter().enumerate() {
+        let bit = 1u128 << index;
+        let mut stack = vec![*result];
+        while let Some(id) = stack.pop() {
+            let Some(slot) = reach.get_mut(id.0) else {
+                continue;
+            };
+            if *slot & bit != 0 {
+                continue;
+            }
+            *slot |= bit;
+            if let Some(node) = dag.get(id) {
+                stack.extend(node.inputs.iter().copied());
+                stack.extend(node.shape_deps.iter().copied());
+            }
+        }
+    }
+    reach
+}
+
+/// Split each claim's members by SCOPE, so a name spelled by two signatures
+/// becomes two claims rather than one class.
+///
+/// Two members belong to one scope when their root reach overlaps, and the
+/// merge is transitive so an A-B-C chain stays one scope. This is the ONE
+/// implementation of C2.4's scoping: both `derive_dim_witnesses`, which the C
+/// and HIP prologues read, and `derive_runtime_dim_classes`, which the entry
+/// and local guard sites and the eval lane read, call it. Round 2 found the
+/// scoping applied to the first and not the second, which is two derivations
+/// that can disagree - the defect class this slice exists to remove, in the
+/// slice's own code.
+///
+/// Measured on `rank_poly_tier3::named_axis_eval_parity_corners`, where
+/// `total(x: &tensor[seq, f32])` and `use2(x: &tensor[batch, seq, f32])` are
+/// merged into one global kernel: grouping by name alone identified a
+/// 3-element axis with a 2-element one and made a correct program trap.
+fn split_by_scope(
+    dag: &Dag,
+    grouped: Vec<(DimClaim, Vec<OrderedMember>)>,
+) -> Vec<(DimClaim, Vec<OrderedMember>)> {
+    let reach = root_reach(dag);
+    grouped
+        .into_iter()
+        .flat_map(|(claim, members)| {
+            let mut buckets: Vec<(u128, Vec<OrderedMember>)> = Vec::new();
+            for entry in members {
+                let mask = reach.get(entry.node).copied().unwrap_or(u128::MAX);
+                let mut merged: Vec<OrderedMember> = vec![entry];
+                let mut merged_mask = mask;
+                buckets.retain_mut(|(bucket_mask, bucket)| {
+                    if *bucket_mask & merged_mask != 0 {
+                        merged_mask |= *bucket_mask;
+                        merged.append(bucket);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                buckets.push((merged_mask, merged));
+            }
+            buckets
+                .into_iter()
+                .map(move |(_, members)| (claim.clone(), members))
+        })
+        .collect()
+}
+
+pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
+    let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
+    for node in dag.nodes() {
+        let sources = output_axis_sources(dag, node.id);
+        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+            let DimInfo::Named(name, None) = dim else {
+                continue;
+            };
+            if is_anonymous(name) {
+                continue;
+            }
+            let Some(source) = sources.get(axis) else {
+                continue;
+            };
+            // A pass-through axis is not a witness: its extent IS the input's,
+            // so it neither declares nor disagrees. Same rule as `is_member`;
+            // the two derivations differ only in the guard filter and in
+            // whether a statically bound name counts.
+            if matches!(source, AxisSource::InputAxis { .. }) && !sets_axis(&node.op, axis) {
+                continue;
+            }
+            // An axis sized BY the claim consumes it rather than witnessing
+            // it, so it is neither a declaration site nor a guard site. The
+            // rule is on the SOURCE kind, so "what is a witness" is decided in
+            // one place rather than by a second list of operations.
+            if matches!(source, AxisSource::ClassSupplied { .. }) {
+                continue;
+            }
+            let claim = DimClaim::Name(name.clone());
+            let entry = OrderedMember {
+                slot: match source {
+                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
+                    _ => None,
+                },
+                node: node.id.0,
+                member: ClassMember {
+                    node: node.id,
+                    axis,
+                    source: source.clone(),
+                },
+            };
+            match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
+                Some((_, members)) => members.push(entry),
+                None => grouped.push((claim, vec![entry])),
+            }
+        }
+    }
+    let scoped = split_by_scope(dag, grouped);
+    let mut out: Vec<(OrderKey, RuntimeDimClass)> = scoped
+        .into_iter()
+        .map(|(claim, mut members)| {
+            members.sort_by_key(OrderedMember::key);
+            let order = members[0].key();
+            (
+                order,
+                RuntimeDimClass {
+                    claim,
+                    members: members.into_iter().map(|entry| entry.member).collect(),
+                },
+            )
+        })
+        .collect();
+    out.sort_by_key(|(order, _)| *order);
+    out.into_iter().map(|(_, class)| class).collect()
+}
+
+/// The equality classes of `dag`, in guard-evaluation order.
+///
+/// Derived, never stored (C4.5): computed from the DAG a lane actually
+/// consumes, after the last rewrite, at the same point as
+/// [`output_axis_sources`], so a stale [`NodeId`] cannot outlive a mutation.
+///
+/// A `Name` class needs at least two members, because one witness has nothing
+/// to disagree with. A `Literal` class needs only one: C2.4 makes the literal
+/// the canonical VALUE rather than a first member, so a single runtime-sourced
+/// axis claiming a literal already owes a guard.
+/// The sort key C2.4 rule 1 defines: interface members before local ones,
+/// interface members by assigned ABI input slot, every remaining tie by node
+/// position.
+type OrderKey = (bool, Option<usize>, usize);
+
+/// A member together with the key that orders it.
+///
+/// `slot` is the declaring `Load`'s assigned ABI input slot for an interface
+/// member and `None` for a local one, so sorting on `(slot.is_none(), slot,
+/// node)` puts every interface member ahead of every local one, orders the
+/// interface group by assigned slot, and breaks every remaining tie by node
+/// position. That is C2.4 rule 1 in one key.
+struct OrderedMember {
+    slot: Option<usize>,
+    node: usize,
+    member: ClassMember,
+}
+
+impl OrderedMember {
+    fn key(&self) -> OrderKey {
+        (self.slot.is_none(), self.slot, self.node)
+    }
+}
+
+pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
+    let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
+
+    for node in dag.nodes() {
+        let sources = output_axis_sources(dag, node.id);
+        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+            let Some(claim) = axis_claim(dim) else {
+                continue;
+            };
+            // A cardinality failure is `check_axis_sources`' typed receipt to
+            // report (C4.1), not this derivation's to guess at.
+            let Some(source) = sources.get(axis) else {
+                continue;
+            };
+            if !is_member(&node.op, axis, &claim, source) {
+                continue;
+            }
+            let entry = OrderedMember {
+                slot: match source {
+                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
+                    _ => None,
+                },
+                node: node.id.0,
+                member: ClassMember {
+                    node: node.id,
+                    axis,
+                    source: source.clone(),
+                },
+            };
+            match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
+                Some((_, members)) => members.push(entry),
+                None => grouped.push((claim, vec![entry])),
+            }
+        }
+    }
+
+    let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
+    for (claim, mut members) in split_by_scope(dag, grouped) {
+        members.sort_by_key(OrderedMember::key);
+        // A `Name` class needs two witnesses: one has nothing to disagree
+        // with. A `Literal` class needs one, because C2.4 makes the literal
+        // the canonical VALUE rather than a first member, so a single
+        // runtime-sourced axis claiming a literal already owes a guard.
+        let needed = match claim {
+            DimClaim::Name(_) => 2,
+            DimClaim::Literal(_) => 1,
+        };
+        if members.len() < needed {
+            continue;
+        }
+        let order = members[0].key();
+        classes.push((
+            order,
+            RuntimeDimClass {
+                claim,
+                members: members.into_iter().map(|entry| entry.member).collect(),
+            },
+        ));
+    }
+    // Classes run in their canonical members' order, so an all-interface
+    // class's entry guards fire in assigned-slot order.
+    classes.sort_by_key(|(order, _)| *order);
+    classes.into_iter().map(|(_, class)| class).collect()
 }
 
 #[cfg(test)]
@@ -927,8 +1543,8 @@ mod tests {
         dag.add_shape_dep(mask, sibling);
         assert_eq!(
             output_axis_sources(&dag, mask),
-            vec![AxisSource::OpComputed { op: mask, axis: 0 }],
-            "the recorded sibling relation supplies the axis"
+            vec![AxisSource::ClassSupplied { op: mask, axis: 0 }],
+            "the recorded sibling relation SUPPLIES the axis, so it is              class-supplied rather than computed by this node"
         );
     }
 

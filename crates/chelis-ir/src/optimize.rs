@@ -223,6 +223,37 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeI
         }
     }
 
+    // chelis#1277 C2.4 rule 2: no guard is ever discharged. An INTERFACE
+    // witness - a `Load` axis a class groups - is an observable root, because
+    // the guard comparing it can trap and a trap is an observation under
+    // `spec/06` section 5.2. Without this a witness read by nothing is
+    // dropped, its claim is left with one witness, the class dissolves and
+    // the guard silently disappears, which is chelis#1374's shape.
+    //
+    // Two bounds keep this from resurrecting dead computation. It runs AFTER
+    // ordinary liveness, and it force-keeps only members whose source is an
+    // external axis. A LOCAL member is the operation introducing the extent:
+    // if that operation is dead, no lane emits its guard, and C4.5 derives
+    // classes "from the DAG a lane consumes, after the last rewrite" - a node
+    // a rewrite has replaced is not in that graph. Forcing local members live
+    // made the liveness circular, since a dead `Expand` carrying a claim
+    // became a member and the membership then kept it alive; that resurrected
+    // the dense product path specialization had just replaced with a
+    // `BlasMatmul`.
+    let mut extra = Vec::new();
+    for class in crate::axis_sources::derive_runtime_dim_classes(dag) {
+        for member in &class.members {
+            if let crate::axis_sources::AxisSource::ExternalAxis { load, .. } = member.source
+                && !live[load.0]
+            {
+                extra.push(load);
+            }
+        }
+    }
+    for load in extra {
+        live[load.0] = true;
+    }
+
     // Rebuild with only live nodes, remapping IDs.
     let mut new_dag = Dag::new();
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();

@@ -2324,6 +2324,63 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
     }
 }
 
+/// The INTERFACE bindings: one per claim with an external witness, canonical
+/// first, in assigned ABI input-slot order.
+///
+/// This is the declaration and entry-guard set, derived from
+/// [`crate::axis_sources::derive_dim_witnesses`] rather than recovered by
+/// walking for a `Load` that carries a matching string. Consumers that read
+/// only interface witnesses - the C and HIP prologues, which declare
+/// `int64_t n = inputs[s]->shape[a];` and guard each further witness at
+/// entry, and [`symbolic_params`], which reports what a caller must supply -
+/// read this.
+///
+/// The local half, an extent an operation computes at run time, is still
+/// [`symbolic_occurrences`]' to report until Slice B's guard commit places
+/// those guards at their introducing operations. Each consumer therefore
+/// reads one derivation or the other, never a mixture: two derivations that
+/// can disagree is the defect this work removes.
+///
+/// `spec/04-type-system.md` section 4.7 decides the order: "Whatever rule
+/// assigns the slots, the guard order follows the assigned slots, and never a
+/// separate traversal by binding name, hash iteration, or node identity."
+pub fn symbolic_bindings_interface(dag: &Dag) -> Vec<SymbolicDimBinding> {
+    crate::axis_sources::derive_dim_witnesses(dag)
+        .into_iter()
+        .filter_map(|class| {
+            let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+                return None;
+            };
+            // Both spellings of "an input tensor's axis" bind here, through
+            // the one predicate that answers it. Accepting only the `Load`'s
+            // own axis dropped the DECLARATION for a name whose sole
+            // interface witness is a folded `shape(t, k)` read - measured on
+            // chelis#631's avgpool program, where `main` declares
+            // `int64_t _anon_dim_1_0 = chelis_tensor_shape(inputs[0], 1);`
+            // beside the Load's own `_anon_dim_0_1` from the same axis, and
+            // the emitted C stopped compiling without it.
+            let mut occurrences = class
+                .members
+                .iter()
+                .filter_map(|member| {
+                    let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+                    let RiscOp::Load { name: label } = &dag.get(load)?.op else {
+                        return None;
+                    };
+                    Some(SymbolicDimOccurrence::load(&name, label.as_str(), axis))
+                })
+                .collect::<Vec<_>>()
+                .into_iter();
+            let canonical = occurrences.next()?;
+            Some(SymbolicDimBinding {
+                name,
+                canonical,
+                others: occurrences.collect(),
+            })
+        })
+        .collect()
+}
+
 pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
     let mut grouped = std::collections::BTreeMap::<String, Vec<SymbolicDimOccurrence>>::new();
     for occurrence in symbolic_occurrences(dag) {
@@ -2357,10 +2414,17 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
 /// shape metadata. chelis#616: op-declared dims are computed at run time by
 /// their owning op and are deliberately excluded; they are not parameters.
 pub fn symbolic_params(dag: &Dag) -> Vec<String> {
-    symbolic_bindings(dag)
+    // Deduplicated by NAME, because C2.4's scope split is about which axes are
+    // guarded together and not about how many parameters a caller supplies.
+    // One binder spelled once in a signature is one parameter however many
+    // scopes the derivation finds it in; without this a merged kernel
+    // published `["batch", "batch"]`.
+    let mut seen = std::collections::BTreeSet::new();
+    symbolic_bindings_interface(dag)
         .into_iter()
         .filter(|binding| matches!(binding.canonical.source, SymbolicDimSource::Load { .. }))
         .map(|binding| binding.name)
+        .filter(|name| seen.insert(name.clone()))
         .collect()
 }
 

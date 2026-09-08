@@ -733,7 +733,7 @@ impl HipEmitter {
             }
         }
 
-        for binding in dag.symbolic_bindings() {
+        for binding in dag.symbolic_bindings_interface() {
             let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
             let canonical_slot = input_slots[canonical_label];
             // `binding.name` flows into format-string context; sanitize.
@@ -846,7 +846,7 @@ impl HipEmitter {
             }
         }
 
-        for binding in dag.symbolic_bindings() {
+        for binding in dag.symbolic_bindings_interface() {
             let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
             let canonical_slot = input_slots[canonical_label];
             let binding_name_fmt =

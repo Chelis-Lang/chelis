@@ -103,7 +103,9 @@ use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
-use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding, SymbolicDimOccurrence};
+use crate::dag::{
+    Dag, DagNode, DimInfo, NodeId, RiscOp, SymbolicDimBinding, SymbolicDimOccurrence,
+};
 use crate::host::{
     ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
     ConcreteHostProgram, HostFunctionOrigin, HostFunctionSpecialization, HostTensorHelper,
@@ -124,6 +126,48 @@ mod verify;
 
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
+
+/// Whether a class member's own output dim carries an extent the checker
+/// already resolved.
+///
+/// For a LOCAL member that is the compiler's own proof: the extent is produced
+/// inside this function and the resolved size is what it was produced to be.
+/// For an INTERFACE member it is a claim about what the caller must pass and
+/// proves nothing, which is why `chelis#1377`'s input axis is guarded rather
+/// than exempted. `placement` is a property of the whole CLASS, so its
+/// `Local` verdict does not establish that a given member is local; callers
+/// pair this with `member_load_axis` to ask that per member.
+fn member_dim_is_statically_resolved(dag: &Dag, member: &crate::axis_sources::ClassMember) -> bool {
+    matches!(
+        dag.get(member.node)
+            .and_then(|node| node.output_type.dims.get(member.axis)),
+        Some(DimInfo::Named(_, Some(_))) | Some(DimInfo::Lit(_))
+    )
+}
+
+/// A local guard's position: the node that introduces the extent, and the
+/// output axis carrying the claim.
+pub type LocalGuardSite = (usize, usize);
+
+/// What a local guard reports and what it compares against.
+///
+/// `operand` is the class's canonical VALUE, which is the claim's binder name
+/// where the lane declares one and the literal the checker resolved the claim
+/// to otherwise. Keying the comparison on the resolved value rather than on
+/// whether a C variable happens to exist keeps the derivation the authority:
+/// a claim resolved to a literal over a RUNTIME read still owes the
+/// comparison `spec/04-type-system.md` section 4.7 requires between the
+/// claimed extent and the value actually observed, and the entry path already
+/// emits exactly that for a `Literal` claim (chelis#1377).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalGuardClaim {
+    /// The claim as reported in the guard's context line.
+    pub claim: String,
+    /// The C expression the observed extent is compared against.
+    pub operand: String,
+    /// The operation [04-NUM-9]'s `<op>` slot names.
+    pub op: &'static str,
+}
 
 /// Immutable cursor over the exact verified DAG payload. The raw [`Dag`]
 /// remains private so a backend can inspect only the payload whose ownership
@@ -165,6 +209,143 @@ impl<'a> VerifiedDagView<'a> {
 
     pub fn symbolic_bindings(self) -> Vec<SymbolicDimBinding> {
         crate::dag::symbolic_bindings(self.dag)
+    }
+
+    /// The INTERFACE bindings: the declaration and entry-guard set, derived
+    /// from the class witnesses rather than recovered by walking for a `Load`
+    /// that carries a matching string (chelis#1277).
+    pub fn symbolic_bindings_interface(self) -> Vec<SymbolicDimBinding> {
+        crate::dag::symbolic_bindings_interface(self.dag)
+    }
+
+    /// The runtime-dimension equality classes whose guards `spec/04` section
+    /// 4.7 places at function ENTRY, because every operand they compare is an
+    /// interface value.
+    ///
+    /// The view answers the placement question rather than handing out the
+    /// graph. Placement has to resolve a slot's producer to decide whether an
+    /// operand is an input tensor's axis, a scalar parameter, or a computed
+    /// value, and an emitter doing that itself would be reaching behind this
+    /// façade to re-derive what the view already knows.
+    /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
+    /// site guards against.
+    ///
+    /// A `Local` class's guard "takes the source position of the operation
+    /// that introduces the guarded extent" (`spec/04-type-system.md` section
+    /// 4.7), so unlike the entry classes these are keyed by node. Only
+    /// `InputAxis` members are sites: an `ExternalAxis` member is the
+    /// prologue's canonical declaration, and an `OpComputed` member's guard
+    /// needs the derivation narrowed first, because the claim over a
+    /// statically determined operation output (a matmul's `Literal(64)` axis)
+    /// would guard a value against itself.
+    /// The `Load` whose axis a class member's operand names, and that axis.
+    ///
+    /// The view is where the C and HIP lanes ask every class question under
+    /// chelis#1538's discipline, so this one is asked here too rather than by
+    /// reaching around the facade for a raw `Dag`; see
+    /// [`crate::axis_sources::member_load_axis`] for what it answers and why
+    /// three consumers share it.
+    pub fn member_load_axis(
+        self,
+        member: &crate::axis_sources::ClassMember,
+    ) -> Option<(NodeId, usize)> {
+        crate::axis_sources::member_load_axis(self.dag, member)
+    }
+
+    pub fn local_dim_guard_sites(self) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+        let mut sites = Vec::new();
+        for class in crate::axis_sources::derive_runtime_dim_classes(self.dag) {
+            if class.placement(self.dag) != crate::axis_sources::GuardPlacement::Local {
+                continue;
+            }
+            let crate::axis_sources::DimClaim::Name(name) = &class.claim else {
+                continue;
+            };
+            // The class's canonical VALUE. C2.4 makes a literal claim its own
+            // canonical value; a `Name` the checker resolved to a literal is
+            // the same situation reached by a different spelling, so the
+            // comparison is against that literal rather than against a
+            // variable no lane declares.
+            let resolved = class.members.iter().find_map(|member| {
+                match self
+                    .dag
+                    .get(member.node)?
+                    .output_type
+                    .dims
+                    .get(member.axis)?
+                {
+                    DimInfo::Named(_, Some(value)) | DimInfo::Lit(value) => Some(value.to_string()),
+                    DimInfo::Named(_, None) => None,
+                }
+            });
+            for member in &class.members {
+                // C2.7 puts "does this site owe a guard" in the derivation
+                // rather than in an emitter: today only the C emitter reads
+                // local sites, so a second answer here would be a LATENT
+                // divergence rather than a live one, and the point of putting
+                // it here is that it cannot become live.
+                //
+                // A LOCAL member's extent is produced by the compiler inside
+                // this function, so a resolved static size on its own dim is
+                // the checker's proof and the comparison would be a value
+                // against the literal it was produced from - a self-check
+                // that can only catch a compiler bug, which C2.4 already
+                // declines for a literal claim matching a literal size. This
+                // keys on PROVENANCE, the same axis section 4.7 uses to place
+                // a guard at entry or at the introducing operation: an
+                // INTERFACE member's resolved size is a caller claim and is
+                // guarded (chelis#1377), never exempted.
+                // Narrowed to LOCAL members. `placement` is a property of the
+                // whole class - `Entry` only when every member is an
+                // interface value - so one local member makes a MIXED class
+                // Local, and applying the proof to every member of it would
+                // exempt an interface member whose resolved size is a caller
+                // claim. Measured: the caller's obligation on such a member
+                // survives on the ABI static-dim check, because b2.4's
+                // narrowing of that check is built from `entry_dim_classes()`
+                // alone and never fires for a member of a Local class. The
+                // predicate is narrowed anyway, so the comment and the code
+                // say the same thing.
+                if crate::axis_sources::member_load_axis(self.dag, member).is_none()
+                    && member_dim_is_statically_resolved(self.dag, member)
+                {
+                    continue;
+                }
+                if !matches!(
+                    member.source,
+                    crate::axis_sources::AxisSource::InputAxis { .. }
+                ) {
+                    // C2.4's literal proof is about the axis SOURCE, not about
+                    // the claim: a member whose extent is a literal performs no
+                    // runtime read, so there is nothing to observe and nothing
+                    // to compare. A resolved claim over a runtime read is a
+                    // different thing and still owes its guard.
+                    continue;
+                }
+                let Some(node) = self.dag.get(member.node) else {
+                    continue;
+                };
+                // [04-NUM-9]'s `<op>` names the operation that introduces the
+                // guarded extent, in the same vocabulary every other trap on
+                // this lane uses.
+                sites.push((
+                    (member.node.0, member.axis),
+                    LocalGuardClaim {
+                        claim: name.clone(),
+                        operand: resolved.clone().unwrap_or_else(|| name.clone()),
+                        op: crate::grad::risc_op_name(&node.op),
+                    },
+                ));
+            }
+        }
+        sites
+    }
+
+    pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
+        crate::axis_sources::derive_runtime_dim_classes(self.dag)
+            .into_iter()
+            .filter(|class| class.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
+            .collect()
     }
 
     pub fn symbolic_occurrences(self) -> Vec<SymbolicDimOccurrence> {

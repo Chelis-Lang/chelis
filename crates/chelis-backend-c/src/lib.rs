@@ -2536,7 +2536,7 @@ int main(void) {{
         assert!(
             result
                 .c_source
-                .contains("chelis_tensor_shape(inputs[1], 0) != batch")
+                .contains("chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 0)")
         );
 
         let lines = compile_and_run_input_cases(
@@ -2792,15 +2792,22 @@ int main(void) {{
                 .c_source
                 .contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);")
         );
+        // The guard reads BOTH operands from the class's own witnesses rather
+        // than comparing against the declared variable, so that a member
+        // scoped to one signature is never compared with a variable the
+        // occurrence walk declared for another (chelis#1277 C2.4). The
+        // property this row names - every non-canonical occurrence is checked
+        // against the canonical - is unchanged.
+        let canonical = "chelis_tensor_shape(inputs[0], 0)";
         assert!(
             result
                 .c_source
-                .contains("chelis_tensor_shape(inputs[1], 0) != batch")
+                .contains(&format!("chelis_tensor_shape(inputs[1], 0) != {canonical}"))
         );
         assert!(
             result
                 .c_source
-                .contains("chelis_tensor_shape(inputs[2], 0) != batch")
+                .contains(&format!("chelis_tensor_shape(inputs[2], 0) != {canonical}"))
         );
     }
 
