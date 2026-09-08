@@ -95,16 +95,12 @@ fn two_disagreeing_claims_on_one_axis_emit_two_guards() {
         .collect();
     assert_eq!(
         sites,
-        vec![
-            ("n".to_string(), "reshape"),
-            ("1".to_string(), "expand"),
-        ],
+        vec![("n".to_string(), "reshape"), ("1".to_string(), "expand"),],
         "the class binder and the unit claim both key on the reshape's axis 0",
     );
 
-    let emitted = emit_dag(&dag, "two_claims").expect(
-        "two disagreeing claims are two obligations, not an unsupported construct",
-    );
+    let emitted = emit_dag(&dag, "two_claims")
+        .expect("two disagreeing claims are two obligations, not an unsupported construct");
     assert!(
         emitted.contains("numeric trap: domain in reshape at int64"),
         "the class's guard is emitted:\n{emitted}"
@@ -178,7 +174,9 @@ fn two_equal_claims_on_one_axis_emit_one_guard() {
 
     let emitted = emit_dag(&dag, "two_equal_claims").expect("equal claims coalesce");
     assert_eq!(
-        emitted.matches("numeric trap: domain in expand at int64").count(),
+        emitted
+            .matches("numeric trap: domain in expand at int64")
+            .count(),
         1,
         "but one comparison discharges both, so exactly one guard is emitted:\n{emitted}"
     );
