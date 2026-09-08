@@ -722,16 +722,28 @@ def _is_undecided(
         # script, unless the line ALSO names this gate absolutely, which means
         # the token picked was more likely an option's value.
         #
-        # Both spellings are compared, because `expected` is resolved and the
-        # command line is raw. On a platform where the checkout sits under a
-        # symlinked prefix, `/var` against `/private/var` on macOS, comparing
-        # only the resolved form makes this containment test fail and the
-        # fail-safe stop failing safe. A fail-safe a spelling difference
-        # defeats is not one.
-        raw = worktree / GATE_SCRIPT_RELATIVE
-        return reap.command_mentions_path(
-            proc.command, str(expected)
-        ) or reap.command_mentions_path(proc.command, str(raw))
+        # KNOWN GAP, deliberately not closed. This compares a canonical
+        # `expected` against a raw command line, so a process naming the gate
+        # through a non-canonical path, a symlinked prefix such as `/var`
+        # against `/private/var` on macOS, is not recognised here and the
+        # verdict is FREE rather than UNKNOWN. Reaching it needs whitespace in
+        # the checkout path AND a non-canonical spelling together, since
+        # without whitespace the walk never lands in this branch.
+        #
+        # A previous attempt compared a second spelling of the WORKTREE, which
+        # cannot help: `collect` re-anchors to `--show-toplevel`, which git
+        # always reports physically, so both spellings of the worktree are the
+        # same string and the clause could never fire. It was removed rather
+        # than kept, because a comparison that cannot fire reads as coverage
+        # and is worse than an absent one. Recovering the path the process
+        # actually named would mean resolving runs of space-joined command
+        # tokens, which is more machinery than this branch is worth.
+        #
+        # The command line is the ONLY input to this program whose spelling it
+        # does not control; every path it compares against is canonical by
+        # construction. `chelis#1568` records this as residual, with the same
+        # identity-versus-spelling root as `chelis#1584`.
+        return reap.command_mentions_path(proc.command, str(expected))
     cwd = cwd_lookup(proc.pid)
     if cwd is None:
         return GATE_SCRIPT_RELATIVE in proc.command

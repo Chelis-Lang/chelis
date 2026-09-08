@@ -1127,6 +1127,13 @@ SPACED = "/wt/my checkout"
 # requirement rather than a default.
 NO_AWKWARD_SPELLING = "no awkward spelling exists for this signal"
 
+# What a hard row requires. Most must never report FREE. One pins a KNOWN GAP
+# instead, asserting the limitation as it stands, so that a later attempt to
+# close it has to change this row deliberately; a "fix" that does not change
+# the behaviour leaves the row passing, which is what reveals it does not work.
+NEVER_FREE = "must never report FREE"
+KNOWN_GAP_FREE = "a recorded limitation: currently reports FREE"
+
 # Three columns per busy signal.
 #
 #   positive   fires this signal and no other
@@ -1145,7 +1152,7 @@ NEAR_MISS_TABLE = {
         "positive": [("held by this worktree", lambda: _lease_case(PROBED))],
         "near_miss": [("held by another worktree", lambda: _lease_case(OTHER))],
         "hard": [
-            ("a sidecar naming this worktree non-canonically",
+            (NEVER_FREE, "a sidecar naming this worktree non-canonically",
              lambda: _lease_case(f"{PROBED}/./")),
         ],
     },
@@ -1176,21 +1183,31 @@ NEAR_MISS_TABLE = {
              lambda: _running("python3 scripts/gate.py --local", cwd=OTHER)),
         ],
         "hard": [
-            ("a value option clustered onto another, -uX",
+            # Grammar rows: spellings of the OPTIONS.
+            (NEVER_FREE, "a value option clustered onto another, -uX",
              lambda: _running(f"python3 -uX importtime {PROBED}/scripts/gate.py")),
-            ("a value option clustered onto another, -uW",
+            (NEVER_FREE, "a value option clustered onto another, -uW",
              lambda: _running(f"python3 -uW ignore {PROBED}/scripts/gate.py")),
-            ("an attached option value",
+            (NEVER_FREE, "an attached option value",
              lambda: _running(f"python3 -Xutf8 {PROBED}/scripts/gate.py")),
-            ("several short options combined",
+            (NEVER_FREE, "several short options combined",
              lambda: _running(f"python3 -EsuB {PROBED}/scripts/gate.py")),
-            ("isolated mode",
+            (NEVER_FREE, "isolated mode",
              lambda: _running(f"python3 -I {PROBED}/scripts/gate.py --local")),
-            ("a checkout path containing a space",
+            (NEVER_FREE, "a checkout path containing a space",
              lambda: _running(f"python3 {SPACED}/scripts/gate.py", worktree=SPACED)),
-            ("the uv re-exec child shape",
+            (NEVER_FREE, "the uv re-exec child shape",
              lambda: _running(
                  f"{PROBED}/.venv/bin/python3 {PROBED}/scripts/gate.py --local")),
+            # Spelling row: the COMMAND LINE's own path. This is the only
+            # input whose spelling the program does not control, and it was
+            # the axis with no coverage at all: every other path compared here
+            # is canonical by construction, from --show-toplevel,
+            # --absolute-git-dir, or an already-resolved root.
+            (KNOWN_GAP_FREE, "a gate named through a non-canonical path",
+             lambda: _running(
+                 f"python3 /var/wt/my checkout/scripts/gate.py --local",
+                 worktree="/private/var/wt/my checkout")),
         ],
     },
     status.SIGNAL_BUILD_PROCESS: {
@@ -1210,9 +1227,9 @@ NEAR_MISS_TABLE = {
             # These two probe the halves of the reaper's matcher that path
             # scoping alone never reaches: the target/ executable rule and the
             # working-directory fallback.
-            ("a nextest-spawned test binary running from target/",
+            (NEVER_FREE, "a nextest-spawned test binary running from target/",
              lambda: _running(f"{PROBED}/target/debug/deps/chelis_cli-9f2a --test")),
-            ("cargo naming no repo path, matched only by its cwd",
+            (NEVER_FREE, "cargo naming no repo path, matched only by its cwd",
              lambda: _running("cargo build --release", cwd=PROBED)),
         ],
     },
@@ -1260,6 +1277,9 @@ class NearMissTableTests(unittest.TestCase):
                     "as an unfilled cell; give it a row or state that no "
                     "awkward spelling exists",
                 )
+                if rows["hard"] != NO_AWKWARD_SPELLING:
+                    for requirement, _d, _f in rows["hard"]:
+                        self.assertIn(requirement, (NEVER_FREE, KNOWN_GAP_FREE))
 
     def test_each_positive_fires_exactly_its_own_signal(self):
         for signal, rows in NEAR_MISS_TABLE.items():
@@ -1286,14 +1306,28 @@ class NearMissTableTests(unittest.TestCase):
         """The direction that causes the collision. Each row is a gate that is
         genuinely running, in a spelling the option walk may or may not parse.
         BUSY is the good answer and UNKNOWN is the acceptable one; FREE is the
-        failure, because it sends a reviewer into a worktree that is in use."""
+        failure, because it sends a reviewer into a worktree that is in use.
+
+        One row is a recorded limitation and asserts FREE instead. It is here
+        rather than deleted so that closing the gap has to change this row
+        deliberately, and so that a repair which does not change the behaviour
+        leaves the row passing, which is what shows it did not work. A previous
+        repair to this exact branch was of that kind: it compared two spellings
+        of a path that is canonical on both sides, so it could never fire, and
+        its test locked a configuration the only caller cannot produce."""
         for signal, rows in NEAR_MISS_TABLE.items():
             if rows["hard"] == NO_AWKWARD_SPELLING:
                 continue
-            for description, factory in rows["hard"]:
+            for requirement, description, factory in rows["hard"]:
                 with self.subTest(signal=signal, case=description):
                     with factory() as kwargs:
                         state = _collect(**kwargs)
+                    if requirement == KNOWN_GAP_FREE:
+                        self.assertEqual(
+                            state["verdict"], status.VERDICT_FREE,
+                            f"{description} no longer reports FREE; if the gap "
+                            "was closed on purpose, move this row to NEVER_FREE")
+                        continue
                     self.assertIn(
                         state["verdict"],
                         (status.VERDICT_BUSY, status.VERDICT_UNKNOWN),
@@ -1315,53 +1349,6 @@ class NearMissTableTests(unittest.TestCase):
                 self.assertIn(
                     "gate-process-identity",
                     [item["source"] for item in state["unknown"]])
-
-
-class FailSafeSpellingTests(unittest.TestCase):
-    """The fail-safe's own containment test must not be defeated by a spelling
-    difference, which is the failure mode it exists to catch.
-
-    Found by the reviewer when its first measurement used an unresolved
-    temporary directory on a platform that symlinks it, `/var` against
-    `/private/var` on macOS. That is the same class as the defect being
-    fixed, showing up in the measurement of the fix.
-    """
-
-    def _probe(self, worktree: Path, command: str):
-        procs = [_proc(70, 1, command)]
-        return status.match_gate_processes(procs, worktree, _no_cwd)
-
-    def test_a_symlinked_prefix_does_not_defeat_the_fail_safe(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            real = root / "real"
-            (real / "my checkout" / "scripts").mkdir(parents=True)
-            link = root / "link"
-            link.symlink_to(real, target_is_directory=True)
-            worktree = link / "my checkout"
-            if worktree.resolve() == worktree:
-                self.skipTest("this filesystem does not distinguish the two")
-            # Whitespace in the path is what forces the absolute branch: the
-            # option walk returns the first fragment as the script.
-            command = f"python3 {worktree}/scripts/gate.py --local"
-            self.assertTrue(str(status.script_argument(command)).startswith(str(link)))
-            matched, undecided = self._probe(worktree, command)
-            self.assertEqual(matched, [])
-            self.assertEqual(
-                [proc.pid for proc in undecided],
-                [70],
-                "a gate named through a symlinked prefix must still degrade to "
-                "UNKNOWN rather than report FREE",
-            )
-
-    def test_the_canonical_spelling_still_degrades(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            worktree = Path(tmp).resolve() / "my checkout"
-            (worktree / "scripts").mkdir(parents=True)
-            command = f"python3 {worktree}/scripts/gate.py --local"
-            matched, undecided = self._probe(worktree, command)
-            self.assertEqual(matched, [])
-            self.assertEqual([proc.pid for proc in undecided], [70])
 
 
 class StaleIndexLockTests(unittest.TestCase):
