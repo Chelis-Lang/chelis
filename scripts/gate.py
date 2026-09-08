@@ -1474,6 +1474,22 @@ def find_summary(
     none is returned. `read_handle` rejects a handle with no usable
     `started_at` for the same reason: a filter that degrades open is worse
     than no filter, because it looks like a guard.
+
+    Returning the first hit in `sorted()` order assumes lexicographic order
+    equals chronological order. That holds by construction, because
+    `write_summary` stamps a fixed-width zero-padded UTC timestamp. It is
+    written down here because an assumption that holds by construction is
+    exactly the kind that breaks silently when someone changes the
+    construction, and the construction lives in another function.
+
+    The correlation is a pid plus a time window, which is not an identity, and
+    two consequences follow. The floor is sampled before the spawn, so it is
+    fractionally earlier than the child's true start, and a run that both
+    ended and freed this pid inside that sub-millisecond window would still be
+    accepted. And a run killed before it writes a summary, followed by a pid
+    reuse, still returns the impostor. Both close the same way and neither is
+    urgent, because this fails toward still-running rather than toward a false
+    pass; chelis#1584 owns them.
     """
     floor = _parse_iso(not_before) if not_before else None
     if floor is None:

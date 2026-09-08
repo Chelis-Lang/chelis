@@ -647,9 +647,13 @@ class SummaryNamingTests(unittest.TestCase):
     """`find_summary` now discards a candidate whose stamp it cannot read, so
     if `write_summary`'s naming and `_summary_stamp`'s parsing ever drift
     apart, `--status` would silently report every run as still going. Lock the
-    writer and the reader to each other rather than to a literal format."""
+    writer and the reader to each other rather than to a literal format.
 
-    def test_a_real_write_summary_name_parses_and_orders_correctly(self):
+    Readability only. This writes one summary, so it cannot exercise ordering;
+    the earliest-match rule is proved by
+    `test_the_earliest_summary_at_or_after_the_start_is_this_runs`."""
+
+    def test_a_real_write_summary_name_is_readable_by_the_real_reader(self):
         with tempfile.TemporaryDirectory() as tmp:
             report = gate.GateReport(mode="local", started_at="2026-09-05T03:00:00.000Z")
             report.exit_code = 0
