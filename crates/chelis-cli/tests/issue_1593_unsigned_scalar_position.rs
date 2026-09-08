@@ -259,3 +259,112 @@ fn an_explicit_binder_with_an_ordinary_name_still_scores_one() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Round 1 P1: hand-written Deep, the carrier the desugarer did not produce.
+// The Surf repair alone left `(t-var {} u8)` scoring 1.0 with an empty error
+// vector, while `chelis surf` printed Surf that this same build rejects: one
+// program, two verdicts, decided by which spelling it arrived in.
+// ---------------------------------------------------------------------------
+
+/// Two of the §1.1.1 reserved-but-deferred spellings, as the other suites use.
+const DEFERRED: [&str; 2] = ["complex64", "int4"];
+
+fn scalar_tvar_deep(name: &str) -> String {
+    format!(
+        "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
+         (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+         (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) (var {{}} x))))\n"
+    )
+}
+
+fn tensor_tvar_deep(name: &str) -> String {
+    format!(
+        "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
+         (defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
+         (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name}))))\n  \
+         (def {{}} f (fn {{}} (params {{}} x) (var {{}} x))))\n"
+    )
+}
+
+/// REGRESSION test. A hand-written `.dp` naming a rejected dtype spelling as a
+/// type variable is rejected by `chelis check`, in a scalar position and in a
+/// tensor precision slot, for the unsigned and the deferred family alike.
+#[test]
+fn a_hand_written_deep_type_variable_is_rejected_at_the_deep_ingress() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
+        for (label, source) in [
+            ("scalar", scalar_tvar_deep(name)),
+            ("tensor precision", tensor_tvar_deep(name)),
+        ] {
+            fs::write(root.join("hand.dp"), &source).expect("write");
+            let checked = text(&run(root, &["check", "hand.dp"]));
+            assert!(
+                !checked.contains("\"score\": 1,"),
+                "a hand-written Deep type variable named `{name}` must not score \
+                 1.0 in a {label} position: {checked}"
+            );
+            assert!(
+                checked.contains(&format!("`{name}`")) && checked.contains("§1.1.1"),
+                "the {label} Deep ingress must cite §1.1.1 for `{name}`: {checked}"
+            );
+        }
+    }
+}
+
+/// REGRESSION test. `chelis surf` must refuse the same Deep rather than print
+/// Surf that this build rejects. That disagreement was the observable form of
+/// the broken `spec/02-surf-syntax.md` §0.1 round-trip law.
+#[test]
+fn the_decompiler_refuses_a_reserved_deep_type_variable() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
+        for (label, source) in [
+            ("scalar", scalar_tvar_deep(name)),
+            ("tensor precision", tensor_tvar_deep(name)),
+        ] {
+            fs::write(root.join("hand.dp"), &source).expect("write");
+            let rendered = text(&run(root, &["surf", "hand.dp"]));
+            assert!(
+                rendered.contains("is not a valid Surf type variable identifier")
+                    && rendered.contains(name),
+                "`chelis surf` must fail closed on `{name}` in a {label} \
+                 position rather than print rejected Surf: {rendered}"
+            );
+        }
+    }
+}
+
+/// DISPOSITION LOCK. Green in both states. An ordinary Deep type variable still
+/// checks clean and still decompiles to Surf that checks clean: the repair
+/// narrowed the resugarable domain to exactly the reserved spellings.
+#[test]
+fn an_ordinary_deep_type_variable_still_checks_and_decompiles() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    for name in ["a", "p", "elem"] {
+        for source in [scalar_tvar_deep(name), tensor_tvar_deep(name)] {
+            fs::write(root.join("ok.dp"), &source).expect("write");
+            let checked = text(&run(root, &["check", "ok.dp"]));
+            assert!(
+                checked.contains("\"score\": 1,"),
+                "`{name}` must still be a legal Deep type variable: {checked}"
+            );
+            let decompiled = run(root, &["surf", "ok.dp"]);
+            let printed = String::from_utf8_lossy(&decompiled.stdout).to_string();
+            assert!(
+                printed.contains(&format!("[{name}]")),
+                "`{name}` must still decompile to a binder list: {printed}"
+            );
+            fs::write(root.join("back.ch"), &printed).expect("write");
+            let rechecked = text(&run(root, &["check", "back.ch"]));
+            assert!(
+                rechecked.contains("\"score\": 1,"),
+                "the decompiled Surf must still check clean for `{name}`: {rechecked}"
+            );
+        }
+    }
+}

@@ -496,15 +496,17 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 // the tensor precision slot's, so the two positions recognise
                 // exactly the same names.
                 //
-                // The tensor precision slot is excluded because
-                // `validate_tensor_precisions_in_program` already reports it
-                // with the tensor-flavoured wording; reporting here as well
-                // would give one `tensor[..., u8]` two copies of the same
-                // complaint under two different surface words.
-                if !self.resolving_tensor_precision
-                    && let Some(diagnostic) =
-                        unsigned_family_diagnostic(name, /* tensor = */ false)
-                            .or_else(|| deferred_family_diagnostic(name, /* tensor = */ false))
+                // `resolving_tensor_precision` selects the surface word, so
+                // the precision slot says "tensor element" and everywhere else
+                // says "scalar". It used to SUPPRESS this arm in the precision
+                // slot and leave `validate_tensor_precisions_in_program` as the
+                // only voice; that left `tensor[..., u8]` still receiving the
+                // generic "unknown primitive type" message this arm exists to
+                // replace (round 1, P3). The validator's own reserved-name
+                // branches are gone, so this is the single voice for both.
+                let tensor = self.resolving_tensor_precision;
+                if let Some(diagnostic) = unsigned_family_diagnostic(name, tensor)
+                    .or_else(|| deferred_family_diagnostic(name, tensor))
                 {
                     let diagnostic = self
                         .diagnostic_location()
@@ -710,6 +712,23 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .allows_hole()
                 .then(|| self.vg.fresh_tvar())
                 .ok_or_else(|| self.unbound("type", name));
+        }
+        // chelis#1593 round 1. `spec/04-type-system.md` §5.8.1 says a spelling
+        // [04-DTYPE-1] rejects names no type variable in ANY type position, and
+        // Deep is a representation of the same public language, so the rule has
+        // to hold on this carrier too. Repairing only the Surf desugarer left a
+        // hand-written `(t-var {} u8)` scoring 1.0 with an empty error vector,
+        // and `chelis surf` printed it back as `def f[u8](x: u8) -> u8 = x`,
+        // which the same build rejects: one program, two verdicts, depending on
+        // which spelling it arrived in. `_` is checked first and stays a hole.
+        let tensor = self.resolving_tensor_precision;
+        if let Some(diagnostic) = unsigned_family_diagnostic(name, tensor)
+            .or_else(|| deferred_family_diagnostic(name, tensor))
+        {
+            let diagnostic = self
+                .diagnostic_location()
+                .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+            return Err(report_witness(self.errors, diagnostic));
         }
         if matches!(
             self.binder_mode,

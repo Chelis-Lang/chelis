@@ -961,7 +961,7 @@ const DEFERRED_DTYPE_NAMES: &[&str] = &[
 /// exactly it. Splitting the two lists across two decisions is what let
 /// `def f[u8](x: u8) -> u8 = x` keep scoring 1.0 after the first repair
 /// (chelis#1593).
-fn is_reserved_dtype_name(name: &str) -> bool {
+pub(crate) fn is_reserved_dtype_name(name: &str) -> bool {
     UNSIGNED_DTYPE_NAMES.contains(&name) || DEFERRED_DTYPE_NAMES.contains(&name)
 }
 

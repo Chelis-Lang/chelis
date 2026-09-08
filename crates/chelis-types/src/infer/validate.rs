@@ -416,23 +416,15 @@ pub(super) fn walk_for_tensor_precision(
                     // this guard `tensor[..., u8]` (or `tensor[...,
                     // complex64]`) would silently fall through with no
                     // §1.1.1-citing diagnostic.
-                    if is_unsigned_dtype_name(name)
-                        && seen.insert((def_context.to_string(), name.to_string()))
-                    {
-                        if let Some(diag) =
-                            unsigned_family_diagnostic(name, /* tensor = */ true)
-                        {
-                            errors.push(diag);
-                        }
-                    } else if is_deferred_dtype_name(name)
-                        && seen.insert((def_context.to_string(), name.to_string()))
-                    {
-                        if let Some(diag) =
-                            deferred_family_diagnostic(name, /* tensor = */ true)
-                        {
-                            errors.push(diag);
-                        }
-                    } else if let Some(prim) = Prim::parse_name(name)
+                    // The §1.1.1 reserved families used to be reported here
+                    // as well as by the resolver. `DeepTypeResolver` now names
+                    // them in every type position and on both carriers
+                    // (chelis#1593), so a branch here would be a second voice
+                    // saying the same sentence. The two `!is_*_dtype_name`
+                    // guards below stay: without them a reserved name falls
+                    // into the unrecognized-primitive arm and gets the wrong
+                    // message.
+                    if let Some(prim) = Prim::parse_name(name)
                         && !prim.is_valid_tensor_precision()
                         && seen.insert((def_context.to_string(), name.to_string()))
                     {

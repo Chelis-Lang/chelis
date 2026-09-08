@@ -26,6 +26,7 @@
 //!
 //! Test labels are recorded in each function's doc comment.
 
+use chelis_deep::parser::parse_and_stamp_file;
 use chelis_deep::printer::print_canonical_flat;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::format::format_source;
@@ -257,5 +258,80 @@ fn the_deferred_family_reaches_the_rejection_in_a_scalar_position() {
             "module P.M\nexport (f)\ndef f(x: {name}) -> {name} = x\n"
         ));
         assert_reaches_rejection(&deep, name, "a scalar parameter and return");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Round 1 P1: the Deep carrier. The Surf repair alone left a hand-written
+// `(t-var {} u8)` naming a type variable, which broke
+// `spec/02-surf-syntax.md` §0.1's first law: the decompiler printed
+// `def f[u8](x: u8) -> u8 = x`, and desugaring that gives `t-prim`, not the
+// `t-var` it started from. §0.1 says a well-formed public Deep node HAS a
+// Surf representation, so a node with none is not well-formed public Deep and
+// the decompiler fails closed rather than leaving the law false.
+// ---------------------------------------------------------------------------
+
+fn deep_of_source(source: &str) -> Vec<chelis_deep::Expr> {
+    parse_and_stamp_file(source).expect("deep parse")
+}
+
+const RESERVED_TVAR_SCALAR: &str = "(module {surf_path: \"P.M\"}\n\
+     p.m\n\
+     (export {} f)\n\
+     (defsig {} f (t-fn {} (t-var {} NAME) (t-var {} NAME)))\n\
+     (def {} f (fn {} (params {} (x {type: (t-var {} NAME)})) (var {} x))))";
+
+const RESERVED_TVAR_TENSOR: &str = "(module {surf_path: \"P.M\"}\n\
+     p.m\n\
+     (export {} f)\n\
+     (defsig {} f (t-fn {} (t-tensor {} (d-lit {} 3) (t-var {} NAME)) \
+     (t-tensor {} (d-lit {} 3) (t-var {} NAME))))\n\
+     (def {} f (fn {} (params {} x) (var {} x))))";
+
+/// REGRESSION test. The decompiler must refuse a Deep type variable whose name
+/// is a spelling [04-DTYPE-1] rejects, in a scalar position and in a tensor
+/// precision slot. Before, it printed Surf that this same build rejects.
+#[test]
+fn the_decompiler_refuses_a_reserved_deep_type_variable() {
+    for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
+        for template in [RESERVED_TVAR_SCALAR, RESERVED_TVAR_TENSOR] {
+            let deep = deep_of_source(&template.replace("NAME", name));
+            let error = chelis_surf::decompile::try_decompile_program(&deep).expect_err(&format!(
+                "`(t-var {{}} {name})` has no Surf representation and must fail closed"
+            ));
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(name) && rendered.contains("type variable"),
+                "the refusal must name `{name}` and the role: {rendered}"
+            );
+        }
+    }
+}
+
+/// REGRESSION test, and the §0.1 round-trip law itself. For every Deep the
+/// decompiler still accepts, `desugar(resugar(deep))` must reproduce that Deep.
+/// The reserved forms are excluded from the law's domain by failing closed
+/// above, which is the only way the law can hold once no Surf text desugars to
+/// them; the ordinary type variable is the control that the domain did not
+/// collapse.
+#[test]
+fn the_surf_deep_round_trip_law_holds_for_every_resugarable_type_variable() {
+    for name in ["a", "p", "elem"] {
+        for template in [RESERVED_TVAR_SCALAR, RESERVED_TVAR_TENSOR] {
+            let source = template.replace("NAME", name);
+            let deep = deep_of_source(&source);
+            let surf = chelis_surf::decompile::try_decompile_program(&deep)
+                .unwrap_or_else(|error| panic!("`{name}` must still resugar: {error}"));
+            let redesugared = desugar_program(&parse_str(&surf).expect("reparse"));
+            assert_eq!(
+                print_canonical_flat(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
+                    &deep
+                )),
+                print_canonical_flat(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
+                    &redesugared
+                )),
+                "desugar(resugar(deep)) must reproduce the Deep for `{name}`:\n{surf}"
+            );
+        }
     }
 }

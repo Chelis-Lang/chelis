@@ -2099,10 +2099,11 @@ the sig's type expression is treated as a `forall`-quantified type
 variable. The §1.1.2 unsigned aliases (`u8`, `u16`, `u32`, `u64`,
 `uint8`, `uint16`, `uint32`, `uint64`) are explicitly excluded so they
 reach the type-checker's §1.1.2 rejection path with a precise
-diagnostic, not silently absorbed as quantifiers. A name reserved under
-§1.1.1, the §1.1.2 unsigned spellings included, names no type variable
-in any type position: an explicit quantifier list does not rebind it,
-and it reaches that rejection wherever it appears.
+diagnostic, not silently absorbed as quantifiers. A dtype spelling that
+[04-DTYPE-1] rejects names no type variable in any type position: an
+explicit quantifier list does not rebind it, and it reaches that
+rejection wherever it appears, on the Deep carrier as well as the Surf
+one.
 
 The internal type representation carries this through `TensorPrec`:
 

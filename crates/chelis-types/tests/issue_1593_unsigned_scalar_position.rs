@@ -328,3 +328,66 @@ fn the_deferred_family_is_rejected_in_a_scalar_position() {
         );
     }
 }
+
+/// REGRESSION test. Round 1 P1: the checker's own Deep ingress. A `t-var`
+/// naming a rejected dtype spelling is not a type variable, so hand-written
+/// Deep that the desugarer would never emit is rejected too. Before, this
+/// scored 1.0 with an empty error vector on both carriers of one program.
+#[test]
+fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
+    for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
+        for (label, source) in [
+            (
+                "scalar",
+                format!(
+                    "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
+                     (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+                     (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) \
+                     (var {{}} x))))\n"
+                ),
+            ),
+            (
+                "tensor precision",
+                format!(
+                    "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
+                     (defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
+                     (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name}))))\n  \
+                     (def {{}} f (fn {{}} (params {{}} x) (var {{}} x))))\n"
+                ),
+            ),
+        ] {
+            let deep = chelis_deep::parser::parse_and_stamp_file(&source).expect("deep parse");
+            let messages: Vec<String> = match check_ir_program(&deep) {
+                Ok(_) => Vec::new(),
+                Err(report) => report.errors.iter().map(|e| e.message.clone()).collect(),
+            };
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains(&format!("`{name}`"))
+                        && message.contains("spec/04-type-system.md §1.1.1")),
+                "a Deep type variable named `{name}` in a {label} position must \
+                 reach the §1.1.1 rejection; got: {messages:?}"
+            );
+        }
+    }
+}
+
+/// DISPOSITION LOCK. Green in both states. An ordinary Deep type variable is
+/// still a type variable; the repair narrowed the rule to rejected spellings.
+#[test]
+fn an_ordinary_deep_type_variable_still_checks_clean() {
+    for name in ["a", "p", "elem"] {
+        let source = format!(
+            "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
+             (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) \
+             (var {{}} x))))\n"
+        );
+        let deep = chelis_deep::parser::parse_and_stamp_file(&source).expect("deep parse");
+        assert!(
+            check_ir_program(&deep).is_ok(),
+            "`{name}` must still be a legal Deep type variable"
+        );
+    }
+}
