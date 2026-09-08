@@ -1291,3 +1291,137 @@ fn a_sym_reshape_target_is_not_a_local_guard_site() {
         "a restated symbol computes no extent, so it owes no comparison",
     );
 }
+
+/// Round 1's P2-1. The `Expand` arm of `local_guard_extent_carrier` is NOT
+/// dead: an `expand`/`insert` whose size reads the shape of a tensor this
+/// function COMPUTED carries an `InputAxis` carrier whose producer is not a
+/// `Load`, so the class is `Local` and the axis is a site. The reviewer's two
+/// spellings both miss it, and both for real reasons: chelis#469 rejects an
+/// arithmetic size at check time, and a size reading a PARAMETER's shape is an
+/// interface value, so its class runs at entry.
+///
+/// Measured on the shipped compiler with
+/// `def f(x: tensor[n, f32]) -> tensor[n, f32] = { y = mul(x, x); b = sum(x, 0);
+/// insert(b, 0, shape(y, 0)) }`, whose emitted C carries
+/// `numeric trap: domain in expand at int64` at the operation. Removing the arm
+/// would make the eval lane skip a site the C lane guards, which is the lane
+/// divergence this slice exists to remove, so the arm stays and this row is
+/// what says so.
+///
+/// EVIDENTIARY STATUS: disposition lock on a live arm.
+#[test]
+fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let computed = dag.add_node(
+        RiscOp::Mul,
+        vec![x, x],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let base = dag.add_node(
+        RiscOp::Mul,
+        vec![x, x],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let inserted = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![base, computed],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        class_for(
+            &derive_runtime_dim_classes(&dag),
+            DimClaim::Name("n".into())
+        )
+        .placement(&dag),
+        GuardPlacement::Local,
+        "the size reads a computed tensor, so the class is not all-interface",
+    );
+    assert_eq!(
+        guard_sites(&dag),
+        vec![(inserted.0, 0, "n".to_string(), "expand")],
+        "the expand that introduces the extent owes the guard",
+    );
+    assert!(
+        chelis_ir::axis_sources::local_guard_extent_carrier(
+            &dag.get(inserted).expect("node").op,
+            0
+        )
+        .is_some(),
+        "and the derivation hands both lanes the carrier to evaluate",
+    );
+}
+
+/// Round 1's P2-2. The eval consumer's `CanonicalExtent::Resolved` arm: a
+/// class whose canonical value the checker already resolved to a literal is
+/// compared against that literal, not against a binder no lane declares.
+///
+/// The resolved size belongs to the INTERFACE member, not to the guarded one:
+/// a local member whose own dim the checker resolved is exempt by
+/// `a_local_member_the_checker_resolved_is_not_a_guard_site`'s provenance
+/// rule, so the only way a site sees a `Resolved` canonical is when a
+/// different member of its class carries the literal. Built directly because
+/// the surface spelling that resolves an input extent this way is the
+/// interface half of chelis#1377, which reaches the ENTRY path instead.
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing with the arm returning
+/// the binder instead of the resolved size, where evaluation succeeded.
+#[test]
+fn a_resolved_canonical_traps_on_eval_against_its_literal() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty(vec![DimInfo::Named("n".into(), Some(4))], Prim::F32),
+        None,
+    );
+    let read = dag.add_node(
+        RiscOp::Shape { axis: 0 },
+        vec![x],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    let doubled = dag.add_node(RiscOp::Mul, vec![read, read], ty(vec![], Prim::Int64), None);
+    let reshaped = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1)],
+        },
+        vec![x, doubled],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    assert_eq!(
+        sites
+            .iter()
+            .map(|((node, axis), claim)| (*node, *axis, claim.canonical.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            reshaped.0,
+            0,
+            chelis_ir::axis_sources::CanonicalExtent::Resolved(4)
+        )],
+        "the checker resolved the claim, so the canonical value is that literal",
+    );
+    let err = chelis_ir::eval::eval_tensor_with(&dag, |name| {
+        (name == "x").then(|| chelis_ir::eval::TensorValue::from_vec(vec![4], vec![1.0; 4]))
+    })
+    .expect_err("the reshape computes 16 against a claim of 4");
+    assert!(
+        err.contains("numeric trap: domain in reshape at int64"),
+        "the eval lane renders [04-NUM-9] for a resolved canonical too: {err}"
+    );
+    assert!(
+        err.contains("extent `n`: claimed = 4,"),
+        "and compares against the literal, not a binder: {err}"
+    );
+}

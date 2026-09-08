@@ -1500,6 +1500,14 @@ fn two_expands_over_one_operand_axis_share_one_guard() {
 // with its declared `n` symbolic, so the target keeps its `RtDim::Node`
 // carrier, the class forms with the `Load`'s axis, and the guard is reachable
 // from the CLI on both lanes.
+//
+// What "the same guard on both lanes" means exactly, because the rows assert
+// with `contains` and would not see the difference: the [04-NUM-9] line is
+// byte-identical, and section 4.7's context line is the same text on both
+// lanes, but on eval the CLI then frames the whole thing as an error, so what
+// a user reads there carries an `error: ` prefix and on C it does not. The
+// atom's own line takes no prefix on either lane, which is what [04-NUM-9]
+// fixes.
 // ---------------------------------------------------------------------------
 
 /// chelis#1375's reproducer, with `claim` naming the declared first result
