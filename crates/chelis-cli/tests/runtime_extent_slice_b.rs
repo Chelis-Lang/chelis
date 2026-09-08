@@ -739,53 +739,124 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval() {
     assert!(out.contains(&domain_trap_line("load")), "{out}");
 }
 
+/// Build, link and run a fixture, returning whether it exited zero, its
+/// combined output, and the emitted C.
+fn c_run_result_with_source(dir: &TempDir, stem: &str, source: &str) -> (bool, String, String) {
+    let (ok, out) = c_run_result(dir, stem, source);
+    let emitted = fs::read_to_string(
+        dir.path()
+            .join(format!("{stem}-out"))
+            .join(format!("{stem}.c")),
+    )
+    .expect("emitted C");
+    (ok, out, emitted)
+}
+
+/// The statement order the two C effect rows assert, read from the emitted C
+/// because the bytes a `print` writes before a trap do not survive
+/// `chelis_numeric_trap`'s `abort()` on a buffered stdout (chelis#1591):
+/// inside `run`'s host body the `print` statement and the call into the
+/// kernel C extracts for `f(seed, x)` (`run__tensor_N`, with `f` inlined and
+/// the same entry guard `f__tensor_0` carries), in the order `effect_first`
+/// names; inside that kernel the entry guard before its first allocation.
+fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
+    // The kernel C extracts for `f(seed, x)` is the `run__tensor_N` whose
+    // body carries the entry guard (`seed`'s own sub-expression is another
+    // `run__tensor_M`, called before the print in both variants).
+    let trap = "chelis_numeric_trap(\"numeric trap: domain in load at int64\")";
+    let (kernel_name, kernel) = emitted
+        .match_indices("static void run__tensor_")
+        .map(|(at, _)| {
+            let rest = &emitted[at..];
+            let name_end = rest.find('(').expect("kernel signature");
+            let name = &rest["static void ".len()..name_end];
+            let body_end = rest[1..]
+                .find("\nstatic ")
+                .map_or(rest.len(), |end| end + 1);
+            (name, &rest[..body_end])
+        })
+        .find(|(_, kernel)| kernel.contains(trap))
+        .expect("one extracted kernel carries the entry guard");
+    let guard_at = kernel.find(trap).expect("the guard");
+    let alloc_at = kernel.find("chelis_alloc(").expect("the kernel allocates");
+    assert!(
+        guard_at < alloc_at,
+        "the entry guard precedes the kernel's first allocation"
+    );
+    let body_start = emitted
+        .find("run__chelis_owned_body(chelis_tensor* x) {")
+        .expect("the IO body is emitted as host code");
+    let body = &emitted[body_start..];
+    let print_at = body
+        .find("chelis_string_from_cstr(\"effect\")")
+        .expect("the print is emitted in the host body (chelis#1528)");
+    let call_at = body
+        .find(&format!("{kernel_name}("))
+        .expect("the host body calls the guarded kernel");
+    if effect_first {
+        assert!(
+            print_at < call_at,
+            "the print precedes the call into the guarded kernel"
+        );
+    } else {
+        assert!(
+            call_at < print_at,
+            "the call into the guarded kernel precedes the print"
+        );
+    }
+}
+
 /// guard_order.effect_before.c: the row that returns with chelis#1528. On
 /// `main` the C lane dropped the `IO` effect of a kernel-lowered body, so the
 /// string never appeared in the emitted program and no row could order it.
+/// The order is asserted from the emitted C's statement order (chelis#1591:
+/// the printed bytes are lost on a buffered stdout when the trap aborts, so
+/// they cannot carry the assertion on Linux), and the trap by execution.
 ///
-/// EVIDENTIARY STATUS: regression test, watched failing on `main` (no
-/// "effect" in the binary's output).
+/// EVIDENTIARY STATUS: regression test against `main` for the print's
+/// presence and position (absent there); disposition lock for the guard's
+/// position and the trap.
 #[test]
 fn an_effect_before_the_guard_runs_when_the_guard_traps_on_c() {
     if !gcc_available() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(
+    let (ok, out, emitted) = c_run_result_with_source(
         &dir,
         "effect_before_c",
         &effect_order_source(MISMATCHED, true),
     );
     assert!(!ok, "the binary must fail: {out}");
-    assert!(
-        out.contains("effect"),
-        "the earlier effect is observed: {out}"
-    );
     assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        "{out}"
+    );
+    assert_effect_order_in_emitted_c(&emitted, true);
 }
 
-/// guard_order.effect_after.c.
+/// guard_order.effect_after.c: the print follows the call into `f` in the
+/// emitted host body, so the trap in `f`'s prologue precedes it; asserted
+/// from the emitted C's statement order for the reason above (chelis#1591),
+/// and the trap by execution.
 ///
-/// EVIDENTIARY STATUS: disposition lock on C (nothing printed on `main`
-/// either, for the wrong reason: the effect was dropped); the row asserts the
-/// trap, which is what `main` lacked.
+/// EVIDENTIARY STATUS: regression test against `main` for the print's
+/// presence and position (absent there); disposition lock for the trap.
 #[test]
 fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
     if !gcc_available() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(
+    let (ok, out, emitted) = c_run_result_with_source(
         &dir,
         "effect_after_c",
         &effect_order_source(MISMATCHED, false),
     );
     assert!(!ok, "the binary must fail: {out}");
-    assert!(
-        !out.contains("effect"),
-        "the later effect must not run: {out}"
-    );
     assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert_effect_order_in_emitted_c(&emitted, false);
 }
 
 /// class.load_load.eval: an all-interface class of three witnesses on one

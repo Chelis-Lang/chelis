@@ -580,7 +580,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         # absent from the emitted program (the kernel decision dropped the
         # def's `IO` effect), so nothing observable could be ordered against a
         # guard; the shared decision keeps such a body in host code on both
-        # lanes and the print is emitted again.
+        # lanes and the print is emitted again. Their receipts assert the
+        # order from the emitted C's statement order (the print against the
+        # call into the kernel, the guard against the first allocation) and
+        # the trap by execution: the printed bytes do not survive the trap's
+        # abort on a buffered stdout (chelis#1591), so they cannot carry the
+        # ordering assertion on every platform.
         _row(
             "guard_order.effect_after.c",
             "silent_unguarded",
