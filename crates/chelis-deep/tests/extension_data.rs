@@ -236,6 +236,62 @@ fn raw_and_token_ingress_cannot_forge_unvalidated_data() {
 }
 
 #[test]
+fn raw_data_conversion_preserves_map_key_identity() {
+    use chelis_deep::{ExtensionData, RawAtom, RawExpr, Span};
+    let span = Span::new(7, 3);
+    let scalar = RawExpr::Atom(RawAtom::Int(2), span);
+    for key in ["a: 1, b", "a 1 :b", "", "two words"] {
+        let entries = vec![(key.into(), scalar.clone())];
+        for raw in [
+            RawExpr::Map(entries.clone(), span),
+            RawExpr::MetaExpr {
+                entries,
+                expr: Box::new(scalar.clone()),
+                span,
+            },
+        ] {
+            assert!(ExtensionData::from_raw(&raw).is_err(), "{raw:?}");
+            let nested = RawExpr::List(vec![scalar.clone(), raw], span);
+            assert!(ExtensionData::from_raw(&nested).is_err(), "{nested:?}");
+        }
+    }
+    let entries = vec![
+        ("type".into(), scalar.clone()),
+        ("type".into(), scalar.clone()),
+        ("_key2".into(), scalar.clone()),
+    ];
+    for (raw, expected) in [
+        (
+            RawExpr::Map(entries.clone(), span),
+            "{type: 2, type: 2, _key2: 2}",
+        ),
+        (
+            RawExpr::MetaExpr {
+                entries,
+                expr: Box::new(scalar),
+                span,
+            },
+            "^{:type 2 :type 2 :_key2 2} 2",
+        ),
+    ] {
+        let data = ExtensionData::from_raw(&raw).unwrap();
+        assert_eq!(data.syntax(), expected);
+        assert_eq!(data.span(), span);
+        let nested = RawExpr::List(
+            vec![
+                raw,
+                RawExpr::ExtensionData(ExtensionData::parse("1e-3f32").unwrap()),
+            ],
+            span,
+        );
+        assert_eq!(
+            ExtensionData::from_raw(&nested).unwrap().syntax(),
+            format!("({expected} 1e-3f32)")
+        );
+    }
+}
+
+#[test]
 fn authoring_renames_live_references_and_preserves_recorded_names() {
     let original = chelis_deep::parse_and_stamp_file("(module {} m (def {} f (fn {} (params {}) (lit {} 1))) (def {tool_data: (var {} f)} g (fn {} (params {}) (var {} f))))").unwrap();
     let renamed = chelis_deep::authoring::rename_function(&original, "m.f", "renamed").unwrap();

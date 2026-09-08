@@ -42,11 +42,6 @@ pub fn print_expr_flat(expr: &Expr) -> String {
     Printer::flat().fmt_expr(&WireExpr::from_ast(expr), 0)
 }
 
-/// Render preserved invocation data for diagnostics without interpreting it.
-pub(crate) fn print_raw_data(raw: &crate::RawExpr) -> String {
-    Printer::flat().fmt_expr_flat(&WireExpr::from_raw_data(raw))
-}
-
 pub fn print_macro_source(source: &crate::annotations::MacroSource) -> String {
     Printer::flat().fmt_expr(
         &WireExpr::from_value(&crate::annotations::MetadataValue::Source(source.clone())),

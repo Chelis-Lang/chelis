@@ -833,7 +833,7 @@ impl WireExpr {
             V::LiteralSource(v) => atom(Atom::Name(v.value().spelling().into()), span),
         }
     }
-    pub(crate) fn from_raw_data(raw: &RawExpr) -> Self {
+    fn from_raw_data(raw: &RawExpr) -> Self {
         match raw {
             RawExpr::ExtensionData(data) => Self::ExtensionData(data.clone()),
             RawExpr::Atom(a, span) => atom(

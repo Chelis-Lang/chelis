@@ -24,14 +24,24 @@ pub struct ExtensionData {
 impl ExtensionData {
     /// Explicit producer conversion of raw syntax into data, without stamping.
     pub fn from_raw(raw: &crate::RawExpr) -> Result<Self, ParseError> {
-        if let crate::RawExpr::ExtensionData(data) = raw {
-            return Ok(data.clone());
+        enum Task<'a> {
+            Value(&'a crate::RawExpr),
+            Text(&'a str),
         }
-        // Raw atoms and public lexer tokens are constructible by callers. Check
-        // their lexical identity so a forged symbol or nonfinite float cannot
-        // silently turn into a different data value when rendered.
-        let mut pending = vec![raw];
-        while let Some(value) = pending.pop() {
+        // Raw atoms, map keys and public lexer tokens are constructible by
+        // callers. Check their lexical identity so rendering cannot silently
+        // turn them into different values or additional map entries. Program
+        // printers sort annotation maps, so render data in its original order.
+        let mut syntax = String::new();
+        let mut pending = vec![Task::Value(raw)];
+        while let Some(task) = pending.pop() {
+            let value = match task {
+                Task::Text(text) => {
+                    syntax.push_str(text);
+                    continue;
+                }
+                Task::Value(value) => value,
+            };
             use crate::{RawAtom as A, RawExpr as R};
             match value {
                 R::Atom(atom, span) => {
@@ -42,18 +52,49 @@ impl ExtensionData {
                         A::Str(v) => TokenKind::Str(v.clone()),
                         A::Bool(v) => TokenKind::Bool(*v),
                     };
-                    checked_scalar(&Token { kind, span: *span })?;
+                    syntax.push_str(&checked_scalar(&Token { kind, span: *span })?);
                 }
-                R::List(items, _) => pending.extend(items),
-                R::Map(entries, _) => pending.extend(entries.iter().map(|(_, value)| value)),
-                R::MetaExpr { entries, expr, .. } => {
-                    pending.extend(entries.iter().map(|(_, value)| value));
-                    pending.push(expr);
+                R::List(items, _) => {
+                    syntax.push('(');
+                    pending.push(Task::Text(")"));
+                    for (index, child) in items.iter().enumerate().rev() {
+                        pending.push(Task::Value(child));
+                        if index > 0 {
+                            pending.push(Task::Text(" "));
+                        }
+                    }
                 }
-                R::ExtensionData(_) => {}
+                R::Map(entries, span) | R::MetaExpr { entries, span, .. } => {
+                    let prefix = matches!(value, R::MetaExpr { .. });
+                    syntax.push_str(if prefix { "^{" } else { "{" });
+                    if let R::MetaExpr { expr, .. } = value {
+                        pending.push(Task::Value(expr));
+                        pending.push(Task::Text(" "));
+                    }
+                    pending.push(Task::Text("}"));
+                    for (index, (key, child)) in entries.iter().enumerate().rev() {
+                        if !identifier(key) {
+                            return Err(ParseError::Expected {
+                                expected: "a data map key identifier".into(),
+                                found: key.clone(),
+                                offset: span.offset,
+                            });
+                        }
+                        pending.push(Task::Value(child));
+                        pending.push(Task::Text(if prefix { " " } else { ": " }));
+                        pending.push(Task::Text(key));
+                        if prefix {
+                            pending.push(Task::Text(":"));
+                        }
+                        if index > 0 {
+                            pending.push(Task::Text(if prefix { " " } else { ", " }));
+                        }
+                    }
+                }
+                R::ExtensionData(data) => syntax.push_str(data.syntax()),
             }
         }
-        Self::parse(&crate::printer::print_raw_data(raw)).map(|value| value.at_span(raw.span()))
+        Self::parse(&syntax).map(|value| value.at_span(raw.span()))
     }
     pub fn parse(source: &str) -> Result<Self, ParseError> {
         let tokens = lexer::lex(source)?;
