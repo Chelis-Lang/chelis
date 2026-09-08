@@ -659,6 +659,8 @@ fn eval_deep_with_bindings(
         adt_fields: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
+        program: None,
+        def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),
         random_seed: None,
@@ -3085,6 +3087,7 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
             ),
             env: UnordMap::new(),
             precision_env: UnordMap::new(),
+            def_name: None,
         }),
         "<closure>"
     );

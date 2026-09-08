@@ -343,7 +343,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.load_load.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.load_load_named_class_guards_every_non_canonical_member_on_eval",
         ),
         _row(
@@ -466,6 +466,16 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "lane_divergent",
             "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c",
         ),
+        # B2h: the eval twin of the driven row. The value-binding form applies
+        # `f` through the kernel the C lane emits for it, and the literal input
+        # extent is checked at the kernel's entry by the DAG evaluator, the
+        # eval analogue of the C ABI preamble.
+        _row(
+            "expand.literal_claim.exported_kernel.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
+        ),
         _row(
             "expand.literal_claim.exported_kernel.c",
             "nonconforming_rejection",
@@ -562,6 +572,32 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "silent_unguarded",
             "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         ),
+        # B2h: the eval effect rows stay at baseline. `chelis eval` emits a
+        # program's printed output only when the evaluation succeeds, so the
+        # order of an effect against a trap is unobservable on that lane
+        # today (chelis#1585); the receipts lock the trap alone.
+        # B2h: the C effect rows return with chelis#1528. On main the effect was
+        # absent from the emitted program (the kernel decision dropped the
+        # def's `IO` effect), so nothing observable could be ordered against a
+        # guard; the shared decision keeps such a body in host code on both
+        # lanes and the print is emitted again. Their receipts assert the
+        # order from the emitted C's statement order (the print against the
+        # call into the kernel, the guard against the first allocation) and
+        # the trap by execution: the printed bytes do not survive the trap's
+        # abort on a buffered stdout (chelis#1591), so they cannot carry the
+        # ordering assertion on every platform.
+        _row(
+            "guard_order.effect_after.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
+        ),
+        _row(
+            "guard_order.effect_before.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
+        ),
         _row(
             "guard_order.effect_after.eval",
             "silent_unguarded",
@@ -583,7 +619,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "guard_order.trap_after.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_later_trap_is_preempted_by_the_extent_guard_on_eval",
         ),
         _row(
@@ -595,7 +631,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "guard_order.trap_before.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.an_earlier_trap_preempts_the_extent_guard_on_eval",
         ),
         _row(
@@ -872,12 +908,22 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "runtime_extent_slice_b", "--", "--nocapture",
             ),
             (
+                "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
+                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
+                "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
+                "an_earlier_trap_preempts_the_extent_guard_on_eval",
+                "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
+                "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
+                "an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
+                "an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
                 "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
                 "c_independent_trap_after_a_mismatch_loses",
                 "c_independent_trap_before_a_mismatch_wins",
                 "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
+                "load_load_named_class_guards_every_non_canonical_member_on_eval",
                 "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
                 "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
+                "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
             ),
         ),
         # A CLI-rooted program is not the exported kernel: `def main() =

@@ -868,7 +868,7 @@ fn issue_513_reshape_arith_gate_refused_grad_numel_mismatch_errs_in_both_lanes()
     expect_grad_failure(
         &source,
         "gaterefused",
-        "elements but the input has",
+        "elements but tensor has",
         "runtime numel mismatch under grad",
     );
 

@@ -15,6 +15,8 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
+use std::borrow::Cow;
+
 use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{
@@ -477,12 +479,79 @@ impl ElementwiseBinOp {
     }
 }
 
+/// chelis#664 on the eval lane: an elementwise op indexes every operand
+/// through the output's shape, so operands that disagree at run time are a
+/// typed error, never an assertion. The routing of host-lane def applications
+/// through this evaluator (chelis#1277 B2h) made a runtime disagreement user
+/// input; the phrase is the one the host interpreter reports.
+fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
+    let render = |shape: &[usize]| {
+        let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
+        format!("[{}]", extents.join(", "))
+    };
+    format!(
+        "tensor shapes must match for elementwise op, got {} vs {}",
+        render(&lhs.shape),
+        render(&rhs.shape)
+    )
+}
+
+/// Lane preservation for the one operand disagreement that is not an error.
+/// The lowerer gives a comparison's scalar operand a rank-0 `Const`
+/// (`lower_builtin_app`'s `cmplt`/`lt` arm in `lower.rs`), and the C kernel
+/// it emits indexes that operand at 0 for every output element: `emit_binary`
+/// in `crates/chelis-backend-c/src/emit.rs` falls through to its strided loop
+/// when the operand sizes differ, and `chelis_indices_to_flat(indices,
+/// t->strides, t->rank)` is 0 at rank 0. `spec/05-risc-primitives.md`
+/// section 2.4.1, lines 778-781 (the runtime-guard prose that [05-MOV-1]'s
+/// "Eval, C, HIP, and Metal execute the same runtime values and traps"
+/// governs), names that idiom and exempts it from the elementwise
+/// operand-agreement guard: "rank-0 scalar operands are the backend's
+/// broadcast idiom and are exempt" (chelis#664). Before host-lane def
+/// applications were routed through this evaluator (chelis#1277 B2h) no DAG
+/// carrying a rank-0 operand reached it; now `gt(to_tensor([..]), 1.5)`,
+/// which `check` admits at score 1 and the compiled C runs, does. This
+/// broadcast makes the two lanes agree on today's answer and takes no
+/// position on whether the form should be admitted at all: chelis#1506
+/// records that [05-OP-36] admits two scalars or two same-dimension tensors
+/// and calls the mixed form a type error. If chelis#1506 resolves by
+/// rejecting, this is the site to remove. The bound is rank 0 in either
+/// position and nothing wider; every other disagreement is the typed error.
+fn broadcast_rank0_operands<'a>(
+    lhs: &'a TensorValue,
+    rhs: &'a TensorValue,
+) -> Result<(Cow<'a, TensorValue>, Cow<'a, TensorValue>), String> {
+    if lhs.shape == rhs.shape {
+        return Ok((Cow::Borrowed(lhs), Cow::Borrowed(rhs)));
+    }
+    if lhs.shape.is_empty() {
+        return Ok((Cow::Owned(splat_rank0(lhs, &rhs.shape)), Cow::Borrowed(rhs)));
+    }
+    if rhs.shape.is_empty() {
+        return Ok((Cow::Borrowed(lhs), Cow::Owned(splat_rank0(rhs, &lhs.shape))));
+    }
+    Err(shape_disagreement(lhs, rhs))
+}
+
+/// The rank-0 element repeated over `shape`, at the operand's own dtype.
+/// `reuse_gather` is the element-preserving gather the movement ops use
+/// (section C3); a rank-0 broadcast is `expand` of one element, so it
+/// qualifies: every output element is `value[0]`, never re-finalized.
+fn splat_rank0(value: &TensorValue, shape: &[usize]) -> TensorValue {
+    TensorValue {
+        storage: value.storage.reuse_gather(&vec![0; numel(shape)]),
+        shape: shape.to_vec(),
+        raw_f64_ingress: value.raw_f64_ingress,
+    }
+}
+
 fn binary_elementwise(
     op: ElementwiseBinOp,
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    assert_eq!(lhs.shape, rhs.shape);
+    let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
+    let (lhs, rhs) = (&*lhs, &*rhs);
     let storage = if lhs.prim() == Prim::Bool && rhs.prim() == Prim::Bool {
         let lhs_values = lhs
             .storage()
@@ -642,7 +711,8 @@ fn compare_elementwise(
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    assert_eq!(lhs.shape, rhs.shape);
+    let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
+    let (lhs, rhs) = (&*lhs, &*rhs);
     let storage =
         compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
     Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
@@ -1978,6 +2048,117 @@ where
         &symbolic_dim_load_inputs,
         &mut load_input,
     )?;
+    // chelis#1277 B2h: both entry guards run BEFORE symbolic-binding
+    // inference. `infer_symbolic_bindings_from_inputs` rejects two `Load`s
+    // that disagree on one binder with its own wording, so with the guards
+    // after it a `Load`/`Load` class on one binder never reached [04-NUM-9]'s
+    // line on eval while the C kernel's prologue rendered it (C2.7). The
+    // inference check remains the backstop for a binder no class covers.
+    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
+    // grouping the C and HIP lanes read. Both derivations call
+    // `axis_sources::split_by_scope`: the prologues read
+    // `derive_dim_witnesses`, the guard sites and this lane read
+    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
+    // the scoping in the first alone, which is two derivations that can
+    // disagree. `spec/04-type-system.md` section 4.7 evaluates
+    // a class whose operands are all interface values "at function entry, in
+    // declared signature order, before any other operation of the function",
+    // so they run here, once every input is resolved and before the first
+    // node evaluates.
+    //
+    // The classes come from `dag`, not `bound_dag`: binding substitutes each
+    // resolved symbol into the types, so on the bound graph the claims are
+    // literals and no `Name` class survives to guard. The EXTENTS come from
+    // `resolved_inputs`, which is the point - a claim is checked against what
+    // the caller actually passed, and reading the inputs rather than the
+    // evaluated `values` keeps the guard independent of the live mask. A
+    // witness the caller did not supply is skipped: chelis#991 makes a dead
+    // generic declaration's input not a requirement of the selected root, and
+    // an absent witness cannot disagree with anything.
+    // chelis#1277 B2h: a declared LITERAL input extent is checked here too,
+    // in declared signature order, before any class guard and before the
+    // first node evaluates. The C lane checks it in the kernel's ABI
+    // preamble (`emit.rs`, the `known_dim_size` arm), which
+    // `spec/design/runtime_extents.md` Slice B narrows to exactly this
+    // complement: an axis whose literal came from a genuine declaration and
+    // that no class covers, because `is_member` keeps an external `Load`
+    // axis out of a `Literal` claim rather than mint a class per
+    // literal-shaped input. A literal result claim propagates onto the input
+    // it reads through inference (chelis#1377's `f(b, x: tensor[n]) ->
+    // tensor[4]` lowers `x` as `[4]`), so on both lanes the disagreement
+    // between the claim and the caller's tensor is visible only here. Before
+    // host-lane def applications were routed through this evaluator no
+    // caller could reach a literal-declared `Load` with a disagreeing
+    // extent; now `chelis eval` does, and without this check it printed the
+    // caller's extent where C traps. The rendering is C's: section 4.7's
+    // context line, then [04-NUM-9]'s complete line with `<op>` = `load`.
+    // The rank check mirrors the same preamble's `expected rank` abort for a
+    // declaration that names every axis; an empty `dims` is skipped because
+    // it is also the lowerer's untyped placeholder (`default_type()`), which
+    // an API binding of any rank legitimately fills.
+    for node in dag.nodes() {
+        let RiscOp::Load { name } = &node.op else {
+            continue;
+        };
+        let Some(value) = resolved_inputs.get(name.as_str()) else {
+            continue;
+        };
+        let dims = &node.output_type.dims;
+        let fully_ranked = !dims.is_empty()
+            && dims
+                .iter()
+                .all(|dim| matches!(dim, DimInfo::Lit(_) | DimInfo::Named(_, _)));
+        if fully_ranked && value.shape.len() != dims.len() {
+            return Err(format!(
+                "input `{name}` expected rank {}, got {}",
+                dims.len(),
+                value.shape.len()
+            ));
+        }
+        for (axis, dim) in dims.iter().enumerate() {
+            let DimInfo::Lit(declared) = dim else {
+                continue;
+            };
+            let Some(observed) = value.shape.get(axis).copied() else {
+                continue;
+            };
+            if observed != *declared {
+                return Err(format!(
+                    "extent `{declared}`: claimed = {declared}, {name} axis {axis} = {observed}\n\
+                     numeric trap: domain in load at int64"
+                ));
+            }
+        }
+    }
+
+    for (name, canonical, member) in entry_dim_guards(dag) {
+        let extent = |witness: (&str, usize)| {
+            resolved_inputs
+                .get(witness.0)
+                .and_then(|value| value.shape.get(witness.1).copied())
+        };
+        let (Some(left), Some(right)) = (
+            extent((canonical.0.as_str(), canonical.1)),
+            extent((member.0.as_str(), member.1)),
+        ) else {
+            continue;
+        };
+        if left == right {
+            continue;
+        }
+        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
+        // `load` because section 4.7 fixes it for a guard whose operands are
+        // all interface values: "the `load` primitive of the later witness in
+        // signature order". The context is its own line, as the same
+        // paragraph requires, and carries the disagreeing names, the axis and
+        // each observed value.
+        return Err(format!(
+            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
+             numeric trap: domain in load at int64",
+            canonical.0, canonical.1, member.0, member.1,
+        ));
+    }
+
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
         let mut bindings =
@@ -2030,55 +2211,6 @@ where
     // uninterruptible. Captured once here; the per-node cost is one relaxed
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
-
-    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
-    // grouping the C and HIP lanes read. Both derivations call
-    // `axis_sources::split_by_scope`: the prologues read
-    // `derive_dim_witnesses`, the guard sites and this lane read
-    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
-    // the scoping in the first alone, which is two derivations that can
-    // disagree. `spec/04-type-system.md` section 4.7 evaluates
-    // a class whose operands are all interface values "at function entry, in
-    // declared signature order, before any other operation of the function",
-    // so they run here, once every input is resolved and before the first
-    // node evaluates.
-    //
-    // The classes come from `dag`, not `bound_dag`: binding substitutes each
-    // resolved symbol into the types, so on the bound graph the claims are
-    // literals and no `Name` class survives to guard. The EXTENTS come from
-    // `resolved_inputs`, which is the point - a claim is checked against what
-    // the caller actually passed, and reading the inputs rather than the
-    // evaluated `values` keeps the guard independent of the live mask. A
-    // witness the caller did not supply is skipped: chelis#991 makes a dead
-    // generic declaration's input not a requirement of the selected root, and
-    // an absent witness cannot disagree with anything.
-    for (name, canonical, member) in entry_dim_guards(dag) {
-        let extent = |witness: (&str, usize)| {
-            resolved_inputs
-                .get(witness.0)
-                .and_then(|value| value.shape.get(witness.1).copied())
-        };
-        let (Some(left), Some(right)) = (
-            extent((canonical.0.as_str(), canonical.1)),
-            extent((member.0.as_str(), member.1)),
-        ) else {
-            continue;
-        };
-        if left == right {
-            continue;
-        }
-        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
-        // `load` because section 4.7 fixes it for a guard whose operands are
-        // all interface values: "the `load` primitive of the later witness in
-        // signature order". The context is its own line, as the same
-        // paragraph requires, and carries the disagreeing names, the axis and
-        // each observed value.
-        return Err(format!(
-            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
-             numeric trap: domain in load at int64",
-            canonical.0, canonical.1, member.0, member.1,
-        ));
-    }
 
     for node in bound_dag.nodes() {
         if let Some(cancel) = &cancel
@@ -2372,12 +2504,11 @@ where
                 // the C backend's runtime numel abort), never a panic.
                 let input = &values[&node.inputs[0]];
                 let expected: usize = shape.iter().product();
+                // The phrase is the interpreter's and the C runtime's
+                // (`host_emit.rs`), so every lane reports the mismatch alike.
                 if expected != input.len() {
                     return Err(format!(
-                        "reshape at node {}: target shape {:?} has {} elements but the \
-                         input has {}",
-                        node.id.0,
-                        shape,
+                        "reshape expects {} elements but tensor has {}",
                         expected,
                         input.len()
                     ));
@@ -2429,6 +2560,17 @@ where
             RiscOp::Shrink { bounds } => {
                 let input = &values[&node.inputs[0]];
                 let resolved = resolve_eval_pairs(bounds, node, &values, &input.shape)?;
+                // chelis#616 on the eval lane: a runtime bound that selects
+                // nothing is rejected as the interpreter rejects it and as
+                // the C runtime aborts it, never returned as an empty tensor.
+                for (axis, (start, end)) in resolved.iter().enumerate() {
+                    if start >= end {
+                        return Err(format!(
+                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted \
+                             (start >= end)"
+                        ));
+                    }
+                }
                 shrink(input, &resolved)
             }
             RiscOp::Stride { strides } => {

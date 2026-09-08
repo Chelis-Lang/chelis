@@ -262,11 +262,13 @@ impl<'a> EvalContext<'a> {
             Ok(value) => Ok(Some(
                 self.unwrap_declared_scalar_return(resolved_name, value)?,
             )),
-            // Not lowerable (host-shaped body): deterministic ladder,
-            // fall back to interpretation; site A handles the body's
-            // reduction or fails loudly.
-            Err(NamedAxisRouteError::NotLowerable(_)) => Ok(None),
-            Err(NamedAxisRouteError::Fatal(message)) => Err(message),
+            // chelis#1277 B2h: a lowering failure after the routing decision
+            // is the evaluation's error, not a silent fall-through to the
+            // interpreter; the decision itself stays by classification (the
+            // `eval_app` gate and the `Ok(None)` returns above for arguments
+            // this boundary cannot type). This retires the eval-lane sibling
+            // of the C lane's chelis#1515 fall-through.
+            Err(error) => Err(error.into_message()),
         }
     }
 

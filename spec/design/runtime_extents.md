@@ -951,13 +951,18 @@ naming here rather than leaving to the corpus file:
   paragraph carried a mislabel from the corpus row's own comment; the two rows
   differ in which operation roots the def, which is exactly what decides
   whether a kernel exists to guard.
-- The `guard_order.effect_*` rows exist only on the eval lane. On C the
-  effect is not merely unorderable against a guard, it is ABSENT: a bound
-  `print` inside an `IO`-effect body emits no corresponding statement at all
-  (the string does not appear in the emitted translation unit), so a row
-  asserting that an effect runs before a guard would assert something the
-  lane never does at any guard placement. The trap-based controls cover both
-  ordering directions on C.
+- The `guard_order.effect_*` rows were measured on the eval lane alone when
+  this section was first written, because on C the effect was not merely
+  unorderable against a guard, it was ABSENT: a bound `print` inside an
+  `IO`-effect body emitted no corresponding statement at all (the string did
+  not appear in the emitted translation unit), so a row asserting that an
+  effect runs before a guard would have asserted something the lane never
+  did at any guard placement. That absence was a defect, chelis#1528, found
+  by B2h: the kernel decision dropped the def's `IO` effect. B2h's shared
+  decision keeps a def whose checked effect row carries `IO`, `Test` or
+  `Resource` in host code on both lanes, the `print` is emitted again, and
+  the two `.c` rows return as B2h's receipts. The trap-based controls cover
+  both ordering directions on C.
 - A row's receipt must name a test registered in the phase's targets before
   that row may reach an exit state; receipts on rows still at a start state
   are deliberately unchecked, so a receipt naming a not-yet-authored test is
@@ -1002,6 +1007,12 @@ naming here rather than leaving to the corpus file:
     with this slice: the exported kernel traps at entry under [04-NUM-9], and
     the input preamble's static-dim check, which emitted the identical
     comparison and aborted first, is narrowed away for exactly that overlap.
+    The complement the preamble keeps, a declared literal input extent no
+    class covers, has its eval analogue in B2h: the DAG evaluator checks
+    every literal-declared `Load` axis against the caller's tensor at entry,
+    in declared signature order and before any class guard, with the same
+    context line and [04-NUM-9] rendering, so a `def main()`-free application
+    such as `widened = f(seed, x)` traps on eval where its kernel traps on C.
     The rooted half is S2b's static rejection.
   - [#665]'s `.c` row stays at `ice`. b2.3 routed the interface BINDING
     consumers through the derived witnesses; `symbolic_occurrences` has a
@@ -1040,6 +1051,52 @@ naming here rather than leaving to the corpus file:
   [#597]'s `.c` row likewise stays at baseline and belongs to S2b, with the
   three unit-source rows below: it fails at lowering with a RANK mismatch,
   which is `fallback_expand_type` having no replacement branch.
+
+**The repair for the host interpreter is routing through the C lane's own
+kernel decision, not a second guard.** `chelis_ir::host::host_def_kernel`
+exposes the decision `lower_host_function` has always made for the C host
+program: a def is a kernel when its declared result is a tensor, no parameter
+is callable, no recursive, callable-parameter or summary-rejecting callee is
+reached, the body root is not on the keep-in-host list, no dynamic
+`to_tensor` is reached, no forward `fail` is reached, the body holds none of
+the six forms `body_form_the_dag_cannot_carry` names before any lowering (a
+string literal, chelis#856; a host-only builtin reached inside the body; a
+`match` on a runtime scrutinee, chelis#520 D1; `reduce_window_*` with a
+non-literal window or stride list, chelis#1058; `pad` with a non-static
+fill, chelis#776; a name that is neither a parameter nor a definition of the
+program), and, since chelis#1528,
+the def's checked effect row carries no effect the DAG cannot represent
+(`IO`, `Test`, `Resource`; `Random` and `Accum` are DAG-carried;
+`spec/04-type-system.md` section 7.1 names `IO` the host-side observable
+interaction effect, and [05-HOST-2] forbids representing "a device-only
+kernel may not perform `IO`" as an inert stub, which a kernel that drops
+`print` is). The decision is made before any lowering, in one function that
+both `lower_host_function` and the host runtime's closure application call,
+so the two lanes cannot answer "is this def a kernel" differently: neither
+the manifest lane nor the lowerer's syntactic map is consulted, because both
+classify every extent-reading callee Host while C lowers it, and they
+disagree with each other on the chelis#218 class. When the answer is a
+kernel, eval applies the def by evaluating that kernel through
+`chelis_ir::eval` with the arguments served as its `Load`s in declared order,
+captured top-level bindings served through top-level resolution, and the
+`Random` stream threaded as the transforms thread it, so the eval lane has
+one tensor evaluator and one derivation point (C2.7) and the class derivation
+and guard of this slice fire in the same kernel on both lanes ([05-MOV-1]).
+The routed unit is whatever C lowers: for `def main() = f(...)` it is
+`main`'s whole body with `f` inlined, the kernel `chelis build` emits, so
+`f` is applied separately only from host-lane code, where C calls the
+kernel wrapper too. When the answer is host, the interpreter runs the body as
+before. A lowering failure after a kernel decision is an error on eval, never
+a fall-through to the interpreter; the C lane keeps only its pre-existing
+non-fatal fall-through (chelis#1515), and the chelis#338 named-axis
+application route, retained for the rank- and precision-polymorphic defs C
+also handles only per call, loses its own fall-through for the same reason.
+Not routed, by measurement rather than by omission: inline tensor
+sub-expressions in host bodies, which C extracts as sub-kernels and eval
+interprets (chelis#1522); library defs reached through a compiled context,
+which the runtime holds as expressions rather than as a checked program; and
+`chelis eval --file`'s habit of writing a `reef.lock` into the enclosing
+package (chelis#1520), which the byte-identity harness works around.
 
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant

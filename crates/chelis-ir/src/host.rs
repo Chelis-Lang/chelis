@@ -35,6 +35,9 @@ thread_local! {
         RefCell::new(UnordMap::new());
     static PROGRAM_DEFS_CACHE: RefCell<UnordMap<usize, Arc<BTreeMap<String, Expr>>>> =
         RefCell::new(UnordMap::new());
+    static DEF_EFFECT_ROWS_CACHE:
+        RefCell<UnordMap<usize, Arc<BTreeMap<String, chelis_types::types::EffectSet>>>> =
+        RefCell::new(UnordMap::new());
     static SUBEXPR_LOWERING_CONTEXT_CACHE:
         RefCell<UnordMap<usize, crate::lower::SubexprLoweringContext>> =
         RefCell::new(UnordMap::new());
@@ -259,6 +262,7 @@ impl HostLoweringCacheGuard {
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
         PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
+        DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
         SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
         HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
         DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -274,6 +278,7 @@ impl Drop for HostLoweringCacheGuard {
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
         PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
+        DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
         SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
         HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
         DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -3029,12 +3034,778 @@ fn host_body_has_call_matching<T>(
     }
 }
 
-fn lower_host_function(
+/// Random-stream state a host evaluator threads into a kernel lowering so the
+/// draws inside the kernel advance the enclosing handler's stream, the same
+/// contract the transforms use through
+/// `try_lower_subexpr_program_with_random_state_progress`. The C lowering
+/// passes `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RandomLoweringState {
+    pub seed: Option<u64>,
+    pub counter: u64,
+}
+
+/// The kernel the C host program emits for a def whose body
+/// `lower_host_function` decides to lower through the tensor DAG, in the form
+/// an evaluator can run directly.
+///
+/// chelis#1277 B2h: the eval interpreter applies a host-lane def through this
+/// kernel, so eval executes exactly the DAG C emits for the def ([05-MOV-1])
+/// and the runtime-extent classes and guards derived from that DAG fire on
+/// both lanes (runtime_extents.md C2.7). The decision is made once, here,
+/// before any lowering: `Ok(None)` is the host lane, `Ok(Some)` the kernel,
+/// and `Err` a kernel decision whose lowering failed.
+#[derive(Debug, Clone)]
+pub struct HostDefKernel {
+    pub dag: crate::Dag,
+    /// Kernel inputs in DAG `Load` order: the referenced params by declared
+    /// name and any captured top-level tensor names, each with its declared
+    /// `TensorType` after dimension-symbol remapping.
+    pub inputs: Vec<HostTensorInput>,
+    pub output: TensorType,
+    /// Declared params in signature order, so positional arguments map onto
+    /// `inputs` by name and the unreferenced ones are dropped, as the C
+    /// wrapper drops them.
+    pub params: Vec<HostParam>,
+    /// The next unused Random ordinal when a `RandomLoweringState` was given.
+    pub next_random_counter: Option<u64>,
+}
+
+/// What `lower_host_function` and [`host_def_kernel`] both start from.
+struct HostDefSignature {
+    name: String,
+    params: Vec<HostParam>,
+    scope: UnordMap<String, HostTypeTerm>,
+    ret_ty: HostTypeTerm,
+    body_expr: Expr,
+}
+
+/// The kernel-or-host decision for one def body, made before lowering.
+enum DefBodyDecision {
+    Host,
+    Kernel(TensorType),
+    /// A body that is a bare tensor variable: the C lane emits a variable
+    /// access rather than a kernel, and an evaluator reads the binding.
+    TensorVar(String, TensorType),
+}
+
+/// Decide whether `name`'s body is a kernel and, if so, lower it.
+///
+/// This is the decision `lower_host_function` makes for the C host program,
+/// exposed so the eval interpreter applies the def through the same DAG.
+/// `Ok(None)`: the host lane runs the body. `Ok(Some)`: the kernel. `Err`: the
+/// decision was kernel and the lowering failed, fatal or not; the caller
+/// decides what a failed kernel lowering means on its lane (the C lane's
+/// fall-through to host lowering is chelis#1515 and is not part of this
+/// function).
+pub fn host_def_kernel(
+    program: &CheckedProgram,
+    name: &str,
+    random: Option<RandomLoweringState>,
+) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    // The declaration's own name is the key for every per-def fact (the
+    // effect row, the call graph); a caller may hand in a shorter spelling
+    // that `find_top_level_def_named` resolves.
+    let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
+        return Ok(None);
+    };
+    let name = canonical;
+    // `ty_expr` is redundant with the lookup `host_def_signature` performs
+    // first (the C caller passes that same lookup's result), so `None` here
+    // yields the identical signature.
+    let Some(signature) = host_def_signature(name, body, None, program) else {
+        return Ok(None);
+    };
+    let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
+    let expected = match def_body_decision(program, &signature)? {
+        DefBodyDecision::Kernel(expected) => expected,
+        DefBodyDecision::Host | DefBodyDecision::TensorVar(..) => return Ok(None),
+    };
+    let (dag, next_random_counter) = lower_kernel_dag(
+        &signature.body_expr,
+        program,
+        &signature.scope,
+        &expected,
+        random,
+    )?;
+    if let Some(builtin) = kernel_dag_loads_builtin(&dag) {
+        return Err(crate::lower::LowerDiagnostic::new(
+            format!(
+                "the kernel body of `{name}` reaches the host-only builtin `{builtin}`, which has \
+                 no tensor-DAG lowering"
+            ),
+            None,
+            None,
+        ));
+    }
+    let inputs = tensor_helper_inputs(&dag);
+    let output = dag
+        .roots()
+        .first()
+        .and_then(|id| dag.get(*id))
+        .map(|node| node.output_type.clone())
+        .unwrap_or_else(|| expected.clone());
+    Ok(Some(HostDefKernel {
+        dag,
+        inputs,
+        output,
+        params: signature.params,
+        next_random_counter,
+    }))
+}
+
+/// Whether `name`'s checked effect row carries an effect with no DAG form
+/// (`IO`, `Test`, `Resource`). Read off the same effect inference the root
+/// manifest uses, cached per program like the other host-lowering facts.
+fn def_effect_row_forbids_kernel(program: &CheckedProgram, name: &str) -> bool {
+    cached_def_effect_rows(program)
+        .get(name)
+        .is_some_and(|row| {
+            row.iter().any(|effect| {
+                matches!(
+                    effect,
+                    chelis_types::types::Effect::Io
+                        | chelis_types::types::Effect::Test
+                        | chelis_types::types::Effect::Resource(_)
+                )
+            })
+        })
+}
+
+fn cached_def_effect_rows(
+    program: &CheckedProgram,
+) -> Arc<BTreeMap<String, chelis_types::types::EffectSet>> {
+    let key = program as *const CheckedProgram as usize;
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) = DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+    {
+        return cached;
+    }
+    let rows = Arc::new(chelis_effects::def_effect_rows(program));
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        DEF_EFFECT_ROWS_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, rows.clone());
+        });
+    }
+    rows
+}
+
+/// A form the kernel lowering cannot carry, found before lowering by walking
+/// the body and every inlined callee with lexical scoping (chelis#1277 B2h:
+/// each class is one the byte-identity corpus found the lowerer rejecting
+/// after a kernel decision, named with the lowerer's own reason). An `if` is
+/// deliberately not a class: the kernel lowering's `lower_if` accepts more
+/// than the syntactic `if_expr_is_dag_lowerable` does, and treating the
+/// latter as the rule flipped three corpus kernels to host code on C.
+/// `Some(reason)` keeps the def in host code on both lanes; on C that is the
+/// lane the non-fatal fall-through (chelis#1515) already chose, so the emitted
+/// program is unchanged, which the corpus capture proves rather than assumes.
+fn body_form_the_dag_cannot_carry(
+    program: &CheckedProgram,
+    body: &Expr,
+    params: &[HostParam],
+) -> Option<String> {
+    let defs = cached_program_defs(program);
+    let mut walk = UncarriableWalk {
+        defs: &defs,
+        visited: UnordSet::new(),
+        scopes: vec![
+            params
+                .iter()
+                .map(|param| (param.name.clone(), false))
+                .collect(),
+        ],
+    };
+    walk.expr(body)
+}
+
+/// Lexical scopes carry whether a binder is a compile-time-known ADT
+/// constructor value, the only scrutinee `lower_match` selects an arm for
+/// (chelis#520 D1).
+struct UncarriableWalk<'a> {
+    defs: &'a BTreeMap<String, Expr>,
+    visited: UnordSet<String>,
+    scopes: Vec<UnordMap<String, bool>>,
+}
+
+impl UncarriableWalk<'_> {
+    fn bound(&self, name: &str) -> Option<bool> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+    }
+
+    fn expr(&mut self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Atom(Atom::Str(_), _) => {
+                Some("a string literal, which has no numeric IR constant (chelis#856)".to_string())
+            }
+            Expr::Atom(_, _) | Expr::Map(_, _) => None,
+            Expr::MetaExpr(meta, _) => self.expr(&meta.expr),
+            Expr::Node(node, span) => self.expr(&Expr::List(node.to_list(*span), *span)),
+            Expr::BareList(elems, _) => elems.iter().find_map(|elem| self.expr(elem)),
+            Expr::UnknownForm(data) => data.children.iter().find_map(|child| self.expr(child)),
+            Expr::List(list, _) => self.list(list),
+        }
+    }
+
+    fn list(&mut self, list: &List) -> Option<String> {
+        let kids = children(list);
+        match tag(list) {
+            Some(DeepTag::Var) => {
+                let name = kids.first().and_then(symbol_name)?;
+                if self.bound(name).is_some()
+                    || BUILTIN_NAMES.contains(&name)
+                    || name.chars().next().is_some_and(char::is_uppercase)
+                {
+                    return None;
+                }
+                match self.defs.get(name) {
+                    // A callee inlines into the kernel, so its body is walked
+                    // under its own parameters; a value binding becomes a
+                    // `Load` and carries nothing.
+                    Some(def_body) => self.def(name, def_body),
+                    None => Some(format!(
+                        "the name `{name}`, which is neither a parameter nor a definition \
+                         of this program (a library definition under a compiled context)"
+                    )),
+                }
+            }
+            Some(DeepTag::App) => {
+                if let Some(callee) = kids.first().and_then(as_list)
+                    && tag(callee) == Some(DeepTag::Var)
+                    && let Some(name) = children(callee).first().and_then(symbol_name)
+                    && self.bound(name).is_none()
+                    && !self.defs.contains_key(name)
+                {
+                    if HOST_ONLY_BUILTINS.contains(&name) {
+                        return Some(format!(
+                            "the builtin `{name}`, which has no tensor-DAG lowering"
+                        ));
+                    }
+                    if name.starts_with("reduce_window_")
+                        && kids[1..]
+                            .iter()
+                            .skip(1)
+                            .any(|list_arg| !is_literal_int_list(list_arg))
+                    {
+                        return Some(format!(
+                            "`{name}` with a non-literal window or stride list, which the \
+                             compiled lowering does not carry (chelis#1058)"
+                        ));
+                    }
+                    if name == "pad" && kids.get(3).is_some_and(|fill| !is_static_scalar(fill)) {
+                        return Some(
+                            "`pad` with a fill value that does not resolve statically \
+                             (chelis#776)"
+                                .to_string(),
+                        );
+                    }
+                    // A bare name handed directly to a builtin that the program
+                    // does not define is a dimension name (a named axis of a
+                    // reduction or `expand`, spec/04-type-system.md section
+                    // 4.5.3), which the lowering resolves against the operand;
+                    // the checker has already bound every value name. A callee
+                    // that is neither a builtin nor a definition is walked as a
+                    // name and reported as unresolvable.
+                    if BUILTIN_NAMES.contains(&name) {
+                        return kids
+                            .iter()
+                            .skip(1)
+                            .filter(|kid| !is_bare_lowercase_var(kid))
+                            .find_map(|kid| self.expr(kid));
+                    }
+                }
+                kids.iter().find_map(|kid| self.expr(kid))
+            }
+            Some(DeepTag::Fn) => {
+                let params = kids
+                    .first()
+                    .map_or_else(Vec::new, fn_param_names)
+                    .into_iter()
+                    .map(|name| (name, false))
+                    .collect();
+                self.scopes.push(params);
+                let found = kids.get(1).and_then(|body| self.expr(body));
+                self.scopes.pop();
+                found
+            }
+            Some(DeepTag::Let) => {
+                self.scopes.push(UnordMap::new());
+                let mut found = None;
+                if let Some(bindings) = kids.first().and_then(as_list)
+                    && tag(bindings) == Some(DeepTag::Bind)
+                {
+                    let binding_kids = children(bindings);
+                    let mut index = 0;
+                    while index + 1 < binding_kids.len() {
+                        found = found.or_else(|| self.expr(&binding_kids[index + 1]));
+                        let static_ctor = is_static_constructor(&binding_kids[index + 1], self);
+                        let mut bound = UnordSet::new();
+                        collect_binder_names(&binding_kids[index], &mut bound);
+                        if let Some(scope) = self.scopes.last_mut() {
+                            for name in bound.into_sorted() {
+                                scope.insert(name, static_ctor);
+                            }
+                        }
+                        index += 2;
+                    }
+                }
+                let found = found.or_else(|| kids.get(1).and_then(|body| self.expr(body)));
+                self.scopes.pop();
+                found
+            }
+            Some(DeepTag::Match) => {
+                let scrutinee = kids.first()?;
+                if let Some(found) = self.expr(scrutinee) {
+                    return Some(found);
+                }
+                if !is_static_constructor(scrutinee, self) {
+                    return Some(
+                        "a `match` on a runtime scrutinee, which IR lowering resolves only \
+                         for a compile-time-known constructor value (chelis#520 D1)"
+                            .to_string(),
+                    );
+                }
+                for arm in kids.iter().skip(1) {
+                    let Some(arm_list) = as_list(arm) else {
+                        continue;
+                    };
+                    if tag(arm_list) != Some(DeepTag::Arm) {
+                        continue;
+                    }
+                    let arm_kids = children(arm_list);
+                    let mut bound = UnordSet::new();
+                    if let Some(pattern) = arm_kids.first() {
+                        collect_binder_names(pattern, &mut bound);
+                    }
+                    self.scopes.push(
+                        bound
+                            .into_sorted()
+                            .into_iter()
+                            .map(|n| (n, false))
+                            .collect(),
+                    );
+                    let found = arm_kids.iter().skip(1).find_map(|kid| self.expr(kid));
+                    self.scopes.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                None
+            }
+            _ => kids.iter().find_map(|kid| self.expr(kid)),
+        }
+    }
+
+    fn def(&mut self, name: &str, body: &Expr) -> Option<String> {
+        let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
+            return None;
+        };
+        if !self.visited.insert(name.to_string()) {
+            return None;
+        }
+        let params = fn_kids
+            .first()
+            .map_or_else(Vec::new, fn_param_names)
+            .into_iter()
+            .map(|param| (param, false))
+            .collect();
+        let saved = std::mem::replace(&mut self.scopes, vec![params]);
+        let found = fn_kids.get(1).and_then(|fn_body| self.expr(fn_body));
+        self.scopes = saved;
+        found
+    }
+}
+
+/// Builtins the kernel lowering has no arm for: the lowerer's own host-side
+/// list (`lower.rs`, `expr_requires_host_runtime_with_ctx`) minus the names
+/// its `lower_builtin_app` does handle (`count`, `shape`, `concat`, `fold`,
+/// a static `to_tensor`, which the preflight covers). Measured against the
+/// arms on `801f92c02`.
+const HOST_ONLY_BUILTINS: &[&str] = &[
+    "print",
+    "debug",
+    "string_len",
+    "string_concat",
+    "string_slice",
+    "string_contains",
+    "string_starts_with",
+    "string_ends_with",
+    "string_trim",
+    "to_string",
+    "to_int",
+    "to_float",
+    "mod",
+    "bitand",
+    "bitor",
+    "bitxor",
+    "shl",
+    "shr",
+    "rank",
+    "numel",
+    "len",
+    "index",
+    "append",
+    "take",
+    "chunk",
+    "range",
+    "map",
+    "filter",
+    "scan",
+    "tensor_scan",
+    "partition",
+    "flat_map",
+    "flatten",
+    "zip",
+    "enumerate",
+    "dict_of",
+    "dict_get",
+    "dict_contains",
+    "dict_remove",
+    "dict_insert",
+    "dict_merge",
+    "dict_keys",
+    "dict_values",
+    "dict_entries",
+    "read_file",
+    "write_file",
+    "read_lines",
+    "read_bytes",
+    "file_exists",
+    "list_dir",
+    "mmap_file",
+    "mmap_read",
+    "mmap_len",
+    "process_run",
+    "round_to",
+    "parse_csv",
+    "to_csv",
+    "csv_ints",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_int",
+    "csv_str",
+    "to_list",
+    "pad_sequences",
+    "pad_sequences_to",
+    "einsum",
+    "split",
+    "scatter",
+    "where",
+    "cumsum",
+    "sort",
+    "diagonal",
+    "trace",
+    "clamp",
+];
+
+/// A `(var name)` whose name starts lowercase: the shape a dimension-name
+/// argument takes in a builtin call.
+fn is_bare_lowercase_var(expr: &Expr) -> bool {
+    let Some((DeepTag::Var, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    kids.first()
+        .and_then(symbol_name)
+        .is_some_and(|name| name.chars().next().is_some_and(char::is_lowercase))
+}
+
+fn fn_param_names(params: &Expr) -> Vec<String> {
+    let Some(list) = as_list(params) else {
+        return Vec::new();
+    };
+    if tag(list) != Some(DeepTag::Params) {
+        return Vec::new();
+    }
+    children(list).iter().filter_map(param_name).collect()
+}
+
+/// Every name a `let` binder or a match pattern introduces (`pat-var` leaves,
+/// plus the bare-name and tuple forms a `bind` uses).
+fn collect_binder_names(pattern: &Expr, out: &mut UnordSet<String>) {
+    match pattern {
+        Expr::Atom(Atom::Name(name), _) => {
+            out.insert(name.clone());
+        }
+        Expr::Atom(_, _) | Expr::Map(_, _) => {}
+        Expr::MetaExpr(meta, _) => collect_binder_names(&meta.expr, out),
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let Some((pattern_tag, _, kids)) = stamped_parts(pattern) else {
+                return;
+            };
+            if matches!(pattern_tag, DeepTag::PatVar | DeepTag::Var)
+                && let Some(name) = kids.first().and_then(symbol_name)
+            {
+                out.insert(name.to_string());
+                return;
+            }
+            for kid in kids {
+                collect_binder_names(kid, out);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_binder_names(elem, out);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for kid in &data.children {
+                collect_binder_names(kid, out);
+            }
+        }
+    }
+}
+
+/// A compile-time-known constructor value: an uppercase variable, an
+/// application of one, or a binder holding one.
+fn is_static_constructor(expr: &Expr, walk: &UncarriableWalk<'_>) -> bool {
+    let Some((expr_tag, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    match expr_tag {
+        DeepTag::Var => kids.first().and_then(symbol_name).is_some_and(|name| {
+            name.chars().next().is_some_and(char::is_uppercase) || walk.bound(name) == Some(true)
+        }),
+        DeepTag::App => kids
+            .first()
+            .and_then(as_list)
+            .filter(|callee| tag(callee) == Some(DeepTag::Var))
+            .and_then(|callee| children(callee).first().and_then(symbol_name))
+            .is_some_and(|name| name.chars().next().is_some_and(char::is_uppercase)),
+        _ => false,
+    }
+}
+
+/// A window or stride list the compiled lowering accepts: a literal `Cons`
+/// chain of integer literals (`lower_builtin_app`'s `reduce_window_*` rule).
+fn is_literal_int_list(expr: &Expr) -> bool {
+    crate::lower::collect_cons_chain(expr).is_some_and(|elems| {
+        elems
+            .iter()
+            .all(|elem| crate::lower::extract_int_for_dim(elem).is_some())
+    })
+}
+
+/// A fill value `lower_builtin_app` resolves statically for `pad`: a numeric
+/// literal, optionally under `neg` or a float `cast` (chelis#776).
+fn is_static_scalar(expr: &Expr) -> bool {
+    match expr {
+        Expr::Atom(Atom::Float(_), _) | Expr::Atom(Atom::Int(_), _) => true,
+        Expr::MetaExpr(meta, _) => is_static_scalar(&meta.expr),
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let Some((expr_tag, _, kids)) = stamped_parts(expr) else {
+                return false;
+            };
+            match expr_tag {
+                DeepTag::Lit => kids.first().is_some_and(is_static_scalar),
+                DeepTag::Cast => kids.first().is_some_and(is_static_scalar),
+                DeepTag::App => {
+                    kids.first()
+                        .and_then(as_list)
+                        .filter(|callee| tag(callee) == Some(DeepTag::Var))
+                        .and_then(|callee| children(callee).first().and_then(symbol_name))
+                        == Some("neg")
+                        && kids.get(1).is_some_and(is_static_scalar)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The predicate list `lower_host_function` has always applied, evaluated
+/// before lowering: declared tensor result, no callable parameter, no
+/// recursive, callable-parameter or summary-rejecting callee reached, root
+/// not kept in the host lane, no dynamic `to_tensor` reach, no forward `fail`.
+fn def_body_decision(
+    program: &CheckedProgram,
+    signature: &HostDefSignature,
+) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
+    let body_expr = &signature.body_expr;
+    // Skip the tensor-helper path when any param is callable: the DAG
+    // helper has no representation for fn-pointer inputs and would otherwise
+    // coerce the callable into `chelis_scalar_tensor_from_f64`, emitting C
+    // that gcc rejects. Go straight through host-lane lowering so the fn
+    // application becomes a direct `f(x)` call.
+    let any_callable_param = signature
+        .params
+        .iter()
+        .any(|param| matches!(param.ty, HostTypeTerm::Fn(_, _)));
+    let calls_summary_rejecting_function =
+        expr_calls_summary_rejecting_top_level_fn(body_expr, program)?;
+    let HostTypeTerm::Tensor(expected) = signature.ret_ty.clone() else {
+        return Ok(DefBodyDecision::Host);
+    };
+    // chelis#1528: a body whose checked effect row carries an effect the DAG
+    // cannot represent stays in host code on both lanes. `spec/04-type-system.md`
+    // section 7.1 makes `IO` the host-side observable interaction effect,
+    // `Test` the test runner's, and `Resource(Device)` a placement region;
+    // [05-HOST-2] forbids representing "a device-only kernel may not perform
+    // IO" as an inert stub, which is what a kernel that drops `print` is.
+    // `Random` (`UniformLike`) and `Accum` (gradient accumulation) are carried
+    // by the DAG.
+    if def_effect_row_forbids_kernel(program, &signature.name) {
+        return Ok(DefBodyDecision::Host);
+    }
+    // A form the kernel lowering cannot carry keeps the def in host code on
+    // both lanes, decided here rather than discovered by a failed lowering
+    // (chelis#1277 B2h; the classes the byte-identity corpus found).
+    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params).is_some() {
+        return Ok(DefBodyDecision::Host);
+    }
+    if any_callable_param
+        || expr_needs_host_lane_tensor_lowering(body_expr, program)
+        || expr_calls_top_level_fn_with_callable_param(body_expr, program)
+        || calls_summary_rejecting_function
+        || should_keep_tensor_expr_in_host_lane(body_expr)
+    {
+        return Ok(DefBodyDecision::Host);
+    }
+    if let Expr::List(list, _) = body_expr
+        && tag(list) == Some(DeepTag::Var)
+        && let Some(name) = children(list).first().and_then(symbol_name)
+    {
+        return Ok(DefBodyDecision::TensorVar(name.to_string(), expected));
+    }
+    if tensor_helper_preflight_rejects(body_expr) {
+        record_host_work(|profile| {
+            profile.tensor_helper_fallbacks += 1;
+            profile.tensor_helper_preflight_rejections += 1;
+        });
+        return Ok(DefBodyDecision::Host);
+    }
+    record_host_work(|profile| {
+        profile.tensor_helper_attempts += 1;
+        profile.tensor_helper_input_nodes += deep_expr_nodes(body_expr);
+    });
+    // chelis#631: never swallow a fail-reaching forward body into a kernel;
+    // the DAG lane lowers `fail` to a mask-selected placeholder while the
+    // host lane keeps it as real control flow (see `lower_tensor_helper_dag`).
+    let defs = cached_program_defs(program);
+    if expr_reaches_forward_fail(body_expr, &defs, &mut UnordSet::new()) {
+        record_host_work(|profile| {
+            profile.tensor_helper_fail_guard_rejections += 1;
+            profile.tensor_helper_fallbacks += 1;
+        });
+        return Ok(DefBodyDecision::Host);
+    }
+    Ok(DefBodyDecision::Kernel(expected))
+}
+
+/// The C lane's use of the shared decision: a kernel call, or `None` for the
+/// host lane. A failed kernel lowering falls through to host lowering here,
+/// which is the pre-existing chelis#1515 split; `host_def_kernel` does not
+/// inherit it.
+fn lower_def_body_kernel(
+    program: &CheckedProgram,
+    signature: &HostDefSignature,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    let expected = match def_body_decision(program, signature)? {
+        DefBodyDecision::Host => return Ok(None),
+        DefBodyDecision::TensorVar(name, expected) => {
+            return Ok(Some(HostExpr::new(HostExprKind::Var(
+                name,
+                HostTypeTerm::Tensor(expected),
+            ))));
+        }
+        DefBodyDecision::Kernel(expected) => expected,
+    };
+    let dag = match lower_kernel_dag(
+        &signature.body_expr,
+        program,
+        &signature.scope,
+        &expected,
+        None,
+    ) {
+        Ok((dag, _)) => dag,
+        Err(diagnostic) if diagnostic.fatal => {
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+        }
+        Err(_) => {
+            record_host_work(|profile| {
+                profile.tensor_helper_dag_rejections += 1;
+                profile.tensor_helper_fallbacks += 1;
+            });
+            return Ok(None);
+        }
+    };
+    if kernel_dag_loads_builtin(&dag).is_some() {
+        record_host_work(|profile| {
+            profile.tensor_helper_fallbacks += 1;
+            profile.tensor_helper_builtin_load_rejections += 1;
+        });
+        return Ok(None);
+    }
+    record_host_work(|profile| profile.tensor_helper_successes += 1);
+    Ok(Some(finish_tensor_helper_call(
+        dag,
+        &signature.scope,
+        tensor_helpers,
+        expected,
+    )))
+}
+
+/// A `Load` named after a builtin means the lowerer treated a host-lane
+/// builtin as a free variable; emitting that DAG would reference a symbol
+/// that does not exist.
+fn kernel_dag_loads_builtin(dag: &crate::Dag) -> Option<String> {
+    dag.nodes().iter().find_map(|node| match &node.op {
+        crate::dag::RiscOp::Load { name } if BUILTIN_NAMES.contains(&name.as_str()) => {
+            Some(name.as_str().to_string())
+        }
+        _ => None,
+    })
+}
+
+/// The one kernel lowering: the body over its declared tensor scope, then
+/// dimension symbols remapped onto the declared signature. Every failure is
+/// an `Err`; the callers decide what it means on their lane.
+fn lower_kernel_dag(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &UnordMap<String, HostTypeTerm>,
+    expected: &TensorType,
+    random: Option<RandomLoweringState>,
+) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
+    let context = cached_subexpr_lowering_context(program);
+    let scope_types = collect_tensor_scope(scope);
+    let (dag, next_random_counter) = match random {
+        None => (
+            crate::lower::try_lower_subexpr_program_with_context(expr, scope_types, &context)?,
+            None,
+        ),
+        Some(state) => {
+            let (dag, counter) =
+                crate::lower::try_lower_subexpr_program_with_context_and_random_state(
+                    expr,
+                    scope_types,
+                    &context,
+                    state.seed,
+                    state.counter,
+                )?;
+            (dag, Some(counter))
+        }
+    };
+    Ok((
+        remap_tensor_helper_dim_symbols(&dag, scope, expected),
+        next_random_counter,
+    ))
+}
+
+/// The declared parameters, their host types, the declared result type and
+/// the inlined body that both `lower_host_function` and [`host_def_kernel`]
+/// start from. `None` when the def has no lowerable shape at all.
+fn host_def_signature(
     name: &str,
     body: &Expr,
     ty_expr: Option<&Expr>,
     program: &CheckedProgram,
-) -> Result<Option<HostFunction>, crate::lower::LowerDiagnostic> {
+) -> Option<HostDefSignature> {
     // Preserve authored dimension identities while expanding only the
     // checker-validated nominal aliases below. Replacing this expression with
     // the canonical checked signature turns `batch` into an anonymous `dN`
@@ -3061,15 +3832,12 @@ fn lower_host_function(
 
     let mut scope = UnordMap::new();
     let mut params = Vec::new();
-    let mut tensor_helpers = Vec::new();
     let body_expr = if let Expr::List(list, _) = body {
         if tag(list) == Some(DeepTag::Fn) {
             let kids = children(list);
-            let Some(params_list) = kids.first().and_then(as_list) else {
-                return Ok(None);
-            };
+            let params_list = kids.first().and_then(as_list)?;
             if tag(params_list) != Some(DeepTag::Params) {
-                return Ok(None);
+                return None;
             }
             for (index, param) in children(params_list).iter().enumerate() {
                 let Some(pname) = param_name(param) else {
@@ -3091,13 +3859,10 @@ fn lower_host_function(
                     ty: pty,
                 });
             }
-            let Some(body) = kids.get(1) else {
-                return Ok(None);
-            };
-            body.clone()
+            kids.get(1)?.clone()
         } else {
             if param_tys.is_empty() && ret_ty.is_unresolved() {
-                return Ok(None);
+                return None;
             }
             for (index, param_ty) in param_tys.iter().enumerate() {
                 let pname = format!("arg{index}");
@@ -3115,7 +3880,7 @@ fn lower_host_function(
             )
         }
     } else {
-        return Ok(None);
+        return None;
     };
     // Inline any local callable bindings (fn / grad / vmap / vmap-grad)
     // into the body before lowering. The host backend only recognizes
@@ -3125,8 +3890,29 @@ fn lower_host_function(
     // unresolved-callable marker builtin
     // (`HOST_UNRESOLVED_CALLABLE_MARKER`), which ABI projection rejects
     // pre-emission.
-    let body_expr = inline_local_callable_lets(&body_expr);
-    let _preflight_guard = TensorHelperPreflightGuard::begin(&body_expr, program);
+    Some(HostDefSignature {
+        name: name.to_string(),
+        params,
+        scope,
+        ret_ty,
+        body_expr: inline_local_callable_lets(&body_expr),
+    })
+}
+
+fn lower_host_function(
+    name: &str,
+    body: &Expr,
+    ty_expr: Option<&Expr>,
+    program: &CheckedProgram,
+) -> Result<Option<HostFunction>, crate::lower::LowerDiagnostic> {
+    let Some(signature) = host_def_signature(name, body, ty_expr, program) else {
+        return Ok(None);
+    };
+    let mut tensor_helpers = Vec::new();
+    // The preflight facts are keyed by the body expression's address, so the
+    // guard opens on the signature's own copy, which is not moved until the
+    // body has been lowered.
+    let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
     // If the declared return type is a tensor, the body must produce a
     // tensor even when downstream type-metadata annotations are missing
     // from the reef'd deep AST. Force the body through the tensor-helper
@@ -3140,30 +3926,18 @@ fn lower_host_function(
     // coerce the callable into `chelis_scalar_tensor_from_f64`, emitting C
     // that gcc rejects. Go straight through host-lane lowering so the fn
     // application becomes a direct `f(x)` call.
-    let any_callable_param = params
-        .iter()
-        .any(|param| matches!(param.ty, HostTypeTerm::Fn(_, _)));
-    let calls_summary_rejecting_function =
-        expr_calls_summary_rejecting_top_level_fn(&body_expr, program)?;
-    let mut host_body = if let HostTypeTerm::Tensor(expected) = ret_ty.clone()
-        && !any_callable_param
-        && !expr_needs_host_lane_tensor_lowering(&body_expr, program)
-        && !expr_calls_top_level_fn_with_callable_param(&body_expr, program)
-        && !calls_summary_rejecting_function
-        && !should_keep_tensor_expr_in_host_lane(&body_expr)
-    {
-        match try_lower_tensor_helper_call(
-            &body_expr,
+    //
+    // chelis#1277 B2h: the kernel-or-host decision and the kernel lowering
+    // are shared with the eval interpreter through `host_def_kernel`, so the
+    // two lanes cannot answer "is this def a kernel" differently.
+    let mut host_body = match lower_def_body_kernel(program, &signature, &mut tensor_helpers)? {
+        Some(kernel_call) => kernel_call,
+        None => lower_host_expr(
+            &signature.body_expr,
             program,
-            &scope,
+            &signature.scope,
             &mut tensor_helpers,
-            expected,
-        ) {
-            Some(lowered) => lowered,
-            None => lower_host_expr(&body_expr, program, &scope, &mut tensor_helpers)?,
-        }
-    } else {
-        lower_host_expr(&body_expr, program, &scope, &mut tensor_helpers)?
+        )?,
     };
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table, the
     // "Tensor-helper extraction" and "Lowering. Fn-body" rules: every
@@ -3184,8 +3958,11 @@ fn lower_host_function(
     // `append_merged_span` helper handles None-noop, dedup, lex-sort,
     // and canonical-equal-noop, so paths that already have the span as
     // canonical (the wrapper-routed lowering) are a no-op.
-    host_body.append_merged_span(body_expr.span_id());
+    host_body.append_merged_span(signature.body_expr.span_id());
     host_body.append_merged_span(body.span_id());
+    let HostDefSignature {
+        mut params, ret_ty, ..
+    } = signature;
     refine_function_params_from_body(&mut params, &host_body);
     let ret_ty = if ret_ty.is_unresolved() {
         host_expr_type(&host_body)
@@ -3288,16 +4065,12 @@ fn try_lower_tensor_helper_call(
     // host-lane builtin as a free variable. Emitting this DAG would generate
     // C with a `__tensor_scalar0_0 = fold;` line — `fold` is not a C symbol.
     // Fall back to `lower_host_expr` which handles HOFs directly.
-    for node in dag.nodes() {
-        if let crate::dag::RiscOp::Load { name } = &node.op
-            && BUILTIN_NAMES.contains(&name.as_str())
-        {
-            record_host_work(|profile| {
-                profile.tensor_helper_fallbacks += 1;
-                profile.tensor_helper_builtin_load_rejections += 1;
-            });
-            return None;
-        }
+    if kernel_dag_loads_builtin(&dag).is_some() {
+        record_host_work(|profile| {
+            profile.tensor_helper_fallbacks += 1;
+            profile.tensor_helper_builtin_load_rejections += 1;
+        });
+        return None;
     }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
     Some(finish_tensor_helper_call(
@@ -3336,22 +4109,16 @@ fn lower_tensor_helper_dag(
     // helper sub-lowering instead of swallowing it; the host
     // fallback would otherwise emit an undefined-symbol call to
     // the rejected grad function.
-    let context = cached_subexpr_lowering_context(program);
-    let dag = match crate::lower::try_lower_subexpr_program_with_context(
-        expr,
-        collect_tensor_scope(scope),
-        &context,
-    ) {
-        Ok(dag) => dag,
+    match lower_kernel_dag(expr, program, scope, expected, None) {
+        Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
         Err(_) => {
             record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
-            return None;
+            None
         }
-    };
-    Some(remap_tensor_helper_dim_symbols(&dag, scope, expected))
+    }
 }
 
 fn lower_tensor_helper_dag_with_controls(
