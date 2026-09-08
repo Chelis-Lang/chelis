@@ -97,8 +97,12 @@ const BACKSTOP_SUFFIX: &str = "forced exit";
 /// The backstop terminates at `timeout + HARD_EXIT_GRACE`, and that is a
 /// wall-clock sleep in a detached thread, so even a starved runner delivers it
 /// within seconds of the deadline. Four times the entire budget leaves any
-/// scheduling delay far below the bound while a genuine hang, which is the only
-/// thing this bound now exists to catch, still fails.
+/// scheduling delay far below the bound.
+///
+/// What it catches is a process that exits far too late. It does NOT catch a
+/// process that never exits: `Command::output` blocks until the child does, so
+/// a true hang stops this test rather than failing this assertion, and the test
+/// runner's slow-timeout is the oracle for that case.
 const TERMINATION_SLACK: Duration = Duration::from_secs(30);
 
 /// A dep-free reef package exporting one helper, plus the package root.
@@ -195,8 +199,8 @@ fn timeout_trips_on_a_slow_program() {
     );
     // Termination, not ordering. `--timeout` promises the run stops; the
     // backstop promises it stops by `timeout + HARD_EXIT_GRACE` whatever the
-    // program does. Only a genuine hang, one that neither polls cancellation
-    // nor reaches the backstop, exceeds this. Which path ran is the ignored
+    // program does. Exceeding this means the process exited far too late, not
+    // that it hung: see `TERMINATION_SLACK`. Which path ran is the ignored
     // pair's business (chelis#1607).
     assert!(
         elapsed < Duration::from_secs(2) + HARD_EXIT_GRACE + TERMINATION_SLACK,
@@ -269,6 +273,10 @@ fn timeout_message_is_absent_from_a_successful_run() {
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout.trim(), EXPECTED_FAST_STDOUT);
     assert!(!stderr.contains("timed out"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains(BACKSTOP_SUFFIX),
+        "a successful run must not claim a forced exit, got: {stderr}"
+    );
 }
 
 /// Positive, reef lane: `--timeout` trips on a slow program evaluated
@@ -363,6 +371,10 @@ fn generous_timeout_does_not_disturb_a_reef_package_eval() {
     assert!(
         !stderr.contains("timed out"),
         "a fast reef-package eval must not report a timeout, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(BACKSTOP_SUFFIX),
+        "a successful run must not claim a forced exit, got: {stderr}"
     );
 }
 

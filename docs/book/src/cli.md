@@ -196,7 +196,7 @@ top-level declaration inside the passes that dominate a large compile
 unwind cleanly rather than being killed mid-write.
 
 If cooperative unwinding does complete, that is the whole message. If it
-does not, the backstop below terminates the process and says so:
+does not, a backstop terminates the process and says so:
 
 ```text
 error: evaluation timed out after 30s (--timeout); cancellation did not complete within 5s, forced exit
@@ -205,14 +205,12 @@ error: evaluation timed out after 30s (--timeout); cancellation did not complete
 The suffix is worth reading. It means the process was killed rather than
 unwound, so destructors did not run and buffered output was not flushed.
 The usual cause is a machine under heavy load, where the cooperative
-unwind is competing for CPU against a fixed wall-clock grace period; the
-other is a pass that polls nothing, listed below.
+unwind competes for CPU against a fixed wall-clock grace period.
 
-A backstop still terminates the process a few seconds after the deadline
-if nothing has unwound. It is defence in depth, not the mechanism: the
-polling above is not exhaustive — the style gate, Reef graph resolution,
-and lowering's whole-program walk do not poll, and a compiler pass that
-genuinely wedges would never reach a check point. `--timeout` promises an
+That backstop is defence in depth, not the mechanism: the polling above is
+not exhaustive — the style gate, Reef graph resolution, and lowering's
+whole-program walk do not poll, and a compiler pass that genuinely wedges
+would never reach a check point. `--timeout` promises an
 unconditional loud failure, so the process-level stop remains.
 
 The same cancellation mechanism is what makes `KeyboardInterrupt` work
