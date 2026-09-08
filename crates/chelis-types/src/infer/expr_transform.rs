@@ -148,12 +148,30 @@ pub(super) enum WrtSelector<'a> {
 }
 
 fn wrt_selector(expr: &deep::Expr) -> Option<WrtSelector<'_>> {
-    // Carrier note: this `Expr::List`-only match is PRESERVED from the
-    // pre-migration code deliberately, so the migration changes no verdict.
-    // On the stamped ingress a `(tuple {} ..)` at this slot arrives as
-    // `Expr::Node` and does not match, which is a chelis#1107-class carrier
-    // question on chelis#1125's axis rather than this PR's; see the pull
-    // request body.
+    // Carrier note, CONFIRMED by execution rather than inferred, and preserved
+    // from the pre-migration code deliberately so the migration changes no
+    // verdict.
+    //
+    // This `Expr::List`-only match means a `(tuple {} ..)` at this slot does
+    // not match on the STAMPED ingress, where it arrives as `Expr::Node`. The
+    // consequence is a fail-closed OVER-REJECTION, not a silent fallback:
+    // `extract_int_for_dim` returns `None` for a tuple node, so
+    // `check_typed_program` REJECTS a well-formed multi-index `grad` that
+    // `check_ir_program` accepts. Nothing quietly takes the single-index path.
+    //
+    //     (defsig {} pair2 (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
+    //     (def {} pair2 (fn {} (params {} x y) (var {} x)))
+    //     (def {} g (grad {} (var {} pair2) (tuple {} 0 1)))
+    //
+    // The same divergence exists before this migration, with `TypeMismatch`
+    // in place of `MalformedForm`: the accept/reject verdicts on both
+    // ingresses are unchanged and only the kind and the text move. No CLI
+    // surface reaches it; the callers that can are `chelis-cli`'s prove paths
+    // and `chelis-backend-c`.
+    //
+    // It is a chelis#1107-class carrier question on chelis#1125's [04-TOT-5]
+    // ingress-parity axis, not this seam's class, so it is filed there rather
+    // than fixed inside a migration that claims to change no verdict.
     if let deep::Expr::List(tuple, _) = expr
         && get_tag(tuple) == Some(DeepTag::Tuple)
     {
