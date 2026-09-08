@@ -498,26 +498,11 @@ fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
 /// Broadcast a rank-0 operand over the other's shape, and report any other
 /// disagreement as a typed error.
 ///
-/// chelis#1277 B2h added the rank-0 branch as LANE PRESERVATION so routing
-/// host-lane defs through this evaluator would not refuse a scalar beside a
-/// tensor that the host interpreter had evaluated, and named decision row 14
-/// as its removal trigger. chelis#1506 is that decision, and it removed the
-/// branch from `compare_elementwise`: a scalar beside a tensor is a type error
-/// under `[05-OP-36]`, so no admitted program reaches a comparison that way.
-///
-/// It is NOT removed here, because the arithmetic site is still reachable from
-/// an admitted program. `def scale[p: Float](x: tensor[1, p]) -> tensor[1, p] =
-/// mul(x, cast(0.1, p))` (chelis#1544's binder-target literal adoption) checks
-/// clean, and its polymorphic scale factor lowers to a rank-0 `Const` feeding
-/// the elementwise `Mul`; deleting the branch made
-/// `issue_1544_binder_cast_precision::scalar_and_tensor_binders_compute_at_each_instantiation`
-/// fail with `got [1] vs []`.
-///
-/// Whether the checker should refuse that program at all is chelis#1621: a
-/// bounded-binder scalar beside a tensor under `mul` checks at 1.0 while its
-/// monomorphic twin is rejected under `[05-OP-36]`, and it runs only through
-/// this broadcast. chelis#1621 therefore decides this site's fate. Until it
-/// does, deleting the branch breaks an admitted program, so it stays.
+/// spec/05 §2.4.1 permits rank-zero operands as the backend's broadcast
+/// idiom. Compiler-generated arithmetic, including Tier 2 lowering, uses it.
+/// Source-level arithmetic and comparisons still require matching surfaces;
+/// #1621 enforces that rule for bounded scalar dtype binders as well. The
+/// comparison evaluator separately requires matching shapes under [05-OP-36].
 ///
 /// The shape check below is a third job and belongs to neither: it is what
 /// makes `[4]` against `[3]` report the interpreter's own phrase, which

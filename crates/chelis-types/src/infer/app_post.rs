@@ -726,13 +726,11 @@ pub(super) fn finish_unified_app(
                                     ),
                                 );
                             }
-                            // tensor_to_scalar requires a fully
-                            // resolved precision. Polymorphic precision
-                            // must be resolved by unification before
-                            // this op can name a host scalar type.
+                            // Conversion changes the surface, not the dtype's
+                            // identity or its declared family restriction.
                             return match precision {
                                 TensorPrec::Concrete(p) => Type::Prim(p),
-                                TensorPrec::Var(_) => result_ty,
+                                TensorPrec::Var(p) => Type::Var(p),
                             };
                         }
                         Type::Var(_) | Type::Error(_) => return result_ty,
@@ -759,6 +757,9 @@ pub(super) fn finish_unified_app(
                     match subst.apply(first_arg) {
                         Type::Prim(precision) if !matches!(precision, Prim::String) => {
                             return Type::Tensor(vec![], TensorPrec::Concrete(precision));
+                        }
+                        Type::Var(p) if subst.tvar_restriction(p).is_some() => {
+                            return Type::Tensor(vec![], TensorPrec::Var(p));
                         }
                         Type::Var(_) | Type::Error(_) => return result_ty,
                         other => {

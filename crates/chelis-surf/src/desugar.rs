@@ -163,6 +163,20 @@ impl DesugarCtx {
         self.current_type_binders.borrow().get(name).copied()
     }
 
+    fn current_binder_names(&self) -> UnordSet<String> {
+        self.current_type_binders
+            .borrow()
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    fn desugar_body_type(&self, ty: &TypeExpr) -> deep::Expr {
+        let binders = self.current_binder_names();
+        desugar_type_with_scope(ty, &binders, &binders)
+    }
+
     fn new(decls: &[Decl]) -> Self {
         let mut top_level_fn_params = UnordMap::new();
         let mut top_level_fn_tensor_param_prec = UnordMap::new();
@@ -1780,7 +1794,11 @@ impl DesugarCtx {
             }
 
             Expr::Lambda(params, body, _) => {
-                let param_names: Vec<deep::Expr> = params.iter().map(desugar_param).collect();
+                let binders = self.current_binder_names();
+                let param_names: Vec<deep::Expr> = params
+                    .iter()
+                    .map(|param| desugar_param_with_scope(param, &binders, &binders))
+                    .collect();
                 let params_node = node(DeepTag::Params, param_names);
                 let lambda_params = params
                     .iter()
@@ -1977,7 +1995,7 @@ impl DesugarCtx {
             Expr::Annotate(e, ty, _) => {
                 // Type annotation pushed into metadata of the desugared expression
                 let desugared = self.desugar_expr_with_scope(e, local_fn_params);
-                inject_type_metadata(desugared, desugar_type(ty))
+                inject_type_metadata(desugared, self.desugar_body_type(ty))
             }
 
             Expr::Block(bindings, final_expr, _) => {
@@ -2117,7 +2135,7 @@ impl DesugarCtx {
                         _ => self.desugar_expr(&binding.value),
                     };
                     if let Some(ty) = &binding.ty {
-                        let value = inject_type_metadata(value, desugar_type(ty));
+                        let value = inject_type_metadata(value, self.desugar_body_type(ty));
                         out = bind_name_value(name, value, out);
                     } else {
                         let value = if matches!(&binding.value, Expr::Annotate(..)) {

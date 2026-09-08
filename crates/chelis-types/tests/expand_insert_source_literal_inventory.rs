@@ -219,8 +219,8 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     (
         "crates/chelis-types/src/infer/app.rs",
         5,
-        5,
-        "three routing arms name both spellings; one `insert` is the two-arm selection that picks which callee to report, and the fifth `expand` is chelis#1506's `[05-OP-36]` rejection naming the replacement spelling. The counts are equal by coincidence rather than by pairing, which is why this row states which literal is which",
+        7,
+        "three routing arms name both spellings; one `insert` is the two-arm callee selection. The fifth `expand` is the concrete comparison replacement. The two additional `insert` mentions give #1621's rank-zero-to-tensor replacement and its higher-rank instruction in one diagnostic literal; this is axis insertion, not same-rank expansion",
     ),
     (
         "crates/chelis-types/src/infer/app_post.rs",
