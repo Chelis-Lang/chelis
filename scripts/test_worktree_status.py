@@ -1081,6 +1081,235 @@ class StaleIndexEdgeTests(unittest.TestCase):
         )
 
 
+def _gate_proc(pid, command):
+    return _proc(pid, 1, command)
+
+
+def _lease_state(tmp, holder_worktree):
+    """A real flock plus a sidecar, the way a running gate leaves them."""
+    lease = _RealLease(Path(tmp), _holder(worktree=holder_worktree))
+    return lease, {gate.LEASE_DIR_ENV: tmp}
+
+
+# One true positive and at least one NEAR MISS per busy signal.
+#
+# A near miss is an input that looks like the signal and must not fire it. The
+# rows exist because near-miss coverage previously appeared only where somebody
+# had already attacked a signal by hand, which is how a signal ships with a
+# boundary nobody probed. Making the table exhaustive over `BUSY_SIGNALS` moves
+# the missing cell from review time to authoring time: add a signal without a
+# near miss and `test_every_busy_signal_has_a_near_miss` fails.
+#
+# Each entry is (description, kwargs for `_collect`). The lease rows need a
+# real lock, so they are built inside the test rather than declared here.
+NEAR_MISS_TABLE = {
+    status.SIGNAL_GATE_PROCESS: {
+        "positive": [
+            (
+                "an absolute gate invocation",
+                {"snapshot": lambda: [
+                    _gate_proc(31, f"python3 {PROBED}/scripts/gate.py --local")]},
+            ),
+            (
+                "a relative gate invocation resolved by cwd",
+                {"snapshot": lambda: [_gate_proc(32, "python3 scripts/gate.py --fast")],
+                 "cwd_lookup": lambda pid: PROBED},
+            ),
+            (
+                "an interpreter option before the script",
+                {"snapshot": lambda: [
+                    _gate_proc(33, f"python3 -X faulthandler {PROBED}/scripts/gate.py")]},
+            ),
+        ],
+        "near_miss": [
+            (
+                "a shell whose command line names the script",
+                {"snapshot": lambda: [
+                    _gate_proc(40, f"/bin/bash -c cd {PROBED} && echo scripts/gate.py")]},
+            ),
+            (
+                "an editor open on the script",
+                {"snapshot": lambda: [_gate_proc(41, f"vim {PROBED}/scripts/gate.py")]},
+            ),
+            (
+                "a Python process that merely names the script",
+                {"snapshot": lambda: [_gate_proc(
+                    42, f"python3 -c import time; time.sleep(60) {PROBED}/scripts/gate.py")]},
+            ),
+            (
+                "a linter run on the script through -m",
+                {"snapshot": lambda: [_gate_proc(
+                    43, f"python3 -m ruff check {PROBED}/scripts/gate.py")]},
+            ),
+            (
+                "a sibling checkout's gate",
+                {"snapshot": lambda: [_gate_proc(
+                    44, f"python3 {PROBED}-165/scripts/gate.py --local")]},
+            ),
+            (
+                "another worktree's gate entirely",
+                {"snapshot": lambda: [_gate_proc(
+                    45, f"python3 {OTHER}/scripts/gate.py --local")]},
+            ),
+        ],
+    },
+    status.SIGNAL_BUILD_PROCESS: {
+        "positive": [
+            (
+                "cargo scoped to this checkout",
+                {"snapshot": lambda: [_gate_proc(
+                    50, f"cargo nextest run --manifest-path {PROBED}/Cargo.toml")]},
+            ),
+        ],
+        "near_miss": [
+            (
+                "cargo in a sibling checkout whose path is a prefix match",
+                {"snapshot": lambda: [_gate_proc(
+                    51, f"cargo nextest run --manifest-path {PROBED}-165/Cargo.toml")]},
+            ),
+            (
+                "cargo somewhere else entirely",
+                {"snapshot": lambda: [_gate_proc(
+                    52, f"cargo build --manifest-path {OTHER}/Cargo.toml")]},
+            ),
+        ],
+    },
+    status.SIGNAL_GIT_OPERATION: {
+        "positive": [
+            (name, {"exists": (lambda m: lambda path: path.name == m)(name)})
+            for name, _description in status.GIT_OPERATION_MARKERS
+        ],
+        "near_miss": [
+            (
+                "a stale index.lock, which proves nothing is running",
+                {"exists": lambda path: path.name == status.INDEX_LOCK_NAME},
+            ),
+            (
+                "a marker-shaped name in the wrong place",
+                {"exists": lambda path: path.name == "MERGE_HEAD.bak"},
+            ),
+        ],
+    },
+}
+
+
+class NearMissTableTests(unittest.TestCase):
+    """One true positive and one near miss per busy signal.
+
+    The point is not the individual rows, which are cheap. It is that the
+    table must cover every signal, so a new signal cannot ship without someone
+    stating what would look like it and must not fire it.
+    """
+
+    def test_every_busy_signal_has_a_near_miss(self):
+        self.assertEqual(
+            set(NEAR_MISS_TABLE) | {status.SIGNAL_GATE_LEASE},
+            set(status.BUSY_SIGNALS),
+            "every signal in BUSY_SIGNALS needs a row here; the lease rows are "
+            "built in the lease tests because they need a real lock",
+        )
+        for signal, rows in NEAR_MISS_TABLE.items():
+            with self.subTest(signal=signal):
+                self.assertTrue(rows["positive"], f"{signal} has no true positive")
+                self.assertTrue(rows["near_miss"], f"{signal} has no near miss")
+
+    def test_each_positive_fires_exactly_its_own_signal(self):
+        for signal, rows in NEAR_MISS_TABLE.items():
+            for description, kwargs in rows["positive"]:
+                with self.subTest(signal=signal, case=description):
+                    state = _collect(**kwargs)
+                    fired = {name for name, _reason in status.busy_signals(state)}
+                    self.assertEqual(fired, {signal})
+                    self.assertEqual(state["verdict"], status.VERDICT_BUSY)
+
+    def test_no_near_miss_fires_any_signal(self):
+        for signal, rows in NEAR_MISS_TABLE.items():
+            for description, kwargs in rows["near_miss"]:
+                with self.subTest(signal=signal, case=description):
+                    state = _collect(**kwargs)
+                    self.assertEqual(
+                        status.busy_signals(state),
+                        [],
+                        f"{description} must not fire {signal}",
+                    )
+                    self.assertNotEqual(state["verdict"], status.VERDICT_BUSY)
+
+    def test_the_lease_signal_positive_and_near_miss(self):
+        """Built here rather than in the table because it needs a real flock."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lease, environ = _lease_state(tmp, PROBED)
+            try:
+                state = _collect(environ=environ)
+            finally:
+                lease.close()
+            fired = {name for name, _reason in status.busy_signals(state)}
+            self.assertEqual(fired, {status.SIGNAL_GATE_LEASE})
+        with tempfile.TemporaryDirectory() as tmp:
+            lease, environ = _lease_state(tmp, OTHER)
+            try:
+                state = _collect(environ=environ)
+            finally:
+                lease.close()
+            self.assertEqual(status.busy_signals(state), [])
+            self.assertTrue(state["lease"]["held_elsewhere"])
+
+
+class StaleIndexLockTests(unittest.TestCase):
+    def test_a_lock_file_is_reported_but_never_busy(self):
+        """Git removes it on a normal exit and on SIGINT, but a SIGKILLed git
+        leaves it forever and nothing kernel-backed holds it, so existence
+        supports "a command may have crashed", not "a command is writing now".
+        Reading it as liveness reported a free worktree BUSY permanently."""
+        state = _collect(exists=lambda path: path.name == status.INDEX_LOCK_NAME)
+        self.assertTrue(state["stale_index_lock"])
+        self.assertEqual(state["verdict"], status.VERDICT_FREE)
+        block = status.render_human(state)
+        self.assertIn("may have crashed", block)
+        self.assertNotIn("writing the index right now", block)
+
+    def test_it_is_not_in_the_operations_table(self):
+        self.assertNotIn(
+            status.INDEX_LOCK_NAME,
+            [name for name, _ in status.GIT_OPERATION_MARKERS],
+        )
+
+    def test_a_real_operation_alongside_a_lock_still_reports_busy(self):
+        state = _collect(
+            exists=lambda path: path.name in (status.INDEX_LOCK_NAME, "MERGE_HEAD")
+        )
+        self.assertEqual(state["verdict"], status.VERDICT_BUSY)
+        self.assertTrue(state["stale_index_lock"])
+
+
+class ScriptArgumentTests(unittest.TestCase):
+    """`script_argument` is the representation change: the token's position,
+    not whether the string appears somewhere."""
+
+    def test_the_script_is_the_first_non_option_token(self):
+        for command, expected in [
+            ("python3 scripts/gate.py --local", "scripts/gate.py"),
+            ("/venv/bin/python3.11 /a/scripts/gate.py --fast", "/a/scripts/gate.py"),
+            ("python -X faulthandler scripts/gate.py", "scripts/gate.py"),
+            ("python -W ignore -X dev scripts/gate.py --local", "scripts/gate.py"),
+            ("python -O scripts/gate.py", "scripts/gate.py"),
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(status.script_argument(command), expected)
+
+    def test_c_and_m_mean_there_is_no_script(self):
+        for command in [
+            "python3 -c import x; x.run() scripts/gate.py",
+            "python3 -m ruff check scripts/gate.py",
+            "python3 -m pytest scripts/gate.py",
+        ]:
+            with self.subTest(command=command):
+                self.assertIsNone(status.script_argument(command))
+
+    def test_an_interpreter_with_no_arguments_runs_no_script(self):
+        self.assertIsNone(status.script_argument("python3"))
+        self.assertIsNone(status.script_argument("python3 -i"))
+
+
 class ImportDisciplineTests(unittest.TestCase):
     def test_importing_gate_does_not_re_execute_the_interpreter(self):
         """`gate.py` re-executes an unmanaged launcher through uv, but only

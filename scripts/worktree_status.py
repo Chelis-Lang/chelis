@@ -121,6 +121,22 @@ EXIT_BUSY = 1
 EXIT_UNKNOWN = 2
 EXIT_NOT_CLEAN = 3
 
+# Every signal that can make this worktree BUSY. The verdict tags each reason
+# with the signal that produced it, so the test suite can require one true
+# positive AND one near miss per signal. Near-miss coverage previously existed
+# only where a reviewer had already attacked, which is how a signal ships with
+# a boundary nobody has probed.
+SIGNAL_GATE_LEASE = "gate-lease"
+SIGNAL_GATE_PROCESS = "gate-process"
+SIGNAL_BUILD_PROCESS = "build-process"
+SIGNAL_GIT_OPERATION = "git-operation"
+BUSY_SIGNALS = (
+    SIGNAL_GATE_LEASE,
+    SIGNAL_GATE_PROCESS,
+    SIGNAL_BUILD_PROCESS,
+    SIGNAL_GIT_OPERATION,
+)
+
 VERDICT_FREE = "FREE"
 VERDICT_BUSY = "BUSY"
 VERDICT_UNKNOWN = "UNKNOWN"
@@ -166,10 +182,10 @@ GIT_TIMEOUT_SECONDS = 60.0
 UNMERGED_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
 # Files and directories in the resolved git dir that mean a git operation is
-# part-way through. `index.lock` additionally means a git command is writing
-# at this instant.
+# part-way through. Each genuinely persists until its operation finishes or is
+# aborted, so its presence supports the sentence beside it. That is the
+# property `index.lock` lacks, which is why it is handled separately below.
 GIT_OPERATION_MARKERS = (
-    ("index.lock", "a git command is writing the index right now"),
     ("MERGE_HEAD", "a merge is in progress"),
     ("CHERRY_PICK_HEAD", "a cherry-pick is in progress"),
     ("REVERT_HEAD", "a revert is in progress"),
@@ -178,18 +194,72 @@ GIT_OPERATION_MARKERS = (
     ("rebase-apply", "a rebase or am is in progress"),
 )
 
-# A process whose command line mentions this is a gate run. `reap_orphans`
-# cannot see it: `BUILD_TOOL_NAMES` has no Python entry and the interpreter
-# does not live under `target/`. Deliberately NOT fixed by adding `python` to
-# that set, which would put every gate run into the reaper's SIGKILL list.
-GATE_SCRIPT_MARKER = "scripts/gate.py"
+# `index.lock` is deliberately NOT in that table. Its existence does not prove
+# a git command is writing: git removes it on a normal exit and on SIGINT, but
+# a SIGKILLed git leaves it behind forever, and nothing kernel-backed holds it
+# the way `flock` holds the gate lease. Reading existence as liveness made a
+# free worktree report BUSY permanently, which is the same substitution this
+# file made elsewhere: a cheap observable standing in for the property the
+# verdict depends on. It is reported as what it is and does not drive the
+# verdict. The other markers stay, because a rebase or a merge genuinely
+# persists until it is finished or aborted.
+INDEX_LOCK_NAME = "index.lock"
+INDEX_LOCK_NOTE = (
+    "a stale lock file is present, so a git command may have crashed; git "
+    "operations here will fail until it is removed"
+)
 
-# The command-line mention alone is not enough, and the difference is not
-# theoretical: an agent's own shell command line routinely names
-# `scripts/gate.py` while running something else entirely, and matching it
-# reports a free worktree BUSY. Requiring the process to be a Python
-# interpreter keeps the gate itself and drops the shell that merely names it.
+# A gate run is a Python interpreter whose SCRIPT ARGUMENT is this worktree's
+# gate. `reap_orphans` cannot see it: `BUILD_TOOL_NAMES` has no Python entry
+# and the interpreter does not live under `target/`. Deliberately NOT fixed by
+# adding `python` to that set, which would put every gate run into the
+# reaper's SIGKILL list.
+GATE_SCRIPT_RELATIVE = "scripts/gate.py"
+
 PYTHON_BASENAME_PREFIX = "python"
+
+# Python options that consume the following token, so what follows them is an
+# option argument rather than the script. `-c` and `-m` are absent on purpose:
+# both mean there is NO script argument at all, and every later token belongs
+# to the command or the module, so they end the search rather than skip one.
+PYTHON_OPTIONS_WITH_ARGUMENT = frozenset(
+    {"-W", "-X", "-Q", "--check-hash-based-pycs"}
+)
+PYTHON_OPTIONS_WITHOUT_A_SCRIPT = frozenset({"-c", "-m"})
+
+
+def script_argument(command: str) -> str | None:
+    """The script a Python command line runs, or None if it runs no script.
+
+    Why this is not a substring test. Asking whether a command line CONTAINS
+    `scripts/gate.py` answers a different question from whether the process IS
+    a gate run, and that gap is where several defects in this file have lived.
+    A shell that names the script, an editor open on it, a linter invoked on
+    it, and `python3 -c '...' scripts/gate.py` all contain the string and none
+    is a gate run. Narrowing the substring cannot close that, because
+    containment is not the property; the token's POSITION is.
+
+    `ps -o command=` flattens argv into one string, so this splits on
+    whitespace and walks it the way Python's own launcher does: skip an
+    option, consume the argument of an option that takes one, stop outright at
+    `-c` or `-m` because neither has a script, and return the first remaining
+    token. A path containing whitespace defeats the split, which is a false
+    negative on a construct nobody uses for a checkout path.
+    """
+    tokens = command.split()
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in PYTHON_OPTIONS_WITHOUT_A_SCRIPT:
+            return None
+        if token in PYTHON_OPTIONS_WITH_ARGUMENT:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return None
 
 
 class GitQueryError(RuntimeError):
@@ -506,12 +576,30 @@ def dirty_state(
 def git_operations_in_progress(
     git_dir: Path, *, exists: Callable[[Path], bool] = Path.exists
 ) -> list[dict]:
-    """Half-finished git operations, read from the RESOLVED git directory."""
+    """Half-finished git operations, read from the RESOLVED git directory.
+
+    `index.lock` is not here; `stale_index_lock` reports it separately,
+    because its existence does not prove anything is running.
+    """
     found: list[dict] = []
     for name, description in GIT_OPERATION_MARKERS:
         if exists(git_dir / name):
             found.append({"marker": name, "description": description})
     return found
+
+
+def stale_index_lock(
+    git_dir: Path, *, exists: Callable[[Path], bool] = Path.exists
+) -> bool:
+    """Whether a git index lock file is present.
+
+    Reported, never counted as busy. Git removes this on a normal exit and on
+    SIGINT, but a SIGKILLed git leaves it behind forever and nothing
+    kernel-backed holds it, so existence supports "a git command may have
+    crashed" and not "a git command is writing right now". Reading it as
+    liveness made a free worktree report BUSY permanently.
+    """
+    return exists(git_dir / INDEX_LOCK_NAME)
 
 
 def lease_state(
@@ -593,18 +681,16 @@ def match_gate_processes(
     worktree: Path,
     cwd_lookup: Callable[[int], str | None] = reap.proc_cwd,
 ) -> list[reap.ProcInfo]:
-    """Live `scripts/gate.py` processes scoped to this worktree.
+    """Live gate runs scoped to this worktree.
 
-    A match must be a Python interpreter AND name the gate script. The mention
-    alone also catches the shell that launched the gate, and any shell whose
-    command line happens to name the script while doing something else, which
-    reports a free worktree BUSY.
-
-    Scoping then reuses `reap_orphans`' boundary-aware matcher so a sibling
-    checkout never matches, and falls back to the working directory when the
-    command line spells a relative path (`python3 scripts/gate.py --local`).
+    A match is a Python interpreter whose SCRIPT ARGUMENT resolves to this
+    worktree's `scripts/gate.py`. Both halves are structural: `script_argument`
+    explains why the position of the token is the property and containment is
+    not. An absolute script path is compared directly; a relative one is
+    resolved against the process's working directory, which is how
+    `python3 scripts/gate.py --local` is matched.
     """
-    worktree_str = str(worktree)
+    expected = (worktree / GATE_SCRIPT_RELATIVE).resolve()
     own_pid = os.getpid()
     found: list[reap.ProcInfo] = []
     for proc in procs:
@@ -612,13 +698,24 @@ def match_gate_processes(
             continue
         if not proc.basename.startswith(PYTHON_BASENAME_PREFIX):
             continue
-        if GATE_SCRIPT_MARKER not in proc.command:
+        script = script_argument(proc.command)
+        if script is None:
             continue
-        if reap.command_mentions_path(proc.command, worktree_str):
-            found.append(proc)
-            continue
-        cwd = cwd_lookup(proc.pid)
-        if cwd is not None and reap.path_is_under(cwd, worktree):
+        candidate = Path(script)
+        if candidate.is_absolute():
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+        else:
+            cwd = cwd_lookup(proc.pid)
+            if cwd is None:
+                continue
+            try:
+                resolved = (Path(cwd) / candidate).resolve()
+            except OSError:
+                continue
+        if resolved == expected:
             found.append(proc)
     return found
 
@@ -710,32 +807,57 @@ def last_gate_report(
     }, degraded
 
 
+def busy_signals(state: dict) -> list[tuple[str, str]]:
+    """Every busy signal that fired, as `(signal, reason)` pairs.
+
+    Split out from `verdict` so the suite can assert exactly WHICH signal a
+    given input fires, which is what makes a near-miss test meaningful: a test
+    that only checks the verdict cannot tell "the right signal fired" from
+    "a different signal happened to fire too".
+    """
+    fired: list[tuple[str, str]] = []
+    lease = state["lease"]
+    if lease.get("held_by_this_worktree"):
+        fired.append(
+            (
+                SIGNAL_GATE_LEASE,
+                "the gate lease is held by this worktree: "
+                + gate.describe_holder(lease.get("holder")),
+            )
+        )
+    processes = state["processes"]
+    for proc in processes.get("gate_processes", []):
+        fired.append(
+            (SIGNAL_GATE_PROCESS, f"a gate process is running here: pid {proc['pid']}")
+        )
+    matched = processes.get("matched", [])
+    if matched:
+        fired.append(
+            (
+                SIGNAL_BUILD_PROCESS,
+                f"{len(matched)} build/test process(es) scoped to this checkout, "
+                f"newest pid {matched[0]['pid']}",
+            )
+        )
+    for operation in state.get("git_operations", []):
+        fired.append(
+            (
+                SIGNAL_GIT_OPERATION,
+                f"{operation['description']} ({operation['marker']})",
+            )
+        )
+    return fired
+
+
 def verdict(state: dict) -> tuple[str, list[str]]:
     """The verdict and the reasons behind it.
 
     BUSY > UNKNOWN > NOT CLEAN > FREE. Positive evidence is never downgraded
     by a failure elsewhere; absence of evidence always is.
     """
-    reasons: list[str] = []
-    lease = state["lease"]
-    if lease.get("held_by_this_worktree"):
-        reasons.append(
-            "the gate lease is held by this worktree: "
-            + gate.describe_holder(lease.get("holder"))
-        )
-    processes = state["processes"]
-    for proc in processes.get("gate_processes", []):
-        reasons.append(f"a gate process is running here: pid {proc['pid']}")
-    matched = processes.get("matched", [])
-    if matched:
-        reasons.append(
-            f"{len(matched)} build/test process(es) scoped to this checkout, "
-            f"newest pid {matched[0]['pid']}"
-        )
-    for operation in state.get("git_operations", []):
-        reasons.append(f"{operation['description']} ({operation['marker']})")
-    if reasons:
-        return VERDICT_BUSY, reasons
+    fired = busy_signals(state)
+    if fired:
+        return VERDICT_BUSY, [reason for _signal, reason in fired]
     if state.get("unknown"):
         # Only sources that could have hidden an owner or a modification
         # withhold FREE. A source that speaks about the past or about index
@@ -791,6 +913,7 @@ def collect(
             "clean": True,
         },
         "git_operations": [],
+        "stale_index_lock": False,
         "lease": {},
         "processes": {"matched": [], "gate_processes": [], "orphaned": 0},
         "last_gate_report": None,
@@ -819,9 +942,9 @@ def collect(
             degraded.extend(dirty_degraded)
         except GitQueryError as exc:
             unknown.append({"source": "git-status", "error": str(exc)})
-        state["git_operations"] = git_operations_in_progress(
-            Path(state["git"]["git_dir"]), exists=exists
-        )
+        git_dir = Path(state["git"]["git_dir"])
+        state["git_operations"] = git_operations_in_progress(git_dir, exists=exists)
+        state["stale_index_lock"] = stale_index_lock(git_dir, exists=exists)
 
     lease, lease_unknown = lease_state(environ, worktree)
     state["lease"] = lease
@@ -943,6 +1066,8 @@ def render_human(state: dict) -> str:
             lines.append(f"git op:   {operation['description']}")
     else:
         lines.append("git op:   none")
+    if state.get("stale_index_lock"):
+        lines.append(f"index:    {INDEX_LOCK_NOTE}")
 
     if state.get("unknown"):
         for item in state["unknown"]:
