@@ -122,6 +122,13 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // axis, which is what the operation means, and the file exists because
     // the previous `expand.ch` was entirely rank-increasing and moved to
     // `insert.ch` (chelis#1277 S2a).
+    // The Slice B and S2b CLI receipts. Every `expand` here broadcasts a unit
+    // axis or is the negative row that refuses a non-unit one.
+    (
+        "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
+        5,
+        "the same-rank broadcast fixture, the zero-extent fixture, the static and runtime non-unit refusals, and the unit-extent control",
+    ),
     (
         "packages/chelis-std/tests/runtime/expand.ch",
         6,

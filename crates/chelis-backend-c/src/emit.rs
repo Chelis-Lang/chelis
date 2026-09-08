@@ -1656,6 +1656,40 @@ impl CEmitter {
                 self.line("}");
             }
         }
+
+        // chelis#1277 S2b: the same-rank `expand`'s unit-extent claim. It is
+        // an operation PRECONDITION on an operand rather than an identity
+        // between output axes, so it is its own derivation, but it places and
+        // renders by the same rules: `spec/05-risc-primitives.md` section
+        // 2.4.1 sends a symbolic or runtime operand extent to "that claim's
+        // runtime extent guard", section 4.7 puts it at entry when the operand
+        // is an input tensor's axis, and the `<op>` slot is `load` for exactly
+        // that reason. The claimed side is the literal 1, so there is no
+        // canonical member to read it from.
+        for (load, read_axis) in dag.entry_unit_extent_reads() {
+            let Some(RiscOp::Load { name }) = dag.get(load).map(|node| &node.op) else {
+                continue;
+            };
+            let Some(&slot) = input_slots.get(name.as_str()) else {
+                continue;
+            };
+            let read_axis = read_axis as i32;
+            if !guarded.insert(("1".to_string(), slot, read_axis)) {
+                continue;
+            }
+            let label = &input_labels[slot];
+            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
+            self.line(&format!(
+                "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
+            ));
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     fn shape_literal(ty: &TensorType) -> String {

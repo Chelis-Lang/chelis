@@ -4667,6 +4667,125 @@ int main() {{
 // text and absent in effect, which is why both directions are pinned here
 // rather than only the count.
 
+/// A same-rank `Expand` whose operand extent is symbolic, so the unit-extent
+/// claim of `spec/05-risc-primitives.md` section 2.4.1 is checked at run time
+/// rather than statically refuted.
+///
+/// `x_dim` is the operand's declared axis-0 extent and `size` is the width the
+/// broadcast sets. The operand is the ONLY input, so its axis is an interface
+/// value and section 4.7 places the guard at function entry, in declared
+/// signature order, before any other operation of the function runs.
+fn same_rank_expand_over_symbolic_operand_dag(x_dim: DimInfo, size: usize) -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![x_dim],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(size),
+        },
+        vec![x],
+        TensorType {
+            dims: vec![DimInfo::Lit(size)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(out);
+    dag
+}
+
+/// Oracle row `expand.positional.replacement.non_unit_source_traps.c`.
+///
+/// `spec/05-risc-primitives.md` section 2.4.1: the same-rank form "is a claim
+/// that the operand's extent at `axis` is 1 [...] A symbolic or runtime
+/// operand extent at `axis` other than 1 fails that claim's runtime extent
+/// guard and traps `Domain`, placed and rendered per
+/// `spec/04-type-system.md` section 4.7 and [04-NUM-9]."
+///
+/// The `<op>` slot is `load`, not `expand`. Section 4.7 fixes it: "for a guard
+/// whose operands are all interface values, the `load` primitive of the later
+/// witness in signature order". The operand's axis IS the only witness and it
+/// is an input tensor's axis, so the class is all-interface.
+///
+/// The `<prim>` slot is `int64` because the guarded result is an extent under
+/// [05-DIM-1] rather than a tensor element, which is why it does not track the
+/// tensor's own `f32`.
+///
+/// EVIDENTIARY STATUS: regression test. On the base the same kernel executes
+/// with no guard at all and returns a tensor built by reading index 0 of an
+/// axis that has more than one element, which is the `silent_unguarded`
+/// baseline this row is recorded at.
+#[test]
+fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c() {
+    let dag = same_rank_expand_over_symbolic_operand_dag(DimInfo::Named("n".into(), None), 3);
+    let result = codegen_with_options(
+        &dag,
+        "bcast_entry",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let run = |name: &str, extent: usize| {
+        let values = (0..extent)
+            .map(|i| format!("{}.0f", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void bcast_entry(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[{extent}] = {{{values}}};
+    chelis_tensor* inputs[1] = {{make_view_1d(xd, {extent})}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    bcast_entry(inputs, 1, outputs, 1);
+    printf("RAN %lld %.1f\n",
+           (long long)chelis_tensor_shape(outputs[0], 0),
+           ((const float*)chelis_tensor_read_view(outputs[0]).data)[2]);
+    return 0;
+}}
+"#
+        );
+        compile_and_run_kernel_capturing(name, &result.c_source, &harness)
+    };
+
+    let (ok, out) = run("bcast_entry_trap", 2);
+    assert!(!ok, "an operand extent of 2 refutes the unit claim: {out}");
+    assert!(
+        out.contains("numeric trap: domain in load at int64"),
+        "the trap renders [04-NUM-9] at the extent's dtype, and `<op>` is \
+         `load` because the operand's axis is an interface value: {out}"
+    );
+    assert!(
+        out.contains("claimed = 1") && out.contains("x axis 0 = 2"),
+        "with the claim, the axis and the value observed for it: {out}"
+    );
+    assert!(
+        !out.contains("RAN "),
+        "the guard runs before the broadcast allocates, so nothing prints: {out}"
+    );
+
+    let (ok, out) = run("bcast_entry_ok", 1);
+    assert!(ok, "a unit operand extent satisfies the claim: {out}");
+    assert!(
+        out.contains("RAN 3 1.0"),
+        "and broadcasts the single element across the declared width: {out}"
+    );
+}
+
 fn expand_reading_own_axis_dag(x_dim: DimInfo, out_dim: DimInfo) -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let mut dag = Dag::new();

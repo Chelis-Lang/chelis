@@ -876,23 +876,38 @@ impl RuntimeDimClass {
         //
         // The walk is bounded by the node count, so a malformed graph cannot
         // spin here.
-        let interface = |member: &ClassMember| match member.source {
-            AxisSource::Literal { .. } => true,
-            AxisSource::ExternalAxis { .. } | AxisSource::InputAxis { .. } => {
-                member_load_axis(dag, member).is_some()
-            }
-            // `ScalarInput` asks the same question of a scalar rather than of
-            // an axis, so it shares the walk but not the axis it resolves to.
-            AxisSource::ScalarInput { input } => {
-                load_through_casts(dag, member.node, input).is_some()
-            }
-            AxisSource::OpComputed { .. } | AxisSource::ClassSupplied { .. } => false,
-        };
-        if self.members.iter().all(interface) {
+        if self
+            .members
+            .iter()
+            .all(|member| member_is_interface(dag, member))
+        {
             GuardPlacement::Entry
         } else {
             GuardPlacement::Local
         }
+    }
+}
+
+/// Whether the quantity a guard reads at `member` is a section 4.7 INTERFACE
+/// value.
+///
+/// Extracted from [`RuntimeDimClass::placement`] rather than copied, because
+/// two derivations now ask it: the equality classes above and the unit-extent
+/// claims below. The reasoning is the block comment in `placement`, and it
+/// stays there; splitting it in two is how the four instances of one defect
+/// that `member_load_axis` records came about.
+fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
+    match member.source {
+        AxisSource::Literal { .. } => true,
+        AxisSource::ExternalAxis { .. } | AxisSource::InputAxis { .. } => {
+            member_load_axis(dag, member).is_some()
+        }
+        // `ScalarInput` asks the same question of a scalar rather than of an
+        // axis, so it shares the walk but not the axis it resolves to.
+        AxisSource::ScalarInput { input } => {
+            load_through_casts(dag, member.node, input).is_some()
+        }
+        AxisSource::OpComputed { .. } | AxisSource::ClassSupplied { .. } => false,
     }
 }
 
@@ -1307,6 +1322,137 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
     // class's entry guards fire in assigned-slot order.
     classes.sort_by_key(|(order, _)| *order);
     classes.into_iter().map(|(_, class)| class).collect()
+}
+
+/// One `expand` node's claim that its operand's extent at `axis` is 1.
+///
+/// `spec/05-risc-primitives.md` section 2.4.1: the same-rank form "is well
+/// formed only when the operand's extent at `axis` is 1 [...] the operation is
+/// a claim that the operand's extent at `axis` is 1. A literal operand extent
+/// at `axis` other than 1 is a type error. A symbolic or runtime operand
+/// extent at `axis` other than 1 fails that claim's runtime extent guard and
+/// traps `Domain`."
+///
+/// This is a PRECONDITION on an operand, not an identity between output axes,
+/// which is why it is derived beside [`derive_runtime_dim_classes`] instead of
+/// inside it. Forcing it in would go wrong two ways. The claim would be filed
+/// under whatever the operand's own output dim states, `Name("n")` for a
+/// symbolic operand, which is a different claim about a different quantity.
+/// And an operand that IS a `Load` axis is excluded from a literal claim by
+/// `is_member` on purpose: "Under a LITERAL claim an external `Load` axis is
+/// not a member. A declared literal input extent is validated against the
+/// caller at the C ABI boundary by the input shape preamble, which is a
+/// different obligation from an extent class and covers programs containing no
+/// runtime extent at all. Treating it as a member would mint a class for every
+/// literal-shaped input." Relaxing that to admit this claim would put a guard
+/// on every literal-shaped input in the repository.
+///
+/// Everything else is shared: the source comes from [`output_axis_sources`],
+/// the placement from [`member_is_interface`] through [`Self::placement`], and
+/// the rendering from the same [04-NUM-9] path the classes use. One more claim
+/// KIND for the same three consumers, not a second answer to one question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitExtentClaim {
+    /// The `Expand` node making the claim.
+    pub node: NodeId,
+    /// Its operand, `node.inputs[0]`.
+    pub operand: NodeId,
+    /// The axis the operation broadcasts, in the operand's own numbering.
+    pub axis: usize,
+    /// The operand axis's own source, carried rather than re-derived for the
+    /// reason [`ClassMember`] carries its own: re-deriving it at emission lets
+    /// the value a guard compares disagree with the source the derivation saw.
+    pub source: AxisSource,
+}
+
+impl UnitExtentClaim {
+    /// The claim's guarded quantity, in the shape the shared placement and
+    /// `Load`-resolution helpers take.
+    ///
+    /// The member names the OPERAND's axis, because that is the extent the
+    /// guard reads. The claim's other side is the literal 1 and needs no
+    /// member: there is nothing to read it from.
+    pub fn member(&self) -> ClassMember {
+        ClassMember {
+            node: self.operand,
+            axis: self.axis,
+            source: self.source.clone(),
+        }
+    }
+
+    /// C1.3's placement, by the same rule the equality classes take.
+    pub fn placement(&self, dag: &Dag) -> GuardPlacement {
+        if member_is_interface(dag, &self.member()) {
+            GuardPlacement::Entry
+        } else {
+            GuardPlacement::Local
+        }
+    }
+
+    /// The `<op>` slot of this claim's [04-NUM-9] line.
+    ///
+    /// `spec/04-type-system.md` section 4.7 fixes it by operand class: "for a
+    /// guard whose operands are all interface values, the `load` primitive of
+    /// the later witness in signature order", and otherwise "the source
+    /// position of the operation that introduces the guarded extent", which
+    /// for this claim is the `expand` that makes it.
+    pub fn trap_op(&self, dag: &Dag) -> &'static str {
+        match self.placement(dag) {
+            GuardPlacement::Entry => "load",
+            GuardPlacement::Local => "expand",
+        }
+    }
+}
+
+/// Every unit-extent claim in `dag` that still owes a runtime guard.
+///
+/// Derived, never stored, from the DAG a lane consumes after the last rewrite,
+/// at the same point as [`output_axis_sources`] and
+/// [`derive_runtime_dim_classes`] (C4.5).
+///
+/// Two exclusions, each from a normative sentence:
+///
+/// - Only the same-rank form makes this claim at all. The two forms of
+///   `RiscOp::Expand` are told apart by the output rank against the operand's,
+///   which is how `verify.rs`, `eval.rs`, `host.rs` and the C emitter already
+///   tell them apart; a fifth spelling of that test is how they would drift.
+/// - An operand extent of literal 1 satisfies the claim by construction, and
+///   section 4.7.2 conditions a guard on a claim "not statically proven equal"
+///   to the value. A literal other than 1 cannot reach here: the checker
+///   refuses it, so this returns no claim for it rather than guarding it.
+pub fn derive_unit_extent_claims(dag: &Dag) -> Vec<UnitExtentClaim> {
+    let mut claims = Vec::new();
+    for node in dag.nodes() {
+        let RiscOp::Expand { axis, .. } = &node.op else {
+            continue;
+        };
+        let Some(&operand_id) = node.inputs.first() else {
+            continue;
+        };
+        let Some(operand) = dag.get(operand_id) else {
+            continue;
+        };
+        if node.output_type.dims.len() != operand.output_type.dims.len() {
+            continue;
+        }
+        let axis = *axis;
+        match operand.output_type.dims.get(axis) {
+            // Proved: the operand states the extent the claim asserts.
+            Some(DimInfo::Lit(1)) => continue,
+            Some(DimInfo::Lit(_)) | None => continue,
+            Some(_) => {}
+        }
+        let Some(source) = output_axis_sources(dag, operand_id).get(axis).cloned() else {
+            continue;
+        };
+        claims.push(UnitExtentClaim {
+            node: node.id,
+            operand: operand_id,
+            axis,
+            source,
+        });
+    }
+    claims
 }
 
 #[cfg(test)]

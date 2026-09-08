@@ -1872,6 +1872,35 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
 /// program and another way for an evaluated one.
 type EntryDimGuard = (String, (String, usize), (String, usize));
 
+/// The unit-extent claims this graph checks at entry, as
+/// `(input label, axis)` pairs to read.
+///
+/// The claimed value is the literal 1, so unlike [`EntryDimGuard`] there is no
+/// canonical witness to carry: the guard compares one read against a constant.
+/// Everything else is shared with the class path, `derive_unit_extent_claims`
+/// and `member_load_axis` included, so a claim cannot be identified one way
+/// for a compiled program and another way for an evaluated one.
+fn entry_unit_extent_guards(dag: &Dag) -> Vec<(String, usize)> {
+    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
+        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
+        _ => None,
+    };
+    let mut guards = Vec::new();
+    for claim in crate::axis_sources::derive_unit_extent_claims(dag) {
+        if claim.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
+            continue;
+        }
+        let Some((load, axis)) = crate::axis_sources::member_load_axis(dag, &claim.member()) else {
+            continue;
+        };
+        let Some(name) = label(load) else {
+            continue;
+        };
+        guards.push((name, axis));
+    }
+    guards
+}
+
 fn entry_dim_guards(dag: &Dag) -> Vec<EntryDimGuard> {
     let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
         Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
@@ -2077,6 +2106,26 @@ where
             "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
              numeric trap: domain in load at int64",
             canonical.0, canonical.1, member.0, member.1,
+        ));
+    }
+
+    // The same-rank `expand`'s unit-extent claim, at the same point and by the
+    // same reading of the inputs. `spec/05-risc-primitives.md` section 2.4.1
+    // makes the operation "a claim that the operand's extent at `axis` is 1"
+    // and sends a symbolic or runtime extent other than 1 to this guard.
+    for (label, axis) in entry_unit_extent_guards(dag) {
+        let Some(observed) = resolved_inputs
+            .get(&label)
+            .and_then(|value| value.shape.get(axis).copied())
+        else {
+            continue;
+        };
+        if observed == 1 {
+            continue;
+        }
+        return Err(format!(
+            "extent `1`: claimed = 1, {label} axis {axis} = {observed}\n\
+             numeric trap: domain in load at int64",
         ));
     }
 

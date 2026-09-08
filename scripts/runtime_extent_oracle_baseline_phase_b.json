@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "b0fc5d2a4966a4b099f4ecb725685ce24416881f1a05a79215a2fc50e8ff754d",
+  "corpus_sha256": "46df3e037fe7de7bbd88e0f27d11ebc7356295677c071881130dbe1bb3c8721e",
   "rows": [
     {
       "id": "class.load_load.c",
@@ -173,43 +173,43 @@
     {
       "id": "expand.positional.replacement.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.issue_597_positional_same_rank_replacement_executes_on_c"
     },
     {
       "id": "expand.positional.replacement.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval"
     },
     {
       "id": "expand.positional.replacement.non_unit_source_static",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "rejects_exactly",
       "receipt": "cli_slice_b.a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error"
     },
     {
       "id": "expand.positional.replacement.non_unit_source_traps.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c"
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c"
     },
     {
       "id": "expand.positional.replacement.non_unit_source_traps.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval"
     },
     {
       "id": "expand.positional.replacement_zero.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_c"
     },
     {
       "id": "expand.positional.replacement_zero.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_eval"
     },
     {

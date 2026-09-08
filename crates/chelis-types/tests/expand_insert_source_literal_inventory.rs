@@ -138,6 +138,12 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
         "a test program, renamed with the rest",
     ),
     (
+        "crates/chelis-ir/src/axis_sources.rs",
+        1,
+        0,
+        "one `expand`, in `UnitExtentClaim::trap_op`: the `<op>` slot section 4.7 gives a locally placed unit-extent claim. It is the rendered operation name, not a dispatch key, and there is no `insert` counterpart because `insert` makes no such claim",
+    ),
+    (
         "crates/chelis-ir/src/dag.rs",
         2,
         0,
