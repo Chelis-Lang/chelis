@@ -753,6 +753,13 @@ reclassifying a representation-seam row. That source-list-only freeze move is
 covered by the existing `unregistered-inventory-source` mutation; no numbered
 representation rule changes with it.
 
+The opt-in lowering trace likewise registers `chelis-ir/src/lowering_trace.rs`
+in that source universe. It clones existing DAG carriers without introducing a
+representation-seam row. Only the source count and corresponding integrity
+digest change; foundation rows, active debt, and mutation implementations stay
+unchanged. The existing `unregistered-inventory-source` mutation covers this
+source-list-only move. No numbered representation semantics change.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

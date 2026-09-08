@@ -306,6 +306,7 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-backend-c/sleef,"
     "chelis-e2e/hip-local-gpu,"
+    "chelis-ir/lowering-trace,"
     "chelis-prove/clarabel,"
     "chelis-python/extension-module,"
     "chelis-runtime/ownership-ledger,"
@@ -485,6 +486,11 @@ CHELIS_BINARY_PRODUCERS: tuple[tuple[str, ...], ...] = (
     tuple(CHELIS_LINT_CHECK),
 )
 
+LOWERING_TRACE_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-ir", "--features", "lowering-trace",
+    "--lib", "--test", "lowering_trace",
+]
+
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
         CLIPPY_WORKSPACE,
@@ -506,6 +512,7 @@ STAGES: dict[str, list[list[str]]] = {
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
+        LOWERING_TRACE_TESTS,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
     ],
@@ -560,6 +567,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     PIPELINE_CORE_DOCUMENTATION_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,
     RUNTIME_REPRESENTATION_ORACLE,
+    LOWERING_TRACE_TESTS,
 ]
 
 # The `--fast` inner-loop pass. Fix-in-place commands first, so the tree the
