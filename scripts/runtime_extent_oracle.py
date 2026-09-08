@@ -649,13 +649,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "reshape.named_claim.node_target.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
         ),
         _row(
             "reshape.named_claim.node_target.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
         ),
         # Chelis#1313 removes the synthesized zero only from ReLU. Sigmoid
@@ -919,11 +919,16 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "runtime_extent_slice_b", "--", "--nocapture",
             ),
             (
+                "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
                 "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
                 "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
                 "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
                 "a_local_unit_extent_claim_traps_at_its_operation_on_c",
+                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
+                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
+                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
+                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
                 "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
                 "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
                 "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",

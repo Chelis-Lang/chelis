@@ -990,15 +990,38 @@ move different lanes at different times and a single-valued row cannot record
 one lane at its exit state while another waits. Three consequences are worth
 naming here rather than leaving to the corpus file:
 
-- [#1375] is `reshape.named_claim.node_target` alone. Both its lanes stay at
-  baseline and belong to a later pull request, B2r, after B2h: `reshape` is on
-  the shared kernel keep-list (`chelis-ir/src/host.rs`'s
+- [#1375] is `reshape.named_claim.node_target` alone, and both its lanes moved
+  together in **B2r**, after B2h, as this paragraph planned. What B2r found is
+  worth recording, because the plan named one gap and there were three.
+  `reshape` was on the shared kernel keep-list (`chelis-ir/src/host.rs`'s
   `should_keep_tensor_expr_in_host_lane`), stale since Slice A gave reshape
-  targets their `RtDim` carrier, so a reshape-rooted def is emitted into the C
-  host program rather than lowered to a kernel and no class-derived guard
-  reaches it; B2h's routing is blocked on the same list for the eval lane. One
-  pull request therefore closes [#1375] on both lanes rather than two
-  half-moves.
+  targets their `RtDim` carrier, so a reshape-rooted def was emitted into the C
+  host program rather than lowered to a kernel and no class-derived guard could
+  reach it. Removing the entry was necessary and not sufficient. The derivation
+  was never the gap: a `Node` carrier is an `AxisSource::ScalarInput`,
+  `sets_axis` counts it, and the class formed with the `Load`'s axis. But
+  `local_dim_guard_sites` admitted only the folded `shape()` read as a site, so
+  the class had two members and nowhere to compare them; and the eval lane had
+  no local guard at all, reading `GuardPlacement::Entry` and nothing else, so
+  C2.7's one derivation had one consumer.
+
+  B2r therefore moved the site derivation beside `derive_runtime_dim_classes`,
+  admitted `ScalarInput` as a site, and made the DAG evaluator the second
+  consumer, checking each site before its node evaluates and rendering
+  [04-NUM-9] in the C lane's words. **That is the mechanism
+  `class.load_op_output.eval` waits on**; B2r did not move that row, whose
+  witness and receipt are its owner's.
+
+  Two facts a later slice should not rediscover. A local site is derived from
+  the UNBOUND graph: `bind_symbolic_dims` rewrites a resolved `Named(n, None)`
+  to `Named(n, Some(k))`, and the derivation reads a member's own dim to decide
+  whether the checker already proved its extent, so on the bound graph every
+  local member looks proved and every site disappears. And a claim over a
+  computed target is reachable from the CLI after all: `def main() = f(...)`
+  inlines `f` and folds the target to a literal, which is why this plan
+  expected driven rows, but a top-level binding `out = f(...)` lowers `f`
+  standalone with its declared extent symbolic, so both [#1375] rows are
+  ordinary CLI rows.
 
   `expand.foreign_claim.same_tensor_set_axis` is [#1376], not [#1375], and is
   NOT part of that handover: it is the same-tensor `shape()` size under a
