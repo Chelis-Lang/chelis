@@ -118,6 +118,20 @@ class ReceiptTests(unittest.TestCase):
             with self.subTest(hosts=value), self.assertRaises(oracle.OracleFailure):
                 self.validate(p)
 
+    def test_structural_prerequisites_do_not_invent_host_execution(self):
+        for issues in ((), (1288,), (1294,), (1288, 1294)):
+            child = replace(self.child, issues=issues)
+            p = packet(); p["hosts"] = {}
+            with self.subTest(issues=issues):
+                self.assertEqual(oracle.validate_receipt(p, child, self.identity, "fresh"), 3)
+                with self.assertRaises(oracle.OracleFailure):
+                    oracle.validate_receipt(packet(), child, self.identity, "fresh")
+        # Combining a structural obligation with behavior cannot waive a lane.
+        p = packet(); p["hosts"] = {}
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.validate_receipt(p, replace(self.child, issues=(1288, 1287)),
+                                    self.identity, "fresh")
+
     def test_unimplemented_device_receipt_requires_lane_cell_and_issue_identity(self):
         p = packet()
         p["devices"] = [{"lane": "hip", "cell": "count/bool/tensor",

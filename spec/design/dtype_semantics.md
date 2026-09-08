@@ -2435,8 +2435,9 @@ the test framework; a committed expected inventory or a driver-authored
 success packet is not execution evidence. Adapters need their own bypass,
 ignored-test, and zero-match mutations before adoption. Every selected test
 must execute successfully, and every obligation must cite an executed test.
-The non-behavior freeze leg has no host lanes; behavior legs require `eval`,
-`c-host`, and `c-dag`. Unbuilt HIP/Metal cells carry explicit issue-bearing
+The structural freeze, #1288 census, and #1294 atom-closure legs execute their
+guards without inventing host behavior cells. Every other prerequisite requires
+`eval`, `c-host`, and `c-dag`; a receipt cannot waive those lanes. Unbuilt HIP/Metal cells carry explicit issue-bearing
 dispositions, whose authorities are checked against the rejection manifest
 and live OPEN issue state. Children still own complete cell discovery and
 the governing per-cell acceptance requirements.

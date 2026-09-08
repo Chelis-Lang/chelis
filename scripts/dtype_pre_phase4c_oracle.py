@@ -30,6 +30,10 @@ REQUIRED_ISSUES = frozenset({
     722, 753, 759, 893, 965, 1059, 1281, 1282, 1284, 1287, 1288, 1289,
     1290, 1292, 1293, 1294, 1295, 1297, 1298, 1306, 1313,
 })
+# These exact prerequisites prove census and atom closure. They execute their
+# guards but own no evaluator/backend behavior cells. No receipt can choose this
+# disposition; every other owning issue requires all three host lanes.
+STRUCTURAL_ISSUES = frozenset({1288, 1294})
 _NAME = re.compile(r"[a-z][a-z0-9-]*")
 
 
@@ -186,13 +190,13 @@ def validate_receipt(payload: object, child: ChildOracle, identity: SourceIdenti
         required = _identities(cases, f"{child.name} {kind}")
         if not required.issubset(observed):
             raise OracleFailure(f"{child.name}: unexecuted {kind} obligations")
-    if child.issues:
+    if set(child.issues) - STRUCTURAL_ISSUES:
         hosts = _object(p["hosts"], {"eval", "c-host", "c-dag"}, "host execution")
         for lane, cases in hosts.items():
             if not _identities(cases, f"{child.name} {lane}").issubset(observed):
                 raise OracleFailure(f"{child.name}: unexecuted host lane {lane}")
     elif p["hosts"] != {}:
-        raise OracleFailure(f"{child.name}: non-behavior freeze oracle declares host execution")
+        raise OracleFailure(f"{child.name}: structural oracle declares host execution")
     if not isinstance(p["devices"], list):
         raise OracleFailure(f"{child.name}: device dispositions must be an explicit list")
     device_cells: set[tuple[str, str]] = set()
