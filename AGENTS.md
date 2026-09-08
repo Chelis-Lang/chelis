@@ -742,6 +742,24 @@ enforcement boundary.
 
 ## Commit And Pull Request Hygiene
 
+### Changelog Fragments
+
+- A behavior-changing PR must add a fragment in `changelog.d/`, using
+  `<pr-or-slug>.<added|changed|fixed>[.breaking].md`. Write the entry without its
+  outer bullet; mark breaking changes through the filename suffix.
+- Correct an existing pending fragment when follow-up work changes its claim.
+- Internal work with no release-note value may use the `no-changelog` PR label.
+  It suppresses only the missing-fragment requirement. Malformed fragments and
+  direct changelog edits still fail the required `Changelog` CI check.
+- Reserve `CHANGELOG.md` edits for release assembly. The release author runs
+  `.venv/bin/python scripts/changelog.py build --version VERSION --date YYYY-MM-DD`,
+  reviews the preview, then repeats with `--write`. Commit the assembled notes,
+  fragment deletions, and version bump together. Never recreate `[Unreleased]`.
+- [The fragment contract](changelog.d/README.md) owns the format, examples,
+  publishing behavior, and focused acceptance command.
+
+### Commit Messages
+
 - Use plain conventional commit messages with the configured human author. Do not add
   `Claude-Session`, Codex/Claude attribution, AI co-authorship markers, or AI-session
   links to commit messages or PR bodies.

@@ -737,6 +737,8 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
 # and .github/workflows/conformance.yml).
 NON_GATE_WORKFLOWS = {
     "ci.yml",
+    # Changelog policy uses Python only, including on docs PRs.
+    "changelog.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
     # Manually dispatched Phase 3 acceptance on a provisioned AMD GPU runner;
