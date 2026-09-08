@@ -202,6 +202,21 @@ fn invalid_case(case: &str) {
     unsafe {
         let tensor = chelis_alloc(2, [2, 3].as_ptr(), CHELIS_DTYPE_F64);
         match case {
+            "reshape-rank-unknown-dtype" => {
+                let mut rank = chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0);
+                rank.dtype = 255;
+                chelis_tensor_check_reshape(tensor, rank, ptr::null());
+            }
+            "reshape-extent-unknown-dtype" => {
+                let mut extent = chelis_scalar_from_bits(CHELIS_DTYPE_I64, 6);
+                extent.dtype = 255;
+                chelis_tensor_check_reshape(
+                    tensor,
+                    chelis_scalar_from_bits(CHELIS_DTYPE_I64, 1),
+                    &extent,
+                );
+            }
+
             "reshape-rank-wrong-dtype" => {
                 chelis_tensor_check_reshape(
                     tensor,
@@ -327,6 +342,8 @@ fn metadata_boundary_rejects_invalid_inputs_before_allocation_or_access() {
         panic!("invalid metadata returned normally: {case}");
     }
     for (case, brand) in [
+        ("reshape-rank-unknown-dtype", "Domain:"),
+        ("reshape-extent-unknown-dtype", "Domain:"),
         ("reshape-rank-wrong-dtype", "Domain:"),
         ("reshape-rank-overflow", "Overflow:"),
         ("reshape-extent-wrong-dtype", "Domain:"),

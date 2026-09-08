@@ -1019,9 +1019,10 @@ fn validate_scalar(value: chelis_scalar, context: &str) -> RuntimeDType {
 }
 
 fn exact_i64_scalar(value: chelis_scalar, context: &str) -> i64 {
-    if validate_scalar(value, context) != RuntimeDType::I64 {
+    if value.dtype != CHELIS_DTYPE_I64 {
         runtime_fail!("Domain: {context} requires int64 tagged metadata");
     }
+    validate_scalar(value, context);
     i64::from_ne_bytes(value.bits.to_ne_bytes())
 }
 
