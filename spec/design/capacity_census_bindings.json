@@ -1,93 +1,118 @@
 {
-  "version": 1,
-  "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)",
+  "version": 2,
   "rows": [
     {
       "flags": [],
       "id": "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String>",
-      "kind": "binding-pyfunction"
+      "kind": "binding-pyfunction",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     },
     {
       "flags": [],
       "id": "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>, project_root: Option<&str>, force_bare: bool) -> PyResult<NativeCompiledModel>",
-      "kind": "binding-pyfunction"
+      "kind": "binding-pyfunction",
+      "authority": "nonnumeric",
+      "graph_identity": "2d673c37cece860c434648ed282e3e23bffe7984ef107ffc4b96a6d7a36479f0"
     },
     {
       "flags": [],
       "id": "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<String>",
-      "kind": "binding-pyfunction"
+      "kind": "binding-pyfunction",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     },
     {
       "flags": [],
-      "id": "chelis_python::decompile_json(py: Python<'_>, source: &str) -> PyResult<String>",
-      "kind": "binding-pyfunction"
+      "id": "chelis_python::decompile_json(py: Python<'_>, source: &str) -> PyResult<source_json::SourceJson<chelis_compiler_api::schema::DecompileResult>>",
+      "kind": "binding-pyfunction",
+      "authority": "nonnumeric",
+      "graph_identity": "cd6c5c929f7aa856cdea354131f0e7ffa8d6166af3266522e1e022c45ac3ae82"
     },
     {
       "flags": [],
       "id": "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<String>",
-      "kind": "binding-pyfunction"
+      "kind": "binding-pyfunction",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     },
     {
       "flags": [],
       "id": "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str, project_root: Option<&str>) -> PyResult<String>",
-      "kind": "binding-pyfunction"
+      "kind": "binding-pyfunction",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     },
     {
       "flags": [],
       "id": "chelis_python::load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel>",
-      "kind": "binding-pyfunction"
+      "kind": "binding-pyfunction",
+      "authority": "nonnumeric",
+      "graph_identity": "e58d8aae36ba2e17e9cf7d3c329acec4ac44806ed4784fc067dae275c16e1ca7"
     },
     {
       "flags": [],
-      "id": "chelis_python::validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String>",
-      "kind": "binding-pyfunction"
+      "id": "chelis_python::validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<source_json::SourceJson<chelis_compiler_api::schema::ValidateResult>>",
+      "kind": "binding-pyfunction",
+      "authority": "nonnumeric",
+      "graph_identity": "e8e6e5c9ec26dbfa4b1a89889ba16c060bfcbaed0a713e278b06e8804f789c8f"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::input_names(self: &Self) -> Vec<String>",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "authority": "nonnumeric",
+      "graph_identity": "7a4d92cc886af4a4c0d3d538a0ece17ef68725fe012a3f1568eef3aa2ab0b551"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::output_names(self: &Self) -> Vec<String>",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "authority": "nonnumeric",
+      "graph_identity": "150beeb0840742e5ec6a66d6e71b9c3feab4e42b4c9d799b295b3946eb1232e0"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::path(self: &Self) -> String",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "authority": "nonnumeric",
+      "graph_identity": "79179081289568648d3c83725085c082454099eed3cc678ed486421972f95cc4"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::target(self: &Self) -> String",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "authority": "nonnumeric",
+      "graph_identity": "11d1510fafc0127c1f1762d3d105ef1ef36d84de726b24cd7e10bcc5afc1e2ac"
     },
     {
       "flags": [
         "numeric-param"
       ],
       "id": "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     },
     {
       "flags": [],
       "id": "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     },
     {
       "flags": [],
       "id": "chelis_python::NativeTensor::dtype(self: &Self) -> PyResult<&'static str>",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "authority": "nonnumeric",
+      "graph_identity": "11dfd28295f65ded4ddcc2ff351085158f20b798f91f3d85abc7f60646c3883a"
     },
     {
       "flags": [],
       "id": "chelis_python::NativeTensor::shape(self: &Self) -> Vec<usize>",
-      "kind": "binding-pymethod"
+      "kind": "binding-pymethod",
+      "citation": "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)"
     }
   ]
 }

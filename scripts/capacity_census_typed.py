@@ -394,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     # the legs back onto separate directories in a form the call-site drift
     # guard in test_capacity_census_typed.py cannot see.
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("mode", choices=("wire", "bindings"))
+    parser.add_argument("mode", choices=("wire", "bindings", "bindings-discovery"))
     # Optional, and no caller in the repository passes it: see
     # SHARED_RUSTDOC_TARGET_DIR. It stays accepted for ad-hoc local runs that
     # need an isolated directory (the `target/agents/<name>` convention for
@@ -402,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-dir", type=Path, default=None)
     parser.add_argument("--registered", action="append", default=[])
     parser.add_argument("--registered-method", action="append", default=[])
+    parser.add_argument("--registered-class", action="append", default=[])
     parser.add_argument("--rustdoc-json", type=Path)
     return parser
 
@@ -442,11 +443,36 @@ def main() -> int:
                 crate_name="chelis_python",
                 target_dir=target_dir,
             )
-        rows = (
-            wire_rows(document)
-            if args.mode == "wire"
-            else binding_rows(document, args.registered, args.registered_method)
-        )
+        if args.mode == "bindings-discovery":
+            from capacity_census_bindings import discover_bindings
+
+            classes = {}
+            for value in args.registered_class:
+                name, separator, identity = value.partition("=")
+                if not separator or not name or not identity or name in classes:
+                    raise CensusError("invalid or duplicate registered class identity")
+                classes[name] = identity
+            compiler_document = generate_rustdoc_json(
+                root=root,
+                package="chelis-compiler-api",
+                crate_name="chelis_compiler_api",
+                target_dir=target_dir,
+            )
+            rows = discover_bindings(
+                [document, compiler_document], args.registered,
+                args.registered_method, classes,
+            )
+            legacy = {row["id"]: row["flags"] for row in binding_rows(
+                document, args.registered, args.registered_method
+            )}
+            for row in rows:
+                row["legacy_flags"] = legacy[row["id"]]
+        else:
+            rows = (
+                wire_rows(document)
+                if args.mode == "wire"
+                else binding_rows(document, args.registered, args.registered_method)
+            )
     except (CensusError, OSError, json.JSONDecodeError) as error:
         print(f"capacity census typed enumerator failed: {error}", file=sys.stderr)
         return 1

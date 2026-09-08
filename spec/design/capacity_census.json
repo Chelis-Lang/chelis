@@ -71,11 +71,13 @@
       {
         "leg": "binding-raw-dtype-params",
         "artifact": "crates/chelis-python/src/lib.rs registered PyO3 callables",
-        "enumerator": "live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures",
+        "enumerator": "live PyO3 signatures; nine final rows require input/return exposure, eight unchanged legacy rows defer it",
         "command": "cargo nextest run -p chelis-python --test capacity_census_bindings",
         "expected_success": "registered_pyfunctions_match_the_reviewed_rustdoc_signatures passes",
         "mutations": [
-          "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected"
+          "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected",
+          "retired_binding_rows_cannot_regain_legacy_admission",
+          "copied_missing_and_duplicate_binding_registrations_fail"
         ]
       }
     ],

@@ -849,7 +849,7 @@ Deliverables, with phase homes:
    | typed leg | artifact | live enumerator | command and expected success | standing red mutation |
    |---|---|---|---|---|
    | `wire-schema-numeric-fields` | `crates/chelis-compiler-api/src/schema.rs` public serialized type graph | rustdoc JSON public schema type graph -> numeric fields | `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `wire_schema_numeric_fields_match_the_reviewed_baseline` passes | `adding_or_removing_a_public_serialized_f64_field_changes_the_census` |
-   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
+   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live PyO3 signatures; nine final rows require input/return exposure, eight unchanged legacy rows defer it | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
 
    Each leg is a live enumerator, executable command, exact success
    condition, and mutation test recorded in `coverage_manifest()`. The wire
@@ -893,13 +893,14 @@ Deliverables, with phase homes:
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
 
-   The primary baseline has completed that landing rule: its 237 discovered
+   The primary baseline has completed that landing rule: its 247 discovered
    rows have final authority as 66 exact nonnumeric rows, 16 exact tagged
-   carriers/transports, and 155 exact numeric-operation registrations. It has
+   carriers/transports, and 165 exact numeric-operation registrations. It has
    zero grandfather, permanent-disposition, successor-override,
-   integer-plumbing, or other transition rows. The 84 wire and 17 binding
-   baseline rows remain sealed legacy cohorts; Count's wire field is separately
-   final-registered. These counts are current inventory evidence; executable
+   integer-plumbing, or other transition rows. The 84 wire and eight binding
+   baseline rows remain sealed legacy cohorts. Nine binding rows have final
+   nonnumeric authority; Count's wire field is separately final-registered.
+   These counts are current inventory evidence; executable
    enumeration and exact one-class matching remain the completion oracle.
 
    The final C/runtime authority partition is exact:
@@ -1593,8 +1594,27 @@ constructors, decompile/validate source results, four model name/path/target
 getters and the NativeTensor dtype getter. Actual registered payload contracts,
 not this list, determine final classification. The remaining shape getter
 has its own [05-OP-45] identity and exact `Vec<i64>` result; the C-only
-shape atom cannot supply that binding's authority. None of the 17 frozen
-binding rows is promoted by this planning classification.
+shape atom cannot supply that binding's authority. The independent nonnumeric
+binding migration final-registers the nine structural candidates with an
+executed registered-signature and reachable-type census. `decompile_json` and
+`validate_json` preserve `SourceJson<DecompileResult>` and
+`SourceJson<ValidateResult>` until PyO3 conversion; a sealed constructor accepts
+the actual typed result and serializes it once. Their error paths raise string
+exceptions rather than serialized result payloads. The other seven structural
+signatures expose source/path/name/vocabulary strings or opaque registered
+pyclass handles. Each handle's published methods remain separate census roots.
+
+The binding baseline retains eight unchanged legacy rows: the four numeric
+compiler JSON functions and four tensor methods. Discovery records both input
+and return capacity, alias/container/nominal closure and unsupported dynamic
+payloads for all registered methods. Final and new rows must pass this stronger
+discovery; only an exact unchanged member of the eight-row remainder can defer
+it. Their old flags are not widened. This partial activation does not establish
+complete binding closure or numeric CompilerJson admission. The executable
+checks are `cargo nextest run -p chelis-python --test capacity_census_bindings`
+and `--test binding_payloads`, including malformed input, missing/duplicate
+registration, retired-exception revival, f64-return, reachable-width and
+unsupported-payload controls.
 
 Binding discovery must follow registered methods and return-container capacity,
 and each numeric transport must bind the actual producer/consumer contract.
