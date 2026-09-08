@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "71041f16942d4f83a469587d69893557344ee68251dd4c857b1a31842aa6c74a",
+  "corpus_sha256": "19dd610877f249117e64e94cb8dd47f65cc60e2262b040203d2b249d21173b79",
   "rows": [
     {
       "baseline": "silent_unguarded",
@@ -245,7 +245,7 @@
     {
       "baseline": "silent_unguarded",
       "id": "guard_order.effect_after.eval",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval"
     },
     {
@@ -257,7 +257,7 @@
     {
       "baseline": "silent_unguarded",
       "id": "guard_order.effect_before.eval",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_eval"
     },
     {

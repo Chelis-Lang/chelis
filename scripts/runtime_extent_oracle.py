@@ -601,13 +601,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "guard_order.effect_after.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
         ),
         _row(
             "guard_order.effect_before.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
         ),
         _row(
