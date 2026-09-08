@@ -15,8 +15,8 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
-use std::borrow::Cow;
 
+use std::borrow::Cow;
 use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{
@@ -496,30 +496,30 @@ fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
     )
 }
 
-/// Lane preservation for the one operand disagreement that is not an error.
-/// The lowerer gives a comparison's scalar operand a rank-0 `Const`
-/// (`lower_builtin_app`'s `cmplt`/`lt` arm in `lower.rs`), and the C kernel
-/// it emits indexes that operand at 0 for every output element: `emit_binary`
-/// in `crates/chelis-backend-c/src/emit.rs` falls through to its strided loop
-/// when the operand sizes differ, and `chelis_indices_to_flat(indices,
-/// t->strides, t->rank)` is 0 at rank 0. `spec/05-risc-primitives.md`
-/// section 2.4.1, lines 778-781 (the runtime-guard prose that [05-MOV-1]'s
-/// "Eval, C, HIP, and Metal execute the same runtime values and traps"
-/// governs), names that idiom and exempts it from the elementwise
-/// operand-agreement guard: "rank-0 scalar operands are the backend's
-/// broadcast idiom and are exempt" (chelis#664). Before host-lane def
-/// applications were routed through this evaluator (chelis#1277 B2h) no DAG
-/// carrying a rank-0 operand reached it; `gt(to_tensor([..]), 1.5)` then did.
+/// Broadcast a rank-0 operand over the other's shape, and report any other
+/// disagreement as a typed error.
 ///
-/// chelis#1506 has since resolved that question by REJECTING: [05-OP-36]
-/// admits two scalars or two same-dimension tensors, and the mixed form is a
-/// type error, so no checked program produces that DAG any more. This site
-/// nevertheless stays, because the source-level form was never its only
-/// client: the rank-0 operand is also the backend's own idiom under
-/// chelis#664, which section 2.4.1 exempts by name, and Tier-2 lowerings
-/// synthesize it. Removing it is a separate change with its own evidence, not
-/// a consequence of chelis#1506. The bound is rank 0 in either position and
-/// nothing wider; every other disagreement is the typed error.
+/// chelis#1277 B2h added the rank-0 branch as LANE PRESERVATION so routing
+/// host-lane defs through this evaluator would not refuse a scalar beside a
+/// tensor that the host interpreter had evaluated, and named decision row 14
+/// as its removal trigger. chelis#1506 is that decision, and it removed the
+/// branch from `compare_elementwise`: a scalar beside a tensor is a type error
+/// under `[05-OP-36]`, so no admitted program reaches a comparison that way.
+///
+/// It is NOT removed here, because the arithmetic site is still reachable from
+/// an admitted program. `def scale[p: Float](x: tensor[1, p]) -> tensor[1, p] =
+/// mul(x, cast(0.1, p))` (chelis#1544's binder-target literal adoption) checks
+/// clean, and its polymorphic scale factor lowers to a rank-0 `Const` feeding
+/// the elementwise `Mul`; deleting the branch made
+/// `issue_1544_binder_cast_precision::scalar_and_tensor_binders_compute_at_each_instantiation`
+/// fail with `got [1] vs []`. Whether the checker should refuse that program
+/// too is chelis#1506's question for `mul`, not for the comparisons, and it is
+/// not decided here.
+///
+/// The shape check below is a third job and belongs to neither: it is what
+/// makes `[4]` against `[3]` report the interpreter's own phrase, which
+/// `an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic`
+/// locks.
 fn broadcast_rank0_operands<'a>(
     lhs: &'a TensorValue,
     rhs: &'a TensorValue,
@@ -547,6 +547,22 @@ fn splat_rank0(value: &TensorValue, shape: &[usize]) -> TensorValue {
         raw_f64_ingress: value.raw_f64_ingress,
     }
 }
+
+/// Elementwise comparison operands must agree on shape exactly. chelis#1506
+/// removed the rank-0 broadcast from this family: `[05-OP-36]` makes a scalar
+/// beside a tensor a type error, so the lane preservation B2h added for it has
+/// no admitted program left to preserve.
+fn require_matching_comparison_shapes(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<(), String> {
+    if lhs.shape == rhs.shape {
+        return Ok(());
+    }
+    Err(shape_disagreement(lhs, rhs))
+}
+
+
 
 fn binary_elementwise(
     op: ElementwiseBinOp,
@@ -714,8 +730,7 @@ fn compare_elementwise(
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
-    let (lhs, rhs) = (&*lhs, &*rhs);
+    require_matching_comparison_shapes(lhs, rhs)?;
     let storage =
         compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
     Ok(TensorValue::from_storage(lhs.shape.clone(), storage))

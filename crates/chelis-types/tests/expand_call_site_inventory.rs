@@ -149,11 +149,6 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "the same replacement spelling inside the `[05-UNS-1]` runtime refusal",
     ),
     (
-        "crates/chelis-compiler-api/tests/issue_1277_host_lane_routing.rs",
-        6,
-        "the six Slice B2h routing roots, re-vehicled from a scalar operand onto the explicit spelling; the six asserted values are unchanged",
-    ),
-    (
         "crates/chelis-cli/tests/coral_prerequisites.rs",
         6,
         "the migration half of the inverted Coral gate: the six programs as Coral must now spell them",
