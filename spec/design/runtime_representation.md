@@ -29,8 +29,6 @@ Those facts are still optional at their highest-risk consumers:
   can bypass;
 - equal-width representations remain interchangeable to a cast even though
   [04-NUM-8] says their bits have different meanings;
-- `DimExpr::normalized_key` uses saturating products, so two unequal symbolic
-  capacities can compare equal before allocation;
 - Python and the HIP support header independently mirror a fixed-rank,
   int32-sized device tensor whose element pointer is `float *`; and
 - backend element spellings and stores are text selected at call sites, so a
@@ -71,8 +69,9 @@ The class has already survived local repairs:
 3. [#1360] made HIP allocation and element spelling agree for Bool8 and made the
    unsupported kernels fail loudly. The required Bool8 operation family remains
    [#1364]; a width assertion alone cannot prove a kernel writes canonical 0/1.
-4. Host runtime allocation now uses checked metadata, while compiler capacity
-   equivalence still saturates before the runtime sees a value ([#888]).
+4. Host runtime allocation gained checked metadata while compiler capacity
+   equivalence still saturated before the runtime saw a value ([#888]); the
+   exact capacity authority and legacy retirement below remove that path.
 5. `Repr` derives byte width but not [04-NUM-8]'s arithmetic representation
    ([#899]). The missing fact is restated or inferred wherever a lane needs it.
 
