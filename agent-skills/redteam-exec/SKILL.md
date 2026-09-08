@@ -74,9 +74,10 @@ validation pass, or verification of a fix that a red team reported.
 - The brief pastes the busy signal for that target instead of asserting it:
   `.venv/bin/python scripts/worktree_status.py [--path PATH] [--json] [--quiet]`.
   That pasted output is the heavyweight-command handshake for that target. It answers
-  free, busy, unknown, or not clean, never reports free on missing evidence, and prints
+  free, busy, unknown, or not clean, withholds free when evidence is missing, and prints
   a finished gate report under a history label rather than as current state, so treat
-  unknown as busy. The reviewer uses a free target without a cold rebuild and asks
+  unknown as busy. Free is its best answer rather than a proof; the probe documents the
+  residual case its fail-safe does not reach. The reviewer uses a free target without a cold rebuild and asks
   before starting any other heavyweight build.
 - A reviewer whose probes mutate tracked source gets its own worktree, whatever the
   signal reports. This is an exception to reuse, not a caveat on it: sequencing narrows

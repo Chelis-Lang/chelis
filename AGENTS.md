@@ -96,12 +96,15 @@ not drift.
   that target. Create a new worktree or target only when those reuse conditions do not
   hold.
 - Read what that signal actually says. It answers free, busy, unknown, or not clean,
-  and where those conflict the more cautious answer wins. It never reports free on
-  missing evidence: a probe that could not read the process table answers unknown, so
-  unknown is a reason to wait rather than a reason to proceed. A `--local` or full gate
-  run is lease-proven and kernel-backed. A `--fast` run takes no lease and is inferred
-  from its cargo children, so it is the weakest of the signals. A finished gate report
-  is printed under a history label and is never current state.
+  and where those conflict the more cautious answer wins. Missing evidence withholds
+  free by design rather than standing in for an empty machine: a probe that could not
+  read the process table answers unknown, so unknown is a reason to wait rather than a
+  reason to proceed. A `--local` or full gate run is lease-proven and kernel-backed. A
+  run that takes no lease, `--fast` among them, is caught only by a scan of the
+  processes it spawned, so it is the weakest of the signals. A finished gate report is
+  printed under a history label and is never current state. Free is the probe's best
+  answer rather than a proof: it documents the residual case its own fail-safe does not
+  reach.
 - A reviewer whose probes mutate tracked source does not share a worktree with anything
   that compiles, whatever the signal reports. This is an exception to warm reuse rather
   than a caveat on it: sequencing narrows the window in which one agent's inserted
