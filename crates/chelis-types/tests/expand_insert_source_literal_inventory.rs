@@ -262,9 +262,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ("crates/chelis-types/src/linearity.rs", 1, 1, ""),
     (
         "crates/chelis-types/src/unify.rs",
-        18,
-        2,
-        "the deferred two-shape constraint machinery and its tests. `insert` has one legal shape and records no such constraint, so these messages can only ever name `expand`; a counterpart here would be unreachable code",
+        1,
+        1,
+        "neither is about the operations. This file held 18 and 2 for the deferred two-shape constraint machinery and its tests, which chelis#1277 S2c deleted. What is left are two substring matches in unrelated test expectations: `expanded rank reaches the older type` and `a forbidden direct insertion must fail explicitly`. The scanner counts substrings, so the English words score",
     ),
 ];
 
