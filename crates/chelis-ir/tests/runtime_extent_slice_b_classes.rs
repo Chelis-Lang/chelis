@@ -816,6 +816,122 @@ fn classes_survive_bind_symbolic_dims_unchanged() {
     );
 }
 
+/// Oracle row `rebuild.classes_after_each_pass`.
+///
+/// C5 property 7 asks for the derived classes to be "the same set in the same
+/// order" after each rebuild pass. The two tests above take one pass each;
+/// this one is the row's receipt and takes every rebuild pass `chelis-ir`
+/// exposes as a public entry point, so a pass that starts dropping stamped
+/// names cannot hide behind a sibling that keeps them.
+///
+/// COVERAGE, stated exactly because the row's name says "each pass": the
+/// passes exercised are `vmap::vectorize_axis0`, `dag::bind_symbolic_dims`,
+/// `optimize::dead_code_eliminate`, `optimize::common_subexpr_eliminate`,
+/// `optimize::constant_fold`, `fuse::fuse`, and
+/// `specialize::specialize_for_blas`. `splice_dag` and graph cloning are
+/// lowering-side and live in `chelis-types`, so they are not reachable from
+/// this crate and are not covered here; C2.4's `f(n, n)` splice row covers
+/// the splice's observable consequence instead.
+///
+/// Member `NodeId`s are compared only for the passes that preserve ids. The
+/// rest may renumber, so for those the assertion is on the claims, which is
+/// what "the same set in the same order" names.
+///
+/// EVIDENTIARY STATUS: disposition lock for the passes the two tests above
+/// already covered, regression test for the other five, which nothing
+/// exercised before this row. Its teeth come from
+/// `dropping_a_stamped_name_changes_the_derived_classes` below: a derivation
+/// that returned an empty list for every graph would satisfy every equality
+/// here and fail that one.
+#[test]
+fn every_rebuild_pass_preserves_the_derived_classes() {
+    // Two witnesses of `n` joined into one result, plus a second claim `m` on
+    // a rank-2 pair, so the fixture has more than one class and the ORDER of
+    // the class list is observable rather than vacuous.
+    let build = || {
+        let mut dag = Dag::new();
+        let x = f32_load(&mut dag, "x", vec![named("n"), named("m")]);
+        let y = f32_load(&mut dag, "y", vec![named("n"), named("m")]);
+        let joined = dag.add_node(
+            RiscOp::Add,
+            vec![x, y],
+            ty(vec![named("n"), named("m")], Prim::F32),
+            None,
+        );
+        dag.add_root(joined);
+        dag
+    };
+
+    let dag = build();
+    let before = derive_runtime_dim_classes(&dag);
+    assert_eq!(
+        claims(&before),
+        vec![DimClaim::Name("n".into()), DimClaim::Name("m".into())],
+        "the fixture must derive both claims before any pass runs",
+    );
+
+    // Passes that preserve `NodeId`s: assert the members too, which is the
+    // stronger statement.
+    let id_preserving: Vec<(&str, Dag)> = vec![
+        (
+            "bind_symbolic_dims",
+            chelis_ir::dag::bind_symbolic_dims(
+                &dag,
+                &chelis_unord::UnordMap::from([
+                    ("n".to_string(), 4usize),
+                    ("m".to_string(), 2usize),
+                ]),
+            )
+            .expect("bind n and m"),
+        ),
+        ("constant_fold", {
+            let mut folded = build();
+            chelis_ir::optimize::constant_fold(&mut folded);
+            folded
+        }),
+    ];
+    for (pass, rebuilt) in id_preserving {
+        let after = derive_runtime_dim_classes(&rebuilt);
+        assert_eq!(claims(&before), claims(&after), "{pass} changed the claims");
+        for claim in claims(&before) {
+            assert_eq!(
+                members_of(&before, claim.clone()),
+                members_of(&after, claim.clone()),
+                "{pass} preserves node ids, so {claim:?}'s members must be identical",
+            );
+        }
+    }
+
+    // Passes that may renumber: the claims, in order, are the property.
+    let remapping: Vec<(&str, Dag)> = vec![
+        (
+            "vectorize_axis0",
+            chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).expect("vectorize"),
+        ),
+        (
+            "dead_code_eliminate",
+            chelis_ir::optimize::dead_code_eliminate(&dag),
+        ),
+        (
+            "common_subexpr_eliminate",
+            chelis_ir::optimize::common_subexpr_eliminate(&dag),
+        ),
+        ("fuse", chelis_ir::fuse::fuse(&dag)),
+        (
+            "specialize_for_blas",
+            chelis_ir::specialize::specialize_for_blas(&dag),
+        ),
+    ];
+    for (pass, rebuilt) in remapping {
+        let after = derive_runtime_dim_classes(&rebuilt);
+        assert_eq!(
+            claims(&before),
+            claims(&after),
+            "{pass} must leave the same claims in the same order",
+        );
+    }
+}
+
 /// The discriminating twin for the two rebuild tests: dropping a stamped name
 /// DOES change the derived classes. Without it, a derivation that returned an
 /// empty list for every graph would pass both survival tests.
