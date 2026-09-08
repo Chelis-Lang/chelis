@@ -472,10 +472,8 @@ fn issue_319_expand_precision_poly_verb_lowers() {
 /// `p = f32, w = f64`. The declaration is rejected before any call site is
 /// reached, so "both pinned to f32" never arises.
 ///
-/// Regression test, red before the rigidity check. Both-ingress agreement for
-/// [04-INF-6] is carried by `issue_1134_forward_reference_parity`; this row
-/// pins the chelis#319 program specifically, through the compiler-api Surf
-/// ingress this suite uses.
+/// Regression test, red before the rigidity check. Both Surf and serialized
+/// Deep must reject this exact chelis#319 program before gradient evaluation.
 #[test]
 fn issue_319_two_precision_vars_unified_by_the_body_are_rejected() {
     let twovar = "sig f: tensor[s, d, p] -> tensor[s, d, w] -> tensor[s, d, w]\n\
@@ -483,21 +481,41 @@ fn issue_319_two_precision_vars_unified_by_the_body_are_rejected() {
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(q, b), cast(0, int32)), cast(0, int32)))\n\
                   out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
-    let message = match try_eval(twovar) {
-        Ok(ok) => panic!(
-            "[04-INF-6]: a signature declaring two independent precision binders \
-             whose body unifies them must be rejected at the declaration; got Ok({ok:?})"
-        ),
-        Err(message) => message,
-    };
-    assert!(
-        message.contains("distinct declared type parameters")
-            && message.contains("`p`")
-            && message.contains("`w`")
-            && message.contains("04-INF-6"),
-        "the rejection must be the [04-INF-6] collapse diagnostic naming both \
-         binders, not some other failure; got {message}"
-    );
+    let deep =
+        chelis_compiler_api::compiler::desugar(chelis_compiler_api::schema::DesugarRequest {
+            source: twovar.to_owned(),
+        })
+        .expect("desugar")
+        .deep_text;
+    let results = [
+        (SourceKind::Surf, twovar.to_owned()),
+        (SourceKind::Deep, deep),
+    ]
+    .into_iter()
+    .map(|(source_kind, source)| {
+        eval(EvalRequest {
+            source_kind,
+            source,
+            bindings: BTreeMap::new(),
+        })
+    })
+    .collect::<Vec<_>>();
+    for result in results {
+        let error = result.expect_err("[04-INF-6]: two authored binders must stay independent");
+        assert_eq!(error.stage, "check", "{error:?}");
+        assert!(
+            error.errors.iter().any(|diagnostic| {
+                diagnostic.kind() == chelis_vocab::DiagnosticKind::TypeMismatch
+                    && diagnostic
+                        .message
+                        .contains("distinct declared type parameters")
+                    && diagnostic.message.contains("`p`")
+                    && diagnostic.message.contains("`w`")
+                    && diagnostic.message.contains("04-INF-6")
+            }),
+            "expected the collapse diagnostic naming both binders: {error:?}"
+        );
+    }
 }
 
 /// The honest-header twin, so chelis#319's guarantee survives on the shape the
