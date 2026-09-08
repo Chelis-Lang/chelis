@@ -1829,10 +1829,10 @@ exact ADT identity by [05-OP-34].
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the twenty-two final public C callable identities enumerated in
+> exactly the twenty-six final public C callable identities enumerated in
 > the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
 > incorporates by reference. These
-> signatures are canonical: axes and rank are `int32_t`; extents, sizes,
+> signatures are canonical: axes and unboxed rank are `int32_t`; extents, sizes,
 > offsets, counts, and element counts are `int64_t`; dtype arguments are
 > `chelis_dtype`; tensor arguments and results are [05-OP-44]'s opaque
 > `chelis_tensor` handles, and every tensor result is a new owner; and an
@@ -1882,6 +1882,31 @@ exact ADT identity by [05-OP-34].
 > that need dimensions use `chelis_tensor_rank` and `chelis_tensor_shape`.
 > There is no rank-specialized or recursively nested list-egress alias.
 > Padding follows [05-OP-9..10] exactly.
+>
+> `chelis_tensor_stride` projects the checked contiguous suffix stride at the
+> normalized axis; `chelis_tensor_byte_count` projects the checked logical byte
+> count at the tensor's declared representation, excluding spare storage capacity.
+> Both return exact int64 metadata. These observations, like rank, shape, and
+> element count, remain valid during an active write guard and access no elements.
+> `chelis_tensor_check_reshape` takes rank and every target extent as exact tagged
+> int64 scalars; the decoded rank must fit nonnegative int32. It validates the
+> target rank, extents, contiguous
+> suffix strides, element count, logical byte count, and target allocation domain,
+> and requires the target count to equal the input count. It reads only metadata,
+> is valid during an active write guard, and changes no metadata, ownership, or
+> payload. Positive rank requires a non-null shape pointer. An empty target has
+> zero elements but still requires representable suffix strides; rank zero has
+> one element. Malformed metadata or unequal counts trap `Domain`; unrepresentable
+> products, strides, byte counts, or allocation projections trap `Overflow`.
+>
+> `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
+> and an idle tensor of any active element dtype. It applies the same checked
+> reshape validation before allocating result storage, returns an independent
+> owner with the target shape, and preserves every stored element bit in row-major
+> order. The input is unchanged; no shape-list element is inferred or converted.
+> On floats the adjoint reshapes the cotangent to the input shape; integer and bool
+> forms are forward-only. Metadata observations and validation have no cotangent,
+> shape arguments have no cotangent, and none of these operations has an accumulator.
 >
 > `concat` requires a nonempty list of tensors with one common rank and dtype and equal
 > non-concatenated extents and copies parts in list order. `split` requires
