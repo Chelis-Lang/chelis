@@ -2287,7 +2287,8 @@ pub fn capacity_census_classes() -> [(&'static str, &'static str, bool); 2] {
 
 fn capacity_census_class<T: pyo3::PyClass>() -> (&'static str, &'static str, bool) {
     // Read the slots emitted by #[pymethods], rather than assuming an absent
-    // rustdoc method means PyO3's non-instantiable default constructor.
+    // rustdoc method means PyO3's non-instantiable default constructor. Presence
+    // does not identify the Rust function; discovery rejects unproved slots.
     let has_constructor = <T as pyo3::impl_::pyclass::PyClassImpl>::items_iter()
         .any(|items| items.slots.iter().any(|slot| slot.slot == ffi::Py_tp_new));
     (
@@ -2330,16 +2331,31 @@ mod tests {
         #[pyclass]
         struct NoConstructor;
         #[pyclass]
-        struct HasConstructor;
+        struct HasConstructor {
+            dtype: i32,
+        }
+        impl HasConstructor {
+            fn new() -> Self {
+                Self { dtype: 0 }
+            }
+        }
         #[pymethods]
         impl HasConstructor {
             #[new]
-            fn create() -> Self {
-                Self
+            fn create(dtype: i32) -> Self {
+                Self { dtype }
             }
         }
         assert!(!capacity_census_class::<NoConstructor>().2);
         assert!(capacity_census_class::<HasConstructor>().2);
+        assert_eq!(HasConstructor::new().dtype, 0);
+        Python::with_gil(|py| {
+            assert!(py.get_type::<NoConstructor>().call0().is_err());
+            let constructor = py.get_type::<HasConstructor>();
+            let value = constructor.call1((7,)).unwrap();
+            assert_eq!(value.extract::<PyRef<HasConstructor>>().unwrap().dtype, 7);
+            assert!(constructor.call0().is_err());
+        });
     }
 
     const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");

@@ -32,10 +32,6 @@ _TEXT_OUTPUT_DOMAINS = {
 }
 
 
-def _contains_text(value):
-    if value in (("atomic", "alloc::string::String"), ("primitive", "str")):
-        return True
-    return isinstance(value, tuple) and any(_contains_text(child) for child in value)
 _DYNAMIC = {
     "pyo3::types::any::PyAny",
     "pyo3::types::dict::PyDict",
@@ -44,6 +40,57 @@ _DYNAMIC = {
     "pyo3::instance::Py",
     "pyo3::instance::Bound",
 }
+
+
+def payload_obligations(graph):
+    """Summarize text and codec obligations separately for each adapter subtree.
+
+    A nominal type can occur both inside SourceJson and beside it. Keep those
+    contexts distinct, including when a generic argument is substituted. The
+    finite summaries terminate for recursive nominal types without expanding
+    their potentially unbounded instantiations.
+    """
+    definitions = {definition.identity: definition for definition in graph.definitions}
+    summaries = {(name, source_json): set() for name in definitions for source_json in (False, True)}
+
+    def evaluate(expr, source_json):
+        kind = expr[0]
+        if kind in {"primitive", "atomic"}:
+            text = expr in (("atomic", "alloc::string::String"), ("primitive", "str"))
+            return {("text",)} if text and not source_json else set()
+        if kind == "generic":
+            return {("parameter", expr[1], source_json)}
+        if kind == "reference":
+            declaration = definitions[expr[1]]
+            arguments = dict(zip(declaration.parameters, expr[2], strict=True))
+            result = set()
+            if source_json and declaration.kind != "type_alias" and declaration.codec != "serde-derived":
+                result.add(("codec",))
+            for obligation in summaries[(expr[1], source_json)]:
+                if obligation[0] == "parameter":
+                    result.update(evaluate(arguments[obligation[1]], obligation[2]))
+                else:
+                    result.add(obligation)
+            return result
+        if kind == "container":
+            children = expr[2]
+            source_json = source_json or expr[1] == _SOURCE_JSON
+        elif kind == "tuple":
+            children = expr[1]
+        else:
+            children = (expr[-1],)
+        return set().union(*(evaluate(child, source_json) for child in children))
+
+    while True:
+        changed = False
+        for (name, source_json), known in summaries.items():
+            obligations = set().union(*(evaluate(edge.type, source_json) for edge in definitions[name].edges))
+            if not obligations <= known:
+                known.update(obligations)
+                changed = True
+        if not changed:
+            break
+    return set().union(*(evaluate(expr, False) for _, expr in graph.roots))
 
 
 class BindingGraph(RustdocGraph):
@@ -94,7 +141,6 @@ class BindingGraph(RustdocGraph):
                 if not expected:
                     return ("atomic", identity)
                 if identity == _SOURCE_JSON:
-                    self._source_json_seen = True
                     location = self.locations.get(identity)
                     if not location:
                         raise GraphError("missing source JSON wrapper definition")
@@ -127,13 +173,7 @@ class BindingGraph(RustdocGraph):
                 return value
 
             ty = replace_self(ty)
-        self._source_json_seen = False
-        graph = self.discover("chelis_python", ty if ty is not None else {"tuple": []})
-        if self._source_json_seen:
-            for declaration in graph.definitions:
-                if declaration.kind != "type_alias" and declaration.codec != "serde-derived":
-                    raise GraphError("source JSON result lacks a proven derived codec")
-        return graph
+        return self.discover("chelis_python", ty if ty is not None else {"tuple": []})
 
 
 def discover_bindings(documents, functions, methods, classes):
@@ -156,6 +196,11 @@ def discover_bindings(documents, functions, methods, classes):
         owner, separator, name = registered.partition("::")
         if not separator or owner not in classes:
             raise GraphError(f"missing registered class for method {registered}")
+        if name == "__new__":
+            # PyO3 permits #[new] on any Rust method name. The compiled slot
+            # census establishes its presence, but rustdoc cannot tie that
+            # slot to the original function. An inherent `new` is no evidence.
+            raise GraphError(f"unproved registered constructor provenance: {registered}")
         identity = classes[owner]
         crate, item_id = graph.locations[identity]
         item = graph._item(crate, item_id)
@@ -166,7 +211,7 @@ def discover_bindings(documents, functions, methods, classes):
                 continue
             for method_id in impl.get("items", []):
                 method = graph._item(crate, method_id)
-                if method.get("name") == ("new" if name == "__new__" else name) and "function" in method.get("inner", {}):
+                if method.get("name") == name and "function" in method.get("inner", {}):
                     found.append(method)
         if len(found) != 1:
             raise GraphError(f"missing or duplicate registered method {registered}")
@@ -185,8 +230,10 @@ def discover_bindings(documents, functions, methods, classes):
         try:
             for direction, label, ty in [("input", label, ty) for label, ty in inputs] + [("output", "$return", output)]:
                 discovered = graph.exposure(ty, owner)
-                typed_text = (discovered.roots, tuple(edge.type for definition in discovered.definitions for edge in definition.edges))
-                if direction == "output" and _contains_text(typed_text) and not graph._source_json_seen:
+                obligations = payload_obligations(discovered)
+                if ("codec",) in obligations:
+                    raise GraphError("source JSON result lacks a proven derived codec")
+                if direction == "output" and ("text",) in obligations:
                     domain = _TEXT_OUTPUT_DOMAINS.get(name)
                     if domain is None:
                         raise GraphError("untyped Python text result requires an actual payload contract")

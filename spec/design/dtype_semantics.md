@@ -1603,6 +1603,11 @@ the actual typed result and serializes it once. Their error paths raise string
 exceptions rather than serialized result payloads. The other seven structural
 signatures expose source/path/name/vocabulary strings or opaque registered
 pyclass handles. Each handle's published methods remain separate census roots.
+Compiled constructor-slot presence does not identify the implementing Rust
+function. A registered constructor fails discovery until that provenance is
+proved; an inherent method named `new` cannot stand in for it. Source JSON
+authority applies only to its typed payload subtree, including through aliases
+and generic containers; sibling text results require their own contract.
 
 The binding baseline retains eight unchanged legacy rows: the four numeric
 compiler JSON functions and four tensor methods. Discovery records both input

@@ -93,11 +93,29 @@ class BindingExposure(unittest.TestCase):
         rows = discover_bindings([a.doc], ["probe"], ["Model::score"], classes)
         self.assertEqual(rows[0]["flags"], [])
         self.assertIn("float-carrier", rows[1]["flags"])
-        with self.assertRaisesRegex(Exception, "missing or duplicate registered method"):
+        with self.assertRaisesRegex(Exception, "constructor provenance"):
             discover_bindings([a.doc], [], ["Model::__new__"], classes)
         a.doc["index"]["10"]["inner"]["struct"]["impls"].remove(41)
         with self.assertRaisesRegex(Exception, "PyClass"):
             discover_bindings([a.doc], ["probe"], [], classes)
+
+    def test_constructor_requires_provenance_even_with_an_inherent_new_helper(self):
+        a = fixture()
+        a.struct(10, "Handle", [])
+        a.external(40, "pyo3::pyclass::PyClass")
+        a.add(41, None, {"impl": {"trait": {"id": 40}, "items": []}})
+        a.add(42, None, {"impl": {"trait": None, "items": [43, 44]}})
+        a.add(43, "new", {"function": {"sig": {"inputs": [], "output": {"generic": "Self"}}}})
+        a.add(44, "create", {"function": {"sig": {
+            "inputs": [("dtype", primitive("i32"))], "output": {"generic": "Self"}}}})
+        a.doc["index"]["10"]["inner"]["struct"]["impls"] += [41, 42]
+        classes = {"Handle": "chelis_python::Handle"}
+        # An explicitly named method has an exact Rust identity. A Python
+        # constructor slot does not reveal which of these functions owns it.
+        result = discover_bindings([a.doc], [], ["Handle::create"], classes)[0]
+        self.assertEqual(result["flags"], ["raw-dtype-int"])
+        with self.assertRaisesRegex(Exception, "constructor provenance"):
+            discover_bindings([a.doc], [], ["Handle::__new__"], classes)
 
     def test_duplicate_or_missing_registered_callables_fail(self):
         a = fixture(primitive("bool"))
@@ -147,6 +165,45 @@ class BindingExposure(unittest.TestCase):
         self.assertIn("codec", exposure(b)["problem"])
         a.doc["index"]["10"]["inner"]["struct"]["kind"]["plain"]["fields"].append(a.field("extra", primitive("f64")))
         self.assertIn("wrapper", exposure(a)["problem"])
+
+    def test_source_json_authority_is_confined_to_its_subtree(self):
+        a = fixture()
+        a.struct(10, "SourceJson", [a.field("value", {"generic": "T"})], params=("T",),
+                 path=["chelis_python", "source_json", "SourceJson"])
+        a.struct(11, "ValidateResult", [a.field("mode", primitive("str"))],
+                 path=["chelis_compiler_api", "schema", "ValidateResult"])
+        a.external(12, "alloc::string::String")
+        a.external(13, "pyo3::err::PyResult")
+        a.external(14, "alloc::vec::Vec")
+        a.add(15, "TextAlias", {"type_alias": {"type": reference(12)}},
+              path=["chelis_python", "TextAlias"])
+        a.struct(16, "Envelope", [a.field("value", {"generic": "T"})], params=("T",))
+        a.struct(17, "Recursive", [a.field("value", {"generic": "T"}),
+                                   a.field("next", reference(17, {"generic": "T"}))], params=("T",))
+        source = reference(10, reference(11))
+
+        def result(ty):
+            a.doc["index"]["1"]["inner"]["function"]["sig"]["output"] = reference(13, ty)
+            return exposure(a)
+
+        for good in (source, {"tuple": [source, primitive("bool")]},
+                     reference(14, source), reference(16, source), reference(17, source)):
+            with self.subTest(good=good):
+                self.assertIsNone(result(good)["problem"])
+        for sibling in (reference(12), reference(14, reference(12)), reference(15),
+                        reference(16, reference(12)), reference(17, reference(12)), reference(11)):
+            for members in ([source, sibling], [sibling, source]):
+                with self.subTest(members=members):
+                    self.assertIn("text result requires", result({"tuple": members})["problem"])
+
+        # A sibling's ordinary Rust shape does not require a JSON codec. Move
+        # that same type into the payload and its missing codec must fail.
+        no_codec = a.struct(18, "Plain", [a.field("valid", primitive("bool"))])
+        a.doc["index"][str(no_codec)]["inner"]["struct"]["impls"] = []
+        self.assertIsNone(result({"tuple": [source, reference(18)]})["problem"])
+        a.doc["index"]["11"]["inner"]["struct"]["kind"]["plain"]["fields"].append(
+            a.field("nested", reference(18)))
+        self.assertIn("codec", result(source)["problem"])
 
 
 if __name__ == "__main__":
