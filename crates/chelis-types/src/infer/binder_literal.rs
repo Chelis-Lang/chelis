@@ -33,10 +33,14 @@ pub(super) fn validate_binder_literal_adoption_in_program(
         let bounds = sig.and_then(|sig| sig.dtype_bounds.as_ref().ok());
         visit_binder_literal_uses(body, &mut |usage| {
             match usage {
-            BinderLiteralUse::CastTarget {
-                binder,
-                source: Some(_),
-            } if !bounds.is_some_and(|bounds| bounds.contains_key(binder)) => errors.push(CheckError::new(
+            // chelis#1558: [04-DTYPE-1] constrains the cast TARGET, not the
+            // source, so every source reaches this arm. PR #1545 landed the
+            // arm gated on `source: Some(_)`, which enforced it for a literal
+            // operand only; a variable operand checked at 1.0 and was caught
+            // late and differently by each lane. Dropping the gate is the
+            // whole repair: one pass, one diagnostic, both ingresses.
+            BinderLiteralUse::CastTarget { binder, source: _ }
+                if !bounds.is_some_and(|bounds| bounds.contains_key(binder)) => errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
                 format!(
                     "cast target `{binder}` in `{name}` does not name an active primitive dtype: \
