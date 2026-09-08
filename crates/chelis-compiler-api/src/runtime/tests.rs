@@ -242,12 +242,13 @@ fn expect_unbounded_cast_target_rejection(source: &str, binder: &str, owner: &st
             .iter()
             .any(|error| error.message.contains(&subject)
                 && error.message.contains("04-DTYPE-1")),
-        "expected the [04-DTYPE-1] rejection naming `{binder}` in `{owner}`; got {:?}",
+        "expected the [04-DTYPE-1] rejection naming `{binder}` in `{owner}`; got [{}]",
         errors
             .errors
             .iter()
             .map(|error| error.message.as_str())
             .collect::<Vec<_>>()
+            .join(" | ")
     );
 }
 
