@@ -2641,7 +2641,8 @@ so PP7 could not have decided the rule for itself.
 
 ### PP8. Source-coverage totality ([#874], [#887])
 
-**Opened 2026-09-03.** §C4.1's invariant quantifies over the checked result.
+**Opened 2026-09-03; Slice 1 delivered by PR [#1602].** §C4.1's invariant
+quantifies over the checked result.
 [#874] proposed the complementary obligation over the submitted program and
 recorded three tag-keyed routes to the vacuity. This item establishes three
 things by execution. The vacuity is **live on `main` today**. The live routes
@@ -3412,6 +3413,7 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
 [#1543]: https://github.com/Chelis-Lang/chelis/pull/1543
 [#1546]: https://github.com/Chelis-Lang/chelis/pull/1546
+[#1602]: https://github.com/Chelis-Lang/chelis/pull/1602
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
 [#930]: https://github.com/Chelis-Lang/chelis/issues/930
