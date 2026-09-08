@@ -54,16 +54,16 @@ hand-maintained copies.
 
 ## Changelog Fragments
 
-After the 0.18.7 release PR (#1586) merges and the #1251 cutover lands,
-behavior-changing PRs add a Markdown fragment to `changelog.d/`. Use a filename
+Behavior-changing PRs add a Markdown fragment to `changelog.d/`. Use a filename
 such as `parser_errors.fixed.md` or `1625.changed.breaking.md`, and write the
 entry without its outer bullet. Correct pending fragments when later changes
 invalidate their claims. Reserve `CHANGELOG.md` for release assembly.
 
-The PR check starts advisory. Use `no-changelog` for internal work with no
-release-note value; this suppresses only missing-fragment warnings. See the
-[fragment contract](changelog.d/README.md) for authoring examples, the release
-commands, and the acceptance oracle.
+The required `Changelog` CI check rejects missing or invalid fragments and
+direct changelog edits outside release assembly. Use `no-changelog` for internal
+work with no release-note value; this suppresses only the missing-fragment
+requirement. The [fragment contract](changelog.d/README.md) has authoring examples,
+the release commands, and the acceptance oracle.
 
 ## Declarative Naming
 

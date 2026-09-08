@@ -749,8 +749,8 @@ enforcement boundary.
   outer bullet; mark breaking changes through the filename suffix.
 - Correct an existing pending fragment when follow-up work changes its claim.
 - Internal work with no release-note value may use the `no-changelog` PR label.
-  It suppresses only the missing-fragment warning, not malformed fragments or
-  direct changelog edits. CI starts advisory and does not prove complete coverage.
+  It suppresses only the missing-fragment requirement. Malformed fragments and
+  direct changelog edits still fail the required `Changelog` CI check.
 - Reserve `CHANGELOG.md` edits for release assembly. The release author runs
   `.venv/bin/python scripts/changelog.py build --version VERSION --date YYYY-MM-DD`,
   reviews the preview, then repeats with `--write`. Commit the assembled notes,

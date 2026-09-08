@@ -205,28 +205,28 @@ class ChangelogTests(unittest.TestCase):
                 path.unlink()
                 path.write_bytes(original)
 
-    def test_git_symlink_fragment_warns(self):
+    def test_git_symlink_fragment_fails(self):
         (self.root / "changelog.d/a.fixed.md").symlink_to("README.md")
         self.commit()
-        self.assertIn("regular file", self.policy("--advisory").stdout)
+        self.assertIn("regular file", self.policy(success=False).stdout)
 
-    def test_summary_reports_advisories_without_claiming_success(self):
+    def test_summary_reports_failure_without_claiming_success(self):
         self.write("crates/compiler/src/lib.rs", "Change")
         self.commit()
         summary = self.root / "summary.md"
         event = self.write("event.json", json.dumps({"pull_request": {"labels": []}}))
         with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
-            code, output, errors = self.invoke_main(["check-pr", "--base", self.base, "--head", "HEAD", "--event-file", str(event), "--advisory"])
-        self.assertEqual(code, 0, errors)
-        self.assertIn("::warning::missing fragment", output)
-        self.assertIn("advisory finding", summary.read_text())
+            code, output, errors = self.invoke_main(["check-pr", "--base", self.base, "--head", "HEAD", "--event-file", str(event)])
+        self.assertEqual(code, 1, errors)
+        self.assertIn("::error::missing fragment", output)
+        self.assertIn("Changelog: FAIL", summary.read_text())
         self.assertIn("missing fragment", summary.read_text())
         self.assertNotIn("PASS", summary.read_text())
 
     def test_annotation_escapes_percent_and_newline_in_git_path(self):
         self.write("changelog.d/bad%\nname.md", "Entry.")
         self.commit()
-        self.assertIn("bad%25%0Aname.md", self.policy("--advisory").stdout)
+        self.assertIn("bad%25%0Aname.md", self.policy(success=False).stdout)
 
     def test_failed_changelog_write_does_not_delete_fragments(self):
         self.write("changelog.d/a.fixed.md", "Fix.")
@@ -295,7 +295,6 @@ class ChangelogTests(unittest.TestCase):
                 self.write(path, "Change")
                 self.commit()
                 self.assertIn("missing fragment", self.policy(success=False).stdout)
-                self.assertIn("::warning::", self.policy("--advisory").stdout)
 
     def test_label_only_suppresses_missing_fragment(self):
         event = self.write("event.json", json.dumps({"pull_request": {"labels": [{"name": "no-changelog"}]}}))
@@ -305,7 +304,7 @@ class ChangelogTests(unittest.TestCase):
         self.assertNotIn("missing fragment", result.stdout)
         self.write("CHANGELOG.md", HISTORY.replace("Old fix", "Historical rewrite"))
         self.commit()
-        result = self.policy("--event-file", str(event), "--advisory")
+        result = self.policy("--event-file", str(event), success=False)
         self.assertIn("direct CHANGELOG.md edit", result.stdout)
 
     def test_amended_fragment_counts_but_identity_rename_does_not(self):
@@ -327,12 +326,12 @@ class ChangelogTests(unittest.TestCase):
         self.commit()
         self.policy()
 
-    def test_invalid_fragment_warns_even_for_docs_only_change(self):
+    def test_invalid_fragment_fails_even_for_docs_only_change(self):
         self.write("changelog.d/a.fixed.md", "")
         self.commit()
-        self.assertIn("empty", self.policy("--advisory").stdout)
+        self.assertIn("empty", self.policy(success=False).stdout)
 
-    def test_release_diff_is_reproducible_or_warns(self):
+    def test_release_diff_is_reproducible_or_fails(self):
         self.write("Cargo.toml", '[workspace.package]\nversion = "0.1.0"\n')
         self.write("changelog.d/a.fixed.md", "Fix.")
         self.base = self.commit()
@@ -342,9 +341,9 @@ class ChangelogTests(unittest.TestCase):
         self.policy()
         self.write("CHANGELOG.md", (self.root / "CHANGELOG.md").read_text().replace("Old fix", "Rewritten"))
         self.commit()
-        self.assertIn("direct CHANGELOG.md edit", self.policy("--advisory").stdout)
+        self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
 
-    def test_fake_release_with_leftover_fragment_warns(self):
+    def test_fake_release_with_leftover_fragment_fails(self):
         self.write("Cargo.toml", '[workspace.package]\nversion = "0.1.0"\n')
         self.write("changelog.d/a.fixed.md", "Fix.")
         self.base = self.commit()
@@ -352,7 +351,7 @@ class ChangelogTests(unittest.TestCase):
         self.build("--write")
         self.write("changelog.d/b.fixed.md", "Left over.")
         self.commit()
-        self.assertIn("direct CHANGELOG.md edit", self.policy("--advisory").stdout)
+        self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
 
     def test_stale_base_uses_merge_base_not_sibling_changes(self):
         self.git("checkout", "-qb", "sibling")
@@ -364,11 +363,43 @@ class ChangelogTests(unittest.TestCase):
         self.base = sibling
         self.policy()
 
-    def test_bad_git_ref_and_event_remain_failures_in_advisory_mode(self):
-        result = self.cli("check-pr", "--base", "missing", "--head", "HEAD", "--advisory", success=False)
+    def test_unchanged_changelog_does_not_block_fragment_authoring(self):
+        self.write("CHANGELOG.md", "## [Unreleased]\n\n- Existing note.\n\n" + HISTORY)
+        self.base = self.commit()
+        self.write("docs/example.md", "Docs only")
+        self.commit()
+        self.policy()
+        self.write("crates/compiler/src/lib.rs", "Changed")
+        self.commit()
+        self.assertIn("missing fragment", self.policy(success=False).stdout)
+        self.write("changelog.d/a.fixed.md", "Fix.")
+        self.commit()
+        self.policy()
+        self.cli("check", success=False)
+        self.build(success=False)
+
+    def test_existing_unreleased_notes_do_not_allow_direct_edits(self):
+        self.write("CHANGELOG.md", "## [Unreleased]\n\n- Existing note.\n\n" + HISTORY)
+        self.base = self.commit()
+        self.write("CHANGELOG.md", "## [Unreleased]\n\n- Changed note.\n\n" + HISTORY)
+        self.commit()
+        event = self.write("event.json", json.dumps({"pull_request": {"labels": [{"name": "no-changelog"}]}}))
+        result = self.policy("--event-file", str(event), success=False)
+        self.assertIn("direct CHANGELOG.md edit", result.stdout)
+        self.assertIn("move [Unreleased] notes", result.stdout)
+
+    def test_advisory_escape_is_not_supported(self):
+        self.write("crates/compiler/src/lib.rs", "Changed")
+        self.commit()
+        result = self.policy("--advisory", success=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments: --advisory", result.stderr)
+
+    def test_bad_git_ref_and_event_are_operational_failures(self):
+        result = self.cli("check-pr", "--base", "missing", "--head", "HEAD", success=False)
         self.assertEqual(result.returncode, 2)
         event = self.write("event.json", "invalid json")
-        result = self.policy("--event-file", str(event), "--advisory", success=False)
+        result = self.policy("--event-file", str(event), success=False)
         self.assertEqual(result.returncode, 2)
 
 
@@ -377,17 +408,19 @@ class WorkflowTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [sys.executable, "-B", "-m", "unittest",
-             "scripts.test_changelog.ChangelogTests.test_summary_reports_advisories_without_claiming_success"],
+             "scripts.test_changelog.ChangelogTests.test_summary_reports_failure_without_claiming_success"],
             cwd=root, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "", "fixture output must not become real GitHub annotations")
         self.assertNotIn("::warning::", result.stderr)
+        self.assertNotIn("::error::", result.stderr)
 
-    def test_advisory_workflow_and_publishing_wiring(self):
+    def test_required_workflow_and_publishing_wiring(self):
         root = Path(__file__).resolve().parent.parent
         workflow = (root / ".github/workflows/changelog.yml").read_text()
-        self.assertIn("--advisory", workflow)
+        self.assertIn("name: Changelog\n", workflow)
+        self.assertNotIn("--advisory", workflow)
         for event in ("opened", "synchronize", "reopened", "labeled", "unlabeled"):
             self.assertIn(event, workflow)
         self.assertNotIn("paths:", workflow)

@@ -1,4 +1,4 @@
-name: Changelog advisory
+name: Changelog
 
 on:
   pull_request:
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   changelog:
-    name: Changelog advisory
+    name: Changelog
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -33,8 +33,8 @@ jobs:
       - name: Test changelog contract
         run: .venv/bin/python -m unittest scripts.test_changelog
 
-      - name: Check PR changelog policy (advisory)
+      - name: Check PR changelog policy
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: .venv/bin/python scripts/changelog.py check-pr --base "$BASE_SHA" --head "$HEAD_SHA" --advisory
+        run: .venv/bin/python scripts/changelog.py check-pr --base "$BASE_SHA" --head "$HEAD_SHA"

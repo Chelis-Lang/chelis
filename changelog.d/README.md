@@ -1,9 +1,7 @@
 # Changelog fragments
 
 Behavior-changing pull requests add a Markdown fragment here instead of editing
-`CHANGELOG.md`. This convention takes effect after the 0.18.7 release PR (#1586)
-merges and the remaining `[Unreleased]` notes are moved here. The implementation
-PR stays draft until that cutover is complete.
+`CHANGELOG.md`.
 
 ## Author a fragment
 
@@ -24,11 +22,12 @@ the text: the filename does not generate an issue or PR link. A PR can supply
 multiple fragments when it needs distinct categories. Correct an existing
 pending fragment when a follow-up changes its claim.
 
-PR checks start **advisory**. Non-documentation changes and normative spec
-changes should supply a new or substantively amended fragment. For internal
+The required `Changelog` CI check validates all pending fragments and any
+changed `CHANGELOG.md` content. Non-documentation changes and normative spec
+changes must supply a new or substantively amended fragment. For internal
 work with no release-note value, apply `no-changelog`; this suppresses only the
-missing-fragment warning. Malformed fragments and direct changelog edits still
-produce warnings. Advisory checks do not prove complete release coverage.
+missing-fragment requirement. Malformed fragments and direct changelog edits
+outside reproducible release assembly still fail the check.
 
 Only this README and correctly named regular fragment files belong here.
 
@@ -56,7 +55,7 @@ release edit before retrying. It never stages files, commits, or tags.
 
 Commit the version bump, assembled changelog, and fragment deletions together
 in the release PR. Direct historical edits are outside the assembly convention
-and produce an advisory warning even with `no-changelog`.
+and fail the PR check even with `no-changelog`.
 
 The tag-publishing workflow extracts the committed version section into its
 GitHub Release body. It refuses missing, duplicate, or empty notes, a workspace
@@ -78,9 +77,8 @@ It exercises the real CLI in temporary Git repositories, including negative
 cases. PR policy can also be checked locally without GitHub access:
 
 ```sh
-.venv/bin/python scripts/changelog.py check-pr --base origin/main --head HEAD --advisory
+.venv/bin/python scripts/changelog.py check-pr --base origin/main --head HEAD
 ```
 
-The workflow supplies its event JSON for label handling. Policy findings are
-warnings in advisory mode; operational failures remain nonzero. The advisory
-workflow is not a required merge check.
+The workflow supplies its event JSON for label handling. Policy findings exit
+with status 1; operational failures exit with status 2. Both fail CI.

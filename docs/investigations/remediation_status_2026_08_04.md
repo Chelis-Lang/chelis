@@ -1087,7 +1087,7 @@ that measures it.
    on the #912 leg rather than scoping the leg out. Both behaviors are
    correct. The hazard is the converse - an oracle nobody runs proves nothing,
    which is #1089.
-6. **Release notes drift; the fragment cutover is pending.** v0.18.4 had
+6. **Release notes drift; PR fragments are required.** v0.18.4 had
    to author its own section from the commits (`[Unreleased]` was empty and no
    commit since v0.18.3 touched `CHANGELOG.md` - 21 PRs, zero entries, per PR
    #1199's account, and `git log v0.18.3..v0.18.4 -- CHANGELOG.md` returns
@@ -1123,17 +1123,13 @@ that measures it.
    fragment, or it recreates this case as a conflict.
 
    #1251 supplies the [fragment contract](../../changelog.d/README.md), a tested
-   local Python assembler, and PR policy warnings. The cutover follows release
-   PR #1586: migrate only entries still unreleased after that PR merges, then
-   remove `[Unreleased]`. Until that cutover lands, reconstruction remains the
-   release process and its drift risk remains open.
+   local Python assembler, and a required `Changelog` CI check.
 
-   After cutover, behavior-changing PRs author fragments; release assembly
+   Behavior-changing PRs author fragments; release assembly
    preserves historical sections and consumes the pending entries. GitHub
    Releases use the committed version section. Missing fragments and direct
-   changelog edits outside reproducible assembly produce **advisory** warnings;
-   `no-changelog` suppresses only the missing-fragment warning. This is an
-   adoption policy, not proof of complete release coverage. The executable
+   changelog edits outside reproducible assembly fail CI;
+   `no-changelog` suppresses only the missing-fragment requirement. The executable
    acceptance command is `.venv/bin/python -m unittest scripts.test_changelog`.
 7. **The plan set's oracles cannot see the ecosystem.** Every phase oracle in
    these five plans is repo-internal, so a change can pass all of them and

@@ -310,7 +310,10 @@ def check_pr(root: Path, base: str, head: str, labels: set[str]) -> list[str]:
     paths = [p.decode("utf-8") for p in git(root, "diff", "--no-renames", "--name-only", "-z", ancestor, head, "--").split(b"\0") if p]
     before, after = git_tree(root, ancestor), git_tree(root, head)
     findings = []
-    for validate in (fragments, lambda t: sections(required(t, "CHANGELOG.md"))):
+    validators = [fragments]
+    if "CHANGELOG.md" in paths:
+        validators.append(lambda t: sections(required(t, "CHANGELOG.md")))
+    for validate in validators:
         try:
             validate(after)
         except PolicyError as error:
@@ -365,20 +368,19 @@ def main(argv: list[str] | None = None, *, root: Path = REPO_ROOT) -> int:
     pr.add_argument("--base", required=True)
     pr.add_argument("--head", required=True)
     pr.add_argument("--event-file", default=os.environ.get("GITHUB_EVENT_PATH"))
-    pr.add_argument("--advisory", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "check-pr":
             findings = check_pr(root, args.base, args.head, event_labels(args.event_file))
             for finding in findings:
                 escaped = finding.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-                print(f"::warning::{escaped}" if args.advisory else finding)
-            message = f"Changelog: {len(findings)} advisory finding(s)." if findings and args.advisory else "Changelog: FAIL" if findings else "Changelog: PASS"
+                print(f"::error::{escaped}")
+            message = "Changelog: FAIL" if findings else "Changelog: PASS"
             print(message)
             if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
                 with Path(summary).open("a", encoding="utf-8") as stream:
                     stream.write(message + "\n\n" + "".join(f"- {finding}\n" for finding in findings))
-            return 0 if args.advisory or not findings else 1
+            return 1 if findings else 0
         tree = disk_tree(root)
         if args.command == "check":
             notes = fragments(tree)
