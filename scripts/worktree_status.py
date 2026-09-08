@@ -737,7 +737,12 @@ def _is_undecided(
         # than kept, because a comparison that cannot fire reads as coverage
         # and is worse than an absent one. Recovering the path the process
         # actually named would mean resolving runs of space-joined command
-        # tokens, which is more machinery than this branch is worth.
+        # tokens; a reviewer measured that at about nine lines inside this
+        # branch, bounded to runs of six tokens, breaking nothing else. So the
+        # reason this is open is not cost. It is that the defect needs
+        # whitespace and a non-canonical spelling together, and this branch had
+        # already taken two repairs that each introduced a defect, so the next
+        # change to it should be made deliberately rather than in passing.
         #
         # The command line is the ONLY input to this program whose spelling it
         # does not control; every path it compares against is canonical by
