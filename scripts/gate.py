@@ -2437,8 +2437,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Run only the integration stage's non-nextest support oracles.",
     )
-    p.add_argument("--test-archive", type=Path, help="Reuse a verified workspace test archive in --tests-only CI.")
-    p.add_argument("--support-slice", choices=("frontend", "domain"), help="Run one exact support subset.")
+    p.add_argument(
+        "--support-slice", choices=("frontend", "domain"),
+        help="Run one integration support subset on its existing workspace worker.",
+    )
     p.add_argument(
         "--partition",
         metavar="HASH:N/M",
@@ -2576,8 +2578,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--no-lease cannot be combined with --no-wait/--lease-timeout")
     if args.lease_timeout is not None and args.lease_timeout <= 0:
         p.error("--lease-timeout must be a positive number of seconds")
-    if args.test_archive is not None and not args.tests_only:
-        p.error("--test-archive requires integration --tests-only")
     if args.support_slice is not None and not args.support_only:
         p.error("--support-slice requires integration --support-only")
     if args.tests_only and args.support_only:
@@ -2608,7 +2608,6 @@ def selected_stage_commands(
     support_only: bool,
     partition: str | None,
     support_slice: str | None = None,
-    test_archive: Path | None = None,
 ) -> list[list[str]]:
     """Return one CI stage slice without duplicating canonical commands."""
     commands = STAGES[stage]
@@ -2622,9 +2621,6 @@ def selected_stage_commands(
         selected = selected[:2] if support_slice == "frontend" else selected[2:]
     if partition is not None:
         selected[0].extend(["--partition", partition])
-    if test_archive is not None:
-        import ci_test_archive
-        selected[0] = ci_test_archive.reuse_command(selected[0], test_archive)
     return selected
 
 
@@ -2974,16 +2970,12 @@ def main(
             # CI stage runs: no preflight, no lease, summary only. A shallow
             # clone has no origin/main, so record what git can answer.
             report.git.update(_git_facts())
-            if args.test_archive is not None:
-                import ci_test_archive
-                ci_test_archive.verify(args.test_archive, "workspace")
             commands = selected_stage_commands(
                 args.stage,
                 tests_only=args.tests_only,
                 support_only=args.support_only,
                 partition=args.partition,
                 support_slice=args.support_slice,
-                test_archive=args.test_archive,
             )
             exit_code = run_commands(
                 commands,

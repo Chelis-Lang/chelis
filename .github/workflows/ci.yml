@@ -240,7 +240,7 @@ jobs:
         run: python3 scripts/ci_setup_uv_python.py
 
       # cargo-nextest is intentionally absent, so the expensive structural
-      # profile oracle self-skips here and runs once on the workspace build job.
+      # profile oracle self-skips here and runs once on workspace shard 1.
       - name: Install shared-skill validator dependency
         run: uv pip install --python .venv/bin/python PyYAML==6.0.3
 
@@ -640,139 +640,6 @@ jobs:
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
 
-  workspace-test-build:
-    name: Build Workspace Tests (Linux)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    # Skip on docs-only PRs (chelis#419). A skipped required job reports
-    # success, so branch protection stays satisfied; on push docs_only is
-    # always false. `needs: [changes]` is what makes the output readable.
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Strip debuginfo; see lint-rust for the chelis#392 rationale.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
-      # job for the transient-mirror-reset rationale.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # See lint-rust for why this runs before the cargo cache
-      # and why the version is pinned to v8.1.0 rather than @v8.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          save-if: true
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.136
-
-      - name: Verify archive execution contract
-        run: .venv/bin/python -m unittest scripts.ci_archive_execution
-
-      - name: Build and archive workspace tests
-        run: .venv/bin/python scripts/ci_test_archive.py create --configuration workspace --archive-file target/ci-archives/workspace.tar.zst
-
-      - name: Verify test selection on the compiled configuration
-        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
-
-      - name: Upload workspace test build
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-test-build-workspace
-          path: target/ci-archives/workspace.tar.zst*
-          compression-level: 0
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
-  generalization-test-build:
-    name: Build Generalization Tests (Linux)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    # Skip on docs-only PRs (chelis#419). A skipped required job reports
-    # success, so branch protection stays satisfied; on push docs_only is
-    # always false. `needs: [changes]` is what makes the output readable.
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Strip debuginfo; see lint-rust for the chelis#392 rationale.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
-      # job for the transient-mirror-reset rationale.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # See lint-rust for why this runs before the cargo cache
-      # and why the version is pinned to v8.1.0 rather than @v8.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          save-if: false
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.136
-
-      - name: Build and archive generalization tests
-        run: .venv/bin/python scripts/ci_test_archive.py create --configuration generalization --archive-file target/ci-archives/generalization.tar.zst
-
-      - name: Verify test selection on the compiled configuration
-        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
-
-      - name: Upload generalization test build
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-test-build-generalization
-          path: target/ci-archives/generalization.tar.zst*
-          compression-level: 0
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
   workspace-tests-shard:
     name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)
     strategy:
@@ -782,8 +649,8 @@ jobs:
     runs-on: ubuntu-latest
     # Skip on docs-only PRs (chelis#419). A skipped required job reports
     # success, so branch protection stays satisfied; on push docs_only is
-    # always false. `needs: [changes, workspace-test-build]` is what makes the output readable.
-    needs: [changes, workspace-test-build]
+    # always false. `needs: [changes]` is what makes the output readable.
+    needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo; see lint-rust for the chelis#392 rationale.
     env:
@@ -817,47 +684,49 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Support oracles still need Cargo dependencies. The build job writes this cache.
-          save-if: false
+          # Both shards restore the same warm workspace cache. Only shard 1
+          # publishes a new entry, avoiding a same-key save race.
+          save-if: ${{ matrix.shard == 1 }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.136
+        uses: taiki-e/install-action@nextest
 
-      # Offline compile controls still need the current lockfile's registry
-      # entries and sources even though nextest no longer builds this worker.
-      - name: Fetch dependencies for offline compile controls
-        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
-
-      - name: Download workspace test build
-        uses: actions/download-artifact@v7
-        with:
-          name: linux-test-build-workspace
-          path: target/ci-archives
-
-      # gate.py verifies the same-head/configuration archive before executing
-      # the existing ci profile and disjoint hash partition.
+      # The workspace has ~200 integration test binaries. `cargo test
+      # --workspace --tests` runs them one binary at a time, serializing
+      # the heavyweight binaries (each test compiles/checks/builds
+      # chelis-std). `cargo nextest` schedules tests from all binaries in
+      # a single global thread pool, overlapping the heavyweight work.
+      # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
+      #
+      # The integration nextest command is defined once in scripts/gate.py.
+      # Each worker selects one of two deterministic, disjoint hash
+      # partitions. The `ci` nextest profile writes per-test JUnit
+      # timing XML to target/nextest/ci/junit.xml; the aggregate job downloads
+      # both artifacts and reports their combined timings. Do not hand-inline
+      # cargo commands into this job (see scripts/test_gate.py parity lock).
       - name: Gate (workspace test shard)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: python3 scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2 --test-archive target/ci-archives/workspace.tar.zst
+        run: python3 scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2
 
-      # Both shards reuse the compiled workspace archive for support nextest
-      # commands. The feature-specific lowering trace and rustdoc legs retain
-      # their own Cargo invocations. Keep their exact-once support ownership.
+      # This structural oracle needs cargo-nextest. Execute it exactly once on
+      # shard 1, before lowering-trace changes its warm feature set.
+      # It lists only the default feature
+      # configuration this shard has already built; the generalization lane's
+      # feature-enabled listing runs on generalization shard 1 for the same
+      # reason.
+      - name: Verify nextest profile coverage
+        if: matrix.shard == 1
+        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
+
+      # Both workers have the workspace build warm. Split the existing support
+      # commands so shard 2 no longer owns their entire serial tail.
       - name: Gate (frontend support subset)
         if: matrix.shard == 1
-        env:
-          CHELIS_TEST_ARCHIVE: target/ci-archives/workspace.tar.zst
-          CHELIS_ORACLE_BINARY: target/debug/chelis
         run: python3 scripts/gate.py integration --support-only --support-slice frontend
 
       - name: Gate (domain support subset)
         if: matrix.shard == 2
-        env:
-          CHELIS_TEST_ARCHIVE: target/ci-archives/workspace.tar.zst
-          CHELIS_ORACLE_BINARY: target/debug/chelis
         run: python3 scripts/gate.py integration --support-only --support-slice domain
 
       - name: Upload workspace JUnit shard
@@ -971,7 +840,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # The workspace-test-build producer is the sole cache writer.
+          # Both parallel jobs restore the same cache; only matrix shard 1 of
+          # workspace-tests-shard saves it, avoiding a second multi-GB entry.
           save-if: false
 
       # The wire and bindings census binaries both invoke nested cargo rustdoc
@@ -1052,7 +922,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Restore the cache written by workspace-test-build.
+          # Restore the workspace cache but leave the single writer in matrix
+          # shard 1 of workspace-tests-shard, avoiding another multi-GB entry.
           save-if: false
 
       - name: Install cargo-nextest
@@ -1099,7 +970,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Restore the cache written by workspace-test-build.
+          # Restore the workspace cache while leaving shard 1 of the workspace
+          # suite as the single writer for this namespace.
           save-if: false
 
       - name: Compiled value ownership Phase 2 oracle
@@ -1148,7 +1020,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Restore the workspace cache; workspace-test-build
+          # Restore the workspace cache; matrix shard 1 of workspace-tests-shard
           # remains the single writer for this namespace.
           save-if: false
 
@@ -1164,7 +1036,8 @@ jobs:
   # level-based generalization with the retained reference sweep and bypasses
   # nextest's default filter so no discovered non-ignored test is omitted.
   # Split the one corpus over four deterministic hash partitions: each shard
-  # reuses one verified feature-enabled build, while test execution runs on four hosted runners in parallel. The aggregate job
+  # still compiles the exact feature-enabled workspace, while the expensive
+  # test execution runs on four hosted runners in parallel. The aggregate job
   # below retains a stable oracle status and fails closed unless all four
   # disjoint partitions succeed; the directly required Integration Tests (Linux)
   # context transitively gates that aggregate.
@@ -1177,7 +1050,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, generalization-test-build]
+    needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -1213,26 +1086,21 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.136
-
-      - name: Fetch dependencies for offline compile controls
-        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
-
-      - name: Download generalization test build
-        uses: actions/download-artifact@v7
-        with:
-          name: linux-test-build-generalization
-          path: target/ci-archives
-
-      - name: Verify generalization test build
-        run: .venv/bin/python scripts/ci_test_archive.py verify --configuration generalization --archive-file target/ci-archives/generalization.tar.zst
+        uses: taiki-e/install-action@nextest
 
       - name: Typecheck level generalization oracle
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --archive-file target/ci-archives/generalization.tar.zst --extract-to . --extract-overwrite --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+
+      # The generalization-lane selection census lists this exact feature
+      # configuration, which is warm only here. On workspace shard 1 the same
+      # listing recompiled the workspace under a second feature set and cost
+      # 4.4 minutes per run; here it is one `cargo nextest list` on the build
+      # the oracle step just produced. Shard 1 runs it once.
+      - name: Verify generalization lane selection
+        if: matrix.shard == 1
+        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
 
       - name: Validate and report test timing
         run: >-

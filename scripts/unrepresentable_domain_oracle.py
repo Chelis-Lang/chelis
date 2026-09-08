@@ -88,11 +88,6 @@ import time
 from pathlib import Path
 from typing import Mapping, Sequence
 
-try:
-    import ci_test_archive
-except ModuleNotFoundError:
-    from scripts import ci_test_archive
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -890,10 +885,6 @@ def check_validate_agrees_with_check() -> None:
 
 def run_compiled_suite(label: str, cmd: tuple[str, ...], timeout: int = 300) -> None:
     """Execute a compiled test binary through nextest and require green."""
-    if cmd[:3] == ("cargo", "nextest", "run"):
-        archive = ci_test_archive.from_environment()
-        if archive is not None:
-            cmd = tuple(ci_test_archive.reuse_command(cmd, archive))
     print(f"  + {' '.join(cmd)}")
     result = subprocess.run(
         cmd,
