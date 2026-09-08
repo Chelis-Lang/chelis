@@ -6647,13 +6647,15 @@ impl<'a> HostEmitter<'a> {
         expr_ty: &HostType,
         site: &ProjectedHostSite<'a>,
     ) -> Result<(), Unsupported> {
-        let arm_edges = site
+        let (scrutinee_owner, arm_edges) = site
             .directives
             .iter()
             .find_map(|action| match action {
-                VerifiedHostAction::Terminator(VerifiedHostTerminator::Match { arms, .. }) => {
-                    Some(arms.clone())
-                }
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Match {
+                    scrutinee,
+                    arms,
+                    ..
+                }) => Some((scrutinee.owner().id(), arms.clone())),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -6675,6 +6677,12 @@ impl<'a> HostEmitter<'a> {
         let arm_blocks = Self::join_completion_blocks(site, expected_arms, "ADT-match")?;
         let scrutinee_var = self.next_temp("adt");
         self.emit_expr_to_var(scrutinee, &scrutinee_var, &host_type(scrutinee))?;
+        // Pattern bindings may shadow the authored name that originally held
+        // the scrutinee. Keep the verified owner attached to this
+        // compiler-generated temporary so an arm-completion drop cannot be
+        // redirected to a same-spelled scalar or another payload binding.
+        self.owner_vars
+            .insert(scrutinee_owner, scrutinee_var.clone());
         let tag_var = self.next_temp("adt_tag");
         self.lines.push(format!(
             "{}chelis_string {} = chelis_adt_get_tag({});",
