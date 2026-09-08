@@ -142,7 +142,10 @@ pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
             };
-            crate::infer::infer_program_in_session(exprs, &mut sink)
+            match admit_metadata(exprs, &mut sink) {
+                Ok(()) => crate::infer::infer_program_in_session(exprs, &mut sink),
+                Err(stats) => stats,
+            }
         };
         InferResult {
             errors,
@@ -314,25 +317,63 @@ fn run_result<T>(
     }
 }
 
+// Text ingress and Node construction have already checked these rules.
+// Legacy programmatic carriers still enter here: reject before inference so
+// shape errors cannot be reinterpreted or reported again by semantic owners.
+fn admit_metadata(
+    exprs: &[chelis_deep::Expr],
+    sink: &mut DiagnosticSink<'_>,
+) -> Result<(), InferStats> {
+    if let Err(error) = chelis_deep::metadata::validate_metadata(exprs) {
+        sink.push(
+            CheckError::new(
+                crate::errors::CheckErrorKind::MalformedForm,
+                error.to_string(),
+                vec![],
+            )
+            .at_offset(error.span.offset),
+        );
+        return Err(InferStats {
+            typed_nodes: 0,
+            total_nodes: 0,
+        });
+    }
+    Ok(())
+}
+
+fn run_with_metadata<T>(
+    exprs: &[chelis_deep::Expr],
+    run: impl FnOnce(&mut DiagnosticSink<'_>) -> Result<T, InferStats>,
+) -> Result<T, InferResult> {
+    run_result(|sink| {
+        admit_metadata(exprs, sink)?;
+        run(sink)
+    })
+}
+
 pub(crate) fn build_type_env_from_library(
     exprs: &[chelis_deep::Expr],
 ) -> Result<TypeEnv, InferResult> {
     crate::infer::run_on_grown_stack(|| {
-        run_result(|sink| crate::infer::build_type_env_from_library_in_session(exprs, sink))
+        run_with_metadata(exprs, |sink| {
+            crate::infer::build_type_env_from_library_in_session(exprs, sink)
+        })
     })
 }
 
 pub(crate) fn build_compiled_library_context(
     exprs: &[chelis_deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_result(|sink| crate::infer::build_compiled_library_context_in_session(exprs, sink))
+    run_with_metadata(exprs, |sink| {
+        crate::infer::build_compiled_library_context_in_session(exprs, sink)
+    })
 }
 
 pub(crate) fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     exprs: &[chelis_deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_result(|sink| {
+    run_with_metadata(exprs, |sink| {
         crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, sink)
     })
 }
@@ -345,7 +386,7 @@ pub(crate) fn check_ir_with_signature_context(
     #[cfg(test)]
     record_type_analysis_session();
     crate::infer::run_on_grown_stack(|| {
-        run_result(|sink| {
+        run_with_metadata(exprs, |sink| {
             crate::infer::check_ir_with_signature_context_in_session(
                 context,
                 signature_context,
@@ -360,7 +401,9 @@ pub(crate) fn check_typed_program(
     exprs: &[chelis_deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
     crate::infer::run_on_grown_stack(|| {
-        run_result(|sink| crate::infer::check_typed_program_in_session(exprs, sink))
+        run_with_metadata(exprs, |sink| {
+            crate::infer::check_typed_program_in_session(exprs, sink)
+        })
     })
 }
 
@@ -371,7 +414,10 @@ pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
             };
-            crate::infer::infer_ir_program_in_session(exprs, &mut sink)
+            match admit_metadata(exprs, &mut sink) {
+                Ok(()) => crate::infer::infer_ir_program_in_session(exprs, &mut sink),
+                Err(stats) => stats,
+            }
         };
         InferResult {
             errors,
@@ -386,6 +432,7 @@ pub(crate) fn try_checked_program_with_effect_annotations(
     annotated_exprs: Vec<chelis_deep::Expr>,
 ) -> Result<CheckedProgram, InferResult> {
     run_result(|sink| {
+        admit_metadata(&annotated_exprs, sink)?;
         Ok(
             crate::infer::checked_program_with_effect_annotations_in_session(
                 original,

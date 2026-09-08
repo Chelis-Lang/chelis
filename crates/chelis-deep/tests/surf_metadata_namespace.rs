@@ -12,12 +12,14 @@ fn string(value: &str) -> Expr {
 }
 
 fn variable_with_metadata(entries: Vec<(String, Expr)>) -> Expr {
-    Expr::Node(
-        Box::new(Node::new(
-            DeepTag::Var,
-            MetaMap { entries },
-            vec![name("x")],
-        )),
+    Expr::List(
+        chelis_deep::List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
+                Expr::Map(MetaMap { entries }, Span::new(0, 0)),
+                name("x"),
+            ],
+        },
         Span::new(0, 0),
     )
 }
@@ -35,15 +37,17 @@ fn parsers_reject_unknown_keys_in_the_closed_surf_namespace() {
 
 #[test]
 fn programmatic_validation_accepts_known_surface_metadata_and_rejects_unknown_keys() {
-    let known = variable_with_metadata(vec![
-        ("surf_path".to_string(), string("M.Path")),
-        ("surf_literal_style".to_string(), string("explicit")),
-        ("surf_binding_type".to_string(), string("inferred")),
-    ]);
+    let known = parse_str("(module {surf_path: \"M.Path\"} m.path)").unwrap();
+    assert!(validate(&known).is_empty());
     assert!(
-        validate(&[known])
-            .iter()
-            .all(|warning| !warning.message.contains("surf_*"))
+        Node::try_new(
+            DeepTag::Var,
+            MetaMap {
+                entries: vec![("surf_path".into(), string("M.Path"))]
+            },
+            vec![name("x")]
+        )
+        .is_err()
     );
 
     let unknown = variable_with_metadata(vec![("surf_future".to_string(), string("value"))]);
@@ -51,7 +55,7 @@ fn programmatic_validation_accepts_known_surface_metadata_and_rejects_unknown_ke
     assert_eq!(
         warnings
             .iter()
-            .filter(|warning| warning.message.contains("closed Deep `surf_*`"))
+            .filter(|warning| warning.message.contains("closed Surf metadata namespace"))
             .count(),
         1,
         "programmatic producers must hit the same closed namespace gate: {warnings:?}"

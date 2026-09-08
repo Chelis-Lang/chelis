@@ -569,3 +569,56 @@ The same change set recorded four related decisions:
   repeat the manual scratch-variant shape.
 
 (Further divergences to be recorded here.)
+
+## Metadata value domain (#1478, #1330)
+
+`spec/03-deep-syntax.md` [03-META-1/2] owns the metadata shape and role
+contract. `chelis-deep::metadata` implements one key declaration and one
+borrowed syntax view over both raw expressions and AST expressions. The
+registry-to-spec test compares the exact key inventory with an independently
+written positive/negative corpus. Child-index roles remain a separate total
+classification; metadata conversion chooses its role from the key contract.
+
+Node construction, deserialization, and transactional replacement enforce
+local metadata invariants. Complete-tree ingress and programmatic validation
+also enforce parent/sibling placement. Constructor traversal stops at validated
+Node descendants after checking their placement relative to the new parent;
+ungated legacy carriers are traversed. This is an inductive Node guarantee,
+not a claim that the legacy `Expr::List` domain has been removed (#1029).
+Binder-map payloads and historical `source` records are data roles. They do
+not acquire annotation rules from a coincidentally matching key spelling.
+Constructing a module checks dimension groups within its supplied children;
+only a fragment's relationship to an absent enclosing tree remains deferred.
+
+The public Surf round-trip normalizer now returns `Result`: malformed metadata
+must fail before an infallible internal rewrite could erase it or panic while
+rebuilding a Node. Resugaring and the independent executable grammar validator
+consume the shared metadata contract. Semantic type/effect/binder resolution
+remains with its owning checkers; shape validity does not establish semantic
+agreement or grant trust to producer annotations.
+
+Surf parsing rejects repeated bounds and conflicting bound ownership between
+a standalone signature and its definition before desugaring. The desugarer
+requires the same declaration contract from programmatic callers and no
+longer encodes a rejected bound on a `def`. Existing downstream defense tests
+construct explicit legacy carriers when their malformed fixtures can no
+longer pass public parsing or Node construction.
+
+The checker session boundary also validates complete input metadata before
+inference, including legacy carriers and library/context entry points. This
+keeps a malformed annotation from reaching semantic consumers or producing a
+second diagnostic for the same shape failure. Semantic ownership tests use
+well-shaped but invalid type names to retain their independent-error checks.
+
+The authoritative acceptance command remains:
+
+```
+.venv/bin/python scripts/unrepresentable_domain_oracle.py
+```
+
+Acceptance is exit 0 and `ORACLE: PASS`. Its metadata obligation drives both
+`check` and `validate --deep`; its compiled suites include the exact-key,
+constructor, deserializer, transactional replacement, and compiler-API ingress
+corpora. `scripts/gate.py` already runs this oracle in `integration` and
+`--local`, and hosted `Workspace Tests (Linux)` runs that integration stage.
+This slice addresses #1478 and #1330, not the other open #908 obligations.

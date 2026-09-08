@@ -610,10 +610,16 @@ const INVARIANT_WITHOUT_OPAQUE: &str = "(module {} m.wf \
 /// invoked from the typed entry; its readers could not decode the carrier.
 #[test]
 fn invariant_without_opaque_is_rejected_on_both_ingresses() {
-    assert_agree_and_reject(
-        INVARIANT_WITHOUT_OPAQUE,
-        "requires `@opaque`",
-        "deftype with invariant and no opaque",
+    let error = parse_and_stamp_file(INVARIANT_WITHOUT_OPAQUE)
+        .expect_err("invalid metadata cannot create a stamped Node");
+    assert!(error.to_string().contains("opaque"));
+    let legacy = legacy_metadata::legacy_metadata_fixture(INVARIANT_WITHOUT_OPAQUE);
+    let typed = typed_errors(&legacy);
+    assert_eq!(typed, ir_errors(&legacy));
+    assert!(
+        typed
+            .iter()
+            .any(|m| m.contains("metadata `invariant`") && m.contains("opaque"))
     );
 }
 
@@ -779,3 +785,6 @@ fn int64_suffixed_seed_literal_is_accepted_on_both_ingresses() {
         "with seed at an int64-suffixed literal",
     );
 }
+
+#[path = "../../../tests/support/legacy_metadata.rs"]
+mod legacy_metadata;

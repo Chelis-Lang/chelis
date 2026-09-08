@@ -98,7 +98,60 @@ fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, Parse
     };
     let decls = p.parse_program()?;
     validate_property_names(&decls)?;
+    validate_bound_ownership(&decls)?;
     Ok(decls)
+}
+
+/// A standalone signature owns its bounds (spec/03 §2.2). Reject the
+/// conflicting source before desugaring could construct forbidden metadata.
+pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError> {
+    let signatures: UnordSet<_> = decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Sig { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for decl in decls {
+        if let Decl::FunDef {
+            type_binders, span, ..
+        }
+        | Decl::Sig {
+            type_binders, span, ..
+        } = decl
+        {
+            let mut bounded = UnordSet::new();
+            for binder in type_binders.iter().filter(|b| b.bound.is_some()) {
+                if !bounded.insert(binder.name.as_str()) {
+                    return Err(ParseError::Expected {
+                        expected: "one dtype-family bound per binder".into(),
+                        found: format!("duplicate bound for `{}`", binder.name),
+                        offset: span.offset,
+                    });
+                }
+            }
+        }
+        match decl {
+            Decl::FunDef {
+                name,
+                type_binders,
+                span,
+                ..
+            } if signatures.contains(name.as_str())
+                && type_binders.iter().any(|b| b.bound.is_some()) =>
+            {
+                return Err(ParseError::Expected {
+                    expected: "bounds on the signature: a declaration's `defsig` owns its binders"
+                        .into(),
+                    found: format!("bounded def `{name}`"),
+                    offset: span.offset,
+                });
+            }
+            Decl::Module { decls, .. } => validate_bound_ownership(decls)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {

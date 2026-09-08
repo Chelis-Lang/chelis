@@ -19,6 +19,8 @@ use crate::tag::DeepTag;
 /// arity was wrong.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeError {
+    /// Metadata violates its spec-owned shape or locally decidable placement.
+    Metadata(crate::metadata::MetadataError),
     /// A Name atom appeared at a RuntimeExpr child position.
     NameAtExprSlot {
         tag: DeepTag,
@@ -51,6 +53,7 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NodeError::Metadata(error) => error.fmt(f),
             NodeError::NameAtExprSlot { tag, index, name } => {
                 write!(
                     f,
@@ -219,6 +222,7 @@ impl Node {
             });
         }
 
+        crate::metadata::validate_node(tag, meta, children).map_err(NodeError::Metadata)?;
         Ok(())
     }
 

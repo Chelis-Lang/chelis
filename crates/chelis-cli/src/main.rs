@@ -1265,10 +1265,12 @@ fn preflight_migration(path: &Path) -> Result<(PathBuf, String, String), String>
         )
     })?;
     let deep_canonical = chelis_deep::printer::print_canonical(
-        &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep),
+        &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)
+            .map_err(|error| format!("{}: Deep normalization failed: {error}", path.display()))?,
     );
     let redesugared_canonical = chelis_deep::printer::print_canonical(
-        &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared),
+        &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared)
+            .map_err(|error| format!("{}: Deep normalization failed: {error}", path.display()))?,
     );
     if deep_canonical != redesugared_canonical {
         return Err(format!(

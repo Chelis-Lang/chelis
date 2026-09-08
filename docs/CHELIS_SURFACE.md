@@ -616,3 +616,15 @@ is a tested-not-proven trusted base.
 | [`spec/design/implicit_linearity.md`](../spec/design/implicit_linearity.md) | why `copy()`/`drop()` exist |
 | [`spec/design/chelis_canonical_reference.md`](../spec/design/chelis_canonical_reference.md) | core vs std vs shell scope taxonomy |
 | [`spec/design/shell_repo_contract.md`](../spec/design/shell_repo_contract.md) | what a downstream shell's `CHELIS_SURFACE.md` view must carry |
+
+Deep metadata follows `spec/03-deep-syntax.md` [03-META-1/2]. Malformed
+registered values, duplicate singleton annotations, and forbidden placements
+are rejected at ingress with the metadata key and source location. Producer
+extensions remain available outside the closed `surf_*` namespace. `grad`'s
+`wrt` metadata uses `(var {} name)` or a nonempty tuple of those references;
+bare names are rejected. `dtype_bounds` binder names and historical `source`
+arguments are data, so annotation-key spelling does not reclassify them.
+
+For Rust callers, `chelis_surf::resugar::normalize_deep_for_surface_roundtrip`
+returns `Result<Vec<Expr>, ResugarError>` and rejects malformed metadata before
+normalizing it. Handle the error rather than assuming an unchecked AST is valid.

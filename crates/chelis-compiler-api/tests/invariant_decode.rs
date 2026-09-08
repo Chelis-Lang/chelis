@@ -740,7 +740,8 @@ fn malformed_invariant_metadata_fails_closed_at_decode() {
     // malformed metadata, leaving `Probability` with no table entry, so
     // `revalidate_adt_value` treated it as invariant-free and decoded the
     // payload with zero check (a fail-OPEN soundness hole).
-    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
+    assert!(chelis_deep::parser::parse_str(PROBABILITY_DEEP_MALFORMED_INVARIANT).is_err());
+    let exprs = legacy_metadata::legacy_metadata_fixture(PROBABILITY_DEEP_MALFORMED_INVARIANT);
     let err = try_decode_adt_value(&exprs, &prob_payload(0.3)).expect_err(
         "a malformed declared invariant must fail closed: a structurally-valid \
          payload cannot be safely materialized without a usable predicate",
@@ -768,7 +769,8 @@ fn malformed_invariant_rejects_every_payload_no_pass_through() {
     // Parity: the malformed invariant must reject across the board (no value
     // can be materialized), not just one probe. This pins that the fix is a
     // categorical fail-closed, not a value-dependent fluke.
-    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
+    assert!(chelis_deep::parser::parse_str(PROBABILITY_DEEP_MALFORMED_INVARIANT).is_err());
+    let exprs = legacy_metadata::legacy_metadata_fixture(PROBABILITY_DEEP_MALFORMED_INVARIANT);
     for v in [0.0_f64, 0.5_f64, 1.0_f64, -0.5_f64, 1.5_f64] {
         assert!(
             try_decode_adt_value(&exprs, &prob_payload(v)).is_err(),
@@ -938,3 +940,6 @@ fn skipped_variant_ctor_rejects_at_structural_decode() {
         }
     }
 }
+
+#[path = "../../../tests/support/legacy_metadata.rs"]
+mod legacy_metadata;

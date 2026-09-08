@@ -134,7 +134,7 @@ fn parse_empty_map() {
 
 #[test]
 fn parse_map_with_entries() {
-    let exprs = parse_str("{type: f32}").unwrap();
+    let exprs = parse_str("{type: (t-prim {} f32)}").unwrap();
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::Map(m, _) => {
@@ -209,9 +209,9 @@ fn spec_nested_lists_post_sprint() {
 
 #[test]
 fn spec_metadata_on_list_items() {
-    // (fn (^{:type f32} x) body) — metadata on items within a list.
+    // (fn (^{:type (t-prim {} f32)} x) body) — metadata on items within a list.
     // Since the list lacks a metadata map at index 1, this becomes a BareList.
-    let exprs = parse_str("(fn (^{:type f32} x) body)").expect("parse failed");
+    let exprs = parse_str("(fn (^{:type (t-prim {} f32)} x) body)").expect("parse failed");
     assert_eq!(exprs.len(), 1);
     match &exprs[0] {
         Expr::BareList(outer, _) => {
@@ -232,7 +232,7 @@ fn spec_metadata_on_list_items() {
         }
         other => panic!("expected BareList, got {:?}", other),
     }
-    roundtrip("(fn (^{:type f32} x) body)");
+    roundtrip("(fn (^{:type (t-prim {} f32)} x) body)");
 }
 
 #[test]

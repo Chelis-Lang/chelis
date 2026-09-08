@@ -10,6 +10,7 @@ pub mod dtype_bounds;
 pub mod effect_kind;
 pub mod lexer;
 pub mod literal_source;
+pub mod metadata;
 pub mod node;
 pub mod parser;
 pub mod path;

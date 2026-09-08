@@ -129,13 +129,17 @@ fn simplex_tolerance_band_is_well_formed() {
 
 #[test]
 fn invariant_without_opaque_is_rejected() {
-    let deep = deep_of_dp(
+    let deep = legacy_metadata::legacy_metadata_fixture(
         "(deftype {invariant: (fn {} (params {} p) \
             (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), \
             invariant_amenability: \"linear\"} \
             Probability () (variant {} Probability (field {} value (t-prim {} f32))))",
     );
-    assert_has_violation(&errors(&deep), "requires `@opaque`");
+    let errors = errors(&deep);
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors[0].message.contains("metadata `invariant`") && errors[0].message.contains("opaque")
+    );
 }
 
 #[test]
@@ -431,3 +435,6 @@ fn if_predicate_with_comparison_condition_is_admitted() {
     );
     assert_no_invariant_violation(&errors(&deep));
 }
+
+#[path = "../../../tests/support/legacy_metadata.rs"]
+mod legacy_metadata;

@@ -16,8 +16,11 @@ use chelis_deep::{RawAtom, RawExpr};
 /// the successor carrier revalidates every candidate before commit, so a
 /// wrong-arity `Node` is unconstructible. The legacy `List` carrier is the
 /// remaining way to hand the checker a malformed tree.
+#[path = "../../../../tests/support/legacy_metadata.rs"]
+mod legacy_metadata;
+
 pub(crate) fn parse_unchecked_legacy(source: &str) -> Vec<Expr> {
-    let raw = chelis_deep::parse_raw_str(source).expect("adversarial Deep syntax must lex/parse");
+    let raw = legacy_metadata::raw_metadata_fixture(source);
     let mut exprs: Vec<_> = raw.into_iter().map(raw_to_legacy).collect();
     chelis_deep::parser::stamp_tags(&mut exprs);
     exprs

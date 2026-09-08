@@ -182,6 +182,7 @@ impl std::error::Error for StampError {}
 /// Top-level expressions are treated as Module children (bypass expecting
 /// declarations).
 pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_as_bypass_declaration(raw)?);
@@ -195,6 +196,7 @@ pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> 
 /// This is the entry point for `parse_str` which handles arbitrary Deep
 /// fragments, not just programs.
 pub fn stamp_exprs_lenient(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_bare(raw)?);
@@ -211,6 +213,7 @@ pub fn stamp_exprs_lenient(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampEr
 /// ingress rejection it is inside a `(def ...)`, not an `Atom::Name` the
 /// consumer has to re-diagnose.
 pub fn stamp_runtime_exprs(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_runtime_expr(raw)?);
@@ -228,6 +231,7 @@ pub fn stamp_as_tagged(
     raw_exprs: Vec<RawExpr>,
     expected: DeepTag,
 ) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_as_bypass_tag(raw, expected)?);
@@ -260,6 +264,20 @@ pub fn stamp_deep_file(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError>
             span: Span::new(0, 0),
         });
     }
+    // Root-role rejection owns its diagnostic before inspecting annotations.
+    for raw in &raw_exprs {
+        if !top_level_tag(raw)
+            .is_some_and(|tag| tag == DeepTag::Module || crate::role::is_declaration_tag(tag))
+        {
+            return Err(StampError {
+                kind: StampErrorKind::RequiresDeclaration {
+                    form: FormIdentity::of(raw),
+                },
+                span: raw.span(),
+            });
+        }
+    }
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         if top_level_tag(&raw) == Some(DeepTag::Module) {
@@ -712,9 +730,50 @@ fn convert_atom(raw: RawAtom) -> Atom {
 fn convert_meta_map(entries: Vec<(String, RawExpr)>) -> Result<MetaMap, StampError> {
     let mut out = Vec::with_capacity(entries.len());
     for (key, value) in entries {
-        out.push((key, stamp_bare(value)?));
+        use crate::metadata::{MetadataRole, role};
+        let value = match role(&key) {
+            MetadataRole::Expression => stamp_runtime_expr(value)?,
+            MetadataRole::Type => stamp_serialized_type(value)?,
+            MetadataRole::Preserved | MetadataRole::BinderMap => preserve_syntax(value),
+            MetadataRole::Syntax => stamp_bare(value)?,
+        };
+        out.push((key, value));
     }
     Ok(MetaMap { entries: out })
+}
+
+// Historical invocation arguments and binder maps are data, even when a
+// name spells a vocabulary tag or annotation key.
+fn preserve_syntax(raw: RawExpr) -> Expr {
+    match raw {
+        RawExpr::Atom(atom, span) => Expr::Atom(convert_atom(atom), span),
+        RawExpr::List(items, span) => {
+            Expr::BareList(items.into_iter().map(preserve_syntax).collect(), span)
+        }
+        RawExpr::Map(items, span) => Expr::Map(
+            MetaMap {
+                entries: items
+                    .into_iter()
+                    .map(|(k, v)| (k, preserve_syntax(v)))
+                    .collect(),
+            },
+            span,
+        ),
+        RawExpr::MetaExpr {
+            entries,
+            expr,
+            span,
+        } => Expr::MetaExpr(
+            crate::MetaExpr {
+                entries: entries
+                    .into_iter()
+                    .map(|(k, v)| (k, preserve_syntax(v)))
+                    .collect(),
+                expr: Box::new(preserve_syntax(*expr)),
+            },
+            span,
+        ),
+    }
 }
 
 fn stamp_map(entries: Vec<(String, RawExpr)>, span: Span) -> Result<Expr, StampError> {
@@ -790,6 +849,13 @@ fn build_unknown_form(
         children,
         span,
     })))
+}
+
+fn validate_metadata_raw(raw: &[RawExpr]) -> Result<(), StampError> {
+    crate::metadata::validate_raw(raw).map_err(|error| StampError {
+        span: error.span,
+        kind: StampErrorKind::NodeError(crate::node::NodeError::Metadata(error)),
+    })
 }
 
 #[cfg(test)]

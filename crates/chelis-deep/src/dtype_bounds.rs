@@ -187,16 +187,25 @@ pub fn encode_dtype_bounds(bounds: &[(String, DtypeFamily)], span: Span) -> Expr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse_str;
+    mod legacy_metadata {
+        use crate as chelis_deep;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/support/legacy_metadata.rs"
+        ));
+    }
+    use legacy_metadata::legacy_metadata_fixture;
 
     fn meta_of(source: &str) -> MetaMap {
-        let expr = parse_str(source)
-            .expect("parse Deep")
+        let expr = legacy_metadata_fixture(source)
             .into_iter()
             .next()
             .expect("one expression");
         match expr {
-            Expr::Node(node, _) => node.meta().clone(),
+            Expr::List(list, _) => match &list.elements[1] {
+                Expr::Map(meta, _) => meta.clone(),
+                other => panic!("expected map: {other:?}"),
+            },
             other => panic!("expected a stamped node, got {other:?}"),
         }
     }

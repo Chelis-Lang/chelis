@@ -21,6 +21,8 @@ use crate::ast::{
 /// Failure to structurally resugar a Deep expression.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResugarError {
+    #[error("{0}")]
+    InvalidMetadata(#[from] chelis_deep::metadata::MetadataError),
     #[error("expected a canonical Deep node, found {found}")]
     ExpectedNode { found: String },
 
@@ -95,7 +97,7 @@ struct NodeRef<'a> {
 /// Keeping construction and rendering separate makes it impossible for this
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
-    validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
+    chelis_deep::metadata::validate_metadata(std::slice::from_ref(expr))?;
     validate_binder_literal_adoption(expr, &[], &[])?;
     resugar_expression_inner(expr)
 }
@@ -124,9 +126,7 @@ fn resugar_expression_inner(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// erased a canonical source distinction such as module-path casing or a
 /// grouped `dim` declaration.
 pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
-    for expr in exprs {
-        validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
-    }
+    chelis_deep::metadata::validate_metadata(exprs)?;
     let declarations = resugar_declaration_sequence(exprs)?;
     validate_surface_declarations(&declarations)?;
     Ok(declarations)
@@ -142,7 +142,8 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
 /// `surf_dim_group_size` markers, are consumed while choosing the Surf AST and
 /// then ignored by this Deep-side comparison only when their values and
 /// placements satisfy the closed surface metadata contract. Non-default,
-/// malformed, or misplaced markers remain visible. Exact `type` entries on a
+/// non-default markers remain visible. Malformed or misplaced metadata returns
+/// an error before normalization can erase it. Exact `type` entries on a
 /// `def`, its function value, and its parameters are also removed when the
 /// immediately preceding matching `defsig` already carries the same types.
 /// Canonical Surf deliberately folds that Deep pair into one typed declaration,
@@ -152,9 +153,12 @@ pub fn resugar_program(exprs: &[DeepExpr]) -> Result<Vec<Decl>, ResugarError> {
 /// This narrow normalization is intentionally not
 /// [`chelis_deep::ast::strip_metadata`], which would erase language-relevant
 /// information and could make a false round trip look green.
-pub fn normalize_deep_for_surface_roundtrip(exprs: &[DeepExpr]) -> Vec<DeepExpr> {
+pub fn normalize_deep_for_surface_roundtrip(
+    exprs: &[DeepExpr],
+) -> Result<Vec<DeepExpr>, ResugarError> {
+    chelis_deep::metadata::validate_metadata(exprs)?;
     let normalized = exprs.iter().map(normalize_roundtrip_expr).collect();
-    normalize_declaration_sequence_roundtrip(normalized)
+    Ok(normalize_declaration_sequence_roundtrip(normalized))
 }
 
 fn normalize_declaration_sequence_roundtrip(exprs: Vec<DeepExpr>) -> Vec<DeepExpr> {
@@ -584,7 +588,6 @@ fn normalize_roundtrip_expr_with_context(
                     child,
                     SurfaceMetadataContext {
                         binding_value: node.tag == DeepTag::Bind && index % 2 == 1,
-                        pipe_stage: node.tag == DeepTag::Pipe && index > 0,
                     },
                 )
             })
@@ -1462,145 +1465,6 @@ fn structural_name_list(expr: &DeepExpr, owner: DeepTag) -> Result<Vec<String>, 
 #[derive(Clone, Copy, Default)]
 struct SurfaceMetadataContext {
     binding_value: bool,
-    pipe_stage: bool,
-}
-
-fn validate_surface_metadata_tree(
-    expr: &DeepExpr,
-    context: SurfaceMetadataContext,
-) -> Result<(), ResugarError> {
-    match expr {
-        DeepExpr::Node(node, _) => {
-            validate_surface_node_metadata(node.tag(), node.meta(), node.children_slice(), context)?
-        }
-        DeepExpr::List(list, _) => {
-            if let (Some(DeepExpr::Atom(Atom::Tag(tag), _)), Some(DeepExpr::Map(meta, _))) =
-                (list.elements.first(), list.elements.get(1))
-            {
-                validate_surface_node_metadata(*tag, meta, &list.elements[2..], context)?;
-            } else {
-                for item in &list.elements {
-                    validate_surface_metadata_tree(item, SurfaceMetadataContext::default())?;
-                }
-            }
-        }
-        DeepExpr::Map(meta, _) => {
-            validate_non_node_surface_metadata(&meta.entries)?;
-            for (_, value) in &meta.entries {
-                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            }
-        }
-        DeepExpr::MetaExpr(meta, _) => {
-            validate_non_node_surface_metadata(&meta.entries)?;
-            for (_, value) in &meta.entries {
-                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            }
-            validate_surface_metadata_tree(&meta.expr, SurfaceMetadataContext::default())?;
-        }
-        DeepExpr::BareList(items, _) => {
-            for item in items {
-                validate_surface_metadata_tree(item, SurfaceMetadataContext::default())?;
-            }
-        }
-        DeepExpr::UnknownForm(data) => {
-            validate_non_node_surface_metadata(&data.meta.entries)?;
-            for (_, value) in &data.meta.entries {
-                validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            }
-            for child in &data.children {
-                validate_surface_metadata_tree(child, SurfaceMetadataContext::default())?;
-            }
-        }
-        DeepExpr::Atom(..) => {}
-    }
-    Ok(())
-}
-
-fn validate_non_node_surface_metadata(entries: &[(String, DeepExpr)]) -> Result<(), ResugarError> {
-    for (key, _) in entries {
-        if !key.starts_with("surf_") {
-            continue;
-        }
-        if !is_known_surface_metadata_key(key) {
-            return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() });
-        }
-        return Err(ResugarError::InvalidSurfaceMetadata {
-            key: key.clone(),
-            expected: surface_metadata_expectation(key),
-        });
-    }
-    Ok(())
-}
-
-fn validate_surface_node_metadata(
-    tag: DeepTag,
-    meta: &MetaMap,
-    children: &[DeepExpr],
-    context: SurfaceMetadataContext,
-) -> Result<(), ResugarError> {
-    for (key, value) in &meta.entries {
-        if !key.starts_with("surf_") {
-            validate_surface_metadata_tree(value, SurfaceMetadataContext::default())?;
-            continue;
-        }
-        let valid = match key.as_str() {
-            "surf_path" => {
-                matches!(tag, DeepTag::Module | DeepTag::Import | DeepTag::ImportAll)
-                    && matches!(
-                        value,
-                        DeepExpr::Atom(Atom::Str(path), _)
-                            if children.first().and_then(atom_name).is_some_and(
-                                |lowered| path.to_ascii_lowercase() == lowered
-                            )
-                    )
-            }
-            "surf_dim_group_size" => {
-                tag == DeepTag::Defdim
-                    && matches!(value, DeepExpr::Atom(Atom::Int(size), _) if *size > 0)
-            }
-            "surf_pipe_stage" => {
-                tag == DeepTag::Fn
-                    && context.pipe_stage
-                    && matches!(value, DeepExpr::Atom(Atom::Str(marker), _) if marker == "call-first")
-            }
-            "surf_literal_style" => {
-                tag == DeepTag::Lit
-                    && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "unsuffixed" | "explicit"))
-            }
-            "surf_binding_type" => {
-                context.binding_value
-                    && matches!(value, DeepExpr::Atom(Atom::Str(style), _) if matches!(style.as_str(), "inferred" | "explicit"))
-            }
-            _ => return Err(ResugarError::UnknownSurfaceMetadata { key: key.clone() }),
-        };
-        if !valid {
-            return Err(ResugarError::InvalidSurfaceMetadata {
-                key: key.clone(),
-                expected: surface_metadata_expectation(key),
-            });
-        }
-    }
-    for (index, child) in children.iter().enumerate() {
-        validate_surface_metadata_tree(
-            child,
-            SurfaceMetadataContext {
-                binding_value: tag == DeepTag::Bind && index % 2 == 1,
-                pipe_stage: tag == DeepTag::Pipe && index > 0,
-            },
-        )?;
-    }
-    Ok(())
-}
-
-fn is_known_surface_metadata_key(key: &str) -> bool {
-    matches!(
-        key,
-        "surf_path"
-            | "surf_dim_group_size"
-            | "surf_pipe_stage"
-            | "surf_literal_style"
-            | "surf_binding_type"
-    )
 }
 
 fn surface_metadata_expectation(key: &str) -> &'static str {

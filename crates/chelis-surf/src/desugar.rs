@@ -19,7 +19,11 @@ use crate::ast::*;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Desugar parser-validated declarations. Programmatic callers must satisfy
+/// the same declaration contracts; invalid input cannot construct a Deep Node.
 pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
+    crate::parser::validate_bound_ownership(decls)
+        .expect("desugar_program requires valid signature/bound ownership");
     let ctx = DesugarCtx::new(decls);
     let exprs: Vec<deep::Expr> = decls
         .iter()
@@ -1370,15 +1374,8 @@ impl DesugarCtx {
         self.current_type_binders.replace(restore_binders);
         let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
         let def_node = node(DeepTag::Def, vec![sym(name), fn_node]);
-        // A standalone `sig` owns this declaration's binders, so its `def`
-        // may not also bound them (`spec/04-type-system.md` §5.9). Carry the
-        // authored bound onto the `def` node so the checker rejects it by
-        // name instead of the desugarer silently discarding it.
-        let def_node = if declares_bound && self.explicit_sig_names.contains(name) {
-            with_dtype_bounds(def_node, type_binders)
-        } else {
-            def_node
-        };
+        // Bound ownership is validated before desugaring: a standalone sig
+        // and its def cannot each author bounds. Only defsig carries them.
 
         // chelis#285: when an explicit standalone `sig` already declares this
         // name, the signature synthesized below from inline annotations is

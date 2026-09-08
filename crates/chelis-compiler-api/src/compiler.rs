@@ -5231,6 +5231,7 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpa
         | chelis_deep::parser::ParseError::Expected { offset, .. }
         | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
+        chelis_deep::parser::ParseError::Metadata(error) => error.span.offset,
     };
     DiagnosticSpan::Point { offset }
 }
@@ -6233,9 +6234,8 @@ mod tests {
 
     #[test]
     fn typed_deep_node_wire_bridge_preserves_the_complete_node_shape() {
-        let exprs =
-            chelis_deep::parse_and_stamp_file("(def {source: \"test\"} root (var {} value))")
-                .expect("typed Deep must parse and stamp");
+        let exprs = chelis_deep::parse_and_stamp_file("(def {doc: \"test\"} root (var {} value))")
+            .expect("typed Deep must parse and stamp");
         assert!(matches!(exprs.first(), Some(DeepExpr::Node(_, _))));
 
         let wire = wire_deep_expr(&exprs[0]);
@@ -6257,7 +6257,7 @@ mod tests {
             panic!("def metadata must remain at wire element 1");
         };
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].key, "source");
+        assert_eq!(entries[0].key, "doc");
         assert!(matches!(
             &entries[0].value.kind,
             WireDeepExprKind::Atom {

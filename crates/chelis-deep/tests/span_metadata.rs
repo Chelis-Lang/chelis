@@ -136,7 +136,8 @@ fn span_id_returns_none_when_span_value_is_not_a_string() {
     // The accessor only returns Some for string-literal span values. A
     // non-string `span` value is a shape error the caller handles
     // separately; the accessor reports None to keep its contract narrow.
-    let exprs = parse_str("(def {span: 42} c (lit {} 0))").expect("parse failed");
+    assert!(parse_str("(def {span: 42} c (lit {} 0))").is_err());
+    let exprs = legacy_metadata::legacy_metadata_fixture("(def {span: 42} c (lit {} 0))");
     assert_eq!(exprs[0].span_id(), None);
 }
 
@@ -248,3 +249,6 @@ fn run_thousand_nested_spans_oracle() {
     );
     eprintln!("1000-span round-trip elapsed: {elapsed:?}");
 }
+
+#[path = "../../../tests/support/legacy_metadata.rs"]
+mod legacy_metadata;
