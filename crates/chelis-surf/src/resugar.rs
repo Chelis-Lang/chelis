@@ -3564,6 +3564,24 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             let name = name_child(&node, 0)?;
             if node.tag == DeepTag::TVar && name == "_" {
                 Ok(TypeExpr::Infer(node.span))
+            } else if node.tag == DeepTag::TVar && crate::desugar::is_reserved_dtype_name(name) {
+                // chelis#1593 round 1. Surf has no way to write "a type
+                // variable named `u8`": every spelling [04-DTYPE-1] rejects
+                // desugars to `t-prim`, whatever binder list surrounds it. So
+                // this node has no Surf representation, and printing `u8`
+                // anyway broke `spec/02-surf-syntax.md` §0.1's first law:
+                // `resugar` gave `def f[u8](x: u8) -> u8 = x`, which
+                // `desugar` maps to `t-prim`, not back to the `t-var` it
+                // started from. §0.1 says a well-formed public Deep node HAS a
+                // Surf representation, so a node with none is not well-formed
+                // public Deep and the decompiler fails closed on it, exactly as
+                // chelis#1031 requires for an invalid surface identifier.
+                // Failing closed removes the node from the law's domain rather
+                // than leaving the law false.
+                Err(ResugarError::InvalidSurfaceIdentifier {
+                    name: name.to_string(),
+                    role: "type variable",
+                })
             } else {
                 Ok(TypeExpr::Named(name.to_string(), node.span))
             }
@@ -3610,6 +3628,7 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
         DeepTag::TTensor => {
             at_least(&node, 1)?;
             let (precision, dimensions) = node.children.split_last().expect("nonempty checked");
+            reject_reserved_type_variable(precision)?;
             let precision = type_name(precision).ok_or(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
                 index: node.children.len() - 1,
@@ -3676,6 +3695,41 @@ fn resugar_dimension(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             expected: "a Deep dimension node",
         }),
     }
+}
+
+/// `(t-var {} <name>)` whose name is a dtype spelling `[04-DTYPE-1]` rejects has
+/// no Surf representation, so the decompiler fails closed on it (chelis#1593).
+///
+/// Surf has no way to write "a type variable named `u8`": every rejected
+/// spelling desugars to `t-prim`, whatever binder list surrounds it. Printing
+/// `u8` anyway broke `spec/02-surf-syntax.md` §0.1's first law, because
+/// `resugar` gave `def f[u8](x: u8) -> u8 = x` and `desugar` maps that to
+/// `t-prim`, not back to the `t-var` it started from. §0.1 says a well-formed
+/// public Deep node HAS a Surf representation, so a node with none is not
+/// well-formed public Deep. Failing closed takes it out of the law's domain
+/// instead of leaving the law false, and matches chelis#1031's contract for an
+/// invalid surface identifier.
+///
+/// Both call sites are needed: `resugar_type` handles a scalar type position,
+/// and the `t-tensor` arm reads its precision child through `type_name` without
+/// going back through `resugar_type`.
+fn reject_reserved_type_variable(expr: &DeepExpr) -> Result<(), ResugarError> {
+    let Ok(node) = node_ref(expr) else {
+        return Ok(());
+    };
+    if node.tag != DeepTag::TVar {
+        return Ok(());
+    }
+    let Ok(name) = name_child(&node, 0) else {
+        return Ok(());
+    };
+    if crate::desugar::is_reserved_dtype_name(name) {
+        return Err(ResugarError::InvalidSurfaceIdentifier {
+            name: name.to_string(),
+            role: "type variable",
+        });
+    }
+    Ok(())
 }
 
 fn type_name(expr: &DeepExpr) -> Option<&str> {

@@ -211,6 +211,11 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     owner_location: Option<TypeDiagnosticLocation>,
     resolution_location: Option<TypeDiagnosticLocation>,
     current_location: Option<TypeDiagnosticLocation>,
+    /// True while resolving the trailing precision child of a `t-tensor`.
+    /// That slot has its own reserved-name diagnostic in
+    /// `validate_tensor_precisions_in_program`, so the `t-prim` arm must not
+    /// emit a second one (chelis#1593).
+    resolving_tensor_precision: bool,
 }
 
 impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binders> {
@@ -235,6 +240,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             owner_location: None,
             resolution_location: None,
             current_location: None,
+            resolving_tensor_precision: false,
         };
         if let BinderMode::Explicit(names) = binder_mode {
             // Nominal parameters are type arguments even when their occurrence
@@ -477,12 +483,40 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         match form_tag {
             Some(DeepTag::TPrim) => {
                 let name = self.one_symbol(tag, children)?;
-                Prim::parse_name(name).map(Type::Prim).ok_or_else(|| {
-                    self.type_error(format!(
-                        "unknown primitive type `{name}` in {}",
-                        self.use_site.label()
-                    ))
-                })
+                if let Some(prim) = Prim::parse_name(name) {
+                    return Ok(Type::Prim(prim));
+                }
+                // chelis#1593: this is the one boundary every type position
+                // crosses, so a name reserved under §1.1.1 is reported the
+                // same way everywhere -- the defsig, the annotation, the
+                // `deftype` field, the `typealias` body, and a hand-written
+                // `.dp`. The generic message below names the wrong defect for
+                // a reserved spelling: it says the name is unknown, when the
+                // language reserved it and rejects it. The predicate pair is
+                // the tensor precision slot's, so the two positions recognise
+                // exactly the same names.
+                //
+                // `resolving_tensor_precision` selects the surface word, so
+                // the precision slot says "tensor element" and everywhere else
+                // says "scalar". It used to SUPPRESS this arm in the precision
+                // slot and leave `validate_tensor_precisions_in_program` as the
+                // only voice; that left `tensor[..., u8]` still receiving the
+                // generic "unknown primitive type" message this arm exists to
+                // replace (round 1, P3). The validator's own reserved-name
+                // branches are gone, so this is the single voice for both.
+                let tensor = self.resolving_tensor_precision;
+                if let Some(diagnostic) = unsigned_family_diagnostic(name, tensor)
+                    .or_else(|| deferred_family_diagnostic(name, tensor))
+                {
+                    let diagnostic = self
+                        .diagnostic_location()
+                        .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+                    return Err(report_witness(self.errors, diagnostic));
+                }
+                Err(self.type_error(format!(
+                    "unknown primitive type `{name}` in {}",
+                    self.use_site.label()
+                )))
             }
             Some(DeepTag::TVar) => {
                 let name = self.one_symbol(tag, children)?;
@@ -517,7 +551,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 for child in &children[..children.len() - 1] {
                     dims.push(self.resolve_dim(child)?);
                 }
-                let precision = match self.resolve_type(&children[children.len() - 1])? {
+                // The trailing child is the precision slot, whose reserved-name
+                // diagnostic belongs to `validate_tensor_precisions_in_program`
+                // rather than to the `t-prim` arm above (chelis#1593).
+                let resolved_precision = {
+                    let outer = std::mem::replace(&mut self.resolving_tensor_precision, true);
+                    let resolved = self.resolve_type(&children[children.len() - 1]);
+                    self.resolving_tensor_precision = outer;
+                    resolved?
+                };
+                let precision = match resolved_precision {
                     Type::Prim(prim) => TensorPrec::Concrete(prim),
                     Type::Var(var) => TensorPrec::Var(var),
                     other => {
@@ -669,6 +712,23 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .allows_hole()
                 .then(|| self.vg.fresh_tvar())
                 .ok_or_else(|| self.unbound("type", name));
+        }
+        // chelis#1593 round 1. `spec/04-type-system.md` §5.8.1 says a spelling
+        // [04-DTYPE-1] rejects names no type variable in ANY type position, and
+        // Deep is a representation of the same public language, so the rule has
+        // to hold on this carrier too. Repairing only the Surf desugarer left a
+        // hand-written `(t-var {} u8)` scoring 1.0 with an empty error vector,
+        // and `chelis surf` printed it back as `def f[u8](x: u8) -> u8 = x`,
+        // which the same build rejects: one program, two verdicts, depending on
+        // which spelling it arrived in. `_` is checked first and stays a hole.
+        let tensor = self.resolving_tensor_precision;
+        if let Some(diagnostic) = unsigned_family_diagnostic(name, tensor)
+            .or_else(|| deferred_family_diagnostic(name, tensor))
+        {
+            let diagnostic = self
+                .diagnostic_location()
+                .map_or(diagnostic.clone(), |location| location.attach(diagnostic));
+            return Err(report_witness(self.errors, diagnostic));
         }
         if matches!(
             self.binder_mode,
@@ -888,6 +948,96 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             .map_or(error.clone(), |location| location.attach(error));
         report_witness(self.errors, error)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reserved-but-rejected dtype spellings (`spec/04-type-system.md` §1.1.1)
+//
+// These answer the same question `Prim::parse_name` does -- which spellings
+// name an active primitive -- for the names that deliberately name none, so
+// they belong beside the resolver that asks it. Both the inference passes and
+// `resolve_type` above need them, and `infer` already depends on this module,
+// so keeping them under `infer` would make the two modules circular
+// (chelis#1593).
+// ---------------------------------------------------------------------------
+
+/// True if `name` is one of the unsigned integer dtype names reserved
+/// as deferred by `spec/04-type-system.md` §1.1.1 (§1.1.2 names the
+/// `uint*` spellings canonical; the short `u*` spellings are not
+/// reserved). Covers both the short form (`u8`/`u16`/`u32`/`u64`) and
+/// the canonical `uint*` family that LLMs and cross-language users
+/// tend to write.
+pub(crate) fn is_unsigned_dtype_name(name: &str) -> bool {
+    matches!(
+        name,
+        "u8" | "u16" | "u32" | "u64" | "uint8" | "uint16" | "uint32" | "uint64"
+    )
+}
+
+/// Build a §1.1.1 diagnostic for an unsigned dtype name appearing as a
+/// cast target or a tensor element type. Returns `None` for non-unsigned
+/// names so call sites can short-circuit with `&&`.
+pub(crate) fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
+    if !is_unsigned_dtype_name(name) {
+        return None;
+    }
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    Some(CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use `{name}` as a {surface} dtype: unsigned integer types \
+             are deferred per spec/04-type-system.md §1.1.1 (canonical \
+             spelling uint8/uint16/uint32/uint64 per §1.1.2; active set: \
+             {active_set})"
+        ),
+        vec![format!(
+            "spec/04-type-system.md §1.1.2 names uint8/uint16/uint32/uint64 \
+             canonical and rejects all of them, the short u8/u16/u32/u64 \
+             forms included, under [04-DTYPE-1]; §1.1.1 records their \
+             declared arithmetic width. [04-DTYPE-1] requires a primitive \
+             type position to name an active primitive, so pick one of \
+             {active_set}"
+        )],
+    ))
+}
+
+/// True if `name` is one of the remaining reserved-but-deferred dtype
+/// names of `spec/04-type-system.md` §1.1.1 (`f8e4m3` is absent because
+/// it is a real `Prim` variant and takes the `Prim::parse_name` path;
+/// the unsigned family has its own predicate above). These spellings
+/// never resolve through `Prim::parse_name`, so without a dedicated arm
+/// they would fall to the generic unknown-name rejections with no
+/// §1.1.1 citation.
+pub(crate) fn is_deferred_dtype_name(name: &str) -> bool {
+    matches!(
+        name,
+        "f8e5m2" | "int4" | "uint4" | "complex64" | "complex128" | "decimal128" | "decimal256"
+    )
+}
+
+/// Build a §1.1.1 diagnostic for a reserved-but-deferred dtype name
+/// appearing as a cast target or a tensor element type. Returns `None`
+/// for other names so call sites can short-circuit.
+pub(crate) fn deferred_family_diagnostic(name: &str, tensor: bool) -> Option<CheckError> {
+    if !is_deferred_dtype_name(name) {
+        return None;
+    }
+    let surface = if tensor { "tensor element" } else { "scalar" };
+    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
+    Some(CheckError::new(
+        CheckErrorKind::UnsupportedTensorPrecision,
+        format!(
+            "cannot use `{name}` as a {surface} dtype: {name} is reserved \
+             but deferred per spec/04-type-system.md §1.1.1 (active set: \
+             {active_set})"
+        ),
+        vec![format!(
+            "spec/04-type-system.md §1.1.1 records the deferral rationale \
+             and {name}'s declared arithmetic width; pick one of \
+             {active_set} until it activates"
+        )],
+    ))
 }
 
 fn symbol_name(expr: &deep::Expr) -> Option<&str> {

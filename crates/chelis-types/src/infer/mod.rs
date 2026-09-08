@@ -23,7 +23,8 @@ use crate::cancel::CancelToken;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::deep_type::{
     BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeDiagnosticLocation, TypeResolutionEnv,
-    TypeUseSite,
+    TypeUseSite, deferred_family_diagnostic, is_deferred_dtype_name, is_unsigned_dtype_name,
+    unsigned_family_diagnostic,
 };
 use crate::env::{Env, TopLevelValueVisibility};
 use crate::errors::*;
