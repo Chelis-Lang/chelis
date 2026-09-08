@@ -305,10 +305,10 @@ impl CEmitter {
                          against `{}` under `{}`. One comparison cannot satisfy both, \
                          so emitting either would drop the other",
                         existing.claim,
-                        existing.operand,
+                        existing.canonical,
                         existing.op,
                         claim.claim,
-                        claim.operand,
+                        claim.canonical,
                         claim.op,
                     ),
                     Stage::Codegen("c"),
@@ -6876,7 +6876,11 @@ impl CEmitter {
         let Some(site) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        let (name, operand, op) = (site.claim, site.operand, site.op);
+        // The class's canonical value, rendered as a C expression: the
+        // variable this function's prologue declared for the claim's binder,
+        // or the size the checker resolved.
+        let operand = site.canonical.to_string();
+        let (name, op) = (site.claim, site.op);
         let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
         self.line(&format!("if (({extent_expr}) != {operand}) {{"));
         self.indent += 1;

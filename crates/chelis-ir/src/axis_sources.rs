@@ -1453,6 +1453,197 @@ pub fn derive_unit_extent_claims(dag: &Dag) -> Vec<UnitExtentClaim> {
     claims
 }
 
+/// A local guard's position: the node that introduces the extent, and the
+/// output axis carrying the claim.
+pub type LocalGuardSite = (usize, usize);
+
+/// The value a local guard compares an observed extent against.
+///
+/// The derivation names the value; each lane resolves it through its own
+/// declaration, which is why this is not a rendered string. C reads a
+/// [`CanonicalExtent::Binder`] as the variable its prologue declared for that
+/// claim; the DAG evaluator reads the same binder out of the bindings it
+/// resolved before the first node ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalExtent {
+    /// The claim's binder name.
+    Binder(String),
+    /// A size the checker already resolved for the claim. Keying the
+    /// comparison on the resolved value rather than on whether a lane happens
+    /// to declare a variable keeps the derivation the authority: a claim
+    /// resolved to a literal over a RUNTIME read still owes the comparison
+    /// `spec/04-type-system.md` section 4.7 requires between the claimed
+    /// extent and the value actually observed, and the entry path already
+    /// emits exactly that for a `Literal` claim (chelis#1377).
+    Resolved(usize),
+}
+
+impl std::fmt::Display for CanonicalExtent {
+    /// The canonical value as a lane reads it: the claim's binder name, or the
+    /// resolved size. Both consumers render it through this one impl, so a
+    /// guard's comparison and a diagnostic naming that comparison cannot
+    /// describe the value two different ways.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CanonicalExtent::Binder(binder) => f.write_str(binder),
+            CanonicalExtent::Resolved(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+/// What a local guard reports and what it compares against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalGuardClaim {
+    /// The claim as reported in the guard's context line.
+    pub claim: String,
+    /// The class's canonical value.
+    pub canonical: CanonicalExtent,
+    /// The operation [04-NUM-9]'s `<op>` slot names.
+    pub op: &'static str,
+}
+
+/// Whether a class member's own output dim carries an extent the checker
+/// already resolved.
+///
+/// For a LOCAL member that is the compiler's own proof: the extent is produced
+/// inside this function and the resolved size is what it was produced to be.
+/// For an INTERFACE member it is a claim about what the caller must pass and
+/// proves nothing, which is why `chelis#1377`'s input axis is guarded rather
+/// than exempted. [`RuntimeDimClass::placement`] is a property of the whole
+/// CLASS, so its `Local` verdict does not establish that a given member is
+/// local; callers pair this with [`member_load_axis`] to ask that per member.
+fn member_dim_is_statically_resolved(dag: &Dag, member: &ClassMember) -> bool {
+    matches!(
+        dag.get(member.node)
+            .and_then(|node| node.output_type.dims.get(member.axis)),
+        Some(DimInfo::Named(_, Some(_))) | Some(DimInfo::Lit(_))
+    )
+}
+
+/// C1.3's local guard sites: `(node id, axis)` paired with the claim each
+/// site guards against.
+///
+/// A `Local` class's guard "takes the source position of the operation that
+/// introduces the guarded extent" (`spec/04-type-system.md` section 4.7), so
+/// unlike the entry classes these are keyed by node.
+///
+/// Two lanes read this one function, which is what C2.7's single derivation
+/// point means for a local guard: the C emitter places its guard at the
+/// operation it names, and the DAG evaluator checks the same site when that
+/// node produces its value. A second answer computed in either lane could
+/// disagree with the first, and the point of deriving it here is that it
+/// cannot.
+pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+    let mut sites = Vec::new();
+    for class in derive_runtime_dim_classes(dag) {
+        if class.placement(dag) != GuardPlacement::Local {
+            continue;
+        }
+        let DimClaim::Name(name) = &class.claim else {
+            continue;
+        };
+        // The class's canonical VALUE. C2.4 makes a literal claim its own
+        // canonical value; a `Name` the checker resolved to a literal is the
+        // same situation reached by a different spelling, so the comparison is
+        // against that literal rather than against a variable no lane
+        // declares.
+        let resolved = class.members.iter().find_map(|member| {
+            match dag.get(member.node)?.output_type.dims.get(member.axis)? {
+                DimInfo::Named(_, Some(value)) | DimInfo::Lit(value) => Some(*value),
+                DimInfo::Named(_, None) => None,
+            }
+        });
+        for member in &class.members {
+            // C2.7 puts "does this site owe a guard" in the derivation rather
+            // than in an emitter, so a lane cannot answer it a second way.
+            //
+            // A LOCAL member's extent is produced by the compiler inside this
+            // function, so a resolved static size on its own dim is the
+            // checker's proof and the comparison would be a value against the
+            // literal it was produced from - a self-check that can only catch
+            // a compiler bug, which C2.4 already declines for a literal claim
+            // matching a literal size. This keys on PROVENANCE, the same axis
+            // section 4.7 uses to place a guard at entry or at the introducing
+            // operation: an INTERFACE member's resolved size is a caller claim
+            // and is guarded (chelis#1377), never exempted.
+            // Narrowed to LOCAL members. `placement` is a property of the
+            // whole class - `Entry` only when every member is an interface
+            // value - so one local member makes a MIXED class Local, and
+            // applying the proof to every member of it would exempt an
+            // interface member whose resolved size is a caller claim.
+            // Measured: the caller's obligation on such a member survives on
+            // the ABI static-dim check, because b2.4's narrowing of that check
+            // is built from `entry_dim_classes()` alone and never fires for a
+            // member of a Local class. The predicate is narrowed anyway, so
+            // the comment and the code say the same thing.
+            if member_load_axis(dag, member).is_none()
+                && member_dim_is_statically_resolved(dag, member)
+            {
+                continue;
+            }
+            if !matches!(member.source, AxisSource::InputAxis { .. }) {
+                // C2.4's literal proof is about the axis SOURCE, not about the
+                // claim: a member whose extent is a literal performs no runtime
+                // read, so there is nothing to observe and nothing to compare.
+                // A resolved claim over a runtime read is a different thing and
+                // still owes its guard.
+                continue;
+            }
+            let Some(node) = dag.get(member.node) else {
+                continue;
+            };
+            // [04-NUM-9]'s `<op>` names the operation that introduces the
+            // guarded extent, in the same vocabulary every other trap on this
+            // lane uses.
+            sites.push((
+                (member.node.0, member.axis),
+                LocalGuardClaim {
+                    claim: name.clone(),
+                    canonical: match resolved {
+                        Some(value) => CanonicalExtent::Resolved(value),
+                        None => CanonicalExtent::Binder(name.clone()),
+                    },
+                    op: crate::grad::risc_op_name(&node.op),
+                },
+            ));
+        }
+    }
+
+    // chelis#1277 S2b: the unit-extent claims section 4.7 places LOCAL, beside
+    // the class members above and through the same emission.
+    //
+    // The site is keyed on the OPERAND's axis, because that is the extent the
+    // guard reads: the claim asserts something about the operand, not about the
+    // `expand`'s own output axis, and keying it on the `expand` would hand the
+    // emitter the width being broadcast TO rather than the extent being
+    // claimed. The claimed value is the literal 1, so both the reported claim
+    // and the canonical value are `1`.
+    //
+    // `op` comes from the claim rather than from the operand's own operation.
+    // Section 4.7's `<op>` names "the operation that introduces the guarded
+    // extent", which is the `expand` making the claim, not whichever operation
+    // happened to produce the operand.
+    //
+    // It is derived HERE rather than in the ownership view because C2.7 puts
+    // the local site derivation in one place that both lanes read. S2b added
+    // this loop beside the class loop when both lived in the view; the loop is
+    // unchanged, and it moves with the function it was appended to.
+    for claim in derive_unit_extent_claims(dag) {
+        if claim.placement(dag) != GuardPlacement::Local {
+            continue;
+        }
+        sites.push((
+            (claim.operand.0, claim.axis),
+            LocalGuardClaim {
+                claim: "1".to_string(),
+                canonical: CanonicalExtent::Resolved(1),
+                op: claim.trap_op(dag),
+            },
+        ));
+    }
+    sites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
