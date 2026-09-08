@@ -1,36 +1,14 @@
-//! Rank-only type facts used by the post-inference shape validator.
+//! Exact-shape type facts used by the post-inference shape validator.
+//!
+//! The environment carries one kind of fact: a Deep type expression the
+//! checker itself stamped. There is no rank-only carrier, because rank
+//! agreement is unification's (`spec/04-type-system.md` section 4.7.2, and
+//! `spec/design/checker_totality.md` section PP5 D6 (d)). A second carrier
+//! that held a rank derived here would be a second rank model, and the one
+//! that existed disagreed with the checker's own stamped types.
 
-use super::validate::{derive_ir_builtin_output_type, validator_error};
+use super::validate::derive_ir_builtin_output_type;
 use super::*;
-
-/// Validator-private shape knowledge.
-///
-/// Rank-only facts are deliberately not encoded as Deep dimension syntax.
-/// Authored programs can spell every legal `d-name`, so any string sentinel
-/// in a `t-tensor` is forgeable and can make an exact-shape consumer mistake
-/// source syntax for internal state. This Rust enum is constructed only by
-/// the validator and cannot cross the source/Deep boundary.
-#[derive(Debug, Clone)]
-pub(super) enum ShapeTypeFact {
-    Exact(deep::Expr),
-    RankOnly { rank: usize },
-}
-
-impl ShapeTypeFact {
-    fn exact_expr(&self) -> Option<&deep::Expr> {
-        match self {
-            Self::Exact(expr) => Some(expr),
-            Self::RankOnly { .. } => None,
-        }
-    }
-
-    fn tensor_rank(&self) -> Option<usize> {
-        match self {
-            Self::Exact(expr) => tensor_dims_from_type_expr(expr).map(|dims| dims.len()),
-            Self::RankOnly { rank } => Some(*rank),
-        }
-    }
-}
 
 /// Name-keyed shape evidence for one validation scope.
 ///
@@ -41,12 +19,12 @@ impl ShapeTypeFact {
 /// that is not a written `to_sorted` claim of C3.1 authority, which a name
 /// keyed by an arbitrary source identifier cannot make; `BTreeMap` would
 /// leave `iter` and `keys` open to a later edit.
-pub(super) type ShapeTypeEnv = UnordMap<String, ShapeTypeFact>;
+pub(super) type ShapeTypeEnv = UnordMap<String, deep::Expr>;
 
 pub(super) fn shape_type_env(type_env: &IrTypeEnv) -> ShapeTypeEnv {
     type_env
         .iter()
-        .map(|(name, ty)| (name.clone(), ShapeTypeFact::Exact(ty.clone())))
+        .map(|(name, ty)| (name.clone(), ty.clone()))
         .collect()
 }
 
@@ -72,76 +50,10 @@ pub(super) fn extend_ir_env_with_declared_fn_params(
     };
     for (param, parameter_type) in params.iter().zip(parameter_types) {
         if let Some(name) = param_name_for_refs(param) {
-            scoped.insert(name, ShapeTypeFact::Exact(parameter_type.clone()));
+            scoped.insert(name, parameter_type.clone());
         }
     }
     scoped
-}
-
-/// Reject a shape-identity call when the stamped argument types prove that
-/// two non-scalar tensor operands have different ranks.
-///
-/// The HM schemes use one dimension row for these builtins, but movement-op
-/// wildcards can currently make a rank-divergent call appear unified. The
-/// central shape registry is the authority for the family: adding a new
-/// identity builtin automatically admits it to this validation boundary.
-/// Rank-zero arguments are left to each builtin's ordinary scheme (notably
-/// `clamp`'s explicit scalar-bound form); this check does not invent a
-/// general scalar-broadcast rule.
-pub(super) fn validate_identity_builtin_rank_requirements(
-    list: &deep::List,
-    func_name: &str,
-    type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let mut expected_rank: Option<usize> = None;
-    for argument in list.elements.iter().skip(3) {
-        let Some(rank) = arg_tensor_rank(argument, type_env, static_env) else {
-            continue;
-        };
-        if rank == 0 {
-            continue;
-        }
-        match expected_rank {
-            Some(expected) if expected != rank => {
-                errors.push(validator_error(
-                    CheckErrorKind::DimensionMismatch,
-                    list,
-                    format!(
-                        "IR elementwise builtin `{func_name}` requires matching positive-rank tensor operands, got ranks {expected} and {rank}"
-                    ),
-                    vec![
-                        "Make every tensor operand's dimension list identical; use `insert` explicitly when a rank change is intended"
-                            .to_string(),
-                    ],
-                ));
-                return;
-            }
-            None => expected_rank = Some(rank),
-            _ => {}
-        }
-    }
-}
-
-/// Derive a tensor type that preserves only the output rank and precision of
-/// a movement operation. Every synthetic dimension is deliberately
-/// non-concrete: `stride` changes extents and `expand` inserts an extent, so
-/// copying the input dimension expressions would overstate what this
-/// validator has proved.
-pub(super) fn derive_movement_rank_output_type(
-    list: &deep::List,
-    type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
-    added_axes: usize,
-) -> Option<ShapeTypeFact> {
-    let input_rank = list
-        .elements
-        .get(3)
-        .and_then(|argument| arg_tensor_rank(argument, type_env, static_env))?;
-    Some(ShapeTypeFact::RankOnly {
-        rank: input_rank.checked_add(added_axes)?,
-    })
 }
 
 /// Resolve the tensor type expression of a callsite argument, peeking through
@@ -150,34 +62,13 @@ pub(super) fn arg_tensor_type_expr(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
 ) -> Option<deep::Expr> {
-    let inner = peel_borrow(expr);
-    expr_shape_type_fact(inner, type_env)?.exact_expr().cloned()
-}
-
-/// Resolve a tensor rank for comparison, including validator-private
-/// rank-only facts. Exact-shape validators deliberately use
-/// `arg_tensor_type_expr` instead, so a rank fact never masquerades as a
-/// proved symbolic extent.
-pub(super) fn arg_tensor_rank(
-    expr: &deep::Expr,
-    type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
-) -> Option<usize> {
-    let inner = peel_borrow(expr);
-    // An inline identity application can carry a stamped wildcard tensor
-    // type even when its operands prove a concrete rank. Prefer structural
-    // derivation for recognized builtins before consulting that stamp. This
-    // is the same resolver used for let-bound values, so introducing or
-    // removing a binding cannot change rank-honesty validation (chelis#668).
-    derive_ir_builtin_output_type(inner, type_env, static_env)
-        .or_else(|| expr_shape_type_fact(inner, type_env))
-        .and_then(|fact| fact.tensor_rank())
+    expr_shape_type_fact(peel_borrow(expr), type_env)
 }
 
 pub(super) fn expr_shape_type_fact(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
-) -> Option<ShapeTypeFact> {
+) -> Option<deep::Expr> {
     stack_guard!("expr_shape_type_fact", expr, None);
     match expr {
         deep::Expr::Node(node, _) => {
@@ -260,7 +151,7 @@ pub(super) fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
 /// Record what the validator can prove about one `let` binding's shape.
 ///
 /// Splitting this out of the `Let` arm keeps shape-fact bookkeeping in the
-/// module that owns `ShapeTypeFact`, and keeps `validate.rs` inside the
+/// module that owns `ShapeTypeEnv`, and keeps `validate.rs` inside the
 /// `source_arch` line budget that told us to divide by responsibility rather
 /// than trim.
 pub(super) fn record_let_binding_shape_fact(
@@ -286,10 +177,10 @@ pub(super) fn record_let_binding_shape_fact(
             // so an entry standing here describes a
             // DIFFERENT binding than the one being
             // introduced; leaving it in place lets a
-            // rebinding inherit the previous rank and
-            // makes the identity-rank validator
-            // reject a valid program (chelis#668
-            // round-6 F1).
+            // rebinding inherit the previous
+            // binding's shape (chelis#668 round-6
+            // F1, when the identity-rank validator
+            // still read this environment).
             type_env.remove(name);
             // Mark as failed-derivation when the
             // RHS is structurally a recognized

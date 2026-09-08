@@ -1465,14 +1465,12 @@ pub(super) fn validate_ir_expr(
                 // (see `lower_par` and the `jit` lowering arm).
                 if tag == DeepTag::App
                     && let Some(func_name) = active_ir_builtin_name(list, static_env)
-                    && (is_ir_shape_sensitive_builtin(func_name)
-                        || crate::shape_class(func_name) == crate::ShapeClass::Identity)
+                    && is_ir_shape_sensitive_builtin(func_name)
                 {
                     validate_ir_builtin_symbolic_requirements(
                         list,
                         func_name,
                         type_env,
-                        static_env,
                         failed_let_names,
                         errors,
                     );
@@ -1901,7 +1899,9 @@ pub(super) fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
 /// borrow wrappers like the rest of the validator.
 ///
 /// Returns true when, structurally, this RHS shape COULD have a
-/// derivable output type via `derive_ir_builtin_output_type`; the
+/// derivable output type via `derive_ir_builtin_output_type` -- which since
+/// chelis#668 means a shape-sensitive callee that also has an arm in that
+/// function, not merely a shape-sensitive one; the
 /// caller pairs this with `derived.is_none()` to detect the "should
 /// have derived but didn't" failure mode (issue #212 / RT-205
 /// round-4). The decoupled structural check means we no longer
@@ -1925,7 +1925,15 @@ pub(super) fn let_rhs_is_recognized_shape_sensitive(
     if !compiler_name_is_active(func_name, static_env) {
         return false;
     }
-    if is_ir_shape_sensitive_builtin(func_name) {
+    // Both halves are required. `is_ir_shape_sensitive_builtin` alone would
+    // mark `y = expand(...)`, `insert`, and `stride` as failed derivations
+    // although this validator no longer derives anything for them, and a
+    // marked name silences the whole `conv2d` validator downstream
+    // (chelis#668 round-1 P0). `ir_builtin_has_output_type_derivation` alone
+    // would mark every `y = relu(x)`, because the Identity fallthrough has an
+    // arm for `relu` while the recursion below is what is meant to reach it.
+    if is_ir_shape_sensitive_builtin(func_name) && ir_builtin_has_output_type_derivation(func_name)
+    {
         return true;
     }
     if is_ir_unary_shape_passthrough_builtin(func_name)
@@ -2029,7 +2037,7 @@ pub(super) fn extend_ir_env_with_fn_params(
         let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") else {
             continue;
         };
-        scoped.insert(name.to_string(), ShapeTypeFact::Exact(ty.clone()));
+        scoped.insert(name.to_string(), ty.clone());
     }
     scoped
 }
@@ -2081,13 +2089,9 @@ pub(super) fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &ShapeTypeEnv,
-    static_env: &UnordMap<String, StaticValue>,
     failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    if crate::shape_class(func_name) == crate::ShapeClass::Identity {
-        validate_identity_builtin_rank_requirements(list, func_name, type_env, static_env, errors);
-    }
     match func_name {
         "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
         "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
@@ -2473,19 +2477,35 @@ pub(super) fn conv2d_output_extent(
 /// `y = relu(conv2d(...))` chains correctly into a downstream
 /// `conv2d(&y, ...)` (RT-205 round-2 F2). Reductions and most movement
 /// ops are intentionally NOT handled here; they need separate per-op
-/// derivation because they change rank or shape. The rank-only `stride`
-/// and `expand` arms below exist so a downstream identity op cannot lose a
-/// provable rank fact merely because the intermediate's exact runtime extents
-/// are not statically known.
+/// derivation because they change rank or shape. `stride`, `expand`, and
+/// `insert` are deliberately absent: the rank-only facts they used to derive
+/// were a second rank model, and rank agreement is unification's
+/// (`spec/04-type-system.md` section 4.7.2; PP5 D6 (d) of
+/// `spec/design/checker_totality.md`).
 ///
 /// Returns `None` when the call shape is unrecognized, the args are
 /// non-concrete, or the derived output would be ill-formed (in which
 /// case the validator's own arm will report the diagnostic).
+/// Does `derive_ir_builtin_output_type` have an arm for `name`?
+///
+/// This must list exactly the callees the `match` below dispatches on, and it
+/// exists because the two questions "is this operation shape-sensitive" and
+/// "can this validator derive its output type" stopped having the same answer
+/// when chelis#668 deleted the `stride`/`expand`/`insert` arms. Keying
+/// `let_rhs_is_recognized_shape_sensitive` on the first question marked those
+/// bindings as FAILED derivations, which suppressed every downstream `conv2d`
+/// check (round-1 P0). The failed-derivation marker means "this validator owed
+/// a type here and could not produce one", so it must be keyed on the table
+/// that owes it.
+pub(super) fn ir_builtin_has_output_type_derivation(name: &str) -> bool {
+    matches!(name, "conv2d" | "softmax") || crate::shape_class(name) == crate::ShapeClass::Identity
+}
+
 pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<ShapeTypeFact> {
+) -> Option<deep::Expr> {
     // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
     // below take `&deep::List`, so bridge a stamped Node once here.
     let mut bridge = None;
@@ -2495,14 +2515,7 @@ pub(super) fn derive_ir_builtin_output_type(
     }
     let func_name = active_ir_builtin_name(list, static_env)?;
     match func_name {
-        "conv2d" => derive_conv2d_output_type(list, type_env).map(ShapeTypeFact::Exact),
-        "stride" => derive_movement_rank_output_type(list, type_env, static_env, 0),
-        // The two differ by exactly the axis `insert` adds.
-        // spec/04-type-system.md §4.7.2: "`expand` sets the extent at `axis`
-        // and leaves the rank unchanged; `insert` adds an axis of extent
-        // `size` at `axis` and produces rank `rank(x) + 1`."
-        "expand" => derive_movement_rank_output_type(list, type_env, static_env, 0),
-        "insert" => derive_movement_rank_output_type(list, type_env, static_env, 1),
+        "conv2d" => derive_conv2d_output_type(list, type_env),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.
@@ -2530,39 +2543,35 @@ pub(super) fn derive_unary_shape_passthrough(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<ShapeTypeFact> {
+) -> Option<deep::Expr> {
     let arg = list.elements.get(3)?;
-    resolve_let_value_tensor_rank_type(arg, type_env, static_env)
+    resolve_let_value_tensor_type(arg, type_env, static_env)
 }
 
-/// Derive the output tensor rank of any centrally classified identity op from
-/// its first tensor argument whose rank is structurally resolvable. Identity
+/// Derive the output tensor type of any centrally classified identity op from
+/// its first tensor argument whose type is structurally resolvable. Identity
 /// operations may be unary, binary, or carry scalar parameters (`clamp`,
 /// `uniform_like`), so arity-specific allowlists are both unnecessary and a
-/// source of registry drift. Broadcasting and dtype promotion remain owned by
-/// ordinary inference; this helper surfaces only the rank needed by the next
-/// validator arm.
+/// source of registry drift. Rank agreement, broadcasting, and dtype
+/// promotion are ordinary inference's; this helper carries an exact shape to
+/// the exact-shape validators (`conv2d` chaining, RT-205) and nothing else.
 pub(super) fn derive_identity_shape_passthrough(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<ShapeTypeFact> {
+) -> Option<deep::Expr> {
     list.elements
         .iter()
         .skip(3)
-        .find_map(|argument| resolve_let_value_tensor_rank_type(argument, type_env, static_env))
+        .find_map(|argument| resolve_let_value_tensor_type(argument, type_env, static_env))
 }
 
-/// Resolve a tensor type for an identity op's output, retaining a rank-only
-/// movement fact when no exact shape is available.  This path is deliberately
-/// separate from the exact-shape argument lookup: shape-sensitive consumers
-/// must not interpret the synthetic axes as proved extents, while identity
-/// producers must carry the still-proved rank to their own consumers.
-fn resolve_let_value_tensor_rank_type(
+/// Resolve the tensor type an identity op publishes for its own consumers.
+fn resolve_let_value_tensor_type(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<ShapeTypeFact> {
+) -> Option<deep::Expr> {
     // Peek through borrow before recursing in case a wrapper op
     // appears under an `&` borrow (uncommon but cheap).
     let inner = peel_borrow(expr);
