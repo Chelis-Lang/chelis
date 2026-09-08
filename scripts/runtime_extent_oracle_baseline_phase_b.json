@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "71041f16942d4f83a469587d69893557344ee68251dd4c857b1a31842aa6c74a",
+  "corpus_sha256": "3bdd2484f1fa873377562c2d79699e1849b83310f04ab812103f5ce9e05931cd",
   "rows": [
     {
       "baseline": "silent_unguarded",
@@ -35,13 +35,13 @@
     {
       "baseline": "silent_unguarded",
       "id": "class.no_movement_consumer.c",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_c"
     },
     {
       "baseline": "silent_unguarded",
       "id": "class.no_movement_consumer.eval",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_eval"
     },
     {
@@ -59,13 +59,13 @@
     {
       "baseline": "silent_unguarded",
       "id": "class.shared_member_node.c",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_c"
     },
     {
       "baseline": "silent_unguarded",
       "id": "class.shared_member_node.eval",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_eval"
     },
     {
@@ -245,7 +245,7 @@
     {
       "baseline": "silent_unguarded",
       "id": "guard_order.effect_after.eval",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval"
     },
     {
@@ -257,7 +257,7 @@
     {
       "baseline": "silent_unguarded",
       "id": "guard_order.effect_before.eval",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_eval"
     },
     {
@@ -293,8 +293,8 @@
     {
       "baseline": "silent_unguarded",
       "id": "rebuild.classes_after_each_pass",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.every_rebuild_pass_preserves_the_derived_classes"
+      "phase_b": "executes_exactly",
+      "receipt": "ir_classes.every_rebuild_pass_preserves_the_derived_classes"
     },
     {
       "baseline": "silent_unguarded",

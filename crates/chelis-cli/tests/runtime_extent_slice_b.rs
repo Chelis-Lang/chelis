@@ -7,23 +7,29 @@
 //! section 4.7 requires, and that chelis#1482's missing extent source is a
 //! typed receipt rather than an ICE.
 //!
-//! ## Why the guard rows themselves are not here
+//! ## Which guard rows belong here, and which do not
 //!
-//! A CLI-rooted program is not the exported kernel. `def main() = f(...)`
-//! over literal tensors inlines `f` into the root, so every extent becomes a
-//! literal, the classes disappear, and a violation is a static type error
-//! nobody raises rather than a runtime guard anything can observe; a
-//! top-level binding whose def computes no tensor emits no kernel at all.
-//! The guard placement and rendering rows are therefore DRIVEN rows in
-//! `crates/chelis-backend-c/tests/exec_compile.rs`, which compiles the
-//! exported kernel and calls it with runtime inputs. That is the same shape
-//! as the eval-lane finding recorded in `spec/design/runtime_extents.md`:
-//! the lane that can observe the guard is not the lane a `.ch` fixture
-//! reaches.
+//! The distinction is the ROOT FORM, not the CLI. A `def main() = f(...)`
+//! root inlines `f`, and the emitter gives the root its own kernel carrying
+//! no entry guard, so the program runs unguarded on both lanes: measured at
+//! `1a585ba1b` for chelis#1377's shape, where `chelis eval --file` and the
+//! linked binary both print `shape=[5]` under a declared `tensor[4, f32]`
+//! and both exit zero. A top-level VALUE BINDING `out = f(...)` applies the
+//! exported kernel instead, so `f`'s entry guards run at the call on eval
+//! (B2h's routing) and in the linked binary on C. Every guard row in this
+//! file is therefore a value binding, and the rows that need a hand-built
+//! DAG with inputs bound at the API boundary, rather than a `.ch` fixture,
+//! are the ones with no source spelling: those are the DRIVEN rows in
+//! `crates/chelis-backend-c/tests/exec_compile.rs` and the API rows in
+//! `crates/chelis-ir/tests/runtime_extent_slice_b_eval_guard.rs`.
 //!
-//! The two rows that DO belong here are the order controls, because ordering
-//! a guard against an in-body trap needs a caller, and a called function's
-//! entry sits exactly where its call sits in the caller's source order.
+//! An earlier version of this paragraph said no guard row could live here at
+//! all. That was true of the inlined-root form it measured and over-broad for
+//! the value-binding form, which B2h's rows already used.
+//!
+//! The order controls belong here for a second reason: ordering a guard
+//! against an in-body trap needs a caller, and a called function's entry sits
+//! exactly where its call sits in the caller's source order.
 //!
 //! chelis#1375's two rows belong here for a third reason, recorded at their
 //! own section below: the inlining that erases a class is `def main() =
@@ -990,6 +996,263 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
     assert!(ok, "agreeing witnesses execute: {out}");
     assert!(
         out.contains("out = tensor(shape=[2], data=[3.0, 6.0])"),
+        "{out}"
+    );
+}
+
+// ===========================================================================
+// B2b-0: the two class-shape rows that need a caller, on both lanes.
+//
+// Both are value-binding rows for the reason the `load_load` row above is
+// one: `out = f(...)` applies the exported kernel, so `f`'s entry guards run
+// at the call on eval and in the linked binary on C.
+//
+// The two lanes then render the same line, and the reason is worth stating
+// precisely because the short version of it is false. They do NOT call one
+// function. Eval reads `derive_runtime_dim_classes`, the C prologue reads
+// `derive_dim_witnesses`, and those are two sibling groupings in
+// `axis_sources.rs` that differ in their guard filter over one shared
+// primitive, `output_axis_sources`, which answers where an axis's extent comes
+// from. That shared primitive is what C2.7's one-derivation property is about.
+// Byte identity of the rendered line is therefore something these receipts
+// MEASURE, by asserting the same literal string on each lane, and not
+// something a single shared call already guarantees.
+//
+// The DIMENSION NAMES here are deliberately multi-letter. A single lowercase
+// letter in a dimension position desugars to `d-var`, a polymorphic dimension
+// variable (`chelis-surf/src/desugar.rs`'s implicit single-letter rule), which
+// inference instantiates per call site and unifies against the literal
+// argument extents, so `f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32,
+// 2.0f32, 3.0f32]))` under `tensor[q, f32]` is `dimension mismatch: Lit(2) vs
+// Lit(3)` at check and never reaches a guard. A multi-letter name desugars to
+// `d-name`, a concrete symbolic axis, which is what survives into `DimInfo::
+// Named` and forms a class. Measured at `1a585ba1b` across `n`, `m`, `k`, `q`
+// (all rejected) and `qq`, `nn`, `n2`, `zdim`, `batch`, `seq` (all accepted).
+// ===========================================================================
+
+/// The fixture for `class.no_movement_consumer`: two witnesses of one claim
+/// with NO movement primitive anywhere in the program and a result type that
+/// carries no symbolic dimension.
+///
+/// That is what separates this row from `class.load_load` above, whose result
+/// is `tensor[zdim, f32]`. `runtime_extents.md` C2.4 states the property the
+/// row exists for: Load/Load, Load/op-output and op-output/op-output
+/// equalities "exist even when no movement bound owns them". Here nothing
+/// owns `zdim`. No `expand`, `insert`, `reshape`, `shrink`, `stride` or `pad`
+/// appears, so no movement operation binds it, and the declared result is a
+/// scalar, so the signature does not force it either. The claim is held by
+/// the two parameter declarations alone, and section 4.7 still requires the
+/// entry guard.
+fn no_movement_consumer_source(second: &str) -> String {
+    format!(
+        "module Repro.NoMovementConsumer\n\
+         def f(zz: tensor[zdim, f32], p: tensor[zdim, f32]) -> tensor[f32] = sum(mul(zz, p), 0)\n\
+         out = f(to_tensor([1.0f32, 2.0f32]), to_tensor({second}))\n"
+    )
+}
+
+/// Two witnesses at 2 and 3, so the claim `zdim` is false.
+const NO_MOVEMENT_DISAGREES: &str = "[1.0f32, 2.0f32, 3.0f32]";
+
+/// Two witnesses at 2, so it holds and the reduction runs.
+const NO_MOVEMENT_AGREES: &str = "[3.0f32, 4.0f32]";
+
+/// class.no_movement_consumer.eval.
+///
+/// EVIDENTIARY STATUS: disposition lock. B2a derives the class and B2h routes
+/// the host lane through the kernel, so this shape already traps at
+/// `1a585ba1b`; the row records the state those two changes left it in. The
+/// assertions are not a tautology: the context line names both witnesses with
+/// their observed extents, and the agreeing twin pins the scalar VALUE, so a
+/// guard that trapped on every class or a context line replaced by a literal
+/// would fail one of them.
+#[test]
+fn a_class_with_no_movement_bound_consumer_still_guards_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "no_move_bad.ch",
+        &no_movement_consumer_source(NO_MOVEMENT_DISAGREES),
+    );
+    assert!(!ok, "the witnesses of `zdim` disagree at 2 and 3: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `zdim`: p axis 0 = 3, zz axis 0 = 2"),
+        "section 4.7's context line names the claim, both witnesses and each \
+         observed extent: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "no_move_ok.ch",
+        &no_movement_consumer_source(NO_MOVEMENT_AGREES),
+    );
+    assert!(ok, "agreeing witnesses must execute: {out}");
+    assert!(
+        out.contains("out = 11.0"),
+        "and produce sum(zz * p), whose shape does not carry the guarded \
+         extent at all: {out}"
+    );
+}
+
+/// class.no_movement_consumer.c: the same program compiled and run.
+///
+/// EVIDENTIARY STATUS: disposition lock, as its eval twin. The row's own
+/// content is the LANE AGREEMENT: the compiled binary must render the
+/// identical context line, which C2.7 requires because both lanes read one
+/// derivation.
+#[test]
+fn a_class_with_no_movement_bound_consumer_still_guards_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(
+        &dir,
+        "no_move_bad_c",
+        &no_movement_consumer_source(NO_MOVEMENT_DISAGREES),
+    );
+    assert!(!ok, "the binary must fail: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `zdim`: p axis 0 = 3, zz axis 0 = 2"),
+        "byte-identical to the eval twin's line: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "no_move_ok_c",
+        &no_movement_consumer_source(NO_MOVEMENT_AGREES),
+    );
+    assert!(ok, "agreeing witnesses must execute: {out}");
+    assert!(out.contains("out = 11.0"), "{out}");
+}
+
+/// The fixture for `class.shared_member_node`: one rank-2 parameter whose two
+/// axes are members of two DIFFERENT claims.
+///
+/// C2.4: "two classes may share a node, each with its own guard, and
+/// derivation yields one member per `(node, axis)`". Both `zz` and `p` are
+/// member nodes of the `rows` class and of the `cols` class at once, so a
+/// derivation keyed by node rather than by `(node, axis)` would collapse the
+/// two into one and lose a guard. Driving each axis to disagree on its own
+/// shows the two guards are separate and that each names its own claim.
+fn shared_member_node_source(second: &str) -> String {
+    format!(
+        "module Repro.SharedMemberNode\n\
+         def f(zz: tensor[rows, cols, f32], p: tensor[rows, cols, f32]) -> tensor[rows, cols, f32] = add(zz, p)\n\
+         out = f(to_tensor([[1.0f32, 2.0f32]]), to_tensor({second}))\n"
+    )
+}
+
+/// `rows` disagrees at 1 against 2, `cols` agrees at 2.
+const SHARED_ROWS_DISAGREE: &str = "[[1.0f32, 2.0f32], [3.0f32, 4.0f32]]";
+
+/// `cols` disagrees at 2 against 3, `rows` agrees at 1.
+const SHARED_COLS_DISAGREE: &str = "[[1.0f32, 2.0f32, 5.0f32]]";
+
+/// Both agree.
+const SHARED_AGREES: &str = "[[3.0f32, 4.0f32]]";
+
+/// class.shared_member_node.eval.
+///
+/// EVIDENTIARY STATUS: disposition lock, for the same reason as
+/// `no_movement_consumer` above. What the row pins is that the two classes
+/// stay separate: each mismatch reports ITS OWN claim and ITS OWN axis, so a
+/// collapsed derivation reporting one guard for the node, or reporting `rows`
+/// where `cols` disagreed, fails.
+///
+/// The axis-1 case is where the teeth are. A derivation keyed by node rather
+/// than by `(node, axis)` would compare `zz` against `p` once, on whichever
+/// axis it kept, so the `cols`-only disagreement would slip through and that
+/// program would RUN. `assert!(!ok)` there is not satisfiable by any guard
+/// that has collapsed the two classes into one.
+#[test]
+fn two_classes_sharing_one_node_keep_separate_guards_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "shared_rows.ch",
+        &shared_member_node_source(SHARED_ROWS_DISAGREE),
+    );
+    assert!(!ok, "the `rows` witnesses disagree at 1 and 2: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `rows`: p axis 0 = 2, zz axis 0 = 1"),
+        "the axis-0 class reports axis 0 of both members: {out}"
+    );
+    assert!(
+        !out.contains("extent `cols`"),
+        "and the axis-1 class, which agrees, contributes no guard failure: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "shared_cols.ch",
+        &shared_member_node_source(SHARED_COLS_DISAGREE),
+    );
+    assert!(!ok, "the `cols` witnesses disagree at 2 and 3: {out}");
+    assert!(
+        out.contains("extent `cols`: p axis 1 = 3, zz axis 1 = 2"),
+        "the axis-1 class is its own guard, naming axis 1 of the same two \
+         member nodes: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "shared_ok.ch",
+        &shared_member_node_source(SHARED_AGREES),
+    );
+    assert!(ok, "both classes hold: {out}");
+    assert!(
+        out.contains("out = tensor(shape=[1, 2], data=[4.0, 6.0])"),
+        "{out}"
+    );
+}
+
+/// class.shared_member_node.c: the same three programs compiled and run.
+///
+/// EVIDENTIARY STATUS: disposition lock, as its eval twin, and the lane
+/// agreement is the row's content.
+#[test]
+fn two_classes_sharing_one_node_keep_separate_guards_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(
+        &dir,
+        "shared_rows_c",
+        &shared_member_node_source(SHARED_ROWS_DISAGREE),
+    );
+    assert!(!ok, "the binary must fail: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `rows`: p axis 0 = 2, zz axis 0 = 1"),
+        "byte-identical to the eval twin's line: {out}"
+    );
+    assert!(!out.contains("extent `cols`"), "{out}");
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "shared_cols_c",
+        &shared_member_node_source(SHARED_COLS_DISAGREE),
+    );
+    assert!(!ok, "the binary must fail: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `cols`: p axis 1 = 3, zz axis 1 = 2"),
+        "byte-identical to the eval twin's line: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "shared_ok_c",
+        &shared_member_node_source(SHARED_AGREES),
+    );
+    assert!(ok, "both classes hold: {out}");
+    assert!(
+        out.contains("out = tensor(shape=[1, 2], data=[4.0, 6.0])"),
         "{out}"
     );
 }

@@ -816,6 +816,398 @@ fn classes_survive_bind_symbolic_dims_unchanged() {
     );
 }
 
+/// The `(claim, interface members)` shape of a class list, with each member
+/// named by the `Load` it reads rather than by node id.
+///
+/// Node ids are a rebuild's own business: a pass that renumbers is not a pass
+/// that broke the derivation. What must survive is WHICH input tensor axes a
+/// claim groups, and that is stable under renumbering because a `Load` carries
+/// its name. Members that are not input axes are counted but not named, so a
+/// pass that drops one still fails the comparison.
+fn class_shape(dag: &Dag, classes: &[RuntimeDimClass]) -> Vec<(DimClaim, Vec<(String, usize)>)> {
+    classes
+        .iter()
+        .map(|class| {
+            let members = class
+                .members
+                .iter()
+                .map(|member| match dag.get(member.node).map(|node| &node.op) {
+                    Some(RiscOp::Load { name }) => (name.to_string(), member.axis),
+                    _ => ("<computed>".to_string(), member.axis),
+                })
+                .collect();
+            (class.claim.clone(), members)
+        })
+        .collect()
+}
+
+/// Every node's op and declared dims, in graph order. Two graphs with the same
+/// structure rebuilt identically; two that differ here were REWRITTEN.
+fn structure(dag: &Dag) -> Vec<(String, Vec<DimInfo>)> {
+    dag.nodes()
+        .iter()
+        .map(|node| (format!("{:?}", node.op), node.output_type.dims.clone()))
+        .collect()
+}
+
+fn find_load(dag: &Dag, name: &str) -> NodeId {
+    dag.nodes()
+        .iter()
+        .find(|node| matches!(&node.op, RiscOp::Load { name: n } if n.as_str() == name))
+        .unwrap_or_else(|| panic!("no Load named {name} survived the pass"))
+        .id
+}
+
+/// `dag` with the stamped `name` removed from every axis of `id`, which is how
+/// a rebuild pass that lost a name during a rewrite would leave the graph.
+fn drop_stamped_name(dag: &Dag, id: NodeId, name: &str) -> Dag {
+    let mut out = dag.clone();
+    if let Some(node) = out.node_mut(id) {
+        for dim in node.output_type.dims.iter_mut() {
+            if let DimInfo::Named(stamped, _) = dim
+                && stamped.as_str() == name
+            {
+                *dim = DimInfo::Lit(97);
+            }
+        }
+    }
+    out
+}
+
+/// The shared body of the rebuild row: one pass, its input, its output.
+///
+/// Three assertions, in the order that makes the third mean something.
+///
+/// 1. The pass REWROTE this fixture. Without it the two below hold over the
+///    copy path and prove nothing about the transform the pass is named for,
+///    which is the exact way this row's earlier fixture was vacuous.
+/// 2. Every class that existed before survives, in order, grouping the same
+///    input tensor axes. `added` states the classes the pass introduces, so a
+///    pass that adds one silently cannot pass by being ignored.
+/// 3. Dropping the claim's stamped name from a surviving witness IN THE PASS
+///    OUTPUT changes the derived classes. This is the per-pass red-first
+///    check: it makes assertion 2 an equality that a broken rebuild fails.
+///
+/// What assertion 3 does NOT cover, stated because the gap is real: dropping a
+/// name from an axis the pass SYNTHESIZED (the fused node's output, the
+/// specialized matmul's output) changes nothing, because such an axis is
+/// op-computed and C2.4 makes it claim-supplied rather than a witness. The
+/// derivation is insensitive to it by design, so this receipt is sensitive to
+/// exactly what the property is about and no more.
+fn assert_rebuild_preserves_classes(
+    pass: &str,
+    before: &Dag,
+    after: &Dag,
+    witness_load: &str,
+    claim_name: &str,
+    axis_shift: usize,
+    added: &[DimClaim],
+) {
+    assert_ne!(
+        structure(before),
+        structure(after),
+        "{pass}: the fixture must make this pass rewrite, or the equalities \
+         below cover the rebuild-copy path only",
+    );
+
+    let before_classes = derive_runtime_dim_classes(before);
+    let after_classes = derive_runtime_dim_classes(after);
+    let before_claims = claims(&before_classes);
+
+    let survived: Vec<_> = class_shape(after, &after_classes)
+        .into_iter()
+        .filter(|(claim, _)| before_claims.contains(claim))
+        .collect();
+    // `vectorize_axis0` inserts a batch axis at position 0, so every surviving
+    // member's axis index moves right by one. That is the pass doing its job,
+    // not the derivation losing a witness, so the shift is declared per pass
+    // rather than absorbed by comparing something weaker.
+    let expected: Vec<_> = class_shape(before, &before_classes)
+        .into_iter()
+        .map(|(claim, members)| {
+            let shifted = members
+                .into_iter()
+                .map(|(load, axis)| (load, axis + axis_shift))
+                .collect();
+            (claim, shifted)
+        })
+        .collect();
+    assert_eq!(
+        expected, survived,
+        "{pass}: every class present before the pass must survive it, in \
+         order, grouping the same input tensor axes",
+    );
+
+    let introduced: Vec<DimClaim> = claims(&after_classes)
+        .into_iter()
+        .filter(|claim| !before_claims.contains(claim))
+        .collect();
+    assert_eq!(
+        introduced,
+        added.to_vec(),
+        "{pass}: the classes this pass introduces are part of the record",
+    );
+
+    let witness = find_load(after, witness_load);
+    let broken = drop_stamped_name(after, witness, claim_name);
+    assert_ne!(
+        claims(&derive_runtime_dim_classes(&broken)),
+        claims(&after_classes),
+        "{pass}: dropping `{claim_name}` from `{witness_load}` in the pass \
+         output must change the derived classes, or the equality above is \
+         satisfied by a derivation that sees nothing",
+    );
+}
+
+/// Two witnesses of `nn` joined into one rooted result: the smallest graph
+/// that derives a class at all. Each pass fixture below extends it with the
+/// structure that makes that pass rewrite.
+fn two_witness_base(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
+    let x = f32_load(dag, "x", vec![named("nn")]);
+    let y = f32_load(dag, "y", vec![named("nn")]);
+    let joined = dag.add_node(
+        RiscOp::Add,
+        vec![x, y],
+        ty(vec![named("nn")], Prim::F32),
+        None,
+    );
+    (x, y, joined)
+}
+
+/// Oracle row `rebuild.classes_after_each_pass`.
+///
+/// C5 property 7 asks for the derived classes to be "the same set in the same
+/// order" after each rebuild pass. The two tests above take one pass each on a
+/// graph each of them genuinely transforms; this one is the row's receipt and
+/// takes every rebuild pass `chelis-ir` exposes as a public entry point, EACH
+/// ON A FIXTURE THAT MAKES IT REWRITE.
+///
+/// That last clause is the whole point of the fixtures below, and it is worth
+/// the lines. An earlier version of this row ran all seven passes on
+/// `Add(Load x, Load y)`, where nothing is constant, nothing is dead, there is
+/// no common subexpression, no fusible chain and no BLAS pattern. Five of the
+/// seven rebuilt that graph by copy, so `constant_fold`'s assertion reduced to
+/// `derive(dag) == derive(dag)` and the other four proved the copy path rather
+/// than the transform each is named for. A rewrite is precisely where a pass
+/// would plausibly synthesize a fresh output type and lose a stamped name, so
+/// the copy path is the half of the property that does not need proving.
+/// `assert_rebuild_preserves_classes` now fails if a fixture ever stops making
+/// its pass rewrite, so this cannot silently regress.
+///
+/// COVERAGE, stated exactly because the row's name says "each pass": the
+/// passes exercised are `vmap::vectorize_axis0`, `dag::bind_symbolic_dims`,
+/// `optimize::constant_fold`, `optimize::dead_code_eliminate`,
+/// `optimize::common_subexpr_eliminate`, `fuse::fuse`, and
+/// `specialize::specialize_for_blas`. `splice_dag` and graph cloning are
+/// lowering-side and live in `chelis-types`, so they are not reachable from
+/// this crate and are not covered here; C2.4's `f(n, n)` splice row covers the
+/// splice's observable consequence instead.
+///
+/// MEASURED DEVIATION, recorded rather than hidden: `specialize_for_blas` does
+/// not leave "the same set". Replacing `Sum(Mul(Expand a, Expand b))` with a
+/// `BlasMatmul` gives the specialized node two op-computed output axes under
+/// literal claims, so the pass ADDS `Literal(2)` and `Literal(3)` as one-member
+/// classes that the reduction did not produce. It loses nothing: the `kk` class
+/// survives with both of its input axes. The addition is asserted exactly here,
+/// so it is locked and visible; whether the derivation should form those two
+/// classes at all is not this row's question.
+///
+/// EVIDENTIARY STATUS: regression test for all five passes whose fixtures were
+/// added here, each watched failing under the name drop in
+/// `assert_rebuild_preserves_classes` before the equality above it was trusted;
+/// disposition lock for `vectorize_axis0` and `bind_symbolic_dims`, whose two
+/// neighbouring tests already covered them on transforming graphs.
+#[test]
+fn every_rebuild_pass_preserves_the_derived_classes() {
+    // `bind_symbolic_dims` and `vectorize_axis0` transform the bare two-witness
+    // graph, so they keep it. Node ids survive both, so these two assert the
+    // stronger `(node, axis)` member equality that the projection cannot make.
+    let mut dag = Dag::new();
+    let (_, _, joined) = two_witness_base(&mut dag);
+    dag.add_root(joined);
+    let before = derive_runtime_dim_classes(&dag);
+    assert_eq!(
+        claims(&before),
+        vec![DimClaim::Name("nn".into())],
+        "the base fixture must derive its claim before any pass runs",
+    );
+
+    let bound = chelis_ir::dag::bind_symbolic_dims(
+        &dag,
+        &chelis_unord::UnordMap::from([("nn".to_string(), 4usize)]),
+    )
+    .expect("bind nn");
+    assert_rebuild_preserves_classes("bind_symbolic_dims", &dag, &bound, "y", "nn", 0, &[]);
+    assert_eq!(
+        members_of(&before, DimClaim::Name("nn".into())),
+        members_of(
+            &derive_runtime_dim_classes(&bound),
+            DimClaim::Name("nn".into())
+        ),
+        "bind_symbolic_dims preserves node ids, so the members are identical",
+    );
+
+    let batched = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(3)).expect("vectorize");
+    assert_rebuild_preserves_classes("vectorize_axis0", &dag, &batched, "y", "nn", 1, &[]);
+
+    // `constant_fold` folds a binary op over two `Const` operands. It mutates
+    // in place, so node ids survive and the member equality is exact.
+    let mut folding = Dag::new();
+    let (_, _, folding_joined) = two_witness_base(&mut folding);
+    let five = folding.add_node(
+        RiscOp::synth_const(Prim::F32, 5.0),
+        vec![],
+        ty(vec![], Prim::F32),
+        None,
+    );
+    let two = folding.add_node(
+        RiscOp::synth_const(Prim::F32, 2.0),
+        vec![],
+        ty(vec![], Prim::F32),
+        None,
+    );
+    let difference = folding.add_node(RiscOp::Sub, vec![five, two], ty(vec![], Prim::F32), None);
+    let scaled = folding.add_node(
+        RiscOp::Add,
+        vec![folding_joined, difference],
+        ty(vec![named("nn")], Prim::F32),
+        None,
+    );
+    folding.add_root(scaled);
+    let mut folded = folding.clone();
+    chelis_ir::optimize::constant_fold(&mut folded);
+    assert_rebuild_preserves_classes("constant_fold", &folding, &folded, "y", "nn", 0, &[]);
+    assert_eq!(
+        members_of(
+            &derive_runtime_dim_classes(&folding),
+            DimClaim::Name("nn".into())
+        ),
+        members_of(
+            &derive_runtime_dim_classes(&folded),
+            DimClaim::Name("nn".into())
+        ),
+        "constant_fold replaces a node in place, so the members are identical",
+    );
+
+    // `dead_code_eliminate` needs a node no root reaches.
+    let mut with_dead = Dag::new();
+    let (dead_x, dead_y, dead_joined) = two_witness_base(&mut with_dead);
+    with_dead.add_root(dead_joined);
+    with_dead.add_node(
+        RiscOp::Mul,
+        vec![dead_x, dead_y],
+        ty(vec![named("nn")], Prim::F32),
+        None,
+    );
+    let live = chelis_ir::optimize::dead_code_eliminate(&with_dead);
+    assert_rebuild_preserves_classes("dead_code_eliminate", &with_dead, &live, "y", "nn", 0, &[]);
+
+    // `common_subexpr_eliminate` needs two structurally identical nodes.
+    let mut with_duplicate = Dag::new();
+    let (dup_x, dup_y, _) = two_witness_base(&mut with_duplicate);
+    let first = with_duplicate.add_node(
+        RiscOp::Mul,
+        vec![dup_x, dup_y],
+        ty(vec![named("nn")], Prim::F32),
+        None,
+    );
+    let second = with_duplicate.add_node(
+        RiscOp::Mul,
+        vec![dup_x, dup_y],
+        ty(vec![named("nn")], Prim::F32),
+        None,
+    );
+    let combined = with_duplicate.add_node(
+        RiscOp::Add,
+        vec![first, second],
+        ty(vec![named("nn")], Prim::F32),
+        None,
+    );
+    with_duplicate.add_root(combined);
+    let deduplicated = chelis_ir::optimize::common_subexpr_eliminate(&with_duplicate);
+    assert_rebuild_preserves_classes(
+        "common_subexpr_eliminate",
+        &with_duplicate,
+        &deduplicated,
+        "y",
+        "nn",
+        0,
+        &[],
+    );
+
+    // `fuse` needs an elementwise chain whose intermediate has one consumer,
+    // so the two nodes merge into one `FusedElem`.
+    let mut chained = Dag::new();
+    let (_, _, chain_joined) = two_witness_base(&mut chained);
+    let exponentiated = chained.add_node(
+        RiscOp::Exp,
+        vec![chain_joined],
+        ty(vec![named("nn")], Prim::F32),
+        None,
+    );
+    chained.add_root(exponentiated);
+    let fused = chelis_ir::fuse::fuse(&chained);
+    assert_rebuild_preserves_classes("fuse", &chained, &fused, "y", "nn", 0, &[]);
+
+    // `specialize_for_blas` needs tier2 lowering's `Sum(Mul(Expand, Expand))`
+    // shape, which its matmul detector rewrites to one `BlasMatmul`. The shared
+    // contraction axis `kk` is the claim, so the class here is the one a real
+    // matmul carries.
+    let mut contraction = Dag::new();
+    let a = f32_load(&mut contraction, "a", vec![DimInfo::Lit(2), named("kk")]);
+    let b = f32_load(&mut contraction, "b", vec![named("kk"), DimInfo::Lit(3)]);
+    let widened = ty(
+        vec![DimInfo::Lit(2), named("kk"), DimInfo::Lit(3)],
+        Prim::F32,
+    );
+    let expanded_a = contraction.add_node(
+        RiscOp::Expand {
+            axis: 2,
+            size: RtDim::Lit(3),
+        },
+        vec![a],
+        widened.clone(),
+        None,
+    );
+    let expanded_b = contraction.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(2),
+        },
+        vec![b],
+        widened.clone(),
+        None,
+    );
+    let product = contraction.add_node(RiscOp::Mul, vec![expanded_a, expanded_b], widened, None);
+    let contracted = contraction.add_node(
+        RiscOp::Sum {
+            axis: 1,
+            accumulator: Prim::F32,
+        },
+        vec![product],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
+        None,
+    );
+    contraction.add_root(contracted);
+    let specialized = chelis_ir::specialize::specialize_for_blas(&contraction);
+    assert!(
+        specialized
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
+        "the fixture must reach the matmul detector, not merely the cleanup legs",
+    );
+    assert_rebuild_preserves_classes(
+        "specialize_for_blas",
+        &contraction,
+        &specialized,
+        "b",
+        "kk",
+        0,
+        &[DimClaim::Literal(2), DimClaim::Literal(3)],
+    );
+}
+
 /// The discriminating twin for the two rebuild tests: dropping a stamped name
 /// DOES change the derived classes. Without it, a derivation that returned an
 /// empty list for every graph would pass both survival tests.
