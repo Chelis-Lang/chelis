@@ -215,6 +215,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo clippy --workspace --all-targets --features "
                 "chelis-backend-c/sleef,"
                 "chelis-e2e/hip-local-gpu,"
+                "chelis-ir/lowering-trace,"
                 "chelis-prove/clarabel,"
                 "chelis-python/extension-module,"
                 "chelis-runtime/ownership-ledger,"
@@ -237,6 +238,8 @@ class LocalCommandListTests(unittest.TestCase):
                 "<managed-python> scripts/unrepresentable_domain_oracle.py",
                 "<managed-python> scripts/runtime_representation_oracle.py "
                 "--phase 0",
+                "cargo nextest run -p chelis-ir --features lowering-trace "
+                "--lib --test lowering_trace",
             ],
         )
 
