@@ -121,26 +121,41 @@ fn host_applied_def_main_is_a_host_lane_root() {
     assert_eq!(root_shape(&result, "main"), vec![2, 2]);
 }
 
-/// `coral_prerequisites.rs`'s scalar-operand comparison roots (the
-/// `#[ignore]`d Coral prerequisite asserts `check` only). Each root is a
-/// nullary def with a declared tensor result, so the routing applies it
-/// through the kernel the C lane emits, whose comparison has a rank-0
-/// `Const` operand. The six values are what the compiled C prints and what
-/// the host interpreter printed before the routing; the DAG evaluator must
-/// print them too (`chelis_ir::eval`'s rank-0 broadcast, chelis#1506 for
-/// whether the form should be admitted at all).
+/// `coral_prerequisites.rs`'s comparison roots (the `#[ignore]`d Coral
+/// prerequisite asserts `check` only). Each root is a nullary def with a
+/// declared tensor result, so the routing applies it through the kernel the C
+/// lane emits. The six values are what the compiled C prints and what the host
+/// interpreter printed before the routing; the DAG evaluator must print them
+/// too.
+///
+/// RE-VEHICLED by chelis#1506, which resolved the question this comment used to
+/// leave open ("chelis#1506 for whether the form should be admitted at all").
+/// It is not: `[05-OP-36]` makes a scalar beside a tensor a type error, so the
+/// six programs are spelled with the explicit `expand`, which is the migration
+/// the rejection's diagnostic names. The SUBJECT is unchanged, and it was never
+/// the scalar operand: it is that a host-lane root of this shape evaluates
+/// through the kernel to the values the C lane prints. The six expected values
+/// are unchanged, because the explicit spelling denotes the same computation.
 ///
 /// EVIDENTIARY STATUS: regression test, watched failing on `3b0e5b1b2` with
-/// `unavailable root `above` on Host lane: ... got [] vs [3]`.
+/// `unavailable root `above` on Host lane: ... got [] vs [3]`. The re-vehicling
+/// preserves that: the operand is now a rank-1 `expand` result rather than a
+/// rank-0 `Const`, and the routing property under test is the same.
 #[test]
 fn scalar_operand_comparison_roots_evaluate_to_the_values_the_c_kernel_prints() {
     const CORAL_COMPARISONS: &str = "module Demo.Main\n\n\
-        def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)\n\
-        def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))\n\
-        def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), 2.5)\n\
-        def lt_left() -> tensor[3, bool] = lt(2.5, to_tensor([1.0, 2.0, 3.0]))\n\
-        def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), 2.0)\n\
-        def eq_left() -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))\n";
+        def above() -> tensor[3, bool] = \
+        gt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([1.5]), 0i32, 3i64))\n\
+        def below() -> tensor[3, bool] = \
+        gt(expand(to_tensor([1.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))\n\
+        def lt_right() -> tensor[3, bool] = \
+        lt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.5]), 0i32, 3i64))\n\
+        def lt_left() -> tensor[3, bool] = \
+        lt(expand(to_tensor([2.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))\n\
+        def eq_right() -> tensor[3, bool] = \
+        eq(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.0]), 0i32, 3i64))\n\
+        def eq_left() -> tensor[3, bool] = \
+        eq(expand(to_tensor([2.0]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))\n";
     let result = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: CORAL_COMPARISONS.to_string(),

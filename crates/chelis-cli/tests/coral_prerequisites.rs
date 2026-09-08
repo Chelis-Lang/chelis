@@ -469,9 +469,18 @@ bad = gt(bools, true)
 /// tensor signature; the existing v0.2.5 broadcast test just hides this
 /// because it uses an untyped top-level binding (`gt_left = ...`) whose
 /// inferred type is never checked against any signature.
+/// chelis#1506 INVERTS this gate. The six programs above are the form
+/// `[05-OP-36]` calls a type error, so the compiler now refuses them and names
+/// the replacement. Coral has source that depends on the old acceptance; the
+/// migration is the explicit spelling, and the second half of this test proves
+/// the migration type checks so the pin bump has somewhere to go.
+///
+/// EVIDENTIARY STATUS: REGRESSION for the rejection half, which was a clean
+/// `"score": 1` with `"errors": []` on the base `9b9e7bd56`; DISPOSITION LOCK
+/// for the migration half, which checked clean before and after.
 #[test]
 #[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
-fn coral_comparison_ops_broadcast_scalar_first_with_declared_signature() {
+fn coral_comparison_ops_reject_a_scalar_operand_and_name_the_replacement() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast-issue5");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -492,6 +501,35 @@ def eq_left() -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[05-OP-36]"))
+        .stdout(predicate::str::contains(
+            "does not admit a scalar beside a tensor",
+        ));
+
+    // The migration Coral takes, in the same package, so the pin bump can
+    // point at a spelling this compiler accepts.
+    let (_migrated_dir, migrated_home, migrated_pkg) = make_app("coral-cmp-explicit-issue5");
+    write_file(
+        &migrated_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([1.5]), 0i32, 3i64))
+def below() -> tensor[3, bool] = gt(expand(to_tensor([1.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
+def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.5]), 0i32, 3i64))
+def lt_left() -> tensor[3, bool] = lt(expand(to_tensor([2.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
+def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.0]), 0i32, 3i64))
+def eq_left() -> tensor[3, bool] = eq(expand(to_tensor([2.0]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &migrated_home)
+        .current_dir(&migrated_pkg)
+        .args(["check", migrated_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"score\": 1"))

@@ -509,14 +509,17 @@ fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
 /// operand-agreement guard: "rank-0 scalar operands are the backend's
 /// broadcast idiom and are exempt" (chelis#664). Before host-lane def
 /// applications were routed through this evaluator (chelis#1277 B2h) no DAG
-/// carrying a rank-0 operand reached it; now `gt(to_tensor([..]), 1.5)`,
-/// which `check` admits at score 1 and the compiled C runs, does. This
-/// broadcast makes the two lanes agree on today's answer and takes no
-/// position on whether the form should be admitted at all: chelis#1506
-/// records that [05-OP-36] admits two scalars or two same-dimension tensors
-/// and calls the mixed form a type error. If chelis#1506 resolves by
-/// rejecting, this is the site to remove. The bound is rank 0 in either
-/// position and nothing wider; every other disagreement is the typed error.
+/// carrying a rank-0 operand reached it; `gt(to_tensor([..]), 1.5)` then did.
+///
+/// chelis#1506 has since resolved that question by REJECTING: [05-OP-36]
+/// admits two scalars or two same-dimension tensors, and the mixed form is a
+/// type error, so no checked program produces that DAG any more. This site
+/// nevertheless stays, because the source-level form was never its only
+/// client: the rank-0 operand is also the backend's own idiom under
+/// chelis#664, which section 2.4.1 exempts by name, and Tier-2 lowerings
+/// synthesize it. Removing it is a separate change with its own evidence, not
+/// a consequence of chelis#1506. The bound is rank 0 in either position and
+/// nothing wider; every other disagreement is the typed error.
 fn broadcast_rank0_operands<'a>(
     lhs: &'a TensorValue,
     rhs: &'a TensorValue,
