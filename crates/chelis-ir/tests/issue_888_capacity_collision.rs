@@ -1,53 +1,44 @@
-//! Phase 0 executable reproduction for chelis#888.
-//!
-//! This test locks the known-bad saturating collision until Phase 1 replaces
-//! `DimExprKey` with exact, overflow-safe capacity identity. When that repair
-//! lands, this test must invert and move into the Phase 1 positive controls.
-//!
-//! This is the key-level half of the witness, and on its own it proves only
-//! that two capacities compare equal. The consequence #888 actually claims,
-//! that the collision reaches the memory planner and produces a wrong slot
-//! assignment, is pinned at
-//! `crates/chelis-backend-c/tests/issue_888_capacity_collision.rs`. Both must
-//! invert together.
+//! [04-SHAPE-1] shared-plan outcome for the original #888 collision.
+//! The key-level witness lives in capacity_key::tests, where construction is
+//! private. No production compatibility normalizer survives just for a test.
 
-use chelis_ir::dag::{DimExpr, DimExprKey};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::ownership::{lower_dag_ownership, plan_c_storage, verify_ownership};
+use chelis_types::types::Prim;
 
-fn mul(lhs: DimExpr, rhs: DimExpr) -> DimExpr {
-    DimExpr::Mul(Box::new(lhs), Box::new(rhs))
+fn shape(first: usize, second: usize) -> TensorType {
+    TensorType {
+        dims: vec![
+            DimInfo::Named("n".into(), None),
+            DimInfo::Lit(first),
+            DimInfo::Lit(second),
+        ],
+        precision: Prim::F32,
+    }
 }
 
-fn concrete(value: usize) -> DimExpr {
-    DimExpr::Concrete(value)
-}
-
-fn sym(name: &str) -> DimExpr {
-    DimExpr::Sym(name.into())
+fn slots_for(final_type: TensorType) -> usize {
+    let mut dag = Dag::new();
+    let small = shape(1 << 40, 1 << 40);
+    let a = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 1.0),
+        vec![],
+        small.clone(),
+        None,
+    );
+    let b = dag.add_node(RiscOp::Neg, vec![a], small, None);
+    let c = dag.add_node(RiscOp::Neg, vec![b], final_type, None);
+    dag.add_root(c);
+    let program = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    plan_c_storage(program).unwrap().slots().len()
 }
 
 #[test]
-fn phase0_reproduces_distinct_symbolic_capacities_colliding_at_usize_max() {
-    let smaller = mul(
-        sym("n"),
-        mul(concrete(1usize << 40), concrete(1usize << 40)),
-    );
-    let larger = mul(
-        sym("n"),
-        mul(concrete(1usize << 40), concrete(1usize << 41)),
-    );
+fn distinct_large_products_do_not_reuse_storage() {
+    assert_eq!(slots_for(shape(1 << 40, 1 << 41)), 3);
+}
 
-    assert_eq!(smaller.as_concrete(), None);
-    assert_eq!(larger.as_concrete(), None);
-
-    let saturated = DimExprKey::Mul(vec![
-        DimExprKey::Concrete(usize::MAX),
-        DimExprKey::Sym("n".into()),
-    ]);
-    assert_eq!(smaller.normalized_key(), saturated);
-    assert_eq!(larger.normalized_key(), saturated);
-    assert_eq!(
-        smaller.normalized_key(),
-        larger.normalized_key(),
-        "Phase 0 must reproduce #888's false capacity equality until Phase 1 fixes it"
-    );
+#[test]
+fn equivalent_large_factorizations_still_reuse_storage() {
+    assert_eq!(slots_for(shape(1 << 39, 1 << 41)), 2);
 }

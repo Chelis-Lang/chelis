@@ -528,7 +528,9 @@ fn detect_dense_gather_operands(
 }
 
 fn dims_equivalent(lhs: &DimInfo, rhs: &DimInfo) -> bool {
-    DimExpr::from(lhs).normalized_key() == DimExpr::from(rhs).normalized_key()
+    // A single axis is a resolved literal or an unresolved symbol, never a
+    // product. This pattern comparison is not storage-capacity authority.
+    DimExpr::from(lhs) == DimExpr::from(rhs)
 }
 
 fn expand_extent_matches_inserted_axis(dag: &Dag, node: &DagNode, axis: usize) -> bool {
@@ -808,6 +810,41 @@ mod tests {
     use super::*;
     use crate::dag::{Dag, DimExpr, DimInfo, TensorType};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn single_axis_equivalence_preserves_resolved_values_and_symbol_identity() {
+        let same = [
+            (DimInfo::Lit(0), DimInfo::Named("empty".into(), Some(0))),
+            (DimInfo::Lit(7), DimInfo::Named("n".into(), Some(7))),
+            (
+                DimInfo::Named("n".into(), Some(7)),
+                DimInfo::Named("m".into(), Some(7)),
+            ),
+            (
+                DimInfo::Named("n".into(), None),
+                DimInfo::Named("n".into(), None),
+            ),
+        ];
+        let different = [
+            (DimInfo::Lit(7), DimInfo::Lit(8)),
+            (
+                DimInfo::Named("n".into(), None),
+                DimInfo::Named("n".into(), Some(7)),
+            ),
+            (
+                DimInfo::Named("n".into(), None),
+                DimInfo::Named("m".into(), None),
+            ),
+        ];
+        for (lhs, rhs) in same {
+            assert!(dims_equivalent(&lhs, &rhs));
+            assert!(dims_equivalent(&rhs, &lhs));
+        }
+        for (lhs, rhs) in different {
+            assert!(!dims_equivalent(&lhs, &rhs));
+            assert!(!dims_equivalent(&rhs, &lhs));
+        }
+    }
 
     fn mat(r: usize, c: usize) -> TensorType {
         TensorType {

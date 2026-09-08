@@ -365,6 +365,37 @@ an exact key rule or return `NotProvenEqual`; it may not add a lossy fallback.
 Memory planners may reuse storage only when both the exact capacity key and the
 exact `Repr` agree. A failure to prove equality loses reuse, never correctness.
 
+#### Legacy capacity authority retirement (#888)
+
+The closeout removes `DimExprKey`, `DimExpr::normalized_key`, and their rational
+normalizer; there is no compatibility alias. The only remaining production
+caller was `specialize::dims_equivalent`, which compared single `DimInfo`
+atoms. It compares resolved literal values or unresolved symbol spellings
+directly through `DimExpr::from`, preserving that local axis-pattern decision.
+It neither proves storage capacity nor manufactures a scoped source identity.
+
+`DimExpr` remains the renderable/evaluable extent carrier. Its finite
+`evaluate` and `as_concrete` projections use checked multiplication, returning
+their existing error and `None` channels on overflow. Exact mathematical
+identity remains exclusively `CapacityKey::prove_equal`.
+
+The old rational-equivalence corpus migrates to the private exact-key tests:
+product-only equivalences remain positive; symbolic cancellation, quotient
+reassociation, and zero/partial-domain erasure become negative controls.
+The original large-product key witness is retained in
+`capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision`;
+the C/HIP `issue_888_capacity_collision` suites continue to prove placement.
+This closeout does not complete Phase 1: #889's mandatory checked runtime
+metadata and the composite Phase 1 oracle still have to land.
+
+The Phase 0 coverage freeze moves to name the inverted shared-plan witness,
+execute finite-projection overflow controls in release, and add a mutation
+restoring `DimExpr::normalized_key`. That restored owner must be rejected as
+unclassified even though it existed in the immutable foundation. Paired
+compile-fail/compiling API probes independently prevent the retired key and
+method from returning. The foundation identities remain byte-identical;
+only deleted active debt is removed and current samples are refreshed.
+
 ### C2.2 Runtime metadata types
 
 All host and device allocation/view paths consume privately constructed values:

@@ -357,6 +357,13 @@ class MutationContractTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_retired_capacity_projection_has_a_release_execution_leg(self) -> None:
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "dim_expr_evaluation" in command and "--release" in command
+            for command in commands
+        ), commands)
+
     def test_release_reproducers_and_landed_receipts_are_named(self) -> None:
         commands = [
             entry["command"] for entry in oracle.coverage_manifest()["release_reproducers"]

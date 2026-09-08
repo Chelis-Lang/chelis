@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "9e78c58fbad46dbd16a3c922cccce32b8291fe2d3f48a19b4869a6f687e972db",
+  "freeze_sha256": "e7b0c16863bf011a7f4a5b3d7eab8238ab64443f1168a968e3ea0d7fb633b037",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2482,23 +2482,11 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::as_concrete",
-      "sample": "lhs . as_concrete () ? * rhs . as_concrete () ?"
+      "sample": "lhs . as_concrete () ? . checked_mul (rhs . as_concrete () ?)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::evaluate",
-      "sample": "lhs . evaluate (bindings) ? * rhs . evaluate (bindings) ?"
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::normalized_key",
-      "sample": "lhs . normalized_key ()"
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=normalize_dim_product::take_factor",
-      "sample": "num_concrete . saturating_mul (value)"
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=push_product_atoms",
-      "sample": "concrete . saturating_mul (value)"
+      "sample": "lhs . evaluate (bindings) ? . checked_mul (rhs . evaluate (bindings) ?)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=dropout_sample",
@@ -2555,10 +2543,6 @@
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/verify.rs|owner=owner_byte_cost",
       "sample": "elements . checked_mul (value)"
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/specialize.rs|owner=dims_equivalent",
-      "sample": "DimExpr :: from (lhs) . normalized_key ()"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/specialize.rs|owner=node_has_contiguous_matrix_slices",
@@ -3143,6 +3127,20 @@
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
+          "witness_id": "phase0.mutate_retired_capacity_normalizer",
+          "expected_kind": "normalized-key-arithmetic",
+          "path": "crates/chelis-ir/src/dag.rs",
+          "implementation_sha256": "386288d6aab9d44f64a17b7223eea13e0fd6653b851c8bf74f15d490238f3430",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "DimExpr::normalized_key"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
           "witness_id": "phase0.mutate_capacity_owner_saturation",
           "expected_kind": "saturating-capacity-fold",
           "path": "crates/chelis-ir/src/capacity_key.rs",
@@ -3565,8 +3563,8 @@
         "command": "cargo test --release -p chelis-ir --doc capacity_key"
       },
       {
-        "name": "capacity collision key-level release reproducer",
-        "command": "cargo nextest run --release -p chelis-ir --test issue_888_capacity_collision"
+        "name": "exact shared capacity and finite projection release controls",
+        "command": "cargo nextest run --release -p chelis-ir --test issue_888_capacity_collision --test dim_expr_evaluation"
       },
       {
         "name": "capacity collision planner-level release reproducers",
