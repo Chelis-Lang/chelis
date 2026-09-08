@@ -138,6 +138,25 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         14,
         "unit-extent operands at a legal axis, plus one axis-out-of-range negative row",
     ),
+    // chelis#668 PR A. The `expand` sites here are POSITIVE CONTROLS: the
+    // reproducer PP5's retired validator used to reject is rank 1 beside rank
+    // 1 under the one-shape rule, so it is well typed and must stay spelled
+    // `expand`. Renaming either to `insert` would delete the control.
+    (
+        "crates/chelis-types/tests/issue_668_deleted_derivation_does_not_suppress_conv2d.rs",
+        3,
+        "three `y = expand(x, 0i32, 2i64)` bindings over a unit axis 0, feeding a `conv2d` whose validator must keep running; the operand carries the unit extent, so each is a same-rank broadcast",
+    ),
+    (
+        "crates/chelis-types/tests/issue_668_rank_agreement_is_unification.rs",
+        4,
+        "one program site, `e = expand(x, 0i32, 2i64)` over a symbolic operand, plus three occurrences of the spelling inside test labels and one assertion message",
+    ),
+    (
+        "crates/chelis-cli/tests/issue_668_elementwise_rank_honesty.rs",
+        1,
+        "one program site, `e = expand(x, 0i32, 3i64)`, whose refuted unit-extent claim is executed on the evaluator and C lanes to assert §2.4.1's `Domain` trap",
+    ),
 ];
 
 fn repo_root() -> PathBuf {

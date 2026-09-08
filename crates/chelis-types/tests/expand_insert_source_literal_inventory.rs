@@ -236,12 +236,6 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     ("crates/chelis-types/src/infer/common.rs", 1, 1, ""),
     (
-        "crates/chelis-types/src/infer/shape_honesty.rs",
-        0,
-        1,
-        "the rank-change suggestion, which after the split is `insert` and cannot be `expand`",
-    ),
-    (
         "crates/chelis-types/src/infer/tests/more.rs",
         0,
         1,
@@ -249,9 +243,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-types/src/infer/validate.rs",
-        3,
         2,
-        "the movement allowlist and the rank-derivation table each carry both; the extra `expand` is the same integer-inner-product guidance sentence",
+        1,
+        "the movement allowlist carries both; the extra `expand` is the integer-inner-product guidance sentence. The rank-derivation table carried the third pair and is gone with the identity-rank validator (chelis#668), which also took `shape_honesty.rs`'s only literal, the rank-change suggestion, off this list entirely",
     ),
     (
         "crates/chelis-types/src/infer/vmap_extent.rs",
