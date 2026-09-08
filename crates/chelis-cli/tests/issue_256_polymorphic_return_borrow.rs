@@ -720,10 +720,7 @@ const BNP_PRELUDE: &str = "type BatchNormParams[n] =\n  \
 /// Write a `.ch` fixture with the `BNP_PRELUDE`, canonicalize it, and check it.
 fn check_bnp_program(dir: &Path, module: &str, body: &str) -> Value {
     let fixture = dir.join(format!("{module}.ch"));
-    write_file(
-        &fixture,
-        &format!("module {module}\n{BNP_PRELUDE}{body}"),
-    );
+    write_file(&fixture, &format!("module {module}\n{BNP_PRELUDE}{body}"));
     fmt_inplace(&fixture);
     run_check(&fixture)
 }

@@ -2519,14 +2519,16 @@ a tuple containing one). Borrowing a concretely non-tensor value (a scalar
 `t-prim`, `()`, a function, a non-tensor-carrying ADT, or a tuple of
 scalars) is a type error.
 
-The borrow inner's type is not always concrete at the borrow site. When the
-inner is the result of a polymorphic-return expression — for example
-`relu(prev_out)` or `mean(...)` whose dimension variables are pinned only
-by a later `&tensor[..]` parameter in the surrounding call — the inner is
+The borrow inner's type is not always known at the borrow site. When the
+inner's outer type constructor is still unknown — a parameter whose
+annotation is an inference hole, a bare authored binder, or a `let` binding
+or lambda parameter that takes its type from one of those — the inner is
 still an unresolved type variable when the borrow is first checked. In that
 case classification is **deferred**: the borrow is provisionally accepted
 and the surrounding flow's expected argument type pins the variable through
-unification.
+unification. A tensor whose dimension variables are unresolved is not such
+a case: its outer constructor is already a tensor, and it is classified
+immediately.
 
 The deferral is sound only when the variable is *eventually* pinned to a
 tensor or tensor carrier. If the consumer is itself fully polymorphic
