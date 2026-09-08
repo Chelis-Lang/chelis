@@ -560,17 +560,9 @@ struct OwnerRequirement {
     dedicated: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct SlotInterval {
-    slot: StorageSlotId,
-    birth_index: usize,
-    last_use_index: usize,
-}
-
 struct AssignedSlots {
     slots: Vec<StorageSlotPlan>,
     reusable: BTreeMap<NodeId, ReusableOwnedStorage>,
-    intervals: Vec<SlotInterval>,
 }
 
 type BuiltStoragePlan = (
@@ -590,18 +582,14 @@ fn build_storage_plan(
     let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
     let mut requirements = owner_requirements(dag, &placements, &owner_of)?;
     extend_lifetimes(dag, &placements, &owner_of, &mut requirements);
-    let AssignedSlots {
-        slots,
-        reusable,
-        intervals,
-    } = assign_slots(
+    let AssignedSlots { slots, reusable } = assign_slots(
         dag,
         &mut placements,
         &owner_of,
         &requirements,
         &destructively_dropped,
     )?;
-    let max_live_bytes = physical_live_byte_bound(dag.len(), &slots, &intervals)?;
+    let max_live_bytes = physical_live_byte_bound(&slots)?;
     Ok((
         placements.into_boxed_slice(),
         slots.into_boxed_slice(),
@@ -844,7 +832,6 @@ fn assign_slots(
     let mut future_reuse_allowed = Vec::<bool>::new();
     let mut owner_to_slot = BTreeMap::<NodeId, StorageSlotId>::new();
     let mut reusable = BTreeMap::new();
-    let mut intervals = Vec::new();
 
     for requirement in requirements.values() {
         let exact_in_place =
@@ -894,11 +881,6 @@ fn assign_slots(
             && !destructively_dropped.contains(&requirement.owner);
         owner_to_slot.insert(requirement.owner, slot);
         assign_placement_slot(&mut placements[requirement.owner.0], slot);
-        intervals.push(SlotInterval {
-            slot,
-            birth_index: requirement.birth_index,
-            last_use_index: requirement.last_use_index,
-        });
 
         if let Some((source, facts)) = token_facts {
             let token = ReusableOwnedStorage::mint(
@@ -925,11 +907,7 @@ fn assign_slots(
             }
         }
     }
-    Ok(AssignedSlots {
-        slots,
-        reusable,
-        intervals,
-    })
+    Ok(AssignedSlots { slots, reusable })
 }
 
 fn allocation_elements_for_node(dag: VerifiedDagView<'_>, node: NodeId) -> DimExpr {
@@ -1072,32 +1050,24 @@ fn exact_shape_equal(
         }))
 }
 
-fn physical_live_byte_bound(
-    program_len: usize,
-    slots: &[StorageSlotPlan],
-    intervals: &[SlotInterval],
-) -> Result<LiveByteBound, OwnershipError> {
-    let mut maximum = 0u64;
-    for point in 0..=program_len {
-        let live = intervals
-            .iter()
-            .filter(|interval| interval.birth_index <= point && point <= interval.last_use_index)
-            .map(|interval| interval.slot)
-            .collect::<BTreeSet<_>>();
-        let mut point_bytes = 0u64;
-        for slot in live {
-            let Some(bytes) = slots[slot.index].capacity.allocation_bytes else {
-                return Ok(LiveByteBound::Unknown);
-            };
-            point_bytes = point_bytes.checked_add(bytes).ok_or_else(|| {
-                OwnershipError::LiveByteBoundOverflow {
-                    context: format!("summing physical DAG slots at program point {point}"),
-                }
+fn physical_live_byte_bound(slots: &[StorageSlotPlan]) -> Result<LiveByteBound, OwnershipError> {
+    // Logical death permits reuse; it does not release physical storage. HIP
+    // retains its entire slot pool through cleanup, and C retains descriptors
+    // unless explicitly dropped. Count every distinct slot once, including dead
+    // gaps. This is a concrete upper bound, conservative for early C Drops, not
+    // a claim that every lane necessarily observes the same exact peak.
+    let mut total = 0u64;
+    for slot in slots {
+        let Some(bytes) = slot.capacity.allocation_bytes else {
+            return Ok(LiveByteBound::Unknown);
+        };
+        total = total
+            .checked_add(bytes)
+            .ok_or_else(|| OwnershipError::LiveByteBoundOverflow {
+                context: "summing distinct physical DAG slots".to_string(),
             })?;
-        }
-        maximum = maximum.max(point_bytes);
     }
-    Ok(LiveByteBound::Exact(maximum))
+    Ok(LiveByteBound::Exact(total))
 }
 
 #[cfg(test)]

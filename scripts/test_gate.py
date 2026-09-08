@@ -739,6 +739,9 @@ NON_GATE_WORKFLOWS = {
     "ci.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
+    # Manually dispatched Phase 3 acceptance on a provisioned AMD GPU runner;
+    # the hardware oracle is not part of the per-PR developer gate.
+    "ownership-hip.yml",
     "release.yml",
     "conformance.yml",
     "conformance-nightly.yml",

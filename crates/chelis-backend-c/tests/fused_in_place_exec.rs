@@ -7,6 +7,116 @@ use std::process::Command;
 use std::sync::OnceLock;
 use support::codegen;
 
+/// Physical storage outlives a logical last use unless the emitter releases it.
+/// Cover retained dead slots, exact-capacity recycling, and early explicit Drop.
+#[test]
+fn physical_slot_bound_covers_executed_allocation_lifetimes() {
+    use chelis_ir::ownership::{LiveByteBound, plan_c_storage};
+
+    for (reduce, drop_first, expected_bound, expected_peak, expected_result) in [
+        (false, false, 8, 8, "1"),
+        (true, false, 24, 24, "-4"),
+        (false, true, 20, 16, "2"),
+    ] {
+        let mut dag = Dag::new();
+        let scalar = TensorType::scalar_f32();
+        let first_type = if reduce || drop_first {
+            vec_f32(4)
+        } else {
+            scalar.clone()
+        };
+        let first = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            first_type.clone(),
+            None,
+        );
+        let result = if drop_first {
+            dag.add_node(RiscOp::Drop, vec![first], first_type, None);
+            dag.add_node(RiscOp::synth_const(Prim::F32, 2.0), vec![], scalar, None)
+        } else {
+            let op = if reduce {
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: Prim::F32,
+                }
+            } else {
+                RiscOp::Neg
+            };
+            let second = dag.add_node(op, vec![first], scalar.clone(), None);
+            dag.add_node(RiscOp::Neg, vec![second], scalar, None)
+        };
+        dag.add_root(result);
+        let plan = plan_c_storage(support::verified_dag(&dag, Default::default())).unwrap();
+        assert_eq!(plan.max_live_bytes(), LiveByteBound::Exact(expected_bound));
+        let generated = codegen(&dag, "physical_peak_probe").unwrap();
+        // These fixtures have only unique f32 descriptors. Count actual payload
+        // allocation/release, not logical owners or cumulative allocation traffic.
+        let instrumented = generated
+            .c_source
+            .replace("chelis_alloc(", "probe_alloc(")
+            .replace("chelis_tensor_release(", "probe_release(");
+        let prefix = r#"
+#include <stdio.h>
+#include "chelis_runtime.h"
+static int64_t live_bytes = 0, peak_bytes = 0;
+static chelis_tensor *probe_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype) {
+    chelis_tensor *t = chelis_alloc(rank, shape, dtype);
+    live_bytes += chelis_tensor_numel(t) * sizeof(float);
+    if (live_bytes > peak_bytes) peak_bytes = live_bytes;
+    return t;
+}
+static void probe_release(chelis_tensor *t) {
+    live_bytes -= chelis_tensor_numel(t) * sizeof(float);
+    chelis_tensor_release(t);
+}
+"#;
+        let main = r#"
+int main(void) {
+    chelis_tensor *out[1] = {0};
+    physical_peak_probe(NULL, 0, out, 1);
+    chelis_read_view view = chelis_tensor_read_view(out[0]);
+    printf("peak=%lld result=%g\n", (long long)peak_bytes, (double)*(const float *)view.data);
+    probe_release(out[0]);
+    return live_bytes != 0;
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("probe.c");
+        fs::write(&source, format!("{prefix}\n{instrumented}\n{main}")).unwrap();
+        let toolchain = chelis_backend_c::toolchain::test_toolchain(generated.requirements);
+        let bin = dir.path().join("probe");
+        let compile = Command::new(toolchain.compiler)
+            .arg("-O0")
+            .arg("-I")
+            .arg(runtime_include_dir())
+            .args(toolchain.compile_flags)
+            .arg(source)
+            .arg(runtime_lib_path())
+            .args(toolchain.link_flags)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(bin).output().unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(run.stdout).unwrap(),
+            format!("peak={expected_peak} result={expected_result}\n")
+        );
+        assert!(expected_bound >= expected_peak);
+    }
+}
+
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],

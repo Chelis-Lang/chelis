@@ -498,7 +498,13 @@ value, and neither backend may consult `DimExprKey`, a machine-integer element
 count, or runtime-observed equality. Slot allocation and peak-byte accounting
 consume the same plan: distinct live physical slots are counted once, shared
 views add no bytes, C caller storage is excluded, HIP input mirrors are
-included, and C materialized stores own independent storage.
+included, and C materialized stores own independent storage. The concrete upper
+bound sums distinct slot capacities, never logical-owner live intervals: logical
+death permits recycling but does not itself release an allocation. HIP retains
+the whole slot pool through cleanup; C can release a descriptor at explicit
+`Drop`, so its slot sum can conservatively exceed the observed peak. A known
+`LiveByteBound::Exact` value is a concrete upper bound, not an assertion of an
+exact observed peak.
 
 An owned `Drop` ends any live exclusive write guard before releasing its
 descriptor. Because that release destroys the descriptor as well as ending the
