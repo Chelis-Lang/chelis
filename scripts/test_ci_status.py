@@ -102,9 +102,9 @@ class StatusTests(unittest.TestCase):
                          [{"context": "Linux", "app_id": None}])
 
     def test_head_base_or_state_change_aborts_watch(self):
-        original = {"headRefOid": "a" * 40, "baseRefOid": "c" * 40, "baseRefName": "main", "state": "OPEN"}
+        original = {"headRefOid": "a" * 40, "baseRefOid": "c" * 40, "baseTipOid": "c" * 40, "baseRefName": "main", "state": "OPEN"}
         ci_status.check_identity(original, original)
-        for key, value in (("headRefOid", "b" * 40), ("baseRefOid", "d" * 40), ("baseRefName", "other"), ("state", "MERGED")):
+        for key, value in (("headRefOid", "b" * 40), ("baseRefOid", "d" * 40), ("baseTipOid", "d" * 40), ("baseRefName", "other"), ("state", "MERGED")):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 ci_status.check_identity(original, {**original, key: value})
 
@@ -116,9 +116,10 @@ class CommandTests(unittest.TestCase):
         checks = [check("macOS Smoke")]
         if optional:
             checks.append(optional)
-        return [self.identity, {"checks": [{"context": "macOS Smoke", "app_id": 15368}]},
+        return [self.identity, {"object": {"sha": "d" * 40}},
+                {"checks": [{"context": "macOS Smoke", "app_id": 15368}]},
                 [[], []], [{"check_runs": checks[:1]}, {"check_runs": checks[1:]}],
-                [[], []], self.identity]
+                [[], []], self.identity, {"object": {"sha": "d" * 40}}]
 
     def run_cli(self, replies, *args):
         output, errors = io.StringIO(), io.StringIO()
@@ -132,16 +133,17 @@ class CommandTests(unittest.TestCase):
             "CI Test Telemetry", ident=2, status="queued", conclusion=None)), "--watch")
         self.assertEqual(code, 0)
         self.assertIn('"other_pending": ["CI Test Telemetry"]', output)
-        self.assertIn("--paginate", gh.call_args_list[2].args)
         self.assertIn("--paginate", gh.call_args_list[3].args)
         self.assertIn("--paginate", gh.call_args_list[4].args)
+        self.assertIn("--paginate", gh.call_args_list[5].args)
+        self.assertEqual(gh.call_args_list[1].args, ("api", "repos/Chelis-Lang/chelis/git/ref/heads/main"))
 
     def test_cli_does_not_silently_accept_optional_failure(self):
         self.assertEqual(self.run_cli(self.replies(optional=check(
             "CI Test Telemetry", ident=2, conclusion="failure")))[0], 1)
 
     def test_api_failure_aborts_without_a_report(self):
-        for index in range(1, 6):
+        for index in range(1, 8):
             with self.subTest(index=index):
                 replies = self.replies()
                 replies[index] = RuntimeError("HTTP 403")
@@ -152,21 +154,29 @@ class CommandTests(unittest.TestCase):
 
     def test_moving_head_during_reads_aborts_without_a_report(self):
         replies = self.replies()
-        replies[-1] = {**self.identity, "headRefOid": "b" * 40}
+        replies[-2] = {**self.identity, "headRefOid": "b" * 40}
         code, output, _, _ = self.run_cli(replies)
         self.assertEqual(code, 3)
         self.assertEqual(output, "")
 
     def test_expected_head_mismatch_aborts_before_polling(self):
-        code, output, _, gh = self.run_cli([self.identity], "--head", "b" * 40)
+        code, output, _, gh = self.run_cli(self.replies()[:2], "--head", "b" * 40)
         self.assertEqual(code, 3)
         self.assertEqual(output, "")
-        self.assertEqual(gh.call_count, 1)
+        self.assertEqual(gh.call_count, 2)
+
+    def test_live_base_movement_aborts_when_pr_base_metadata_is_unchanged(self):
+        replies = self.replies()
+        replies[-1] = {"object": {"sha": "e" * 40}}
+        code, output, errors, _ = self.run_cli(replies)
+        self.assertEqual(code, 3)
+        self.assertEqual(output, "")
+        self.assertIn("base", errors)
 
     def test_pending_and_missing_requirements_exit_two(self):
         for check_runs in ([], [check("macOS Smoke", status="queued", conclusion=None)]):
             replies = self.replies()
-            replies[3] = [{"check_runs": check_runs}]
+            replies[4] = [{"check_runs": check_runs}]
             self.assertEqual(self.run_cli(replies)[0], 2)
 
 

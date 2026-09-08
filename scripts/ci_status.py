@@ -76,7 +76,7 @@ def classify(required: list[dict], checks: list[dict], statuses: list[dict]) -> 
 
 def check_identity(original: dict, current: dict) -> None:
     if original["state"] != "OPEN" or any(original[key] != current[key] for key in
-                                            ("headRefOid", "baseRefOid", "baseRefName", "state")):
+                                            ("headRefOid", "baseRefOid", "baseTipOid", "baseRefName", "state")):
         raise ValueError("PR head, base, or open state changed; restart with the intended head")
 
 
@@ -85,6 +85,17 @@ def gh(*args: str):
     if completed.returncode:
         raise RuntimeError(completed.stderr.strip() or "GitHub command failed")
     return json.loads(completed.stdout)
+
+
+def pr_identity(repo: str, pr: int) -> dict:
+    identity = gh("pr", "view", str(pr), "--repo", repo, "--json",
+                  "headRefOid,baseRefOid,baseRefName,state")
+    # PR baseRefOid can retain the comparison base after the branch advances.
+    # Read the actual ref as well so a watch cannot miss that movement.
+    base = quote(identity["baseRefName"], safe="")
+    identity = {**identity, "baseTipOid": gh(
+        "api", f"repos/{repo}/git/ref/heads/{base}")["object"]["sha"]}
+    return identity
 
 
 def snapshot(repo: str, pr: int, original: dict) -> dict:
@@ -100,9 +111,9 @@ def snapshot(repo: str, pr: int, original: dict) -> dict:
     result = classify(requirements(classic, [rule for page in rules for rule in page]),
                       [check for page in check_pages for check in page["check_runs"]],
                       [status for page in status_pages for status in page])
-    check_identity(original, gh("pr", "view", str(pr), "--repo", repo, "--json",
-                                "headRefOid,baseRefOid,baseRefName,state"))
-    return {"repo": repo, "pr": pr, "head": head, **result}
+    check_identity(original, pr_identity(repo, pr))
+    return {"repo": repo, "pr": pr, "head": head,
+            "base_tip": original["baseTipOid"], **result}
 
 
 def main(argv=None) -> int:
@@ -116,8 +127,7 @@ def main(argv=None) -> int:
     if args.interval < 5:
         parser.error("--interval must be at least 5 seconds")
     try:
-        original = gh("pr", "view", str(args.pr), "--repo", args.repo, "--json",
-                      "headRefOid,baseRefOid,baseRefName,state")
+        original = pr_identity(args.repo, args.pr)
         check_identity(original, original)
         if args.head and args.head != original["headRefOid"]:
             raise ValueError("PR head does not match --head")

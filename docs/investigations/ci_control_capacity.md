@@ -81,7 +81,9 @@ checked independently when the requirement permits any app.
 
 The tool reads classic branch protection and effective branch rules, paginates
 all current check runs and commit statuses, and separates required checks from
-other work. It rechecks the head, base commit and branch, and open state after each snapshot.
+other work. It rechecks the head, PR comparison base, live base branch tip, and
+open state after each snapshot. The separate ref read matters because GitHub's
+PR `baseRefOid` can retain the older comparison commit after `main` advances.
 Use `--watch` as a background process, as required by the agent contract.
 
 `required_passed` means only that the observed required status checks pass on
