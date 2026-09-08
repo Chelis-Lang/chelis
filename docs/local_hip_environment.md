@@ -33,6 +33,8 @@ gh workflow run ownership-hip.yml --ref main -f commit=<full-40-character-SHA>
 GitHub requires a manually dispatched workflow to exist on the default branch
 ([workflow dispatch documentation](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)).
 The job has read-only repository access and never runs automatically for PRs.
+Its `.yml` file deliberately uses JSON syntax (a YAML subset), so the Python
+guard validates decoded event keys and rejects duplicate keys or other spellings.
 Use a dedicated runner for trusted repository commits, without workstation
 credentials or unrelated jobs sharing its GPU/build directory.
 

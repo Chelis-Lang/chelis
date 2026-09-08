@@ -68,26 +68,80 @@ class ReceiptTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_manual_dispatch_keeps_untrusted_pr_events_off_the_gpu_host(self):
+    def workflow(self):
+        # This security-sensitive .yml uses JSON's unambiguous YAML subset.
+        # Reject other spellings, aliases, and duplicate keys instead of trying
+        # to approximate YAML event semantics with substring checks.
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate workflow key: {key}")
+                result[key] = value
+            return result
+
         source = (ci.ROOT / ".github/workflows/ownership-hip.yml").read_text()
-        self.assertIn("  workflow_dispatch:", source)
-        self.assertNotIn("pull_request:", source)
-        self.assertNotIn("pull_request_target:", source)
-        self.assertNotIn("  push:", source)
-        self.assertIn("  contents: read", source)
-        self.assertIn("persist-credentials: false", source)
-        self.assertIn("runs-on: [self-hosted, linux, x64, chelis-hip-gfx1151]", source)
+        return json.loads(source, object_pairs_hook=unique_object)
+
+    def test_manual_dispatch_keeps_untrusted_pr_events_off_the_gpu_host(self):
+        workflow = self.workflow()
+        self.assertIsInstance(workflow["on"], dict)
+        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(set(workflow["jobs"]), {"phase3"})
+        job = workflow["jobs"]["phase3"]
+        self.assertEqual(job["runs-on"], ["self-hosted", "linux", "x64", "chelis-hip-gfx1151"])
+        self.assertEqual(job["steps"][0], {
+            "uses": "actions/checkout@v6",
+            "with": {"ref": "${{ inputs.commit }}", "persist-credentials": False},
+        })
+
+    def test_event_policy_rejects_every_automatic_event_and_alternate_shape(self):
+        original = self.workflow()
+        for event in ["pull_request", "pull_request_target", "push", "workflow_run",
+                      "schedule", "repository_dispatch", "issue_comment"]:
+            mutated = json.loads(json.dumps(original))
+            mutated["on"][event] = {}
+            with self.subTest(event=event), patch.object(Path, "read_text", return_value=json.dumps(mutated)):
+                with self.assertRaises(AssertionError):
+                    self.test_manual_dispatch_keeps_untrusted_pr_events_off_the_gpu_host()
+        for events in ["workflow_dispatch", ["workflow_dispatch"], {}]:
+            mutated = dict(original, on=events)
+            with self.subTest(events=events), patch.object(Path, "read_text", return_value=json.dumps(mutated)):
+                with self.assertRaises(AssertionError):
+                    self.test_manual_dispatch_keeps_untrusted_pr_events_off_the_gpu_host()
+
+    def test_quoted_escaped_duplicate_and_yaml_only_event_forms_fail_closed(self):
+        original = json.dumps(self.workflow())
+        sources = [
+            original.replace('"workflow_dispatch":', '"pull_request": {}, "workflow_dispatch":', 1),
+            original.replace('"workflow_dispatch":', '"pull_\\u0072equest": {}, "workflow_dispatch":', 1),
+            original.replace('"workflow_dispatch":', '"workflow_dispatch": {}, "workflow_dispatch":', 1),
+            original.replace('"on":', '"on": {"pull_request": {}}, "on":', 1),
+            "on:\n  workflow_dispatch:\n  'pull_request':\n",
+            'on: {workflow_dispatch: {}, "pull_request": {}}\n',
+            "events: &events {pull_request: {}}\non: *events\n",
+        ]
+        for source in sources:
+            with self.subTest(source=source), patch.object(Path, "read_text", return_value=source):
+                with self.assertRaises((AssertionError, ValueError)):
+                    self.test_manual_dispatch_keeps_untrusted_pr_events_off_the_gpu_host()
 
     def test_oracle_failure_cannot_be_hidden_by_the_artifact_step(self):
-        source = (ci.ROOT / ".github/workflows/ownership-hip.yml").read_text()
-        self.assertIn("ref: ${{ inputs.commit }}", source)
-        self.assertIn("OWNERSHIP_HIP_COMMIT: ${{ inputs.commit }}", source)
-        self.assertIn("run: .venv/bin/python scripts/ownership_hip_ci.py\n", source)
-        self.assertNotIn("continue-on-error", source)
-        self.assertNotIn("|| true", source)
-        self.assertIn("if: always()", source)
-        self.assertIn("path: target/ownership-hip-ci/", source)
-        self.assertIn("if-no-files-found: error", source)
+        workflow = self.workflow()
+        job = workflow["jobs"]["phase3"]
+        self.assertEqual(job["env"]["OWNERSHIP_HIP_COMMIT"], "${{ inputs.commit }}")
+        self.assertNotIn("continue-on-error", job)
+        for step in job["steps"]:
+            self.assertNotIn("continue-on-error", step)
+        oracle = [step for step in job["steps"] if step.get("name") == "Execute the authoritative hardware oracle"]
+        self.assertEqual(oracle, [{"name": "Execute the authoritative hardware oracle",
+                                   "run": ".venv/bin/python scripts/ownership_hip_ci.py"}])
+        artifact = job["steps"][-1]
+        self.assertEqual(artifact["if"], "always()")
+        self.assertEqual(artifact["uses"], "actions/upload-artifact@v7")
+        self.assertEqual(artifact["with"]["path"], "target/ownership-hip-ci/")
+        self.assertEqual(artifact["with"]["if-no-files-found"], "error")
 
 
 if __name__ == "__main__":
