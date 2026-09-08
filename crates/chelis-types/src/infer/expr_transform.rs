@@ -83,7 +83,11 @@ pub(super) fn grad_result_type(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<Type> {
-    let targets = if let Some(indices) = grad_wrt_indices(list, errors)? {
+    // `grad_result_type` returns `Option<Type>` where `None` already means "a
+    // diagnostic was pushed", the pre-existing convention at this boundary.
+    // `.ok()?` preserves it exactly; threading the witness further is plumbing
+    // this change does not take on.
+    let targets = if let Some(indices) = grad_wrt_indices(list, errors).ok()? {
         let mut selected = Vec::with_capacity(indices.len());
         for index in indices {
             let Some(arg) = args.get(index) else {
@@ -130,14 +134,39 @@ pub(super) fn grad_result_type(
     })
 }
 
+/// What the `grad` `wrt` slot can legitimately hold: a tuple of parameter
+/// indices, or a single one.
+///
+/// chelis#874 Slice 2: this is the shape the seam reads at `grad` child 1.
+/// The tuple's OWN children are `RuntimeExpr`-role, not selector slots, so
+/// their per-element diagnostics below stay where they are; the seam decides
+/// only whether the slot itself is readable, exactly as it decides `vmap`'s
+/// axis while the non-negativity check stays a separate value check.
+pub(super) enum WrtSelector<'a> {
+    Tuple(&'a deep::List),
+    Index(i64),
+}
+
+fn wrt_selector(expr: &deep::Expr) -> Option<WrtSelector<'_>> {
+    // Carrier note: this `Expr::List`-only match is PRESERVED from the
+    // pre-migration code deliberately, so the migration changes no verdict.
+    // On the stamped ingress a `(tuple {} ..)` at this slot arrives as
+    // `Expr::Node` and does not match, which is a chelis#1107-class carrier
+    // question on chelis#1125's axis rather than this PR's; see the pull
+    // request body.
+    if let deep::Expr::List(tuple, _) = expr
+        && get_tag(tuple) == Some(DeepTag::Tuple)
+    {
+        return Some(WrtSelector::Tuple(tuple));
+    }
+    extract_int_for_dim(expr).map(WrtSelector::Index)
+}
+
 pub(super) fn grad_wrt_indices(
     list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
-) -> Option<Option<Vec<usize>>> {
+) -> Result<Option<Vec<usize>>, ErrorWitness> {
     let kids = children(list);
-    let Some(wrt_expr) = kids.get(1) else {
-        return Some(None);
-    };
 
     // Issue #216: cast-aware so a Deep-direct grad node with cast-wrapped
     // wrt indices peels to the underlying int and trips the
@@ -145,48 +174,66 @@ pub(super) fn grad_wrt_indices(
     // parameter names to bare literal ints before reaching here, so the
     // swap is defense-in-depth for Deep-direct callers (decompiler,
     // macro output, custom tooling).
-    match wrt_expr {
-        deep::Expr::List(tuple, _) if get_tag(tuple) == Some(DeepTag::Tuple) => {
+    //
+    // chelis#874 Slice 2: the slot read runs through the shared seam. An
+    // ABSENT `wrt` is `grad(f)`'s documented every-parameter default and stays
+    // `Ok(None)`; a PRESENT child that is neither a tuple form nor an integer
+    // is `Err`, with the seam's `MalformedForm` already pushed.
+    let selector = match read_optional_slot(
+        kids,
+        DeepTag::Grad,
+        1,
+        SlotShape::ParameterIndices,
+        wrt_selector,
+        errors,
+    )? {
+        Some(selector) => selector,
+        None => return Ok(None),
+    };
+
+    match selector {
+        WrtSelector::Tuple(tuple) => {
             let mut indices = Vec::new();
             for item in children(tuple) {
                 let Some(index) = extract_int_for_dim(item) else {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        "grad `wrt` tuple must contain integer parameter indices".to_string(),
-                        vec![],
+                    return Err(report_witness(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            "grad `wrt` tuple must contain integer parameter indices".to_string(),
+                            vec![],
+                        ),
                     ));
-                    return None;
                 };
                 if index < 0 {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::DimensionMismatch,
-                        format!("grad `wrt` index must be non-negative, got {index}"),
-                        vec![],
+                    return Err(report_witness(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!("grad `wrt` index must be non-negative, got {index}"),
+                            vec![],
+                        ),
                     ));
-                    return None;
                 }
                 indices.push(index as usize);
             }
-            Some(Some(indices))
+            Ok(Some(indices))
         }
-        other => {
-            let Some(index) = extract_int_for_dim(other) else {
-                errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    "grad `wrt` must be an integer parameter index or tuple of indices".to_string(),
-                    vec![],
-                ));
-                return None;
-            };
+        // A readable index that is out of range is a VALUE error, not a
+        // malformed slot, and keeps its own diagnostic -- the same split
+        // `vmap`'s negative axis keeps after Slice 1.
+        WrtSelector::Index(index) => {
             if index < 0 {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!("grad `wrt` index must be non-negative, got {index}"),
-                    vec![],
+                return Err(report_witness(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!("grad `wrt` index must be non-negative, got {index}"),
+                        vec![],
+                    ),
                 ));
-                return None;
             }
-            Some(Some(vec![index as usize]))
+            Ok(Some(vec![index as usize]))
         }
     }
 }

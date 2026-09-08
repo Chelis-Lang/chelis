@@ -119,6 +119,27 @@ fn assert_slot_rejection(body: &str, form: &str, shape: &str, label: &str) {
     );
 }
 
+/// The seam's rejection: a `MalformedForm` whose message contains `expected`.
+/// Whitespace is normalized so a wrapped expectation in the test source
+/// matches the single-line diagnostic.
+#[track_caller]
+fn assert_seam_message(errors: &[CheckError], expected: &str, label: &str) {
+    let want: String = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hit = errors.iter().any(|e| {
+        matches!(e.kind, CheckErrorKind::MalformedForm)
+            && e.message
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(&want)
+    });
+    assert!(
+        hit,
+        "{label}: expected a MalformedForm containing\n  {want}\ngot:\n  {}",
+        rendered(errors)
+    );
+}
+
 /// No diagnostic may blame the §C4.1 owner-stamp tripwire. That message is an
 /// `internal:` invariant violation naming a node the author did not write
 /// wrongly, and reporting it instead of the real cause is the R5 defect.
@@ -467,20 +488,37 @@ fn grad_applied_to_a_non_function_is_rejected() {
     );
 }
 
-/// DISPOSITION LOCK. `grad` of a real function keeps working, and so does the
-/// `wrt` selector's own rejection.
+/// DISPOSITION LOCK. `grad` of a real function keeps working, and the `wrt`
+/// slot's VALUE checks keep their own diagnostics after Slice 2 moved the
+/// slot's READ onto the seam.
+///
+/// The split is the one `vmap`'s axis already keeps: an unreadable child is a
+/// malformed slot, covered by `migrated_selector_reads_reject_through_the_seam`
+/// above, while a readable index that is out of range is a value error and
+/// stays a `DimensionMismatch`. Before Slice 2 this test asserted the
+/// unreadable case's old text, "grad `wrt` must be an integer parameter index
+/// or tuple of indices"; that message is gone by design and its row moved.
 #[test]
-fn grad_of_a_function_still_checks_and_wrt_keeps_its_diagnostic() {
+fn grad_of_a_function_still_checks_and_wrt_value_checks_are_unchanged() {
     assert_accepted(
         "(def {} d4 (grad {} (var {} double)))",
         "grad of a function",
     );
-    let errors = diagnostics("(def {} d6 (grad {} (var {} double) (var {} nonexistent_name_zzz)))");
+    let errors = diagnostics("(def {} d6 (grad {} (var {} double) -1))");
     assert!(
-        errors.iter().any(|e| e
-            .message
-            .contains("grad `wrt` must be an integer parameter index or tuple of indices")),
-        "the `wrt` selector keeps its own diagnostic; got:\n  {}",
+        errors
+            .iter()
+            .any(|e| matches!(e.kind, CheckErrorKind::DimensionMismatch)
+                && e.message
+                    .contains("grad `wrt` index must be non-negative, got -1")),
+        "a readable negative `wrt` index keeps its own value diagnostic; got:\n  {}",
+        rendered(&errors)
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|e| matches!(e.kind, CheckErrorKind::MalformedForm)),
+        "a readable index is not a malformed slot; got:\n  {}",
         rendered(&errors)
     );
 }
@@ -725,61 +763,125 @@ fn metadata_carrying_children_still_check() {
 
 // ── The four correctly-rejecting slots stay correct ────────────────────────
 
-/// DISPOSITION LOCK. `access`, `tuple-get`, and `cast` already spelled their
-/// selector reads as total decisions over the child; Slice 2 migrates them
-/// onto the shared seam and this row is what proves the migration changed no
-/// verdict and no message.
+/// MIGRATION LOCKS (Slice 2). These four slots already rejected an unreadable
+/// child correctly before PP8; Slice 2 moves them onto the same seam, so one
+/// mechanism owns every role-slot read and chelis#874's condition is met.
+///
+/// Each row is red on `1b685d8c4` (the pre-migration text) and green after,
+/// which makes them regression tests for the migration and locks for the
+/// verdict: the slot still rejects, and the diagnostic still names the form
+/// and what it found. What changes is the text and the kind, deliberately --
+/// a seam that let each caller keep its own message would guarantee nothing
+/// (`spec/design/checker_totality.md` §PP8, "What we deliver", the
+/// implementation note).
+///
+/// `tuple-get` is the one slot whose owner says more than the shared
+/// describer can: `describe_tuple_index` peels a `lit` wrapper to name the
+/// payload atom's family and value, and chelis#1107's PP7 row exists because
+/// the two ingresses once disagreed on exactly that wording. So the seam's
+/// caller-detail affordance returns here with `describe_tuple_index` as its
+/// only consumer, and the detail is suppressed when the generic describer
+/// already names the atom.
 #[test]
-fn already_total_selector_reads_keep_their_diagnostics() {
+fn migrated_selector_reads_reject_through_the_seam() {
     let errors = diagnostics(
         "(deftype {} Solo () (variant {} Solo (field {} r (t-prim {} f32))))
   (def {} a1 (access {} (record {} Solo (kv {} r (lit {type: (t-prim {} f32)} 1.0)))
     (app {} (var {} missing_fn_qqq) (var {} missing_arg_www))))",
     );
-    assert!(
-        errors.iter().any(|e| e
-            .message
-            .contains("a symbol field name as its second child")),
-        "`access` keeps its own field-name diagnostic; got:\n  {}",
-        rendered(&errors)
+    assert_seam_message(
+        &errors,
+        "malformed `access`: expected a symbol field name as child 1, \
+         found a `app` form",
+        "`access` rejects through the seam",
     );
 
     let errors = diagnostics(
         "(def {} t1 (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0)
       (lit {type: (t-prim {} f32)} 2.0)) (var {} nonexistent_name_zzz)))",
     );
-    assert!(
-        errors.iter().any(|e| e.message.contains(
-            "invalid tuple index: expected a non-negative integer literal, \
-             found a non-literal expression"
-        )),
-        "`tuple-get` keeps its own index diagnostic; got:\n  {}",
-        rendered(&errors)
+    assert_seam_message(
+        &errors,
+        "malformed `tuple-get`: expected a non-negative integer index as child 1, \
+         found a `var` form",
+        "`tuple-get` rejects through the seam",
     );
 
     let errors = diagnostics(
         "(def {} t3 (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0)
       (lit {type: (t-prim {} f32)} 2.0)) zz))",
     );
-    assert!(
-        errors.iter().any(|e| e.message.contains(
-            "invalid tuple index: expected a non-negative integer literal, \
-             found symbol `zz`"
-        )),
-        "`tuple-get` keeps `describe_tuple_index`'s found-shape description, \
-         which is more precise than the shared seam's; got:\n  {}",
-        rendered(&errors)
+    assert_seam_message(
+        &errors,
+        "malformed `tuple-get`: expected a non-negative integer index as child 1, \
+         found symbol `zz`",
+        "`tuple-get` keeps the generic describer when it already names the atom",
     );
 
     let errors = diagnostics(
         "(def {} c1 (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} int32)
     (var {} nonexistent_name_zzz)))",
     );
+    assert_seam_message(
+        &errors,
+        "malformed `cast`: expected a symbol mode selector as child 2, \
+         found a `var` form",
+        "`cast`'s mode selector rejects through the seam",
+    );
+
+    let errors = diagnostics("(def {} g1 (grad {} (var {} double) (var {} nonexistent_name_zzz)))");
+    assert_seam_message(
+        &errors,
+        "malformed `grad`: expected an integer parameter index or a tuple of \
+         integer parameter indices as child 1, found a `var` form",
+        "`grad`'s `wrt` selector rejects through the seam",
+    );
+}
+
+/// MIGRATION LOCK. `tuple-get`'s caller detail is what chelis#1107's PP7 row
+/// protects: a `lit`-wrapped index must be described by its payload atom, not
+/// as "a `lit` form". This is the row that decides the `detail` affordance
+/// earns its place.
+#[test]
+fn tuple_get_detail_names_the_payload_atom_behind_a_lit_wrapper() {
+    let errors = diagnostics(
+        "(def {} t4 (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0)
+      (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} -1)))",
+    );
+    assert_seam_message(
+        &errors,
+        "malformed `tuple-get`: expected a non-negative integer index as child 1, \
+         found a `lit` form (integer literal -1)",
+        "a `lit`-wrapped negative index names its payload atom",
+    );
+}
+
+/// DISPOSITION LOCK, green in both states. A genuinely out-of-bounds index is
+/// NOT malformed and keeps `TupleIndexOutOfBounds`. Its job is the
+/// over-rejection half of the migration: before, `MalformedForm` was
+/// unreachable from `tuple-get` at all, so the second assertion only becomes
+/// capable of failing once the migration lands. Migrating the unreadable-index
+/// branch off `TupleIndexOutOfBounds` is also what lets that kind mean only
+/// what it says.
+#[test]
+fn a_readable_out_of_bounds_tuple_index_is_not_malformed() {
+    let errors = diagnostics(
+        "(def {} t5 (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0))
+      (lit {type: (t-prim {} int32)} 7)))",
+    );
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("is not a recognized cast mode selector")),
-        "`cast` keeps its own mode-selector diagnostic; got:\n  {}",
+            .any(|e| matches!(e.kind, CheckErrorKind::TupleIndexOutOfBounds)
+                && e.message.contains("out of bounds for tuple of size 1")),
+        "a readable but out-of-range index keeps TupleIndexOutOfBounds; got:\n  {}",
+        rendered(&errors)
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|e| matches!(e.kind, CheckErrorKind::MalformedForm)),
+        "a readable index is not a malformed form; got:\n  {}",
         rendered(&errors)
     );
 }
