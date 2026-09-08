@@ -421,7 +421,7 @@ class WorkflowTests(unittest.TestCase):
         workflow = (root / ".github/workflows/changelog.yml").read_text()
         self.assertIn("name: Changelog\n", workflow)
         self.assertNotIn("--advisory", workflow)
-        for event in ("opened", "synchronize", "reopened", "labeled", "unlabeled"):
+        for event in ("opened", "synchronize", "reopened", "edited", "labeled", "unlabeled"):
             self.assertIn(event, workflow)
         self.assertNotIn("paths:", workflow)
         self.assertNotIn("continue-on-error", workflow)

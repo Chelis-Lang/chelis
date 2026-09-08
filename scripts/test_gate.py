@@ -737,7 +737,7 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
 # and .github/workflows/conformance.yml).
 NON_GATE_WORKFLOWS = {
     "ci.yml",
-    # Changelog policy is advisory and uses Python only, including on docs PRs.
+    # Changelog policy uses Python only, including on docs PRs.
     "changelog.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
