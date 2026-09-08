@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 from typing import Mapping, Sequence
@@ -224,7 +225,32 @@ def source_identity(root: Path) -> SourceIdentity:
         raise OracleFailure("cannot resolve exact source head")
     if git("status", "--porcelain", "--untracked-files=normal").strip():
         raise OracleFailure("authoritative composite requires a clean committed worktree")
-    return SourceIdentity(head, hashlib.sha256(git("ls-files", "--stage", "-z")).hexdigest())
+    digest = hashlib.sha256()
+    # Git status may trust assume-unchanged/skip-worktree bits. The commit tree
+    # owns the expected bytes; read every actual file independently of the index.
+    for record in git("ls-tree", "-r", "-z", head).split(b"\0"):
+        if not record:
+            continue
+        metadata, name = record.split(b"\t", 1)
+        mode, kind, expected_blob = metadata.split()
+        path = root / os.fsdecode(name)
+        try:
+            actual_mode = path.lstat().st_mode
+            if mode == b"120000" and stat.S_ISLNK(actual_mode):
+                data = os.fsencode(os.readlink(path))
+            elif mode in (b"100644", b"100755") and stat.S_ISREG(actual_mode):
+                if bool(actual_mode & 0o111) != (mode == b"100755"):
+                    raise OracleFailure(f"tracked source mode differs from HEAD: {os.fsdecode(name)}")
+                data = path.read_bytes()
+            else:
+                raise OracleFailure(f"unsupported or changed tracked source kind: {os.fsdecode(name)}")
+        except OSError as error:
+            raise OracleFailure(f"cannot read tracked source {os.fsdecode(name)}: {error}") from error
+        blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest().encode()
+        if kind != b"blob" or blob != expected_blob:
+            raise OracleFailure(f"tracked source bytes differ from HEAD: {os.fsdecode(name)}")
+        digest.update(record + b"\0" + len(data).to_bytes(8, "big") + data)
+    return SourceIdentity(head, digest.hexdigest())
 
 
 def run_child(child: ChildOracle, root: Path, identity: SourceIdentity, run_id: str,

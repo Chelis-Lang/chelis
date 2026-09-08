@@ -279,6 +279,38 @@ class SourceTests(unittest.TestCase):
             with self.assertRaises(oracle.OracleFailure):
                 oracle.source_identity(Path(tmp))
 
+    def test_git_visibility_flags_cannot_hide_changed_or_missing_tracked_bytes(self):
+        source = self.root / "source.txt"
+        for flag, reset in (("--assume-unchanged", "--no-assume-unchanged"),
+                            ("--skip-worktree", "--no-skip-worktree")):
+            self.git("update-index", flag, "source.txt")
+            clean = oracle.source_identity(self.root)
+            source.write_text("hidden source change\n")
+            self.assertEqual(self.git("status", "--porcelain").stdout, "")
+            with self.subTest(flag=flag), self.assertRaises(oracle.OracleFailure):
+                oracle.source_identity(self.root)
+            source.unlink()
+            with self.subTest(flag=flag, missing=True), self.assertRaises(oracle.OracleFailure):
+                oracle.source_identity(self.root)
+            source.write_text("source\n")
+            self.assertEqual(clean, oracle.source_identity(self.root))
+            self.git("update-index", reset, "source.txt")
+
+    def test_committed_symlink_is_hashed_as_link_not_followed(self):
+        link = self.root / "link"
+        link.symlink_to("source.txt")
+        self.git("add", ".")
+        self.commit()
+        first = oracle.source_identity(self.root)
+        self.git("update-index", "--assume-unchanged", "link")
+        link.unlink()
+        link.symlink_to("missing.txt")
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.source_identity(self.root)
+        link.unlink()
+        link.symlink_to("source.txt")
+        self.assertEqual(first, oracle.source_identity(self.root))
+
     def test_complete_fixture_composite_writes_receipt_only_after_all_children_pass(self):
         children = (
             oracle.ChildOracle("freeze", (), (sys.executable, "freeze.py"), "FREEZE: PASS"),
@@ -313,6 +345,24 @@ print({child.success_line!r})
             summary = json.loads((self.root / "target/pass/receipt.json").read_text())
             self.assertEqual([row["oracle"] for row in summary["children"]], ["freeze", "example"])
             self.assertNotEqual(summary["children"][0]["receipt"], summary["children"][1]["receipt"])
+
+            script = self.root / "example.py"
+            script.write_text(script.read_text() + '\nPath("source.txt").write_text("hidden changed source\\n")\n')
+            self.git("add", ".")
+            self.commit()
+            for flag, reset in (("--assume-unchanged", "--no-assume-unchanged"),
+                                ("--skip-worktree", "--no-skip-worktree")):
+                self.git("update-index", flag, "source.txt")
+                output, errors = io.StringIO(), io.StringIO()
+                receipt_dir = self.root / "target" / flag.removeprefix("--")
+                with self.subTest(flag=flag), redirect_stdout(output), redirect_stderr(errors):
+                    self.assertEqual(oracle.main(["--receipt-dir", str(receipt_dir)]), 1)
+                self.assertNotIn(oracle.PASS_LINE, output.getvalue())
+                self.assertFalse((receipt_dir / "receipt.json").exists())
+                self.assertIn("tracked source bytes differ", errors.getvalue())
+                (self.root / "source.txt").write_text("source\n")
+                self.git("update-index", reset, "source.txt")
+
             (self.root / "example.py").write_text("print('EXAMPLE: PASS')\n")
             self.git("add", ".")
             self.commit()
