@@ -740,7 +740,12 @@ def _is_undecided(
         # tokens. That was first written off as more machinery than this
         # branch is worth; a reviewer then measured it at about nine lines
         # inside this branch, bounded to runs of six tokens, breaking nothing
-        # else in the suite. So cost is not the reason this is open. It is
+        # in the suite but the row that pins this gap. That exception is the
+        # important half: the pin row asserts the gap is still open, so an
+        # EFFECTIVE fix must fail it, and a green suite after an attempted fix
+        # is the signature of a repair that does not work. That is exactly how
+        # the dead clause above was caught. So cost is not the reason this is
+        # open. It is
         # open because the defect needs whitespace in the checkout path AND a
         # non-canonical spelling together, and because this branch had already
         # taken two repairs that each introduced a defect, so its next change
