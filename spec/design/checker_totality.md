@@ -13,8 +13,11 @@ post-inference validator, `conv2d`'s guard included, runs on
 `issue_668_deleted_derivation_does_not_suppress_conv2d`'s
 `the_post_inference_validator_runs_only_on_the_ir_ingress` records. That
 asymmetry predates PR A and is untouched by it.
-The C emitter guards of R3 and R4 stand. PP5 stays partial until PR B's
-comparison surface lands and [#597] and [#1512] close with their owners. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
+D8 PR B has landed the comparison surface: the seven identities refuse a
+scalar beside a tensor under `[05-OP-36]`, and the diagnostic names the
+explicit replacement. The C emitter guards of R3 and R4 stand. PP5 stays
+partial until [#597] and [#1512] close with their owners, and until [#1619]
+lets the symbolic-size replacement execute on the C lane. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
 schedule, paired-ingress, and public CLI oracles are green. PR [#1406] delivered the
 separately owned [#1247] kinded nominal-application residue; the bounded
 [#1125] nominal-rank ingress repair and [#1134] forward-reference parity are
@@ -1436,11 +1439,37 @@ both lanes and asserts the trap text. What closes for them is the rest of
 0i32))` rows are [#1512]'s, for the same reason: their operand is a genuinely
 unresolved reduction result, not an `expand` one.
 
-The comparison family is PR B's, not PR A's. The seven identities still carry
-the [#1506] scalar rewrite, so a scalar beside a tensor under `gt` is accepted
-where `add` and `max_elem` reject it. Row 14 decides that it goes; until PR B
-lands, `issue_668_rank_agreement_is_unification` deliberately asserts nothing
-about them.
+The comparison rule is decided, and PR B delivers its concrete-dtype cases:
+the scalar rewrite is gone, and `issue5_cmp_broadcast_both_forms` proves that
+all seven identities reject the concrete scalar/tensor pairs its fixtures
+spell, in both operand orders at both ingresses. Those rejections name
+`[05-OP-36]` and the explicit replacement. This is partial enforcement of
+[#1506]; the bounded-binder cases below remain open under [#1621].
+`issue_668_rank_agreement_is_unification` asserts nothing about comparisons.
+
+The execution-lane gap is separate from that checker residue. The replacement the
+diagnostic names, `expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32))`,
+executes on the evaluator and traps on C, because the unit-extent claim
+attributes itself to the axis the `size` expression reads rather than to the
+`expand` operand's. That is [#1619], owned by the [#1277] stream and
+reproducible with PR B's own source files reverted. The literal-size spelling
+executes on both lanes today. `issue_1506_replacement_spelling_on_the_lanes`
+holds all three facts and flips when [#1619] closes.
+
+The bounded-binder escape tracked by [#1621] under [#731] affects comparisons
+as well as arithmetic. `gt(xs, cast(0.1, p))` under `[p: Float]` with
+`xs: tensor[3, p]` still checks at 1.0, as do the measured `eq`, `cmplt`,
+integer `lt`, and nested `where` forms. Before unification the cast can have a
+type variable rather than a concrete primitive type, so PR B's detection
+does not recognize the mixed surface. The monomorphic twin rejects. A scalar
+parameter `c: p` instead rejects with `OccursCheck`, which names neither the
+atom nor the replacement and bounds the diagnostic claim too. None of these
+forms is claimed repaired by PR B; the normative no-broadcasting rule stays
+unchanged. The arithmetic witness
+`def scale[p: Float](x: tensor[1, p]) = mul(x, cast(0.1, p))` still depends on
+the DAG evaluator's rank-0 broadcast, so PR B keeps that helper at the
+arithmetic site while removing it from comparisons. [#1506] and [#668] remain
+open rather than treating this bounded delivery as PP5 completion.
 
 What PR A does not claim: nothing here is an exhaustive statement about
 elementwise operations. The oracle covers `add`, `mul`, `eq`, `max_elem`,
@@ -3555,3 +3584,5 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1523]: https://github.com/Chelis-Lang/chelis/pull/1523
 [#1532]: https://github.com/Chelis-Lang/chelis/pull/1532
 [#1612]: https://github.com/Chelis-Lang/chelis/issues/1612
+[#1619]: https://github.com/Chelis-Lang/chelis/issues/1619
+[#1621]: https://github.com/Chelis-Lang/chelis/issues/1621

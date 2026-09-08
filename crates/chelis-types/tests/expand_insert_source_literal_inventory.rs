@@ -85,9 +85,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
+        2,
         1,
-        1,
-        "one each: `tensor_expand_host`'s `NumericTrap::Domain` names `expand` as the operation whose precondition it guards, and `insert position` is the English phrase in `tensor_insert_host`'s bounds message. Neither is a dispatch key; both functions take the callee from the evaluator",
+        "`tensor_expand_host`'s `NumericTrap::Domain` names `expand` as the operation whose precondition it guards, and `insert position` is the English phrase in `tensor_insert_host`'s bounds message. Neither is a dispatch key; both functions take the callee from the evaluator. The second `expand` is chelis#1506's `[05-UNS-1]` refusal, which names the replacement spelling built from a unit-extent broadcast; it has no `insert` counterpart because `insert` is not a replacement for anything here",
     ),
     (
         "crates/chelis-compiler-api/src/runtime/named_axis.rs",
@@ -218,9 +218,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-types/src/infer/app.rs",
-        4,
         5,
-        "three routing arms name both spellings; the extra `insert` is the two-arm selection that picks which callee to report",
+        5,
+        "three routing arms name both spellings; one `insert` is the two-arm selection that picks which callee to report, and the fifth `expand` is chelis#1506's `[05-OP-36]` rejection naming the replacement spelling. The counts are equal by coincidence rather than by pairing, which is why this row states which literal is which",
     ),
     (
         "crates/chelis-types/src/infer/app_post.rs",

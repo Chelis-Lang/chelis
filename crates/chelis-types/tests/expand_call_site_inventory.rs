@@ -133,10 +133,35 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         6,
         "the chelis-std runtime suite for the same-rank broadcast",
     ),
+    // chelis#1506 makes a scalar beside a tensor a type error under
+    // `[05-OP-36]`, and the diagnostic names the explicit replacement,
+    // `expand(to_tensor([v]), 0i32, shape(xs, 0i32))`. Every site below is
+    // that replacement: a unit-extent operand widened at its own axis, which
+    // is exactly what `expand` means after the split. None is rank-increasing.
+    (
+        "crates/chelis-types/src/infer/app.rs",
+        1,
+        "the replacement spelling inside the `[05-OP-36]` rejection's suggestion",
+    ),
+    (
+        "crates/chelis-compiler-api/src/runtime/host_ops.rs",
+        1,
+        "the same replacement spelling inside the `[05-UNS-1]` runtime refusal",
+    ),
+    (
+        "crates/chelis-cli/tests/coral_prerequisites.rs",
+        6,
+        "the migration half of the inverted Coral gate: the six programs as Coral must now spell them",
+    ),
+    (
+        "crates/chelis-cli/tests/issue_1506_replacement_spelling_on_the_lanes.rs",
+        3,
+        "the literal-size, symbolic-size, and folded replacement controls broadcast a unit-extent operand at its existing axis",
+    ),
     (
         "crates/chelis-types/tests/issue5_cmp_broadcast_both_forms.rs",
-        2,
-        "one comparison over two unit-extent broadcasts of `to_tensor([0.5f32])`",
+        5,
+        "one comparison over two unit-extent broadcasts of `to_tensor([0.5f32])`, plus the four sites of the replacement spelling the rejection names",
     ),
     (
         "crates/chelis-types/tests/issue_942_inferred_tensor_cast.rs",

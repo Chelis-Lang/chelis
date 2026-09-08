@@ -325,18 +325,19 @@ pub(super) fn finish_unified_app(
         }
     }
 
-    // Special case: comparison ops return tensor[D, bool] when any
-    // argument is tensor-shaped. Comparison ops broadcast a scalar
-    // arg against a tensor arg (see the rewrite block above), so the
-    // result shape comes from whichever argument is the tensor —
-    // not necessarily the first one (issue #5: `gt(1.5, xs)` was
-    // returning `Prim(Bool)` instead of `tensor[D, bool]` because
-    // this override only looked at `arg_tys[0]`).
+    // Special case: comparison ops return tensor[D, bool] when their
+    // arguments resolve to tensors. chelis#1506 removed the scalar/tensor
+    // rewrite and rejects a concrete primitive beside a tensor before
+    // unification under `[05-OP-36]`. A bounded-binder cast can still enter
+    // unification as a type variable and acquire the tensor type (chelis#1621),
+    // so resolved types alone do not prove that both source operands were
+    // tensors. Keep searching for a tensor shape: one operand can remain a
+    // variable while the other is ground, and issue #5 guards the result shape
+    // when the first operand is not the one that supplies it.
     if let Some(ref fname) = func_name
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
     {
         checked_route_observed = true;
-        // Prefer any tensor-shaped arg as the dim source.
         let tensor_dims = arg_tys.iter().find_map(|t| match subst.apply(t) {
             Type::Tensor(dims, _) => Some(dims),
             _ => None,

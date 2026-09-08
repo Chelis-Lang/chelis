@@ -386,9 +386,14 @@ fn a_scalar_beside_a_tensor_is_refused_by_add_and_max_elem() {
 /// once from the identity-rank validator, which D5 records as a cascade.
 #[test]
 fn a_rank_two_where_branch_is_reported_once_by_wheres_own_rule() {
+    // The condition is a bool-tensor parameter rather than `gt(x, 0.0f32)`.
+    // That comparison was incidental scaffolding, and chelis#1506 makes a
+    // scalar beside a tensor a type error, which would add a second diagnostic
+    // and destroy the count this row asserts. The subject is unchanged: one
+    // mismatched `where` call, one diagnostic.
     let source = "module Repro.Where\n\
-                  def f(x: tensor[n, f32], y: tensor[a, b, f32]) = \
-                  where(gt(x, 0.0f32), x, y)\n";
+                  def f(c: tensor[n, bool], x: tensor[n, f32], y: tensor[a, b, f32]) = \
+                  where(c, x, y)\n";
     let diagnostics = agreed_diagnostics(source, "where with a rank-2 alternative");
     assert_eq!(
         diagnostics.len(),
