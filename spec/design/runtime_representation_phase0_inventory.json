@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "e7b0c16863bf011a7f4a5b3d7eab8238ab64443f1168a968e3ea0d7fb633b037",
+  "freeze_sha256": "afd40235ff6fb5839e0cb58fc91ed21eeefa45fa459d67b198bb9115c3ad0494",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -3130,7 +3130,7 @@
           "witness_id": "phase0.mutate_retired_capacity_normalizer",
           "expected_kind": "normalized-key-arithmetic",
           "path": "crates/chelis-ir/src/dag.rs",
-          "implementation_sha256": "386288d6aab9d44f64a17b7223eea13e0fd6653b851c8bf74f15d490238f3430",
+          "implementation_sha256": "955e70aa636012fdeb8ea2a7d990f971e47cfebfae031325b6f98f59700859f9",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"

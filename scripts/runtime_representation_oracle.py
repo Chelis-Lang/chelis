@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "e7b0c16863bf011a7f4a5b3d7eab8238ab64443f1168a968e3ea0d7fb633b037"
+FREEZE_SHA256 = "afd40235ff6fb5839e0cb58fc91ed21eeefa45fa459d67b198bb9115c3ad0494"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -881,7 +881,11 @@ def mutate_retired_capacity_normalizer(source: str) -> str:
         """// runtime_representation_retired_normalizer
 impl DimExpr {
     pub fn normalized_key(&self) -> usize {
-        self.as_concrete().unwrap_or(usize::MAX)
+        match self {
+            Self::Mul(lhs, rhs) => lhs.as_concrete().unwrap_or(usize::MAX)
+                .saturating_mul(rhs.as_concrete().unwrap_or(usize::MAX)),
+            _ => self.as_concrete().unwrap_or(usize::MAX),
+        }
     }
 }""",
     )

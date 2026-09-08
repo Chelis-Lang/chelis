@@ -159,6 +159,26 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
         self.assertIn(extra.identity, caught.exception.details)
 
+    def test_a_retired_foundation_identity_cannot_be_restored(self) -> None:
+        restored = oracle.InventoryRow(
+            kind="normalized-key-arithmetic",
+            path="crates/chelis-ir/src/dag.rs",
+            owner="DimExpr::normalized_key",
+            deletion_phase=1,
+        )
+        self.assertIn(
+            restored.identity,
+            {row["identity"] for row in self.baseline["foundation_rows"]},
+        )
+        self.assertNotIn(
+            restored.identity,
+            {row["identity"] for row in self.baseline["active_debt"]},
+        )
+        with self.assertRaises(oracle.OracleFailure) as caught:
+            oracle.validate_baseline(self.baseline, (*self.rows, restored))
+        self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
+        self.assertIn(restored.identity, caught.exception.details)
+
     def test_only_explicit_exact_arithmetic_is_final_inside_the_capacity_owner(self) -> None:
         exact = oracle.InventoryRow(
             kind="exact-capacity-arithmetic",
