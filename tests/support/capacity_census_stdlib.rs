@@ -31,6 +31,18 @@ impl Capacity {
         }
         self
     }
+
+    fn declaration_domains(&self) -> BTreeSet<String> {
+        let mut domains = self.prims.clone();
+        // An ADT declaration quantifies over its precision parameters. The
+        // constructor therefore carries numeric capacity before any actual
+        // argument is supplied. Keep this projection out of the transfer
+        // summaries so a concrete bool application remains nonnumeric.
+        if !self.precision_params.is_empty() {
+            domains.insert("tensor-precision".to_string());
+        }
+        domains
+    }
 }
 
 struct Declaration {
@@ -395,7 +407,8 @@ fn rows_for_source(
                     .summaries
                     .get(&internal(name))
                     .expect("resolved ADT");
-                if !summary.reachable.prims.is_empty() {
+                let domains = summary.reachable.declaration_domains();
+                if !domains.is_empty() {
                     let shape = declaration.elements[3..]
                         .iter()
                         .map(chelis_deep::printer::print_expr_flat)
@@ -404,7 +417,7 @@ fn rows_for_source(
                     rows.push(Row {
                         kind: "std-adt-numeric".to_string(),
                         id: format!("{label}::{name}: {shape}"),
-                        flags: numeric_carrier_flags(&summary.reachable.prims),
+                        flags: numeric_carrier_flags(&domains),
                         citation: String::new(),
                     });
                 }

@@ -249,6 +249,70 @@ fn stdlib_closure_preserves_all_final_registered_source_identities() {
 }
 
 #[test]
+fn symbolic_tensor_precision_requires_an_adt_operation_row() {
+    for (field, expected_flags) in [
+        ("tensor[3, p]", Some(vec!["numeric-op"])),
+        ("tensor[3, bool]", None),
+        ("tensor[3, f64]", Some(vec!["float-carrier"])),
+        ("p", None),
+    ] {
+        let source =
+            format!("module Std.Constructor\nexport (Vector)\ntype Vector[p] = | Vector({field})");
+        let rows = sources(&[("constructor", &source)]);
+        match expected_flags {
+            Some(flags) => {
+                assert_eq!(rows.len(), 1, "{field}: {rows:?}");
+                assert_eq!(rows[0].kind, "std-adt-numeric");
+                assert!(
+                    rows[0]
+                        .id
+                        .starts_with("constructor::Vector: (p) (variant {} Vector ")
+                );
+                assert_eq!(rows[0].flags, flags);
+                let error = capacity_census_authority::classify_final_authority(
+                    &authority_surface(&rows[0]),
+                    final_authority_registries(),
+                    &fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap(),
+                )
+                .expect_err("a new numeric constructor still needs exact semantic registration");
+                assert!(
+                    error.contains("descriptor has zero final matches"),
+                    "{error}"
+                );
+            }
+            None => assert!(rows.is_empty(), "{field}: {rows:?}"),
+        }
+    }
+}
+
+#[test]
+fn imported_symbolic_precision_reaches_adt_rows_without_tainting_boolean_instances() {
+    for field in ["Imported[p]", "Option[Imported[p]]", "Nested[p]"] {
+        let source = format!(
+            "module Std.Use\nimport Std.Data (Imported, Nested)\nexport (Vector, numbers, booleans)\ntype Vector[p] = | Vector({field})\nsig numbers: Vector[int32] -> Vector[int32]\ndef numbers(x) = x\nsig booleans: Vector[bool] -> Vector[bool]\ndef booleans(x) = x"
+        );
+        let rows = sources(&[
+            (
+                "data",
+                "module Std.Data\ntype Precision[a] = tensor[3, a]\ntype Imported[a] = Precision[a]\ntype Nested[a] = | Nested(Option[Imported[a]])",
+            ),
+            ("use", &source),
+        ]);
+        for name in ["data::Nested", "use::Vector"] {
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row.kind == "std-adt-numeric" && row.id.starts_with(&format!("{name}: "))
+                })
+                .unwrap_or_else(|| panic!("missing symbolic constructor {name}: {rows:?}"));
+            assert_eq!(row.flags, ["numeric-op"], "{field}: {row:?}");
+        }
+        assert!(numeric(&rows, "use::numbers"), "{field}: {rows:?}");
+        assert!(!numeric(&rows, "use::booleans"), "{field}: {rows:?}");
+    }
+}
+
+#[test]
 fn transparent_aliases_and_nominal_fields_have_distinct_carrier_flags() {
     let rows = sources(&[(
         "flags",
