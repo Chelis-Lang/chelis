@@ -30,6 +30,7 @@ def assert_hosted_coverage(test, workflow):
         test.assertFalse(steps[0].get("continue-on-error", False))
     macos = jobs["macos-workspace-shard"]
     test.assertEqual(macos["runs-on"], "macos-latest")
+    test.assertEqual(macos.get("if"), "${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}")
     test.assertFalse(macos.get("continue-on-error", False))
     test.assertIn(1, macos["strategy"]["matrix"]["shard"])
     toolchains = [step for step in macos["steps"] if step.get("uses", "").startswith("dtolnay/rust-toolchain@")]
@@ -42,10 +43,13 @@ def assert_hosted_coverage(test, workflow):
         test.assertFalse(steps[0].get("continue-on-error", False))
     aggregate = jobs["macos-smoke"]
     test.assertIn("macos-workspace-shard", aggregate["needs"])
-    test.assertIn(
-        "python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}",
-        [step.get("run") for step in aggregate["steps"]],
-    )
+    test.assertEqual(aggregate.get("if"), "${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}")
+    test.assertFalse(aggregate.get("continue-on-error", False))
+    command = "python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}"
+    steps = [step for step in aggregate["steps"] if step.get("run") == command]
+    test.assertEqual(len(steps), 1)
+    test.assertNotIn("if", steps[0])
+    test.assertFalse(steps[0].get("continue-on-error", False))
 
 
 class HostedCoverageTests(unittest.TestCase):
@@ -96,6 +100,32 @@ class HostedCoverageTests(unittest.TestCase):
                         step["if"] = "matrix.shard == 3"
                     else:
                         step["continue-on-error"] = True
+                with self.assertRaises(AssertionError):
+                    assert_hosted_coverage(self, workflow)
+
+    def test_macos_producer_and_aggregate_cannot_be_skipped_or_made_nonblocking(self):
+        for job_name in ("macos-workspace-shard", "macos-smoke"):
+            for key, value in (("if", "false"), ("continue-on-error", True)):
+                with self.subTest(job=job_name, key=key):
+                    workflow = copy.deepcopy(self.workflow)
+                    workflow["jobs"][job_name][key] = value
+                    with self.assertRaises(AssertionError):
+                        assert_hosted_coverage(self, workflow)
+
+    def test_macos_aggregate_must_enforce_the_shard_result(self):
+        for change in ("remove", "skip", "ignore-failure", "wrong-result"):
+            with self.subTest(change=change):
+                workflow = copy.deepcopy(self.workflow)
+                steps = workflow["jobs"]["macos-smoke"]["steps"]
+                step = next(step for step in steps if "ci_require_success.py" in step.get("run", ""))
+                if change == "remove":
+                    steps.remove(step)
+                elif change == "skip":
+                    step["if"] = "false"
+                elif change == "ignore-failure":
+                    step["continue-on-error"] = True
+                else:
+                    step["run"] = step["run"].replace("needs.macos-workspace-shard.result", "needs.changes.result")
                 with self.assertRaises(AssertionError):
                     assert_hosted_coverage(self, workflow)
 

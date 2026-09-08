@@ -61,6 +61,23 @@ def validate_skill(path: Path) -> list[str]:
             raise ValueError("description must be at most 1024 characters with no angle brackets")
         if description.lstrip().startswith("[TODO:"):
             raise ValueError("description contains an unfinished placeholder")
+        # Match the skill-creator validator's unfinished-instruction rule while
+        # allowing literal placeholder examples inside Markdown code fences.
+        fence_marker = None
+        fence_length = 0
+        for line in text[match.end():].splitlines():
+            fence = re.match(r"^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)?(`{3,}|~{3,})(.*)$", line)
+            if fence:
+                marker = fence.group(1)
+                if fence_marker is None:
+                    fence_marker = marker[0]
+                    fence_length = len(marker)
+                elif marker[0] == fence_marker and len(marker) >= fence_length and not fence.group(2).strip():
+                    fence_marker = None
+                    fence_length = 0
+                continue
+            if fence_marker is None and re.fullmatch(r"[ ]{0,3}\[TODO:[^\n]*\][ \t]*", line):
+                raise ValueError("instructions contain an unfinished TODO placeholder")
     except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         return [f"{path}: {exc}"]
     return []

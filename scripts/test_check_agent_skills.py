@@ -70,6 +70,37 @@ class SkillContractTests(unittest.TestCase):
         path.unlink()
         self.assertTrue(check.check(self.root))
 
+    def test_unfinished_instructions_are_rejected_even_when_copies_agree(self):
+        paths = [self.skill(prefix) for prefix in (
+            "agent-skills", "crates/chelis-conformance/assets/skills"
+        )]
+        original = paths[0].read_text()
+        for body in (
+            "[TODO: replace this unfinished instruction]\n",
+            "   [TODO: finish this instruction]  \n",
+            "```text\nAn example.\n```\n[TODO: finish after the example]\n",
+            "~~~text\nAn example.\n~~~~\n[TODO: finish after the example]\n",
+        ):
+            with self.subTest(body=body):
+                for path in paths:
+                    path.write_text(original + body)
+                    self.assertTrue(check.validate_skill(path))
+                self.assertTrue(check.check(self.root))
+
+    def test_fenced_placeholder_examples_are_valid_instructions(self):
+        path = self.skill()
+        original = path.read_text()
+        for body in (
+            "```text\n[TODO: an example placeholder]\n```\n",
+            "~~~text\n[TODO: an example placeholder]\n~~~\n",
+            "````text\n```\n[TODO: a shorter fence does not close]\n````\n",
+            "```text\n~~~\n[TODO: a different marker does not close]\n```\n",
+            "- ```text\n[TODO: a list example]\n  ```\n",
+        ):
+            with self.subTest(body=body):
+                path.write_text(original + body)
+                self.assertEqual(check.validate_skill(path), [])
+
     def test_missing_or_unknown_source_skill_is_rejected(self):
         path = self.skill()
         path.unlink()

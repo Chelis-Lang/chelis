@@ -13,7 +13,7 @@ What is locked here:
   (b) paths outside every workspace member map to no crate, and an
       empty diff yields the explicit "no crate changes detected"
       message instead of silently running nothing;
-  (c) the `--local` command list is exactly the static once-per-pull-request subset
+  (c) the optional `--local` command list is exactly the static local subset
       (two of the three workspace clippy configurations, fmt --check,
       chelis lint --check ., the guards and oracles) plus one
       `cargo nextest run -p <crate>` per changed crate -- no workspace
