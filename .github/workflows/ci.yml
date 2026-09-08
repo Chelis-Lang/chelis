@@ -717,7 +717,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Install C dependencies
         run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
@@ -767,7 +767,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Install C dependencies
         run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
