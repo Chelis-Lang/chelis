@@ -102,6 +102,30 @@ termination class (pass, stage-failure, signal, environment, preflight-stop,
 lease-timeout, user-cancel, internal-error), the preflight and lease records,
 and the files a `--fast` run changed, then prints one human summary line.
 
+Detached runs (chelis#1568)
+---------------------------
+`--detach` starts the run in its own session and returns at once, printing a
+handle; `--status [HANDLE]` reports that run's verdict and exits with it. This
+exists because the run outlives a caller's foreground command limit: the three
+`--local` runs of the 2026-09-02 fleet took 7m51s, 9m56s and 10m02s against a
+ten-minute limit.
+
+The launcher is not a gate run. It creates no `GateReport`, writes no summary
+and takes no lease, so "exactly one summary per run" still holds. The CHILD
+runs `run_local`/`run_full` unchanged, so it takes the lease itself, holds the
+flock for its whole life, and writes a sidecar naming its own pid.
+`target/gate-failures/` is unaffected, because `run_commands` builds that path
+from the module-level repo root and the child is spawned with `cwd=repo_root`.
+
+`--no-wait`, `--no-lease` and `--lease-timeout` are forwarded to the child
+untouched, which moves exit 4 out of the shell: with `--detach` the launcher's
+exit code is a LAUNCH verdict (0 spawned, 2 could not spawn), and the lease
+timeout surfaces as `--status`'s exit 4. `--status` returns 75 while the run is
+alive, 1 if it died without writing a summary, and 2 for a missing or
+malformed handle. `--detach --fast` is rejected: `--fast` fixes in place, and a
+writer running unattended against a tree the agent is still editing is the
+collision chelis#1568 is about.
+
 The script is safe to run from any cwd: child commands use the repo root
 (resolved relative to the script's own location) as their working directory.
 Every child inherits one validated `PYO3_PYTHON`. Combined stdout/stderr is
@@ -635,6 +659,16 @@ EXIT_ENVIRONMENT = 2
 EXIT_PREFLIGHT_STOP = 3
 EXIT_LEASE_TIMEOUT = 4
 EXIT_USER_CANCEL = 130
+
+# Detached runs (chelis#1568). The handle and the combined log live beside the
+# run summaries so `$CHELIS_GATE_REPORT_DIR` still controls placement and tests
+# stay isolated.
+DETACH_SUBDIR = "detached"
+DETACH_SCHEMA_VERSION = 1
+# sysexits EX_TEMPFAIL. No gate run can produce 75, and "not now, retry" is
+# exactly what a poll against an unfinished run means, so `--status` can say
+# "no verdict yet" without colliding with a verdict.
+EXIT_STILL_RUNNING = 75
 
 
 def is_managed_runtime(
@@ -1332,6 +1366,432 @@ def human_summary(
     return "; ".join(parts)
 
 
+
+# --- detached runs (chelis#1568) ----------------------------------------------
+
+
+def detach_directory(
+    environ: dict[str, str], repo_root: Path = REPO_ROOT
+) -> Path:
+    """Where handles and combined logs live: `<report dir>/detached`."""
+    return report_directory(environ, repo_root) / DETACH_SUBDIR
+
+
+def detach_child_argv(argv: list[str]) -> list[str]:
+    """The caller's argv with `--detach` removed.
+
+    Everything else passes through untouched, `--no-wait`, `--no-lease` and
+    `--lease-timeout` included: the child is the run, so it owns the lease
+    behaviour the caller asked for.
+    """
+    return [arg for arg in argv if arg != "--detach"]
+
+
+def write_handle(payload: dict, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def read_handle(path: Path) -> dict:
+    """Raises `OSError` or `ValueError` for a missing or malformed handle.
+
+    `started_at` is validated here, not only `pid`, because `find_summary`
+    proves a summary belongs to this run by comparing against it. A handle
+    without a usable start instant would make that filter degrade OPEN, which
+    is a guard that stops guarding under exactly the conditions it exists for,
+    so the handle is rejected at the boundary instead.
+    """
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or "pid" not in payload:
+        raise ValueError(f"{path} is not a gate detach handle")
+    if _parse_iso(payload.get("started_at") or "") is None:
+        raise ValueError(
+            f"{path} has no usable started_at, so a run summary could not be "
+            "proven to belong to it"
+        )
+    return payload
+
+
+def newest_handle(directory: Path) -> Path | None:
+    try:
+        handles = sorted(
+            item for item in directory.glob("*.json") if item.is_file()
+        )
+    except OSError:
+        return None
+    return handles[-1] if handles else None
+
+
+def _parse_iso(text: str) -> datetime | None:
+    """Parse an `_iso` timestamp. `_iso` emits milliseconds, but accept the
+    second-resolution spelling too so a handle written by any version reads."""
+    for shape in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(text, shape)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _summary_stamp(path: Path) -> datetime | None:
+    """The UTC instant `write_summary` encoded in a summary's file name, which
+    is when that run ENDED."""
+    stamp = path.name.split("-", 1)[0]
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%S.%f%z")
+    except ValueError:
+        return None
+
+
+def find_summary(
+    report_dir: Path, pid: int, mode: str, *, not_before: str | None = None
+) -> Path | None:
+    """The run summary the detached child wrote, if it has finished.
+
+    `write_summary` names its file `<stamp>-<pid>-<mode>.json`, so the child's
+    own pid is what correlates the handle with the summary. That is why the
+    spawn must not re-execute through uv: a grandchild would write a summary
+    this glob could never find.
+
+    A pid is not unique over time, so the pid alone is not enough, and it fails
+    in BOTH directions. An older run in the same report directory that happened
+    to get this pid is the only match for the whole window before this run
+    finishes; a later run that reused the pid outranks this run's own summary
+    once it exists. Either way polling reports someone else's verdict, which is
+    a false PASS on the once-per-pull-request gate.
+
+    `not_before` is the handle's `started_at`, and the rule is: take the
+    EARLIEST summary that ended at or after this run started. That one is
+    provably this run's, because no other process can hold this pid between
+    this run's start and its exit, so any impostor's summary must end later
+    than this run's own. "Newest wins" cannot make that argument, and closing
+    only the older direction leaves the newer one open.
+
+    Without a usable floor no candidate can be proven to belong to this run, so
+    none is returned. `read_handle` rejects a handle with no usable
+    `started_at` for the same reason: a filter that degrades open is worse
+    than no filter, because it looks like a guard.
+
+    Returning the first hit in `sorted()` order assumes lexicographic order
+    equals chronological order. That holds by construction, because
+    `write_summary` stamps a fixed-width zero-padded UTC timestamp. It is
+    written down here because an assumption that holds by construction is
+    exactly the kind that breaks silently when someone changes the
+    construction, and the construction lives in another function.
+
+    The correlation is a pid plus a time window, which is not an identity, and
+    two consequences follow. The floor is sampled before the spawn, so it is
+    fractionally earlier than the child's true start, and a run that both
+    ended and freed this pid inside that sub-millisecond window would still be
+    accepted. And a run killed before it writes a summary, followed by a pid
+    reuse, still returns the impostor. Both close the same way and neither is
+    urgent, because this fails toward still-running rather than toward a false
+    pass; chelis#1584 owns them.
+    """
+    floor = _parse_iso(not_before) if not_before else None
+    if floor is None:
+        return None
+    safe_mode = re.sub(r"[^A-Za-z0-9_.-]+", "-", mode).strip("-")
+    try:
+        candidates = sorted(report_dir.glob(f"*-{pid}-{safe_mode}.json"))
+    except OSError:
+        return None
+    for candidate in candidates:
+        ended = _summary_stamp(candidate)
+        # A name whose stamp cannot be read cannot be proven to be this run's,
+        # and `write_summary` always produces a readable one, so it is not
+        # something this gate wrote. `SummaryNamingTests` locks the writer and
+        # this reader together so the format cannot drift apart silently.
+        if ended is not None and ended >= floor:
+            return candidate
+    return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a process with this pid exists. Fallible under pid reuse, the
+    same caveat `reap_orphans.py` documents for `ppid == 1`, which is why the
+    lease check below is preferred when it applies."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def spawn_detached(
+    child_argv: list[str],
+    *,
+    environ: dict[str, str],
+    executable: Path,
+    directory: Path,
+    mode: str,
+    repo_root: Path = REPO_ROOT,
+    now=_utc_now,
+    popen=None,
+    git_facts=None,
+) -> dict:
+    """Start the run in its own session and return the handle payload.
+
+    `start_new_session=True` detaches the child from the caller's terminal and
+    process group, so a foreground command timeout in an agent harness cannot
+    take the run with it. That is the whole point.
+
+    The obvious worry is that this makes the run reapable, since it then has
+    `ppid == 1` and `scripts/reap_orphans.py --kill` calls that orphaned. It
+    does not, for two measured reasons: the interpreter is not in that
+    script's `BUILD_TOOL_NAMES` and does not live under `target/`, so the gate
+    process is never matched at all; and the cargo, rustc and nextest children
+    keep the live gate as their parent, so they are never classified orphaned
+    either. Both properties are locked by `ReaperSafetyTests` in
+    `scripts/test_gate_detach.py`, together with the negative twin: once the
+    gate itself dies its children ARE orphans and the reaper still reaps them,
+    which is what it is for. No protection list is needed, and adding one
+    would risk shielding a genuinely abandoned build.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    started = now()
+    stamp = started.strftime("%Y%m%dT%H%M%S.%fZ")
+    base = f"{stamp}-{os.getpid()}"
+    log_path = directory / f"{base}.log"
+    handle_path = directory / f"{base}.json"
+    facts = _git_facts() if git_facts is None else git_facts()
+    spawn = subprocess.Popen if popen is None else popen
+    script = str(Path(__file__).resolve())
+    argv = [str(executable), script, *child_argv]
+    log = open(log_path, "wb")
+    try:
+        child = spawn(
+            argv,
+            cwd=str(repo_root),
+            env=environ,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log.close()
+    return {
+        "schema_version": DETACH_SCHEMA_VERSION,
+        "pid": child.pid,
+        "mode": mode,
+        "argv": argv,
+        "log": str(log_path),
+        "handle": str(handle_path),
+        "report_dir": str(report_directory(environ, repo_root)),
+        "lease_path": str(lease_dir(environ) / LEASE_FILE_NAME),
+        "worktree": str(repo_root),
+        "head": facts.get("head"),
+        "started_at": _iso(started),
+    }
+
+
+def detached_state(
+    handle: dict,
+    *,
+    alive=_pid_alive,
+    peek=None,
+    find=find_summary,
+) -> dict:
+    """Whether the detached run has finished, is running, or died.
+
+    The order matters and avoids a pid-reuse false positive on the finished
+    path. A matching summary is proof the run ENDED, so it is checked first.
+    The lease is checked next because it is kernel-backed: a sidecar naming
+    this pid, over a lock that is actually held, proves the run is alive. Only
+    then does it fall back to `kill(pid, 0)`, which pid reuse can fool.
+    """
+    pid = int(handle["pid"])
+    report_dir = Path(handle["report_dir"])
+    summary_path = find(
+        report_dir,
+        pid,
+        handle.get("mode", "local"),
+        not_before=handle.get("started_at"),
+    )
+    if summary_path is not None:
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return {
+                "state": "finished",
+                "summary_path": str(summary_path),
+                "summary": None,
+                "error": f"could not read the run summary: {exc}",
+            }
+        return {
+            "state": "finished",
+            "summary_path": str(summary_path),
+            "summary": summary,
+            "error": None,
+        }
+    probe = GateLease.peek if peek is None else peek
+    holds_lease = False
+    lease_path = handle.get("lease_path")
+    if lease_path:
+        try:
+            holder = probe(Path(lease_path))
+        except OSError:
+            holder = None
+        if holder and holder.get("pid") == pid:
+            holds_lease = True
+    if holds_lease:
+        return {"state": "running", "evidence": "holds the gate lease", "error": None}
+    if alive(pid):
+        return {"state": "running", "evidence": "the process is alive", "error": None}
+    return {"state": "died", "evidence": None, "error": None}
+
+
+def run_detach(
+    args: argparse.Namespace,
+    *,
+    argv: list[str],
+    environ: dict[str, str],
+    executable: Path,
+    mode: str,
+    repo_root: Path = REPO_ROOT,
+    output_stream=None,
+    error_stream=None,
+    spawn=spawn_detached,
+) -> int:
+    """Launch the run detached and print its handle. The launcher's exit code
+    is a LAUNCH verdict, never a gate verdict: `--status` is what restores the
+    documented foreground exit contract."""
+    output = sys.stdout if output_stream is None else output_stream
+    error = sys.stderr if error_stream is None else error_stream
+    directory = detach_directory(environ, repo_root)
+    try:
+        payload = spawn(
+            detach_child_argv(argv),
+            environ=environ,
+            executable=executable,
+            directory=directory,
+            mode=mode,
+            repo_root=repo_root,
+        )
+    except OSError as exc:
+        print(f"gate: could not start a detached run: {exc}", file=error)
+        return EXIT_ENVIRONMENT
+    try:
+        handle_path = write_handle(payload, Path(payload["handle"]))
+    except OSError as exc:
+        # The child is already running and detached. Without the handle it
+        # cannot be found by `--status`, so name it here rather than exiting
+        # with a bare "could not start" that is not even true.
+        print(
+            f"gate: the detached run started as pid {payload['pid']} but its "
+            f"handle could not be written ({exc}); its log is "
+            f"{payload['log']} and it holds the lease at {payload['lease_path']}",
+            file=error,
+        )
+        return EXIT_ENVIRONMENT
+
+    def shown(path: str) -> str:
+        try:
+            return str(Path(path).relative_to(repo_root))
+        except ValueError:
+            return path
+
+    print(
+        f"gate: detached {_mode_label(mode)} run started, pid {payload['pid']}",
+        file=output,
+    )
+    print(f"gate: log:    {shown(payload['log'])}", file=output)
+    print(f"gate: handle: {shown(str(handle_path))}", file=output)
+    print(
+        f"gate: status: python3 scripts/gate.py --status {shown(str(handle_path))}",
+        file=output,
+        flush=True,
+    )
+    return 0
+
+
+def run_status(
+    args: argparse.Namespace,
+    *,
+    environ: dict[str, str],
+    repo_root: Path = REPO_ROOT,
+    output_stream=None,
+    error_stream=None,
+    state_of=detached_state,
+) -> int:
+    """Report a detached run's verdict, and exit with it once it has one."""
+    output = sys.stdout if output_stream is None else output_stream
+    error = sys.stderr if error_stream is None else error_stream
+    selector = args.status
+    if selector == "latest":
+        path = newest_handle(detach_directory(environ, repo_root))
+        if path is None:
+            print(
+                "gate: no detached run handle found under "
+                f"{detach_directory(environ, repo_root)}",
+                file=error,
+            )
+            return EXIT_ENVIRONMENT
+    else:
+        path = Path(selector)
+    try:
+        handle = read_handle(path)
+    except (OSError, ValueError) as exc:
+        print(f"gate: cannot read the detach handle {path}: {exc}", file=error)
+        return EXIT_ENVIRONMENT
+    result = state_of(handle)
+    if result["state"] == "running":
+        print(
+            f"gate: detached {_mode_label(handle.get('mode', '?'))} run "
+            f"pid {handle['pid']} is still running ({result['evidence']}); "
+            f"started {handle.get('started_at', '?')}",
+            file=output,
+        )
+        print(f"gate: log: {handle.get('log', '?')}", file=output, flush=True)
+        return EXIT_STILL_RUNNING
+    if result["state"] == "died":
+        print(
+            f"gate: detached run pid {handle['pid']} is gone and wrote no run "
+            f"summary; see {handle.get('log', '?')}",
+            file=error,
+            flush=True,
+        )
+        return 1
+    summary = result.get("summary")
+    if summary is None:
+        print(f"gate: {result.get('error')}", file=error, flush=True)
+        return EXIT_ENVIRONMENT
+    exit_code = int(summary.get("exit_code", 1))
+    termination = summary.get("termination", "?")
+    print(
+        f"gate: detached {_mode_label(summary.get('mode', '?'))} run finished: "
+        f"{str(termination).upper()}, exit {exit_code}, "
+        f"{summary.get('seconds', '?')} s; report {result['summary_path']}",
+        file=output,
+    )
+    failing = summary.get("first_failing_stage")
+    if failing:
+        print(
+            f"gate: first failing stage {failing.get('index', '?')}: "
+            f"{failing.get('command', '?')}",
+            file=output,
+        )
+        transcript = failing.get("transcript")
+        if transcript:
+            print(f"gate: transcript: {transcript}", file=output)
+    if termination == "lease-timeout":
+        print(
+            "gate: exit 4 is the lease timeout, not a gate failure; another "
+            "gate held the lease",
+            file=output,
+        )
+    print(f"gate: log: {handle.get('log', '?')}", file=output, flush=True)
+    return exit_code
+
 # --- preflight ---------------------------------------------------------------
 
 
@@ -2020,6 +2480,30 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--detach",
+        action="store_true",
+        help=(
+            "Start the run in its own session and return at once, printing a "
+            "handle. For a caller with a foreground command timeout shorter "
+            "than the run: the three completed --local runs of the 2026-09-02 "
+            "fleet took 7m51s, 9m56s and 10m02s against a ten-minute limit. "
+            "The exit code is a launch verdict; use --status for the gate's."
+        ),
+    )
+    p.add_argument(
+        "--status",
+        nargs="?",
+        const="latest",
+        metavar="HANDLE",
+        default=None,
+        help=(
+            "Report a detached run's verdict and exit with it: 75 while it is "
+            "still running, otherwise the run's own exit code. Omit HANDLE for "
+            "the newest handle in the report directory, which is this "
+            "worktree's unless $CHELIS_GATE_REPORT_DIR points elsewhere."
+        ),
+    )
+    p.add_argument(
         "--no-wait",
         action="store_true",
         help="Exit 4 immediately when another gate holds the lease.",
@@ -2047,6 +2531,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--fast cannot be combined with --list")
     if args.fast and args.local:
         p.error("--fast and --local are mutually exclusive")
+    if args.detach and args.status is not None:
+        p.error("--detach and --status are mutually exclusive")
+    if args.detach and args.list:
+        p.error("--detach cannot be combined with --list")
+    if args.detach and args.stage is not None:
+        p.error(
+            "--detach cannot be combined with a CI stage name; CI stage runs "
+            "are already supervised by the workflow"
+        )
+    if args.detach and args.fast:
+        # --fast fixes in place (regen_all.py --tier 0, cargo fmt --all). A
+        # writer running unattended against a tree the agent is still editing
+        # is the collision chelis#1568 documents, and --fast is fast enough
+        # that no foreground limit is at stake.
+        p.error(
+            "--detach cannot be combined with --fast; --fast writes to the "
+            "worktree and must not run unattended"
+        )
+    if args.status is not None and (args.fast or args.local or args.list):
+        p.error("--status cannot be combined with --fast/--local/--list")
+    if args.status is not None and args.stage is not None:
+        p.error("--status cannot be combined with a CI stage name")
     lease_flags = [
         name
         for name, given in (
@@ -2056,6 +2562,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         )
         if given
     ]
+    if lease_flags and args.status is not None:
+        p.error(f"{'/'.join(lease_flags)} cannot be combined with --status")
     if lease_flags and args.list:
         p.error(f"{'/'.join(lease_flags)} cannot be combined with --list")
     if lease_flags and args.stage is not None:
@@ -2427,6 +2935,19 @@ def main(
     current_executable = (
         Path(sys.executable) if executable is None else executable
     )
+    if args.status is not None:
+        return run_status(args, environ=environment_in)
+    if args.detach:
+        # Deliberately BEFORE the GateReport below: the launcher is not a gate
+        # run, so it writes no summary and takes no lease. The child does both,
+        # which keeps "exactly one summary per run" true.
+        return run_detach(
+            args,
+            argv=list(argv),
+            environ=environment_in,
+            executable=current_executable,
+            mode="local" if args.local else "full",
+        )
     if args.fast:
         mode = "fast"
     elif args.local:
