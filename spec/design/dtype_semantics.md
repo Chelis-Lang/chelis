@@ -867,7 +867,8 @@ Deliverables, with phase homes:
 
    The wire leg's descriptor matching does not yet verify the complete codec
    shape or a field's transport role. The [typed-wire membership plan](#typed-wire-transport-membership)
-   below defines that strengthening for [#1580](https://github.com/Chelis-Lang/chelis/issues/1580).
+   below records [#1580](https://github.com/Chelis-Lang/chelis/issues/1580)'s
+   membership definition and its #1288 enforcement follow-up.
    Its acceptance requirements are planned work, not evidence supplied by the
    existing wire census.
 
@@ -1276,17 +1277,20 @@ numeric form is type-unrepresentable.
 
 **Scope and implementation status.** This is the wire-specific design for
 [#1580](https://github.com/Chelis-Lang/chelis/issues/1580), within §C6's existing
-three final authority classes. It specifies the next carrier-recognition
-implementation; it does not change the current enumerator, registry, baseline,
-coverage manifest, or decoder. The implementation is accepted only by the wire
-oracle described below. No fourth class for "numeric metadata" is introduced.
+three final authority classes. The membership definition is #1580's deliverable;
+the enforcement checklist below belongs to #1288 under #729. This clarification
+records the semantic distinction in [spec/10 §3.1](../10-serialization.md#31-numeric-values-and-structural-fields);
+this section implements that rule through the census's authority classes. It
+changes no enumerator, registry, baseline, coverage manifest, or decoder. The
+follow-up implementation is accepted only by the wire oracle below. No fourth
+class for "numeric metadata" is introduced.
 
 **Membership rule.** A numeric wire leaf receives `TaggedTransport` authority
 only through an exactly recognized carrier contract that binds its semantic
 role, complete serialized shape, and construction/admission boundary together.
-A registration identifies that contract; it cannot grant authority merely by
-listing a descriptor. Neither a primitive's spelling, a field called `metadata`,
-nor an outer enum tag establishes membership.
+A registration verifies the contract required by spec/10 §3.1; it cannot grant
+authority merely by listing a descriptor. The numbered rule governs field
+meaning; this recognizer governs census admission.
 
 Each recognized contract identifies:
 
@@ -1309,11 +1313,10 @@ numeric operations still require their exact `[05-OP-N]` registration.
 
 The existing source-location domain is defined by
 [spec/03 §1.1.1](../03-deep-syntax.md#111-external-source-spans-span-span_-namespace)
-and [04-FIT-16/17] in [spec/04](../04-type-system.md). A diagnostic coordinate
-denotes a position or measured extent in the checked source, rather than a
-Chelis scalar value or a tensor's size. Its domain has semantics independent of
-the integer used to encode it. The source context can come from the enclosing
-document or request; each point need not carry a redundant file field.
+and [04-FIT-16/17] in [spec/04](../04-type-system.md). Spec/10 §3.1 explicitly
+permits structural transport for that domain. This is why the recognizer can
+admit the diagnostic's coordinate and measured extent without treating their
+integer representation as a Chelis scalar value or tensor size.
 
 `DiagnosticSpan::Point.offset`, `Range.offset`, and `Range.len` therefore have
 specific transport roles. `Point` preserves a coordinate without an extent.
@@ -1456,10 +1459,10 @@ runtime metadata and generated-C adoption;
 [PR #1631](https://github.com/Chelis-Lang/chelis/pull/1631) covers a host slice.
 Neither those slices nor this wire design certify the complete runtime exit.
 
-#### Boundary tests and acceptance
+#### Implementation checklist and acceptance
 
-The implementation begins with failing, spec-derived cases. The first slice
-owns complete discovery and recognition for the existing wire roots and the
+The bounded #1288 enforcement follow-up begins with failing, spec-derived cases.
+It owns complete discovery and recognition for the existing wire roots and the
 four currently registered transport leaves: the three `DiagnosticSpan` leaves
 and `WireRtDim::InputAxis.tensor`. Its matrix is bounded as follows. Each row
 requires an executed positive case and its negative companion; malformed-input
@@ -1485,7 +1488,7 @@ tests and raw-source admission; #889's debug/release count, byte, stride, view,
 and target-overflow tests; #888's equivalent/different large products, partial
 quotients (including zero times a partial quotient), program scope, and exact
 representation at reuse. These are non-regression evidence with their existing
-owners, not claims that the first wire slice completes those issues.
+owners, not claims that the bounded wire follow-up completes those issues.
 
 Retain one authoritative aggregate for this bounded wire work:
 
@@ -1504,14 +1507,26 @@ Round trips need independent expected payloads so matching encoder/decoder bugs
 cannot certify fidelity. Changed oracle selection and hosted wiring need their
 own fail-closed controls.
 
-The implementation updates §C6's typed `coverage_manifest()`, the derived schema
-identity, the owning enumerator/classifier, and paired controls together under
-§B1. Legacy rows keep their existing #1288 debt until individually migrated;
-changed rows independently meet the final rule. No baseline edit promotes
-coverage. This design-only change records the intended enforcement and leaves
-the active manifest and guard artifacts unchanged. A future semantic change
-first amends the owning numbered chapter; a future implementation claim requires
-the aggregate's execution evidence on that exact head.
+The implementation handoff is a checklist within #1288, not another phase plan:
+
+1. Write the matrix's positive and negative cases before implementing the guards.
+2. Implement complete wire discovery and verified carrier admission, migrating
+   the four existing transport registrations to that mechanism.
+3. Update §C6's typed `coverage_manifest()`, derived schema identity, owning
+   enumerator/classifier, and paired controls together under §B1; require the
+   aggregate's execution evidence on the implementation's exact head.
+
+This is an internal guard/registration migration; it can preserve existing wire
+bytes. The clarification requires no wire-version bump or user-data migration.
+If a later carrier redesign changes the serialized contract, it first amends the
+owning numbered chapter and follows that format's version rules.
+
+New or changed rows independently meet the final rule. Existing legacy rows keep
+their #1288 debt until individually migrated; the final contract applies to them
+too. Retiring all legacy exceptions remains #1288's broader deliverable, not an
+additional completion requirement for the membership definition. No baseline
+edit promotes coverage. This design-only change leaves the active manifest and
+guard artifacts unchanged.
 
 ---
 
