@@ -140,6 +140,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--features",
             "chelis-backend-c/sleef,"
             "chelis-e2e/hip-local-gpu,"
+            "chelis-ir/lowering-trace,"
             "chelis-prove/clarabel,"
             "chelis-python/extension-module,"
             "chelis-runtime/ownership-ledger,"

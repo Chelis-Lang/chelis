@@ -831,6 +831,16 @@ class StageUnionTests(unittest.TestCase):
         )
         self.assertEqual(commands, gate.STAGES["integration"][1:])
 
+    def test_lowering_trace_runs_with_its_feature_locally_and_in_ci_support(self):
+        command = ["cargo", "nextest", "run", "-p", "chelis-ir", "--features",
+                   "lowering-trace", "--lib", "--test", "lowering_trace"]
+        self.assertEqual(gate.LOWERING_TRACE_TESTS, command)
+        self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
+        commands = gate.selected_stage_commands(
+            "integration", tests_only=False, support_only=True, partition=None,
+        )
+        self.assertEqual(commands.count(command), 1)
+
     def test_partition_is_rejected_outside_tests_only_integration(self):
         for argv in (
             ["lint-and-unit", "--partition", "hash:1/2"],

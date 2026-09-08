@@ -886,6 +886,53 @@ type CheckResult =
 
 ---
 
+### Opt-in compiler trace for the canonical LaCaDiLE revision
+
+The `chelis-ir/lowering-trace` Cargo feature enables an additive, in-memory
+`try_lower_program_to_library_with_trace` entry point. It calls the same lowering
+implementation as the ordinary entry point. The ordinary entry point does not
+collect snapshots, even in a feature-enabled build; feature-disabled builds have
+no collector field or instrumentation. No CLI, shell interface, default output,
+runtime operation, or serialized format changes.
+
+This is an observation tool, **not a certificate or a validation result**. Its
+initial acceptance oracle is `cargo nextest run -p chelis-ir --features
+lowering-trace --lib --test lowering_trace`. It must cover:
+
+1. Exact parity of the returned library and diagnostics with ordinary lowering,
+   including empty programs, multiple invocations, and rejected AD.
+2. Actual ordinary-grad pre/post snapshots and ordered `wrt` references; repeated
+   operand ports, full constants, dimensions, shape dependencies, and roots stay
+   in their existing `Dag` representation. Snapshots are taken at the production
+   pass invocation, not obtained by invoking AD again.
+3. Distinct context identities for nested lowering, with parent links. Unlowered
+   library definitions, unresolved callable gradients, and vectorization are
+   explicit trace boundaries, not evidence of an accepted ordinary-grad transformation.
+4. Actual library normalization snapshots before DCE, after DCE, after consuming
+   fanout copies, and after drops, together with the two production remap tables.
+   The last snapshot must match the returned library DAG exactly.
+
+The trace deliberately has no `Serialize`/`Deserialize` implementation and is not
+a new numeric wire transport: it retains the existing compiler `Dag` carrier
+without converting constants or introducing scalar numeric payloads.
+A later external evidence envelope must use exact tagged numeric carriers and
+extend the numeric-surface enumerators in that same change. Graph-local IDs are
+not cross-pass identities; consumers must check, not trust, the recorded maps.
+
+Remaining obligations include call-site splicing/result-packing correspondence,
+pre-erasure Random protocol and Resource metadata, the selected emission's
+`VerifiedDagProgram.emission()` ownership actions, external decoding and checking,
+and independent Hull numerical tests. This trace does not cover contextual/host
+subexpression entry points or certify floating-point AD. In particular, observing
+a Dropout node does not discharge the required Dropout conformance lane. Existing
+compiler/spec discrepancies require separately approved compatibility work; this
+tool must not repair or conceal them.
+
+For example, a host-classified function using a runtime shape can leave this
+library DAG empty. `UnloweredDefinitions` records that boundary; the returned
+library's `lowered_names` table identifies the definitions. An empty trace is
+never evidence that the source program's obligations were discharged.
+
 ## 7. Spec-Driven Test Generation - `Hull.Generate`
 
 Generate random well-typed Deep programs. Naive approach (generate random AST, check if it types) has near-zero hit rate for non-trivial programs. The useful approach is top-down, type-directed generation.
