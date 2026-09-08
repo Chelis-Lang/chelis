@@ -1369,6 +1369,9 @@ the associated axis and source rank/dtype retain their validation. The slot's
 magnitude is neither the selected extent nor a proof that two capacities agree.
 Its sibling `WireRtAxis::Lit.value` remains separately registered to [05-OP-7]
 with int32 axis semantics; the selected extent retains exact int64 semantics.
+Identical slot bytes may be valid under distinct legitimate owners; validation
+does not require a new serialized owner token. `InputAxis` reads tensor shape
+without inheriting `Node`'s rank-zero int64 source restriction.
 
 Classification is field-specific and compositional. A recognized container or
 variant cannot confer its authority on an unclassified numeric descendant. A
@@ -1466,7 +1469,7 @@ expectations may use only behavior decided by the controlling spec.
 |---|---|---|
 | Point/range/absence | Actual serializer preserves offset 30, measured length 4, measured length 0, and absent location distinctly. | Fabricate a zero-length range from a point, an offset from absence, or a range from an opaque ID; the relevant output assertion fails. |
 | Source identity and use | Preserve coordinate and opaque identity independently; identical offsets in distinct source contexts stay distinguishable; valid local slicing succeeds. | Reconstruct identity from offsets, treat a foreign identity as local, or overflow/exceed the known local buffer at slicing; reject at the owning use boundary. |
-| Scoped input reference | Reconstruct the intended earlier tensor input with its valid axis and retain shape-only input liveness. | Zero/out-of-range slot, cross-owner reference, wrong source kind/rank/dtype, or a dropped shape-only edge fails the owning validation. |
+| Scoped input reference | Reconstruct the intended earlier tensor input with its valid axis and retain shape-only input liveness; accept valid tensor dtypes and identical slots under distinct legitimate owners. | Zero/out-of-range slot, forbidden owner, reconstruction against the wrong owner's inputs, invalid source/axis under the owning contract, or a dropped shape-only edge fails the owning validation. |
 | Distinct numeric roles | Input reference coexists with the registered int32 axis and exact int64 extent. | Reclassify the axis or extent as reference metadata, or turn a slot into an extent without its governing operation. |
 | Numeric payload fidelity | Canonical value/wire carrier, including exact int64 `9007199254740993` and valid reduced-float images. | Arbitrary `Metadata::Value(f64)` transport registration, int64 through f64, dtype/payload mismatch, or invalid reduced-float image fails. |
 | Raw dtype selector | Canonical closed dtype carrier preserves its active/deferred disposition. | Register a raw integer dtype selector as transport, including after a rename that removes `dtype` from its field name. |
