@@ -151,9 +151,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/eval.rs",
-        4,
+        3,
         0,
-        "DAG evaluator messages for `RiscOp::Expand`, the one IR op both spellings lower to. The fourth is the locally placed unit-extent claim's [04-NUM-9] line, which names `expand` because section 4.7 gives a local guard the operation that introduces the claim rather than the `load` an entry guard names",
+        "DAG evaluator shape messages for `RiscOp::Expand`, the one IR op both spellings lower to, so no `insert` literal exists at this level: `expand at node {}: axis {} out of bounds for rank {} tensor` on the insert-form and same-rank arms, and `expand at node {}: output rank {} must equal input rank {} or {}`. The unit-extent claim's [04-NUM-9] line was a fourth until chelis#1277 B2r unified the evaluator's local guard consumers; `local_guard_verdict` interpolates the site's own operation, so that word now reaches the message from `UnitExtentClaim::trap_op` in `axis_sources.rs` rather than from a literal here",
     ),
     (
         "crates/chelis-ir/src/grad.rs",
