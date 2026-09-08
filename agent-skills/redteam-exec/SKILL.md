@@ -1,6 +1,6 @@
 ---
 name: redteam-exec
-description: Run a compliant Chelis red-team round, or send a fix back to the standing reviewer for verification. A round is a fresh local subagent working a time-boxed inline brief against the pushed head, reusing a clean exact-head worktree and warm target; a fix is verified by the reviewer that reported it. Anything else is not a red team.
+description: Run a compliant Chelis red-team round, or send a fix back to the standing reviewer for verification. A round is a fresh local subagent working an inline brief against the pushed head, reusing a clean exact-head worktree and warm target; a fix is verified by the reviewer that reported it. Anything else is not a red team.
 ---
 
 # Red Team Exec
@@ -19,13 +19,14 @@ validation pass, or verification of a fix that a red team reported.
    standing reviewer did not read, or once at the end of a long pull request before
    ready-for-review. A one-word or one-line repair inside the files the reviewer read
    never earns a fresh round.
-3. A pull request gets at most two fresh rounds by default; a third needs the user's
+3. A pull request gets at most three fresh rounds by default; a fourth needs the user's
    explicit approval. A prose-only pull request, design documents included, gets one,
    and a second needs the same approval. Rounds run from any platform count, and the
    pull request's round record is the counter. Verification does not count against the
    cap; the end-of-pull-request round does.
-4. Every round is time-boxed. The default is 15 minutes; the brief states the deadline,
-   and the reviewer reports what it has when the deadline arrives.
+4. Context budgets and time limits are optional, with no default. When set, include
+   them in the brief. The reviewer reports what it has when an explicit limit is
+   reached; an unfinished check is "unvalidated", not a finding.
 5. The head under review is pushed before the round starts, so CI runs on it while the
    review runs. CI is watched by at most one background waiter, never a foreground
    sleep or poll loop.
@@ -90,6 +91,7 @@ validation pass, or verification of a fix that a red team reported.
 ## Round Brief Template
 
 Send this as the subagent's prompt, with every placeholder filled.
+Add a context budget or deadline only when one is set for the round.
 
 ```text
 Red-team round <N> of <cap> for <PR number or branch>: <one-line subject>.
@@ -104,9 +106,7 @@ Target: <absolute path>, warm. Busy signal, taken <HH:MM local>, pasted verbatim
 `.venv/bin/python scripts/worktree_status.py --path <target>`:
 <paste the command's output here; do not summarise it>
 Use it as is; do not rebuild cold, and ask before starting any other heavyweight build.
-Budgets: context <N> tokens; report <N> characters.
-Deadline: <HH:MM local>, <15> minutes from now. Report what you have when it arrives;
-an unfinished check is "unvalidated", not a finding.
+Report budget: <N> characters.
 Deliver by: <SendMessage to <name> | final report>. Nothing else counts as delivery.
 
 Run code, not just eyes: execute tests and commands, add an adversarial probe where
@@ -178,7 +178,7 @@ Deliver by: <SendMessage to <name> | final report>.
   classification, with linked issue status for every out-of-scope defect
 - exact commands run for every P0, P1, and P2; a P3 is one line with no reproduction
 - coverage against the in-scope claims and the active acceptance oracle
-- exact reviewed commit, deadline met or missed, and final worktree status
+- exact reviewed commit and final worktree status; deadline met or missed when one was set
 - explicit note of anything unvalidated
 
 ## Validation Discipline
