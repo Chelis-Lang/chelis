@@ -265,12 +265,12 @@ Devenv files.
    ```
 
 5. Run the gates through `chelis-gate`, which forwards every argument to
-   `python3 scripts/gate.py`: `--fast` before every push, `--local` once per
-   pull request on the committed candidate:
+   `python3 scripts/gate.py`: `--fast` before every push. CI validates the pushed
+   candidate; `--local` is available for optional troubleshooting:
 
    ```sh
    chelis-gate --fast
-   chelis-gate --local
+   chelis-gate --local  # optional
    ```
 
 Use `devenv shell --` to run one command without an interactive shell:
@@ -501,15 +501,15 @@ cargo run -p chelis-cli --bin chelis -- --help
 ```
 
 `--fast` is the pre-push gate: fix-in-place, run before every push. `--local`
-(chelis#360) is the once-per-pull-request gate: run on the committed candidate
-immediately before marking the draft ready for review, after it is pushed and CI
-has started. `scripts/gate.py` is the single source of truth for the per-PR gate;
-CI runs the same commands:
+(chelis#360) is optional for troubleshooting or additional local validation. Applicable
+CI checks must pass on the pushed candidate before marking the draft ready for review;
+no per-PR `--local` run is required. `scripts/gate.py` defines the commands shared with
+the CI gate stages:
 
 ```sh
 python3 scripts/gate.py --list  # re-executes through uv when needed
 python3 scripts/gate.py --fast  # before every push; fixes fmt and tier-0 regeneration in place
-python3 scripts/gate.py --local # once per PR, on the committed candidate
+python3 scripts/gate.py --local # optional troubleshooting and local validation
 ```
 
 `--fast` regenerates the tier-0 artifacts (`scripts/regen_all.py --tier 0`) and

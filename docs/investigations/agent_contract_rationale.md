@@ -182,7 +182,7 @@ one.
 
 ## 8. A gate run that described a head nobody merged, behind "Pull Request Review Gate"
 
-The rule this replaces said the `--local` gate runs at most once per pull request, on
+An earlier rule said the `--local` gate runs at most once per pull request, on
 the committed candidate, immediately before ready-for-review. Both halves cannot hold at
 once as soon as a review round changes the candidate, and the run's first pull request
 showed it: the `--local` evidence described head `7ea68247`, the round-2 repairs landed
@@ -191,8 +191,9 @@ candidate were never the same commit. Later in the same run a merge shipped with
 `--local` evidence describing a head one commit behind the merged one.
 
 Neither case was a shortcut. Both are what the rule asks for when read literally, which
-is why the fix is to state the obligation as coverage of the shipped head rather than as
-a count of runs.
+is why validation evidence must identify the head it covered. Routine readiness now
+uses CI on the candidate head; `--local` is optional. The same evidence rule applies
+when an optional local run is cited.
 
 The second rule is about the invocation rather than the cadence. The three `--local`
 runs that completed took 7m51s, 9m56s and 10m02s, against a ten-minute foreground

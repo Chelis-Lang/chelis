@@ -646,8 +646,9 @@ cargo nextest run --profile ci --no-fail-fast \
 
 The invariant and source contracts run inside that command, including the
 fitness/cascade/handler/owner-stamp controls. The compile-fail witness doctests
-and `scripts/gate.py --local` are required supporting evidence, but neither
-replaces this oracle.
+and applicable CI checks on the candidate head are required supporting evidence,
+but neither replaces this oracle. `scripts/gate.py --local` is an optional local
+reproduction of supporting checks.
 
 The witness doctests are `crates/chelis-types/src/errors.rs`'s eight
 ` ```compile_fail ` blocks. `cargo nextest` does not execute doctests, so

@@ -241,6 +241,9 @@ jobs:
 
       # cargo-nextest is intentionally absent, so the expensive structural
       # profile oracle self-skips here and runs once on workspace shard 1.
+      - name: Install shared-skill validator dependency
+        run: uv pip install --python .venv/bin/python PyYAML==6.0.3
+
       - name: Script unit tests (scripts/test_*.py)
         run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
 
@@ -1180,6 +1183,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       # See lint-rust for why this runs before the cargo cache
       # and why the version is pinned to v8.1.0 rather than @v8.
@@ -1228,6 +1233,17 @@ jobs:
           path: target/nextest/ci-full/junit.xml
           if-no-files-found: error
           retention-days: 14
+
+      # These two configurations previously depended on a mandatory local
+      # gate. Linux Clippy cannot lint target_os=macos code. Run each once
+      # on shard 1; the existing macOS Smoke aggregate requires its success.
+      - name: Clippy macOS default features
+        if: matrix.shard == 1
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy macOS solver-free features
+        if: matrix.shard == 1
+        run: cargo clippy --workspace --all-targets --features chelis-backend-c/sleef,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
 
       - name: Verify packaged binary architecture
         if: matrix.shard == 2
@@ -1529,6 +1545,17 @@ jobs:
 
       - name: Validate CI topology documentation
         run: uv run --managed-python --python 3.11 --no-project python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
+
+      # Agent instructions are Markdown, so their owning checks must also
+      # run when docs-only routing skips the workspace and script jobs.
+      - name: Validate shared agent skills
+        run: uv run --managed-python --python 3.11 --no-project --with PyYAML==6.0.3 python scripts/check_agent_skills.py
+
+      - name: Test hosted validation coverage
+        run: uv run --managed-python --python 3.11 --no-project --with PyYAML==6.0.3 python -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation
+
+      - name: Verify shared skill distribution
+        run: cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity
 
       # chelis#729 Phase 4B froze the numeric atoms and the capability schema
       # behind atom and region digests over spec/ and spec/design/, plus a
