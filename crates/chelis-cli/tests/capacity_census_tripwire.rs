@@ -31,9 +31,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chelis_deep::tag::DeepTag;
-use chelis_deep::{Atom, DtypeFamily, Expr, List};
+use chelis_deep::{Atom, Expr, List};
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
+
+#[path = "../../../tests/support/capacity_census_stdlib_tests.rs"]
+mod stdlib_closure_tests;
 
 #[path = "../../../tests/support/c_lexical.rs"]
 mod c_lexical;
@@ -1095,7 +1098,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
-        &["float-carrier"],
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1109,7 +1112,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
-        &["numeric-op"],
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1319,7 +1322,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
-        &["numeric-op"],
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1445,14 +1448,14 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
-        &["numeric-op"],
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
         "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
-        &["numeric-op"],
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1984,22 +1987,27 @@ fn coverage_manifest() -> CoverageManifest {
             CoveredLeg {
                 leg: "std-adt-numeric".to_string(),
                 artifact: "packages/chelis-std/src/**/*.ch desugared Deep AST".to_string(),
-                enumerator: "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs".to_string(),
+                enumerator: "stdlib_rows -> Reef declaration linker -> resolved type fixed point".to_string(),
                 command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
                     .to_string(),
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
                 mutations: vec![
                     "std_adt_identity_changes_when_same_dtype_variant_changes".to_string(),
+                    "stdlib_closure_tests::mutual_nominal_recursion_propagates_numeric_fields".to_string(),
                 ],
             },
             CoveredLeg {
                 leg: "std-def-numeric".to_string(),
                 artifact: "packages/chelis-std/src/**/*.ch desugared Deep AST".to_string(),
-                enumerator: "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs".to_string(),
+                enumerator: "stdlib_rows -> Reef declaration linker -> resolved type fixed point".to_string(),
                 command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
                     .to_string(),
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
-                mutations: vec!["exported_public_numeric_stdlib_def_is_enumerated".to_string()],
+                mutations: vec![
+                    "exported_public_numeric_stdlib_def_is_enumerated".to_string(),
+                    "stdlib_closure_tests::private_helpers_and_transparent_aliases_survive_relocation".to_string(),
+                    "stdlib_closure_tests::unresolved_nominals_and_wrong_nominal_arguments_fail_closed".to_string(),
+                ],
             },
             CoveredLeg {
                 leg: "prelude-adt-numeric".to_string(),
@@ -3126,17 +3134,9 @@ fn walk_ch_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Classify a stdlib carrier by the numeric primitives it mentions, on the
-/// same rule the C families already use: a float primitive in an untagged
-/// public position is a `float-carrier` SEAM, an integer primitive makes
-/// the row a `numeric-op`. On a new post-ratchet row that class is bound to
-/// semantic registration. `scan_deftypes`
-/// previously hard-coded empty flags, so no `std-adt-numeric` row could be
-/// a seam and adding `| JsonBigNum(f64)` to `io/json.ch` landed by
-/// regenerating and citing an open issue - the round-1 P1-1 shape closed
-/// for the header family only, and a direct contradiction of `AGENTS.md`'s
-/// "a public ADT variant carrying bare `f64` has NO citation path"
-/// (round-3 red team P1).
+/// Retained capacity flags for concrete numeric payloads. Final authority
+/// classifies a declared Chelis primitive as a typed numeric operation; these
+/// flags do not turn a language ADT into an untagged external C carrier.
 fn numeric_carrier_flags(prims: &BTreeSet<String>) -> Vec<String> {
     let mut flags = Vec::new();
     if prims.iter().any(|p| FLOAT_PRIMS.contains(&p.as_str())) {
@@ -3148,445 +3148,9 @@ fn numeric_carrier_flags(prims: &BTreeSet<String>) -> Vec<String> {
     flags
 }
 
-fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::TPrim)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && NUMERIC_PRIMS.contains(&name.as_str())
-            {
-                prims.insert(name.clone());
-            }
-            // [05-OP-35]'s closed precision domains and recursive equality
-            // domain are numeric capacity even when no concrete primitive is
-            // written in the signature. A tensor precision variable is also
-            // capacity over the active tensor element set. These markers are
-            // deliberately not in `FLOAT_PRIMS`: they use the tagged carrier,
-            // so they are numeric operations without introducing a bare-float
-            // seam.
-            if list.tag() == Some(DeepTag::TVar)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "q" | "Q")
-            {
-                prims.insert(name.clone());
-            }
-            if list.tag() == Some(DeepTag::TTensor)
-                && let Some(Expr::List(precision, _)) = list.elements.last()
-                && precision.tag() == Some(DeepTag::TVar)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = precision.elements.get(2)
-            {
-                prims.insert(format!("tensor-precision:{name}"));
-            }
-            for e in &list.elements {
-                collect_numeric_tprims(e, prims);
-            }
-        }
-        Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, v| collect_numeric_tprims(v, prims));
-        }
-        Expr::MetaExpr(me, _) => collect_numeric_tprims(&me.expr, prims),
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_numeric_tprims(&bridged, prims);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-fn collect_referenced_adts(expr: &Expr, names: &mut BTreeSet<String>) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::TAdt)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-            {
-                names.insert(name.clone());
-            }
-            for element in &list.elements {
-                collect_referenced_adts(element, names);
-            }
-        }
-        Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, value| collect_referenced_adts(value, names));
-        }
-        Expr::MetaExpr(meta, _) => collect_referenced_adts(&meta.expr, names),
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_referenced_adts(&bridged, names);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-#[derive(Default)]
-struct AdtNumericDependencies {
-    direct_prims: BTreeSet<String>,
-    referenced_adts: BTreeSet<String>,
-}
-
-fn collect_adt_numeric_dependencies(
-    expr: &Expr,
-    definitions: &mut BTreeMap<String, AdtNumericDependencies>,
-) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::Deftype) {
-                let mut dependency = AdtNumericDependencies::default();
-                for element in list.elements.iter().skip(3) {
-                    collect_numeric_tprims(element, &mut dependency.direct_prims);
-                    collect_referenced_adts(element, &mut dependency.referenced_adts);
-                }
-                definitions.insert(deftype_name(list), dependency);
-            }
-            for element in &list.elements {
-                collect_adt_numeric_dependencies(element, definitions);
-            }
-        }
-        Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, value| collect_adt_numeric_dependencies(value, definitions));
-        }
-        Expr::MetaExpr(meta, _) => collect_adt_numeric_dependencies(&meta.expr, definitions),
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_adt_numeric_dependencies(&bridged, definitions);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-fn nominal_adt_numeric_prims(exprs: &[Vec<Expr>]) -> BTreeMap<String, BTreeSet<String>> {
-    let mut definitions = BTreeMap::new();
-    for program in exprs {
-        for expr in program {
-            collect_adt_numeric_dependencies(expr, &mut definitions);
-        }
-    }
-
-    let mut closure: BTreeMap<String, BTreeSet<String>> = definitions
-        .iter()
-        .map(|(name, dependency)| (name.clone(), dependency.direct_prims.clone()))
-        .collect();
-    loop {
-        let mut changed = false;
-        for (name, dependency) in &definitions {
-            let inherited = dependency
-                .referenced_adts
-                .iter()
-                .filter_map(|referenced| closure.get(referenced))
-                .flat_map(|prims| prims.iter().cloned())
-                .collect::<Vec<_>>();
-            let target = closure.entry(name.clone()).or_default();
-            let previous_len = target.len();
-            target.extend(inherited);
-            changed |= target.len() != previous_len;
-        }
-        if !changed {
-            return closure;
-        }
-    }
-}
-
-fn collect_numeric_tprims_with_adts(
-    expr: &Expr,
-    adt_prims: &BTreeMap<String, BTreeSet<String>>,
-    prims: &mut BTreeSet<String>,
-) {
-    collect_numeric_tprims(expr, prims);
-    let mut referenced = BTreeSet::new();
-    collect_referenced_adts(expr, &mut referenced);
-    for name in referenced {
-        if let Some(reachable) = adt_prims.get(&name) {
-            prims.extend(reachable.iter().cloned());
-        }
-    }
-}
-
-/// Collect numeric primitives that cross the exported definition boundary
-/// without first entering a source-defined nominal ADT. The recursive ADT
-/// closure above decides whether a callable is numeric; this narrower pass
-/// decides whether it exposes an untagged primitive carrier. A tagged value
-/// such as `Json` remains numeric surface, but merely accepting or returning
-/// that ADT does not create another bare-float seam for every JSON operation.
-fn collect_untagged_numeric_tprims(
-    expr: &Expr,
-    nominal_adts: &BTreeMap<String, BTreeSet<String>>,
-    prims: &mut BTreeSet<String>,
-) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::TAdt)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && nominal_adts.contains_key(name)
-            {
-                return;
-            }
-            if list.tag() == Some(DeepTag::TPrim)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && NUMERIC_PRIMS.contains(&name.as_str())
-            {
-                prims.insert(name.clone());
-            }
-            for element in &list.elements {
-                collect_untagged_numeric_tprims(element, nominal_adts, prims);
-            }
-        }
-        Expr::Map(map, _) => {
-            map.visit_syntax(&mut |_, value| {
-                collect_untagged_numeric_tprims(value, nominal_adts, prims)
-            });
-        }
-        Expr::MetaExpr(meta, _) => {
-            collect_untagged_numeric_tprims(&meta.expr, nominal_adts, prims);
-        }
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_untagged_numeric_tprims(&bridged, nominal_adts, prims);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-fn deftype_name(list: &List) -> String {
-    for e in list.elements.iter().skip(2) {
-        if let Expr::Atom(Atom::Name(name), _) = e {
-            return name.clone();
-        }
-    }
-    "<unnamed>".to_string()
-}
-
-fn symbol(expr: &Expr) -> Option<&str> {
-    if let Expr::Atom(Atom::Name(name), _) = expr {
-        Some(name)
-    } else {
-        None
-    }
-}
-
-/// The identity prefix for a declaration's dtype-family bounds.
-///
-/// Two signatures that differ only in their bounds are different numeric
-/// surface, so the bound belongs in the row identity. Empty for a
-/// declaration with no bound, which keeps every pre-existing row byte-stable.
-fn render_declared_bounds(bounds: &[(String, DtypeFamily)]) -> String {
-    if bounds.is_empty() {
-        return String::new();
-    }
-    format!(
-        "[{}] ",
-        bounds
-            .iter()
-            .map(|(binder, family)| format!("{binder}: {}", family.surf_name()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-fn scan_exported_numeric_defs(
-    list: &List,
-    file_label: &str,
-    adt_prims: &BTreeMap<String, BTreeSet<String>>,
-    rows: &mut Vec<Row>,
-) {
-    if list.tag() != Some(DeepTag::Module) {
-        return;
-    }
-    let declarations = list.elements.iter().skip(3);
-    let mut exports = BTreeSet::new();
-    let mut value_definitions = BTreeSet::new();
-    let mut signatures: BTreeMap<String, &Expr> = BTreeMap::new();
-    // `spec/04-type-system.md` §5.9: a declared dtype-family bound is a
-    // binder's dtype domain, so it is both numeric capacity and part of the
-    // row identity. Before bounds existed the domain lived in the binder's
-    // NAME (`p_float`); reading it from the declaration instead is structural
-    // rather than a spelling heuristic, and the name list below stays as a
-    // conservative backstop for an unbounded metavariable spelling.
-    let mut declared_bounds: BTreeMap<String, Vec<(String, DtypeFamily)>> = BTreeMap::new();
-    for declaration in declarations.clone() {
-        let Expr::List(declaration, _) = declaration else {
-            continue;
-        };
-        match declaration.tag() {
-            Some(DeepTag::Export) => {
-                exports.extend(
-                    declaration
-                        .elements
-                        .iter()
-                        .skip(2)
-                        .filter_map(symbol)
-                        .map(str::to_string),
-                );
-            }
-            Some(DeepTag::Def) => {
-                if let Some(name) = declaration.elements.get(2).and_then(symbol) {
-                    value_definitions.insert(name.to_string());
-                }
-            }
-            Some(DeepTag::Defsig) => {
-                if let (Some(name), Some(signature)) = (
-                    declaration.elements.get(2).and_then(symbol),
-                    declaration.elements.get(3),
-                ) {
-                    signatures.insert(name.to_string(), signature);
-                    if let Some(Expr::Map(meta, _)) = declaration.elements.get(1) {
-                        let bounds = chelis_deep::decode_dtype_bounds(meta);
-                        if !bounds.is_empty() {
-                            declared_bounds.insert(name.to_string(), bounds);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    for name in exports {
-        let Some(signature) = signatures.get(&name) else {
-            // An export naming no value definition is a type, ADT, or
-            // constructor export, which this leg does not enumerate. An
-            // export naming a `def` with no `defsig` is different: the
-            // enumerator reads capacity off the DECLARED signature, so
-            // that def's dtypes are public and invisible at once. It used
-            // to `continue` (round-4 red team N3), and the Surf style
-            // guide recommends exactly that shape for load-style bindings,
-            // so the silent path was one stdlib commit from being taken.
-            assert!(
-                !value_definitions.contains(&name),
-                "{}EXPORTED DEFINITION WITHOUT A DECLARED SIGNATURE \
-                 `{file_label}::{name}`: this leg enumerates a public \
-                 stdlib def's numeric capacity from its `defsig`, so an \
-                 exported def that declares none is public numeric surface \
-                 the census cannot see. Declare the signature (`def ... -> \
-                 T = ...` per the Surf style guide) or stop exporting the \
-                 binding.{}",
-                teaching_header(),
-                teaching_footer()
-            );
-            continue;
-        };
-        let bounds = declared_bounds.get(&name).map(Vec::as_slice).unwrap_or(&[]);
-        let mut reachable_prims = BTreeSet::new();
-        // A bounded binder ranges over that family's active dtypes, so it is
-        // capacity exactly as the metavariable spellings below are. Like
-        // them it stays out of `untagged_prims`: the domain is declared, not
-        // a bare-float seam.
-        for (binder, family) in bounds {
-            reachable_prims.insert(format!("dtype-bound:{binder}:{}", family.surf_name()));
-        }
-        collect_numeric_tprims_with_adts(signature, adt_prims, &mut reachable_prims);
-        if reachable_prims.is_empty() {
-            continue;
-        }
-        let mut untagged_prims = BTreeSet::new();
-        collect_untagged_numeric_tprims(signature, adt_prims, &mut untagged_prims);
-        rows.push(Row {
-            kind: "std-def-numeric".to_string(),
-            id: format!(
-                "{file_label}::{name}: {}{}",
-                render_declared_bounds(bounds),
-                chelis_deep::printer::print_expr_flat(signature)
-            ),
-            flags: numeric_carrier_flags(&untagged_prims),
-            citation: String::new(),
-        });
-    }
-}
-
-fn scan_deftypes_with_adts(
-    exprs: &[Expr],
-    file_label: &str,
-    adt_prims: &BTreeMap<String, BTreeSet<String>>,
-    rows: &mut Vec<Row>,
-) {
-    fn walk(
-        expr: &Expr,
-        file_label: &str,
-        adt_prims: &BTreeMap<String, BTreeSet<String>>,
-        rows: &mut Vec<Row>,
-    ) {
-        match expr {
-            Expr::List(list, _) => {
-                if list.tag() == Some(DeepTag::Module) {
-                    scan_exported_numeric_defs(list, file_label, adt_prims, rows);
-                }
-                if list.tag() == Some(DeepTag::Deftype) {
-                    let name = deftype_name(list);
-                    let prims = adt_prims.get(&name).cloned().unwrap_or_default();
-                    if !prims.is_empty() {
-                        let shape = list
-                            .elements
-                            .iter()
-                            .skip(3)
-                            .map(chelis_deep::printer::print_expr_flat)
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        rows.push(Row {
-                            kind: "std-adt-numeric".to_string(),
-                            id: format!("{file_label}::{name}: {shape}"),
-                            flags: numeric_carrier_flags(&prims),
-                            citation: String::new(),
-                        });
-                    }
-                }
-                for e in &list.elements {
-                    walk(e, file_label, adt_prims, rows);
-                }
-            }
-            Expr::Map(map, _) => {
-                map.visit_syntax(&mut |_, v| walk(v, file_label, adt_prims, rows));
-            }
-            Expr::MetaExpr(me, _) => walk(&me.expr, file_label, adt_prims, rows),
-            Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
-                walk(&bridged, file_label, adt_prims, rows);
-            }
-            Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-        }
-    }
-    for e in exprs {
-        walk(e, file_label, adt_prims, rows);
-    }
-}
-
-fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
-    let programs = vec![exprs.to_vec()];
-    let adt_prims = nominal_adt_numeric_prims(&programs);
-    scan_deftypes_with_adts(exprs, file_label, &adt_prims, rows);
-}
-
-fn stdlib_rows(root: &Path) -> Vec<Row> {
-    let src_dir = root.join(STD_SRC_REL);
-    let mut files = Vec::new();
-    walk_ch_files(&src_dir, &mut files);
-    files.sort();
-    let mut programs = Vec::new();
-    for path in files {
-        let src =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let decls = chelis_surf::parser::parse_str(&src).unwrap_or_else(|e| {
-            panic!(
-                "stdlib source must parse for the capacity census: {}: {e:?}",
-                path.display()
-            )
-        });
-        let exprs = chelis_surf::desugar::desugar_program(&decls);
-        let label = path
-            .strip_prefix(&src_dir)
-            .expect("under src dir")
-            .with_extension("")
-            .to_string_lossy()
-            .replace('\\', "/");
-        programs.push((label, exprs));
-    }
-    let exprs = programs
-        .iter()
-        .map(|(_, exprs)| exprs.clone())
-        .collect::<Vec<_>>();
-    let adt_prims = nominal_adt_numeric_prims(&exprs);
-    let mut rows = Vec::new();
-    for (label, exprs) in programs {
-        scan_deftypes_with_adts(&exprs, &label, &adt_prims, &mut rows);
-    }
-    rows
-}
+#[path = "../../../tests/support/capacity_census_stdlib.rs"]
+mod stdlib_discovery;
+use stdlib_discovery::{scan_deftypes, stdlib_rows};
 
 // ---------------------------------------------------------------------------
 // Rust-registered prelude value ADTs (the chelis#890 `Json` shape)
@@ -3640,7 +3204,7 @@ fn render_prelude_census_type(ty: &chelis_types::types::Type) -> String {
 }
 
 /// Collect the numeric primitive spellings reachable in one prelude ADT
-/// field type, the `collect_numeric_tprims` counterpart for
+/// field type, the resolved stdlib traversal counterpart for
 /// Rust-registered types.
 fn collect_prelude_numeric_prims(ty: &chelis_types::types::Type, prims: &mut BTreeSet<String>) {
     use chelis_types::types::{TensorPrec, Type};
@@ -4465,25 +4029,15 @@ fn planted_struct_layout_is_inventoried() {
 
 #[test]
 fn planted_deftype_with_f64_variant_is_detected() {
-    // The chelis#891 JNum shape, built through the typed Deep constructors
-    // (artifact-level, not text): (deftype {} Json (variant JNum (t-prim {} f64))).
-    let span = chelis_deep::Span::new(0, 0);
-    let tprim = Expr::node(
-        DeepTag::TPrim,
-        Default::default(),
-        vec![Expr::Atom(Atom::Name("f64".to_string()), span)],
-        span,
-    );
-    let deftype = Expr::node(
-        DeepTag::Deftype,
-        Default::default(),
-        vec![Expr::Atom(Atom::Name("Json".to_string()), span), tprim],
-        span,
-    );
+    // A complete, canonical declaration reaches the resolver before the
+    // census follows the field's numeric payload.
     let mut rows = Vec::new();
-    scan_deftypes(&[deftype], "planted", &mut rows);
+    scan_deftypes(&[planted_numeric_adt("JNum")], "planted", &mut rows);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].id, "planted::Json: (t-prim {} f64)");
+    assert_eq!(
+        rows[0].id,
+        "planted::Json: () (variant {} JNum (t-prim {} f64))"
+    );
 }
 
 #[test]
@@ -5422,7 +4976,6 @@ fn no_generic_maintainer_override_spelling_is_authority() {
     }
 }
 
-/// A retired permanent-disposition spelling cannot classify a row.
 #[test]
 fn invented_permanent_disposition_is_not_a_citation() {
     let row = Row {

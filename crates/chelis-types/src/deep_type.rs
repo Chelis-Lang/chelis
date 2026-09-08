@@ -145,12 +145,17 @@ pub(crate) struct TypeResolutionEnv {
     headers: UnordMap<String, Vec<NominalParamKind>>,
 }
 
+/// Checker-native nominal containers whose payloads are their type arguments.
+/// Other nominal shapes come from the ADT registry, including List and Option.
+pub(crate) const NATIVE_NOMINAL_HEADERS: &[(&str, usize)] =
+    &[("Dict", 2), ("Result", 2), ("String", 0)];
+
 impl TypeResolutionEnv {
     pub(crate) fn from_registry(registry: &AdtRegistry) -> Self {
         let mut headers = Self::default();
         // Checker-native nominal surfaces that are typed structurally by
         // builtin rules instead of carrying registry variants.
-        for (name, arity) in [("Dict", 2), ("Result", 2), ("String", 0)] {
+        for &(name, arity) in NATIVE_NOMINAL_HEADERS {
             headers
                 .headers
                 .insert(name.to_string(), vec![NominalParamKind::Type; arity]);
