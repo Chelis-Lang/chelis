@@ -51,6 +51,27 @@ use crate::ownership::VerifiedDagView;
 /// fn require_hash<T: std::hash::Hash>() {}
 /// fn bypass() { require_hash::<CapacityKey>(); }
 /// ```
+///
+/// The retired lossy key and its normalizer are not alternative APIs:
+///
+/// ```compile_fail
+/// use chelis_ir::dag::DimExprKey;
+/// ```
+///
+/// ```compile_fail
+/// use chelis_ir::dag::DimExpr;
+/// let _ = DimExpr::Concrete(1).normalized_key();
+/// ```
+///
+/// Finite expression evaluation and the proof API remain available:
+///
+/// ```
+/// use chelis_ir::{capacity_key::CapacityKey, dag::DimExpr};
+/// fn compare(a: &CapacityKey, b: &CapacityKey) -> bool {
+///     a.prove_equal(b).is_ok()
+/// }
+/// assert_eq!(DimExpr::Concrete(1).as_concrete(), Some(1));
+/// ```
 #[derive(Clone, Debug)]
 pub struct CapacityKey {
     canonical: CanonicalCapacity,
@@ -610,10 +631,21 @@ mod tests {
 
     #[test]
     fn capacity_key_products_use_arbitrary_precision_without_collision() {
-        let smaller = exact(product(vec![source(0, 0), literal(1u128 << 80)]));
-        let larger = exact(product(vec![source(0, 0), literal(1u128 << 81)]));
+        // The original #888 key-level witness, inverted onto exact authority.
+        let smaller = exact(product(vec![
+            source(0, 0),
+            literal(1u128 << 40),
+            literal(1u128 << 40),
+        ]));
+        let larger = exact(product(vec![
+            source(0, 0),
+            literal(1u128 << 40),
+            literal(1u128 << 41),
+        ]));
         assert_eq!(smaller.prove_equal(&smaller), Ok(()));
         assert!(smaller.prove_equal(&larger).is_err());
+        let refactored = exact(product(vec![literal(1u128 << 80), source(0, 0)]));
+        assert_eq!(smaller.prove_equal(&refactored), Ok(()));
     }
 
     #[test]
@@ -686,6 +718,173 @@ mod tests {
             CapacityKey::from_typed_expr(CapacityExpr::Unsupported).unwrap(),
             CapacityKeyBuild::NotProven(_)
         ));
+    }
+
+    #[test]
+    fn retired_rational_identities_do_not_discharge_integer_domains() {
+        // Migrated from dim_canonicalization and dim_canon_adversarial.
+        // Every old quotient family remains observable; none of these
+        // algebraic rewrites proves the complete exact-integer domain.
+        let n = source(1, 0);
+        let m = source(2, 0);
+        let k = source(3, 0);
+        let p = |a, b| product(vec![a, b]);
+        let q = quotient;
+        let cases = [
+            (
+                "gcd-numerator",
+                q(p(n.clone(), literal(4)), literal(2)),
+                p(n.clone(), literal(2)),
+            ),
+            (
+                "gcd-denominator",
+                q(literal(6), p(n.clone(), literal(4))),
+                q(literal(3), p(n.clone(), literal(2))),
+            ),
+            (
+                "gcd-both",
+                q(p(literal(12), n.clone()), p(literal(8), m.clone())),
+                q(p(literal(3), n.clone()), p(literal(2), m.clone())),
+            ),
+            (
+                "gcd-partial",
+                q(p(n.clone(), literal(3)), literal(6)),
+                q(n.clone(), literal(2)),
+            ),
+            (
+                "atom-cancellation",
+                q(p(n.clone(), m.clone()), n.clone()),
+                m.clone(),
+            ),
+            (
+                "multiple-atoms",
+                q(
+                    p(p(n.clone(), m.clone()), k.clone()),
+                    p(m.clone(), k.clone()),
+                ),
+                n.clone(),
+            ),
+            (
+                "residual-quotient",
+                q(p(n.clone(), m.clone()), p(n.clone(), k.clone())),
+                q(m.clone(), k.clone()),
+            ),
+            ("self-atom", q(n.clone(), n.clone()), literal(1)),
+            (
+                "self-product",
+                q(p(n.clone(), m.clone()), p(n.clone(), m.clone())),
+                literal(1),
+            ),
+            (
+                "shared-atom-gcd",
+                q(p(n.clone(), literal(6)), p(n.clone(), literal(4))),
+                q(literal(3), literal(2)),
+            ),
+            (
+                "nested-numerator",
+                q(q(n.clone(), m.clone()), k.clone()),
+                q(n.clone(), p(m.clone(), k.clone())),
+            ),
+            (
+                "nested-denominator",
+                q(n.clone(), q(m.clone(), k.clone())),
+                q(p(n.clone(), k.clone()), m.clone()),
+            ),
+            (
+                "nested-both",
+                q(q(n.clone(), m.clone()), q(k.clone(), literal(2))),
+                q(p(n.clone(), literal(2)), p(m.clone(), k.clone())),
+            ),
+            (
+                "mul-div-cancel",
+                p(q(n.clone(), literal(2)), literal(2)),
+                n.clone(),
+            ),
+            (
+                "mul-div-partial",
+                p(q(n.clone(), literal(2)), literal(4)),
+                p(n.clone(), literal(2)),
+            ),
+            (
+                "two-divs",
+                p(q(n.clone(), m.clone()), q(k.clone(), literal(2))),
+                q(p(n.clone(), k.clone()), p(m.clone(), literal(2))),
+            ),
+            (
+                "mul-symbolic-div",
+                p(q(n.clone(), m.clone()), m.clone()),
+                n.clone(),
+            ),
+            (
+                "multiplicity",
+                q(
+                    p(p(n.clone(), n.clone()), m.clone()),
+                    p(n.clone(), m.clone()),
+                ),
+                n.clone(),
+            ),
+            ("zero-numerator", q(literal(0), n.clone()), literal(0)),
+            (
+                "indivisible-factor",
+                q(p(n.clone(), literal(3)), literal(2)),
+                p(n.clone(), q(literal(3), literal(2))),
+            ),
+            (
+                "coprime",
+                q(p(n.clone(), literal(5)), literal(3)),
+                n.clone(),
+            ),
+            (
+                "distinct-divisors",
+                q(n.clone(), literal(3)),
+                q(n.clone(), literal(4)),
+            ),
+            ("reciprocal", q(literal(1), n.clone()), q(n, literal(1))),
+        ];
+        for (name, lhs, rhs) in cases {
+            let lhs = exact(lhs);
+            let rhs = exact(rhs);
+            assert!(lhs.prove_equal(&rhs).is_err(), "{name}");
+            assert!(rhs.prove_equal(&lhs).is_err(), "{name}, reversed");
+            assert!(
+                lhs.prove_equal(&lhs).is_err(),
+                "{name} lost its partial domain"
+            );
+        }
+    }
+
+    #[test]
+    fn total_products_and_literal_division_are_still_proven() {
+        let n = source(1, 0);
+        let m = source(2, 0);
+        for (lhs, rhs) in [
+            (
+                product(vec![n.clone(), literal(4), m.clone()]),
+                product(vec![m.clone(), product(vec![literal(4), n.clone()])]),
+            ),
+            (product(vec![literal(0), n.clone(), m.clone()]), literal(0)),
+            (quotient(literal(12), literal(3)), literal(4)),
+            (
+                product(vec![n.clone(), quotient(literal(6), literal(3))]),
+                product(vec![literal(2), n.clone()]),
+            ),
+        ] {
+            let lhs = exact(lhs);
+            let rhs = exact(rhs);
+            assert_eq!(lhs.prove_equal(&rhs), Ok(()));
+            assert_eq!(rhs.prove_equal(&lhs), Ok(()));
+        }
+        assert!(
+            exact(product(vec![n.clone(), n.clone(), m.clone()]))
+                .prove_equal(&exact(product(vec![n, m])))
+                .is_err()
+        );
+        for numerator in [literal(0), source(1, 0)] {
+            assert!(matches!(
+                CapacityKey::from_typed_expr(quotient(numerator, literal(0))),
+                Err(CapacityKeyBuildError::StaticZeroDivisor)
+            ));
+        }
     }
 
     #[test]

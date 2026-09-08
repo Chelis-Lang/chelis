@@ -29,8 +29,6 @@ Those facts are still optional at their highest-risk consumers:
   can bypass;
 - equal-width representations remain interchangeable to a cast even though
   [04-NUM-8] says their bits have different meanings;
-- `DimExpr::normalized_key` uses saturating products, so two unequal symbolic
-  capacities can compare equal before allocation;
 - Python and the HIP support header independently mirror a fixed-rank,
   int32-sized device tensor whose element pointer is `float *`; and
 - backend element spellings and stores are text selected at call sites, so a
@@ -71,8 +69,9 @@ The class has already survived local repairs:
 3. [#1360] made HIP allocation and element spelling agree for Bool8 and made the
    unsupported kernels fail loudly. The required Bool8 operation family remains
    [#1364]; a width assertion alone cannot prove a kernel writes canonical 0/1.
-4. Host runtime allocation now uses checked metadata, while compiler capacity
-   equivalence still saturates before the runtime sees a value ([#888]).
+4. Host runtime allocation gained checked metadata while compiler capacity
+   equivalence still saturated before the runtime saw a value ([#888]); the
+   exact capacity authority and legacy retirement below remove that path.
 5. `Repr` derives byte width but not [04-NUM-8]'s arithmetic representation
    ([#899]). The missing fact is restated or inferred wherever a lane needs it.
 
@@ -364,6 +363,37 @@ A later dimension-expression operation outside this closed vocabulary must add
 an exact key rule or return `NotProvenEqual`; it may not add a lossy fallback.
 Memory planners may reuse storage only when both the exact capacity key and the
 exact `Repr` agree. A failure to prove equality loses reuse, never correctness.
+
+#### Legacy capacity authority retirement (#888)
+
+The closeout removes `DimExprKey`, `DimExpr::normalized_key`, and their rational
+normalizer; there is no compatibility alias. The only remaining production
+caller was `specialize::dims_equivalent`, which compared single `DimInfo`
+atoms. It compares resolved literal values or unresolved symbol spellings
+directly through `DimExpr::from`, preserving that local axis-pattern decision.
+It neither proves storage capacity nor manufactures a scoped source identity.
+
+`DimExpr` remains the renderable/evaluable extent carrier. Its finite
+`evaluate` and `as_concrete` projections use checked multiplication, returning
+their existing error and `None` channels on overflow. Exact mathematical
+identity remains exclusively `CapacityKey::prove_equal`.
+
+The old rational-equivalence corpus migrates to the private exact-key tests:
+product-only equivalences remain positive; symbolic cancellation, quotient
+reassociation, and zero/partial-domain erasure become negative controls.
+The original large-product key witness is retained in
+`capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision`;
+the C/HIP `issue_888_capacity_collision` suites continue to prove placement.
+This closeout does not complete Phase 1: #889's mandatory checked runtime
+metadata and the composite Phase 1 oracle still have to land.
+
+The Phase 0 coverage freeze moves to name the inverted shared-plan witness,
+execute finite-projection overflow controls in release, and add a mutation
+restoring `DimExpr::normalized_key`. That restored owner must be rejected as
+unclassified even though it existed in the immutable foundation. Paired
+compile-fail/compiling API probes independently prevent the retired key and
+method from returning. The foundation identities remain byte-identical;
+only deleted active debt is removed and current samples are refreshed.
 
 ### C2.2 Runtime metadata types
 

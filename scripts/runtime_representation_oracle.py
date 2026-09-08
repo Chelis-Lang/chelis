@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "7566ad7643214ed95a25b49e9ecf6e477619e8616c82de20b29ab01fdeefddb3"
+FREEZE_SHA256 = "b14833f0fdfaa1a6d27f8db9903ddfce6846dc6fe2755e05f0de40534f945c3d"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -873,6 +873,25 @@ fn runtime_representation_phase0_saturating_fold(concrete: usize, value: usize) 
     )
 
 
+def mutate_retired_capacity_normalizer(source: str) -> str:
+    """An old normalizer identity cannot re-enter the shrink-only debt set."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_retired_normalizer",
+        """// runtime_representation_retired_normalizer
+impl DimExpr {
+    pub fn normalized_key(&self) -> usize {
+        match self {
+            Self::Mul(lhs, rhs) => lhs.as_concrete().unwrap_or(usize::MAX)
+                .saturating_mul(rhs.as_concrete().unwrap_or(usize::MAX)),
+            _ => self.as_concrete().unwrap_or(usize::MAX),
+        }
+    }
+}""",
+    )
+
+
 def mutate_capacity_owner_saturation(source: str) -> str:
     """Saturation never becomes final inside the exact-capacity owner."""
 
@@ -1333,6 +1352,8 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
         _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
         _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_normalized_key_arithmetic),
+        _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_retired_capacity_normalizer,
+               expected_owners=("DimExpr::normalized_key",)),
         _probe(
             "saturating-capacity-fold",
             CAPACITY_KEY_OWNER,
@@ -1629,13 +1650,12 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "opaque capacity key public surface",
             ("cargo", "test", "--release", "-p", "chelis-ir", "--doc", "capacity_key"),
         ),
-        # [#888] has three witnesses at two levels: the key-level collision in
-        # the IR, and the planner-level consequence in each backend that
-        # consumes the key. The two planners carry the same defect in verbatim
-        # copies, so one witness would understate the class. All three must
-        # INVERT when Phase 1's exact CapacityKey lands, never be deleted.
+        # The private CapacityKey leg above inverts #888's original key-level
+        # witness. These shared-plan and backend-adapter legs preserve its
+        # allocation consequences without retaining a lossy production API.
+        # Finite DimExpr projections must reject overflow in release too.
         OracleLeg(
-            "capacity collision key-level release reproducer",
+            "exact shared capacity and finite projection release controls",
             (
                 "cargo",
                 "nextest",
@@ -1645,6 +1665,8 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "chelis-ir",
                 "--test",
                 "issue_888_capacity_collision",
+                "--test",
+                "dim_expr_evaluation",
             ),
         ),
         OracleLeg(
