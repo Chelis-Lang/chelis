@@ -11,7 +11,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from pathlib import Path as pathlib_Path
 from unittest import mock
 
 
@@ -415,24 +414,29 @@ class CompileFailFixtureLockTests(unittest.TestCase):
     """
 
     @staticmethod
-    def _gated_fixture_dirs() -> set[pathlib_Path]:
-        """Fixture directories any `check_*_compile_fail.py` compiles.
+    def _gated_fixture_dirs() -> set[str]:
+        """Fixture directories any `check_*compile_fail.py` compiles.
 
-        Derived, not listed. This was a two-name tuple plus a `MANIFEST`
-        import, which could not see `check_hash_order_phase_b_compile_fail.py`
-        at all: that script names `disallowed_hash_types` and `order_escape`
-        inline off a `FIXTURE_ROOT` instead of exporting one `MANIFEST`. The
-        three fixtures it and `check_hash_order_compile_fail.py` own were
-        therefore absent from the bump inventory, and cutting 0.18.7 failed on
-        a stale lock -- the same class as chelis#1128 at 0.18.2.
+        Derived by asking, for each fixture that exists on disk, whether any
+        gate script mentions it by name. The inverse -- parsing paths out of
+        the scripts -- is what the first version of this did, and it was blind
+        to `check_hash_order_phase_b_compile_fail.py`: that script builds
+        `FIXTURE_ROOT / "disallowed_hash_types" / "Cargo.toml"`, so the name
+        never sits adjacent to the text `compile_fail` and the pattern
+        extracted nothing. The guard then passed vacuously for the very script
+        whose fixtures were the ones left stale when 0.18.7 was cut.
         """
-        dirs: set[pathlib_Path] = set()
-        for script in sorted((bump_mod.REPO_ROOT / "scripts").glob("check_*compile_fail.py")):
-            for name in re.findall(r'compile_fail[/"\s]+[/"\s]*"?([a-z0-9_]+)"?', script.read_text()):
-                if name in {"Cargo", "toml", "rs"}:
-                    continue
-                dirs.add(name)
-        return dirs
+        scripts = "\n".join(
+            path.read_text()
+            for path in sorted(
+                (bump_mod.REPO_ROOT / "scripts").glob("check_*compile_fail.py")
+            )
+        )
+        on_disk = {
+            lock.parent.name
+            for lock in bump_mod.REPO_ROOT.glob("crates/*/tests/compile_fail/*/Cargo.lock")
+        }
+        return {name for name in on_disk if f'"{name}"' in scripts}
 
     def test_inventory_covers_every_gated_fixture(self):
         inventory = {m.parent.name for m in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS}

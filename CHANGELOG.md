@@ -10,6 +10,71 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **BREAKING (Surf/shell): type binders take explicit dtype-family bounds, and
+  `SHELL_FORMAT_VERSION` moves 2 -> 3 (chelis#1417, part of chelis#729).** A
+  binder may bound itself to `Float`, `Int` or `Numeric` --
+  `sig arange[p: Int]: p -> p -> tensor[n, p]` -- and `sig` gains the bracket
+  list `def` already had, in the same position. New `[04-DTYPE-2]`
+  (`spec/04` §5.9). Family names are contextual words, so a user type named
+  `Float` is unaffected and `[p: MyAdt]` is a parse error rather than a silent
+  bound. Deep carries the bound as `dtype_bounds` metadata on `defsig`; no new
+  tag. **`arange` no longer accepts floats and `linspace` no longer accepts
+  integers**, which is what `[05-OP-35]` always said. **Every `.shell`
+  published by 0.18.6 must be regenerated.** Two unification defects are fixed
+  with it: `merge_tvar_restrictions` used exact equality where three families
+  require intersection, and `bind_tvar`'s `source.or(target)` silently
+  discarded the narrower bound.
+
+- **BREAKING (builtins): `insert` is the rank-increasing movement primitive
+  (part of chelis#1277).** `insert(x, axis, size)` carries the positional
+  three-argument `expand` insertion behaviour, and every rank-increasing call
+  site now spells it. `expand`'s own meaning is unchanged in this release.
+  Renamed programs move from a deferred route to a fixed one: a result shape
+  formerly selected by a later consumer is determined at the call. The
+  observable difference is confined to programs whose result shape is selected
+  late, and the change carries one known capability regression.
+
+- **BREAKING (checker): `expand`'s same-rank form requires a unit source
+  extent (part of chelis#1277).** `spec/04` §4.7.2 said a same-rank result
+  "replaces the extent at `axis`" unconditionally, while `spec/05` §2.4's
+  movement table carried the `(size-1 broadcast)` precondition only as a
+  parenthetical. The precondition is now normative, and a same-rank `expand`
+  over a non-unit source extent is rejected instead of executing with no loud
+  outcome anywhere.
+
+- **BREAKING (checker): lexical precedence over compiler-provided names
+  (chelis#1076, chelis#672).** A compiler-provided name no longer silently
+  replaces the callable ordinary lexical scope selected. Applied uppercase
+  heads resolve through a structural constructor scope, so lexical shadowing
+  cannot erase constructor-position authority; constructor patterns resolve
+  against the nominal scrutinee owner; and evaluator dispatch and C host
+  lowering consult active lexical bindings before builtin, named-axis, pipe or
+  host-combinator routes.
+
+- **BREAKING (checker): elementwise rank disagreement is rejected (part of
+  chelis#668).** Where the checker has derived a rank fact for both operands of
+  a `ShapeClass::Identity` call, a positive-rank disagreement now reports. This
+  is the checker lane; the separate backend-c host-emitter guard is listed
+  under Fixed.
+
+- **BREAKING (eval/lowering): static seed and literal folding are typed
+  (chelis#794).** Static seed evaluation is a typed scalar fold over literal,
+  cast and negation forms rather than a read of the first numeric child of an
+  arbitrary composite, and an explicit random seed must resolve to the signed
+  `int64` that `[05-RNG-1]` requires -- negative seeds remain valid, their
+  two's-complement bits reinterpreted. A bare atom no longer has a dtype
+  invented for it.
+
+- **`list_dir` returns its entries in byte order (`[05-HOST-4]`,
+  chelis#1479).** No numbered-spec sentence assigned an order, so both lanes
+  returned raw `fs::read_dir` order and a program folding over `list_dir`
+  produced a different value on two machines holding identical files. The set
+  of entries is external state and stays outside the determinism contract; the
+  order is not.
+
+- **Hash iteration order cannot reach an observable result (chelis#1341).**
+  Enforced by construction rather than by review.
+
 - **ReLU now retains its dedicated [05-OP-43] identity and adjoint
   (chelis#1313).** Reverse-mode AD returns the complete incoming cotangent
   only where `0 < x`, and exact positive zero at both signed zeros and NaN;
@@ -56,10 +121,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   C, `chelis check`, and `chelis test` preserve the same checked extent.
   Structured inferred JSON wraps nominal dimensions as
   `{kind:"dimension", dim:{...}}` without changing existing type-argument
-  objects. Serialized compiler state changes accordingly: compiled-context
-  cache v12 → v13, stdlib cache v8 → v9, library cache v5 → v6,
-  and Reef prepared-graph cache v2 → v3; stale entries rebuild
-  automatically.
+  objects. Serialized compiler state changes accordingly. Measured across the
+  whole 0.18.7 cut rather than for this change alone: compiled-context cache
+  11 -> 15, stdlib cache 7 -> 12, library cache 4 -> 8, and Reef prepared-graph
+  cache 2 -> 5; stale entries rebuild automatically.
+  `PACKAGE_SCHEMA_FORMAT_VERSION` is unchanged at 2.
+  `SHELL_FORMAT_VERSION` moves 2 -> 3 and does NOT rebuild automatically --
+  see the dtype-family binder entry above.
 
 - **BREAKING (runtime/C ABI): compiled values move to a unified atomic heap
   (chelis#1286 phase 1).** The public ABI cuts over to an opaque `Tensor`
