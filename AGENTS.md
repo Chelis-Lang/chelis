@@ -125,15 +125,12 @@ not drift.
 
 - Every pull request, documentation-only work included, gets at least one compliant
   red-team round before merge. Push first, after `python3 scripts/gate.py --fast`: the
-  round reviews the pushed head while CI runs on it. The full `--local` gate covers the
-  head that goes ready-for-review. Run it late, on the committed candidate you intend
-  to ship, so one run normally suffices; when a review round changes that candidate the
-  earlier run stops describing it and you run it again. Evidence that predates the
-  repairs describes a head nobody is merging. The pull request records which head each
-  run covered, so a reader can check the evidence against the merged commit instead of
-  assuming the two match. A rebase that preserves the candidate's content is exempt per
-  [Worktree And Branch Discipline](#worktree-and-branch-discipline), and the record says
-  that the covered head differs from the merged one.
+  round reviews the pushed head while CI runs on it. Applicable CI checks must pass on
+  the head that goes ready-for-review, including any repairs made during review.
+  `--local` is optional for troubleshooting or additional local validation; it is not
+  a pull-request readiness requirement. Record the reviewed head and CI evidence in
+  the pull request. Any supporting local evidence must also name the head it covered;
+  evidence from before a repair does not validate the repaired candidate.
   [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
   has the runs behind this rule.
 - Classify every finding against the pull request's stated scope. A finding is in scope
@@ -649,8 +646,9 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
   before any history rewrite is published. Run `python3 scripts/gate.py --fast` on the
   result for a non-documentation change or the focused documentation checks for a
-  docs-only change; a content-preserving rebase does not oblige a fresh `--local` run,
-  and the record notes that the covered head is not the merged one. Never force-push a red gate. Obtain approval, then use an exact-head
+  docs-only change. A content-preserving rebase may retain supporting local evidence;
+  record that its covered head differs, and require CI on the new head. Never
+  force-push a red gate. Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
   neither does one whose only hand-resolved conflicts are generated or digest lines:
   regenerate `rejection_registry_generated.rs` with
@@ -787,15 +785,17 @@ Agent gates for non-documentation changes:
 
 ```sh
 python3 scripts/gate.py --fast    # before every push: fixes in place, then checks
-python3 scripts/gate.py --local   # covers the head that goes ready-for-review
-python3 scripts/gate.py --detach --local   # same run, detached
+python3 scripts/gate.py --local   # optional troubleshooting and local validation
+python3 scripts/gate.py --detach --local   # optional run, detached
 python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
 ```
 
 `scripts/gate.py` is the single source of truth for the per-PR gate. `--fast` is the
-pre-push gate: fix-in-place, run before every push. `--local` runs on the committed
-candidate after the draft is pushed and CI has started, and must cover the head that
-goes ready-for-review. The bare full gate is CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
+pre-push gate: fix-in-place, run before every push. CI on the pushed candidate owns
+routine PR validation and must pass before ready-for-review. `--local` is an optional
+way to reproduce checks on the developer's machine; no per-PR run is required.
+The bare full gate remains CI-owned for routine PR validation.
+CI calls `python3 scripts/gate.py <stage>` for each split job.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
@@ -859,8 +859,7 @@ completion oracle, and the tracker requires every fix in that class to run
 it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
 line.
 
-`--local` (chelis#360) is the gate on the committed candidate that goes
-ready-for-review. It runs
+`--local` (chelis#360) is an optional local validation command. It runs
 two of the three workspace clippy configurations (`-D warnings`, compile-only): the
 default row and the solver-free-features row. The `--no-default-features` row is
 CI-owned through `gate.py lint-and-unit`, because `check_configuration_closure.py`
@@ -868,7 +867,7 @@ reconciles every repository `.rs` file against the dep-info in the worktree's ta
 `crates/chelis-prove/src/clarabel_sos.rs` is compiled per pull request only by the
 solver-free row, and the no-default row compiles a strict subset of the default row.
 It then runs `cargo fmt --check`, `chelis lint --check .`, the deterministic
-std-bundle regeneration check, all three explicit rustdoc commands, the checkpoint and
+std-bundle regeneration check, the explicit rustdoc commands, the checkpoint and
 hash-order compile-fail fixtures, the configuration-closure check, both pipeline-core
 guards, the chelis#908 unrepresentable-domain oracle, the runtime-representation
 Phase 0 oracle, and `cargo nextest run -p <crate> --no-fail-fast` for each crate
@@ -877,18 +876,18 @@ resolved from each member's `Cargo.toml`, not the directory name). The derived c
 list is always printed; "no crate changes detected" means the per-crate stage was
 skipped, not silently empty. The workspace nextest stage is CI-owned: run `--fast`
 before every push, push before the review round so the reviewer and CI see the same
-head, run `--local` on the committed candidate that goes ready-for-review, and let CI
-(macOS Smoke is the authoritative workspace oracle) run the full suite. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+head, and require CI on the candidate before ready-for-review. CI runs the full suite
+(macOS Smoke is the authoritative workspace oracle). See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on macOS.
 
-A cold `--local` run does not fit inside a foreground command budget, so do not start
-it as one. Launch it with `python3 scripts/gate.py --detach --local` and collect the
+If a cold `--local` run is useful, launch it with
+`python3 scripts/gate.py --detach --local` and collect the
 result with `python3 scripts/gate.py --status [HANDLE]`. The launcher's exit code is a
 launch verdict and nothing more: the run's own exit code, exit 4 for a lease timeout
 included, arrives through `--status`. Record the `--status` verdict and the head it
 covered, never the launch.
 [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
-has the runs that produced both rules.
+has the runs behind the evidence and invocation rules.
 
 `--fast` is the inner-loop pass. It fixes in place and prints what it changed:
 `scripts/regen_all.py --tier 0` (the rejection registry, the embedded conformance
@@ -953,7 +952,7 @@ per-stage seconds, the first failing stage, the termination class (`pass`,
 `stage-failure`, `signal`, `environment`, `preflight-stop`, `lease-timeout`,
 `user-cancel`, `internal-error`), and the files a `--fast` run changed; it then prints
 one summary line with the stage count, seconds, verdict, and report path. Record the
-`--local` run's seconds from that file in the pull request.
+seconds from that file when citing an optional `--local` run in the pull request.
 
 The gate normalizes `CARGO_TARGET_DIR` to an absolute path inside the current
 worktree and rejects paths outside it. It also sets
@@ -963,24 +962,23 @@ These controls isolate writable state; concurrent agents may still contend
 for CPU and make each other slower. The advisory lease serializes `--local` and full
 runs across worktrees on one workstation; it never kills another process.
 
-Prose-only changes with no code, fixture, example, or structurally consumed Markdown
-are exempt from `--local`: run the focused documentation checks, push, and require green
-CI. Hosted docs-only classification is routing evidence, not proof that every changed
-Markdown control artifact has an owning validator in that workflow.
+Documentation-only changes require applicable CI on the candidate head. Hosted
+docs-only classification is routing evidence, not proof that every changed Markdown
+control artifact has an owning validator in that workflow.
 
 Markdown parsed, embedded, mirrored, or used as agent instructions is a control artifact,
-not inert prose. Run its focused validators even when CI reports `docs_only=true`. For a
-shared `agent-skills/*/SKILL.md` or red-team command-wrapper change, at minimum:
+not inert prose. Its focused validators must run even when CI reports
+`docs_only=true`. The always-run Docs job owns shared-agent-skill validation:
 
-- run the platform's skill-schema validator against every changed `SKILL.md` (in Codex,
-  use the `skill-creator` `quick_validate.py` helper),
-- run `scripts/regenerate_conformance_assets.py --check` through the uv-managed Python,
-- compare the live and embedded skill bytes and the Claude/Codex wrapper bytes, and
-- run the `chelis-conformance` `asset_drift_tripwire` and `skill_set_uniformity` tests
-  with the worktree's managed Python environment.
+- `scripts/check_agent_skills.py` validates metadata, the registered shared set,
+  source/embedded byte agreement, and Claude/Codex red-team wrapper agreement;
+- the validator and CI-routing tests exercise failure cases;
+- `chelis-conformance`'s `asset_drift_tripwire` and `skill_set_uniformity` tests
+  exercise compiled assets and downstream distribution.
 
-The always-run Docs job builds mdBook and validates the package skill/examples; it does
-not replace these shared-agent-skill checks.
+Local reruns of these checks are optional. Docs also builds mdBook and validates the
+package skill/examples. Phase-specific acceptance oracles and manual gates remain
+required; making `--local` optional does not replace those named obligations.
 
 Default-gate discipline:
 

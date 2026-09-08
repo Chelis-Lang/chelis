@@ -27,8 +27,8 @@ Usage (an unmanaged launcher is automatically re-executed through uv):
                                        # annotated fast/local/CI-owned
     python3 scripts/gate.py --fast     # the pre-push gate: fix in place, then
                                        # lint, per-crate clippy, tripwires
-    python3 scripts/gate.py --local    # the once-per-pull-request gate, on the
-                                       # committed candidate before ready-for-review
+    python3 scripts/gate.py --local    # optional troubleshooting and local
+                                       # validation; CI owns PR readiness
 
 Local/CI stage split (chelis#360): the full developer gate runs
 `cargo nextest run --workspace --no-fail-fast` with the default profile, while the CI
@@ -37,9 +37,9 @@ to the required dtype oracle. The workspace execution stays out of `--local` --
 macOS Smoke is the authoritative
 workspace oracle, and on the macOS workstation the mass first-exec
 burst it triggers can wedge assessment entirely (see
-docs/local_macos_environment.md). `--local` is the once-per-pull-request
-gate, run on the committed candidate immediately before ready-for-review, after
-the draft is pushed and CI has started: two workspace clippy configurations
+docs/local_macos_environment.md). `--local` is optional for troubleshooting or
+additional local validation. CI on the pushed candidate owns PR readiness.
+The local command runs two workspace clippy configurations
 (compile-only, no mass exec), fmt, `chelis lint`, the regeneration and
 compile-fail guards, both oracles, plus `cargo nextest run -p <crate>
 --no-fail-fast` for each crate changed vs `origin/main` (committed diff plus
@@ -531,7 +531,7 @@ HASH_PARTITION_RE = re.compile(
     r"^hash:(?P<shard>[1-9][0-9]*)/(?P<count>[1-9][0-9]*)$"
 )
 
-# The static `--local` once-per-pull-request subset (chelis#360). Deliberately
+# The static subset for optional `--local` validation (chelis#360). Deliberately
 # excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
 # first-exec burst) and NEXTEST_WORKSPACE (CI-owned; macOS Smoke is the
 # authoritative workspace oracle). `--local` appends a dynamic
@@ -981,7 +981,7 @@ def render(command: list[str]) -> str:
 
 def list_annotation(command: list[str]) -> str:
     """The `--list` annotation for a canonical command: whether the
-    `--fast` pre-push gate and the `--local` once-per-pull-request subset
+    `--fast` pre-push gate and the optional `--local` subset
     include it, only `--local` does, or CI owns it."""
     if command in FAST_STATIC_COMMANDS and command in LOCAL_STATIC_COMMANDS:
         return FAST_ANNOTATION
@@ -1070,7 +1070,7 @@ def changed_crates(
 
 
 def local_command_list(crates: list[str]) -> list[list[str]]:
-    """The `--local` once-per-pull-request command list: the static subset
+    """The optional `--local` command list: the static subset
     plus one `cargo nextest run -p <crate> --no-fail-fast` per changed crate."""
     commands = list(LOCAL_STATIC_COMMANDS)
     for crate in crates:
@@ -1459,7 +1459,7 @@ def find_summary(
     to get this pid is the only match for the whole window before this run
     finishes; a later run that reused the pid outranks this run's own summary
     once it exists. Either way polling reports someone else's verdict, which is
-    a false PASS on the once-per-pull-request gate.
+    a false PASS on the optional local gate.
 
     `not_before` is the handle's `started_at`, and the rule is: take the
     EARLIEST summary that ended at or after this run started. That one is
@@ -2292,7 +2292,7 @@ def run_local(
     executable: Path,
     state: dict,
 ) -> int:
-    """Run the `--local` once-per-pull-request gate: preflight, lease, derive
+    """Run the optional `--local` gate: preflight, lease, derive
     the changed crates vs origin/main, then run the local command list."""
     code, environment = run_preflight(
         mode="local", report=report, environ=environ, executable=executable
@@ -2457,8 +2457,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--local",
         action="store_true",
         help=(
-            "Run the once-per-pull-request gate on the committed candidate, "
-            "immediately before ready-for-review (chelis#360): two workspace "
+            "Run optional local validation (chelis#360): two workspace "
             "clippy configurations, fmt --check, chelis lint --check ., the "
             "regeneration and compile-fail guards, both oracles, and cargo "
             "nextest run -p <crate> for each crate changed vs origin/main. "

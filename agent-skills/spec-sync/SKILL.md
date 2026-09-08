@@ -26,10 +26,13 @@ Use this skill whenever a change affects public language/compiler behavior.
 
 ## Verification
 
-Run the pre-push gate after the edits, and the full local gate once on the committed
-candidate before ready-for-review:
+Run the pre-push gate after the edits, then require applicable CI checks to pass on
+the pushed candidate before ready-for-review:
 
 ```sh
 python3 scripts/gate.py --fast
-python3 scripts/gate.py --local
 ```
+
+`python3 scripts/gate.py --local` is optional for troubleshooting or additional local
+validation. It is not a per-PR requirement and does not replace a named acceptance
+oracle or manual gate.

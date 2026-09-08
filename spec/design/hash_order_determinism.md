@@ -276,18 +276,13 @@ The two residuals differ in that the feature one has a nightly `--all-features`
 backstop and this one has none at any cadence. Bringing it in requires a
 supported Windows host, not a further row.
 
-Separately, two of the three per-pull-request rows (`default-features` and
-`solver-free-features`) list macOS among their hosts, but no continuous job
-runs Clippy on macOS. The two macOS jobs in `ci.yml` are
-`macos-workspace-shard`, which inlines `cargo nextest run --workspace --profile
-ci-full` rather than calling the gate, and `smt-build-darwin-arm64`, a release
-build; no step of either runs Clippy, and neither requests the component.
-No macOS job in another workflow runs Clippy either, and the only one of them
-on a push trigger is `build-cvc5.yml`'s `build-darwin-arm64`, which harvests a
-cvc5 artifact. Attribute-form
-`#[cfg(target_os = "macos")]` regions are therefore linted by `python3
-scripts/gate.py --local`, which `AGENTS.md` makes mandatory once per pull
-request on the committed candidate, and not by default CI. The
+Two of the three per-pull-request rows (`default-features` and
+`solver-free-features`) list macOS among their hosts. Shard 1 of
+`macos-workspace-shard` installs Clippy and runs both configurations; the
+`macos-smoke` aggregate requires that shard to succeed. Attribute-form
+`#[cfg(target_os = "macos")]` regions therefore receive these two lint
+configurations in CI. `python3 scripts/gate.py --local` remains an optional
+local reproduction. The
 `no-default-features` row is Linux-only: `--local` dropped it and kept the
 other two because the closure check's source-reconciliation leg needs the
 solver-free row on a fresh target (`crates/chelis-prove/src/clarabel_sos.rs`
