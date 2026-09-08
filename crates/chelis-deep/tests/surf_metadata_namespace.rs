@@ -40,14 +40,17 @@ fn programmatic_validation_accepts_known_surface_metadata_and_rejects_unknown_ke
     let mut metadata = Metadata::default();
     let error = metadata
         .extensions_mut()
-        .insert("surf_future".into(), string("value"))
+        .insert(
+            "surf_future".into(),
+            chelis_deep::ExtensionData::parse("\"value\"").unwrap(),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("surf_future"));
 }
 
 #[test]
-fn programmatic_validation_recurses_through_structural_containers() {
+fn legacy_expression_encoding_cannot_enter_the_extension_data_map() {
     let raw = serde_json::json!({"entries": [["outer", {"Map": [{"entries": [["surf_nested", string("value")]]}, Span::new(0, 0)]}]]});
     let error = serde_json::from_value::<Metadata>(raw).unwrap_err();
-    assert!(error.to_string().contains("surf_nested"));
+    assert!(error.to_string().contains("opaque extension-data encoding"));
 }

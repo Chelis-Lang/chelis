@@ -119,11 +119,34 @@ performs those checks nor treats a well-shaped annotation as trusted.
 > elements record the original arguments without interpreting or rewriting
 > their contents as annotations or runtime expressions.
 
-Producer-specific keys outside the closed `surf_*` namespace and reserved
-`span_*` extensions retain syntax-valued payloads unless another normative
-contract assigns a more specific rule. Nested nodes and metadata maps in
-those payloads remain subject to validation. A `dtype_bounds` payload is
-instead a data map governed by §2.2: its keys are binder names, even when
+> **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque
+> data. Chelis semantic passes SHALL neither interpret nor rewrite their
+> payloads. Producer tools may interpret their own data. Compiler-interpreted
+> annotations SHALL have an explicitly specified, compiler-owned key and
+> payload type; an extension key never grants compilation authority.
+
+Extension data uses Deep's lexical scalar tokens, parenthesized lists,
+ordered maps, and prefix records. List heads have no tag meaning. Nested map
+keys have no annotation meaning, including `type`, `span`, and `surf_*`.
+Nested entry order and duplicates are preserved; annotation-key uniqueness
+applies to the enclosing annotation map. Lexical syntax, escaping and balanced
+structure are checked, but AST shape, placement, binder, type and effect rules
+do not apply inside data. Scalar tokens, including numeric suffixes, retain
+their spelling; formatting may canonicalize whitespace and separators.
+
+Semantic expression traversal excludes extension data. A surviving or
+replacement AST node preserves its originating owner's extensions; copying a
+node copies them. Removing a node removes its attached extensions. A node
+synthesized without an originating owner starts with no extensions. Combining
+owners unions distinct keys and coalesces identical payloads. Conflicting
+payloads SHALL NOT overwrite one another: an optional rewrite remains
+unapplied, and a required combination reports the conflicting key. Equality
+for this combination compares data, not its diagnostic source offsets.
+AST and tooling serialization preserve the data; runtime values and machine
+code need not embed arbitrary producer annotations. The external-span
+propagation contract below remains binding.
+
+A `dtype_bounds` payload is a data map governed by §2.2: its keys are binder names, even when
 they spell `type`, `span`, or a `surf_*` name. They are not metadata keys.
 Likewise, the contents of a preserved `source` record are syntax data.
 The annotation-key uniqueness rule does not reinterpret data maps inside
@@ -773,6 +796,11 @@ The normal and debug emitters share this AST-backed resugarer and Surf printer.
 Debug output may append stable `-- deep-debug: ...` comments; it is not a
 second Surf dialect.
 
+Producer extensions have no Surf representation. Resugaring SHALL reject
+an extension-bearing AST with the extension key and owning source location,
+before emitting output, rather than discard data. Deep-to-Deep normalization
+preserves these payloads, including inside structural annotation containers.
+
 Surf property declarations represent user-authored properties only. They have
 no syntax for the non-forgeable `bridge:c-earchin` producer identity or for a
 producer-local `property_source_id`. Resugaring a property with either form of
@@ -1017,7 +1045,8 @@ always learns which form was rejected.
 > by its syntactic class, which SHALL be exactly one of: a bare identifier, a
 > bare integer literal, a bare float literal, a bare string literal, a bare
 > boolean literal, an empty list, a list without a tag symbol, a metadata map,
-> or a metadata-annotated form. An implementation SHALL NOT substitute a
+> a metadata-annotated form, or opaque extension data supplied through a raw
+> programmatic API. An implementation SHALL NOT substitute a
 > placeholder for either identification. The rejection SHALL be reported at
 > the ingress boundary that reads the program text, before name resolution,
 > type checking, evaluation, lowering, or resugaring observes the program. An

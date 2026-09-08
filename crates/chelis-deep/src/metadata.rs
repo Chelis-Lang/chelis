@@ -164,6 +164,7 @@ pub fn role(key: &str) -> MetadataRole {
 /// Borrowed syntax adapters keep one shape implementation for both AST stages.
 #[derive(Clone, Copy)]
 enum View<'a> {
+    Data(&'a crate::ExtensionData),
     Raw(&'a RawExpr),
     Ast(&'a Expr),
     Value(&'a V),
@@ -213,6 +214,7 @@ impl<'a> View<'a> {
     }
     fn span(self) -> Span {
         match self {
+            Self::Data(data) => data.span(),
             Self::Raw(v) => v.span(),
             Self::Ast(v) => v.span(),
             Self::Value(v) => v.span(),
@@ -382,7 +384,7 @@ impl<'a> View<'a> {
 fn entries(meta: &Metadata) -> Entries<'_> {
     meta.values()
         .map(|v| (v.key().spelling(), View::Value(v)))
-        .chain(meta.extensions().iter().map(|(k, v)| (k, View::Ast(v))))
+        .chain(meta.extensions().iter().map(|(k, v)| (k, View::Data(v))))
         .collect()
 }
 fn value<'a>(meta: &Entries<'a>, key: &str) -> Option<View<'a>> {
@@ -942,7 +944,9 @@ fn check_groups(items: &[View<'_>]) -> Result<(), MetadataError> {
 fn push_metadata<'a>(meta: Entries<'a>, stack: &mut Vec<(View<'a>, Context)>) {
     for (key, v) in meta.into_iter().rev() {
         // These are data roles. Their complete outer shape was checked above.
-        if !matches!(role(key), MetadataRole::Preserved | MetadataRole::BinderMap) {
+        if crate::annotations::MetadataKey::decode(key).is_some()
+            && !matches!(role(key), MetadataRole::Preserved | MetadataRole::BinderMap)
+        {
             stack.push((v, Context::default()));
         }
     }
@@ -1159,7 +1163,11 @@ mod annotation_admission_cost {
                 if extension {
                     metadata
                         .extensions_mut()
-                        .insert("custom".into(), current)
+                        .insert(
+                            "custom".into(),
+                            crate::ExtensionData::parse(&crate::printer::print_expr_flat(&current))
+                                .unwrap(),
+                        )
                         .unwrap();
                 } else {
                     metadata

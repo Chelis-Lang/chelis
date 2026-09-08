@@ -63,11 +63,12 @@ fn stamped_lit() -> Expr {
     )
 }
 
-fn meta_with(key: &str, value: Expr) -> Metadata {
+fn meta_with(_key: &str, value: Expr) -> Metadata {
     let mut metadata = Metadata::default();
     metadata
-        .extensions_mut()
-        .insert(key.into(), value)
+        .insert(chelis_deep::annotations::MetadataValue::PropertySeed(
+            chelis_deep::annotations::RuntimeExpression::try_new(value).unwrap(),
+        ))
         .expect("valid extension fixture");
     metadata
 }
@@ -84,11 +85,7 @@ fn assert_child_rejected(payload: Expr, expected_tag: &str) {
 
 /// Assert the construction gate rejects `payload` in metadata position.
 fn assert_metadata_rejected(payload: Expr, expected_tag: &str) {
-    let mut metadata = Metadata::default();
-    let error = metadata
-        .extensions_mut()
-        .insert("probe".into(), payload)
-        .unwrap_err();
+    let error = chelis_deep::annotations::RuntimeExpression::try_new(payload).unwrap_err();
     assert!(error.to_string().contains(expected_tag), "{error}");
 }
 
@@ -191,7 +188,7 @@ fn deserialize_rejects_a_raw_tag_two_stamped_levels_down() {
 fn deserialize_rejects_a_raw_tag_in_a_stamped_child_metadata() {
     let mut inner = stamped_var_json();
     node_meta_entries_mut(&mut inner).push(Value::Array(vec![
-        Value::String("probe".to_string()),
+        Value::String("property_seed".to_string()),
         json_of(&raw("let")),
     ]));
 
@@ -291,7 +288,7 @@ fn try_replace_children_rejects_a_raw_tag_beside_a_stamped_child() {
 
 #[test]
 fn try_replace_meta_rejects_a_raw_tag_below_nested_carriers() {
-    let mut metadata = meta_with("probe", stamped_lit());
+    let metadata = meta_with("probe", stamped_lit());
     let before = metadata.clone();
     let buried = Expr::BareList(
         vec![Expr::MetaExpr(
@@ -303,10 +300,7 @@ fn try_replace_meta_rejects_a_raw_tag_below_nested_carriers() {
         )],
         sp(),
     );
-    let error = metadata
-        .extensions_mut()
-        .replace("probe".into(), buried)
-        .unwrap_err();
+    let error = chelis_deep::annotations::RuntimeExpression::try_new(buried).unwrap_err();
     assert!(error.to_string().contains("match"));
     assert_eq!(metadata, before, "rejection is atomic");
 }
@@ -437,7 +431,7 @@ fn metaexpr_expr_slot_is_scanned_in_both_positions() {
 
 #[test]
 fn metaexpr_metadata_is_scanned_in_both_positions() {
-    let value = serde_json::json!({ "MetaExpr": [{"entries": [["probe", raw("app")]], "expr": stamped_lit()}, sp()] });
+    let value = serde_json::json!({ "MetaExpr": [{"entries": [["property_seed", raw("app")]], "expr": stamped_lit()}, sp()] });
     let error = serde_json::from_value::<Expr>(value).unwrap_err();
     assert!(error.to_string().contains("app"));
     assert_metadata_rejected(raw("app"), "app");

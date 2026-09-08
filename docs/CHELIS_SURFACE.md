@@ -623,13 +623,20 @@ Deep metadata follows `spec/03-deep-syntax.md` [03-META-1/2]. Malformed
 registered values, duplicate annotation keys (including extensions and `span_*`),
 and forbidden placements
 are rejected at ingress with the metadata key and source location. Producer
-extensions remain available outside the closed `surf_*` namespace. `grad`'s
+extensions remain available outside the closed `surf_*` namespace. Under
+[03-META-3], their contents are opaque data: nested annotation-like keys,
+variable spellings and macro forms have no compiler meaning and survive
+semantic rewrites unchanged. Surf conversion rejects extensions it cannot
+preserve, naming the key and owning location. `grad`'s
 `wrt` metadata uses `(var {} name)` or a nonempty tuple of those references;
 bare names are rejected. `dtype_bounds` binder names and historical `source`
 arguments are data, so annotation-key spelling does not reclassify them.
 
 Rust AST carriers use `Metadata`: compiler annotations are dedicated
-`MetadataValue` variants, and `ExtensionMap` accepts only producer keys.
+`MetadataValue` variants, and `ExtensionMap` accepts producer keys paired
+with sealed `ExtensionData` values. Use `ExtensionData::parse` or explicit
+raw-syntax conversion; program expressions cannot be inserted directly.
+Serialized extensions have an explicit data tag; regenerate older checkpoints.
 Insertion rejects duplicates; replacement is explicit. Validated payloads
 expose immutable expression leaves and fallible role-aware rebuilding.
 Raw key/value pairs are confined to parsing and serialization boundaries.

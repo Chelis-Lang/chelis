@@ -39,14 +39,14 @@ fn additional_core_payloads_reject_bad_shapes_and_owners() {
 }
 
 #[test]
-fn source_arguments_are_data_but_extension_values_are_annotations() {
+fn source_arguments_and_extension_values_are_data() {
     let historical = "(var {source: (macro_name {custom: 1, custom: 2, surf_future: false})} x)";
     let parsed = parse_str(historical).unwrap();
     let wire = serde_json::to_string(&parsed).unwrap();
     let decoded: Vec<chelis_deep::Expr> = serde_json::from_str(&wire).unwrap();
     assert_eq!(parsed, decoded);
-    assert!(parse_str("(var {custom: {custom: 1, custom: 2}} x)").is_err());
-    assert!(parse_str("(var {custom: {surf_future: false}} x)").is_err());
+    assert!(parse_str("(var {custom: {custom: 1, custom: 2}} x)").is_ok());
+    assert!(parse_str("(var {custom: {surf_future: false}} x)").is_ok());
 }
 
 #[test]
@@ -67,8 +67,8 @@ fn registered_inventory_contains_thirty_compiler_owned_keys() {
 
 #[test]
 fn typed_insertion_replacement_and_extension_names_are_separate() {
+    use chelis_deep::Span;
     use chelis_deep::annotations::{Metadata, MetadataValue, Spanned};
-    use chelis_deep::{Atom, Expr, Span};
     let span = Span::new(0, 0);
     let mut meta = Metadata::default();
     meta.insert(MetadataValue::Doc(Spanned::new("first".into(), span)))
@@ -90,17 +90,26 @@ fn typed_insertion_replacement_and_extension_names_are_separate() {
     ] {
         assert!(
             meta.extensions_mut()
-                .insert(key.into(), Expr::Atom(Atom::Bool(true), span))
+                .insert(
+                    key.into(),
+                    chelis_deep::ExtensionData::parse("true").unwrap()
+                )
                 .is_err(),
             "{key}"
         );
     }
     meta.extensions_mut()
-        .insert("custom".into(), Expr::Atom(Atom::Bool(true), span))
+        .insert(
+            "custom".into(),
+            chelis_deep::ExtensionData::parse("true").unwrap(),
+        )
         .unwrap();
     assert!(
         meta.extensions_mut()
-            .insert("custom".into(), Expr::Atom(Atom::Bool(false), span))
+            .insert(
+                "custom".into(),
+                chelis_deep::ExtensionData::parse("false").unwrap()
+            )
             .is_err()
     );
 }
@@ -268,13 +277,16 @@ fn binder_annotation_spans_survive_structural_payload_decoding() {
 
 #[test]
 fn empty_storage_and_invalid_extension_names_have_no_hidden_state() {
-    use chelis_deep::{Atom, Expr, Span, annotations::Metadata};
+    use chelis_deep::annotations::Metadata;
     let mut metadata = Metadata::default();
     for key in ["", "bad-key", "1invalid", "not.key"] {
         assert!(
             metadata
                 .extensions_mut()
-                .insert(key.into(), Expr::Atom(Atom::Bool(true), Span::new(0, 0)))
+                .insert(
+                    key.into(),
+                    chelis_deep::ExtensionData::parse("true").unwrap()
+                )
                 .is_err(),
             "{key}"
         );
@@ -376,24 +388,24 @@ fn expression_payload_admission_rejects_undecoded_vocabulary() {
     };
     assert!(TypeSyntax::try_new(raw("t-var")).is_err());
     assert!(RuntimeExpression::try_new(raw("var")).is_err());
-    let mut annotations = Metadata::default();
-    assert!(
-        annotations
-            .extensions_mut()
-            .insert("custom".into(), raw("var"))
-            .is_err()
-    );
     let typed = parse_str("(var {} x)").unwrap().remove(0);
-    assert!(RuntimeExpression::try_new(typed.clone()).is_ok());
+    assert!(RuntimeExpression::try_new(typed).is_ok());
+    let mut annotations = Metadata::default();
     annotations
         .extensions_mut()
-        .insert("custom".into(), typed)
+        .insert(
+            "custom".into(),
+            chelis_deep::ExtensionData::parse("(var {} x extra)").unwrap(),
+        )
         .unwrap();
     let before = annotations.clone();
     assert!(
         annotations
             .extensions_mut()
-            .replace("custom".into(), raw("var"))
+            .replace(
+                "surf_future".into(),
+                chelis_deep::ExtensionData::parse("true").unwrap()
+            )
             .is_err()
     );
     assert_eq!(annotations, before);
@@ -468,58 +480,76 @@ fn serde_preserves_existing_expression_leaf_carriers() {
 }
 
 #[test]
-fn previous_generic_ast_checkpoints_decode_without_loss() {
+fn previous_extension_checkpoints_reject_and_core_json_remains_readable() {
     let sources: Vec<String> =
         serde_json::from_str(include_str!("fixtures/metadata_df5daab/sources.json")).unwrap();
-    let expected: Vec<Vec<chelis_deep::Expr>> = sources
-        .iter()
-        .map(|source| parse_str(source).unwrap())
-        .collect();
-    let json: Vec<Vec<chelis_deep::Expr>> =
+    let old: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("fixtures/metadata_df5daab/ast.json")).unwrap();
-    let binary: Vec<Vec<chelis_deep::Expr>> =
-        bincode::deserialize(include_bytes!("fixtures/metadata_df5daab/ast.bin")).unwrap();
-    assert_eq!(
-        sources.len(),
-        32,
-        "thirty registered shapes, prefix and source/extension data"
-    );
-    assert_eq!(
-        json.len(),
-        expected.len(),
-        "all previous JSON programs decode"
-    );
-    assert_eq!(
-        binary.len(),
-        expected.len(),
-        "all previous binary programs decode"
-    );
-    for (index, ((json, binary), expected)) in json.iter().zip(&binary).zip(&expected).enumerate() {
-        assert_eq!(json, expected, "previous JSON producer: {}", sources[index]);
+    assert_eq!(sources.len(), 32);
+    assert_eq!(old.len(), sources.len());
+    let mut rejected = 0;
+    let mut accepted = 0;
+    for (source, json) in sources.iter().zip(old) {
+        let expected = parse_str(source).unwrap();
+        let current = serde_json::to_value(&expected).unwrap();
+        let decoded = serde_json::from_value::<Vec<chelis_deep::Expr>>(json);
+        if current.to_string().contains("ExtensionData") {
+            assert!(
+                decoded
+                    .unwrap_err()
+                    .to_string()
+                    .contains("opaque extension-data encoding")
+            );
+            rejected += 1;
+        } else {
+            assert_eq!(decoded.unwrap(), expected, "old core: {source}");
+            accepted += 1;
+        }
+        let current_binary = bincode::serialize(&expected).unwrap();
         assert_eq!(
-            binary, expected,
-            "previous binary producer: {}",
-            sources[index]
+            bincode::deserialize::<Vec<chelis_deep::Expr>>(&current_binary).unwrap(),
+            expected
         );
     }
+    assert!(accepted > 0 && rejected > 0);
+    assert!(
+        bincode::deserialize::<Vec<Vec<chelis_deep::Expr>>>(include_bytes!(
+            "fixtures/metadata_df5daab/ast.bin"
+        ))
+        .is_err()
+    );
 }
 
 #[test]
 fn serde_rejects_duplicate_core_and_extension_entries_in_json_and_binary() {
-    // The historical wire format is a list, so a hostile producer can still
-    // encode duplicates even though the current Metadata API cannot.
+    // Independent hostile wire producer. The positive controls lock the enum
+    // tags before the duplicate-key controls exercise admission.
+    #[derive(Clone, serde::Serialize)]
+    #[allow(dead_code)]
+    enum Wire {
+        Atom(chelis_deep::Atom, chelis_deep::Span),
+        List,
+        Map,
+        MetaExpr,
+        Node,
+        BareList,
+        UnknownForm,
+        ExtensionData(chelis_deep::ExtensionData),
+    }
     #[derive(serde::Serialize)]
     struct Entries {
-        entries: Vec<(String, chelis_deep::Expr)>,
+        entries: Vec<(String, Wire)>,
     }
     for key in ["doc", "custom", "span_file"] {
-        let entry = (
-            key.to_string(),
-            chelis_deep::Expr::Atom(
+        let value = if key == "doc" {
+            Wire::Atom(
                 chelis_deep::Atom::Str("value".into()),
                 chelis_deep::Span::new(0, 0),
-            ),
-        );
+            )
+        } else {
+            Wire::ExtensionData(chelis_deep::ExtensionData::parse("\"value\"").unwrap())
+        };
+        let entry = (key.to_string(), value);
         let single = Entries {
             entries: vec![entry.clone()],
         };

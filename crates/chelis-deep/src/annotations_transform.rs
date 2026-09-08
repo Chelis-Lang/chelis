@@ -149,15 +149,79 @@ impl InvariantPredicate {
 /// The owner of an expression visited by a syntax analysis. Registered names
 /// derive from the typed key, while extension names belong to their producer.
 #[derive(Debug, Clone, Copy)]
-pub enum MetadataName<'a> {
+pub enum MetadataName {
     Core(MetadataKey),
-    Extension(&'a str),
 }
-impl MetadataName<'_> {
+impl MetadataName {
     pub fn spelling(&self) -> &str {
         match self {
             Self::Core(k) => k.spelling(),
-            Self::Extension(k) => k,
+        }
+    }
+}
+
+impl Expr {
+    /// Transfer an originating owner's opaque annotations to its replacement.
+    /// Both inputs retain their original state if a key conflicts.
+    pub fn try_inherit_extensions(self, owner: &Expr) -> Result<Self, MetadataError> {
+        let extensions = match owner {
+            Expr::Node(node, _) => node.meta().extensions(),
+            Expr::Map(meta, _) => meta.extensions(),
+            Expr::MetaExpr(meta, _) => meta.metadata.extensions(),
+            Expr::UnknownForm(data) => data.meta.extensions(),
+            Expr::List(list, _) => match list.elements.get(1) {
+                Some(Expr::Map(meta, _)) => meta.extensions(),
+                _ => return Ok(self),
+            },
+            Expr::BareList(items, _) => match items.as_slice() {
+                [_, Expr::Map(meta, _)] => meta.extensions(),
+                _ => return Ok(self),
+            },
+            Expr::Atom(..) => return Ok(self),
+        };
+        if extensions.is_empty() {
+            return Ok(self);
+        }
+        let mut candidate = self;
+        let meta = match &mut candidate {
+            Expr::Node(node, _) => {
+                let mut meta = node.meta().clone();
+                meta.extensions_mut().try_merge(extensions)?;
+                node.try_replace_meta(meta).map_err(|error| {
+                    let mut detail =
+                        invalid("extension", owner.span(), "a valid replacement owner");
+                    detail.detail = Some(error.to_string());
+                    detail
+                })?;
+                return Ok(candidate);
+            }
+            Expr::Map(meta, _) => Some(meta),
+            Expr::MetaExpr(meta, _) => Some(&mut meta.metadata),
+            Expr::UnknownForm(data) => Some(&mut data.meta),
+            Expr::List(list, _) => match list.elements.get_mut(1) {
+                Some(Expr::Map(meta, _)) => Some(meta),
+                _ => None,
+            },
+            Expr::BareList(items, _) => match items.as_mut_slice() {
+                [_, Expr::Map(meta, _)] => Some(meta),
+                _ => None,
+            },
+            Expr::Atom(..) => None,
+        };
+        if let Some(meta) = meta {
+            meta.extensions_mut().try_merge(extensions)?;
+            Ok(candidate)
+        } else {
+            let mut metadata = Metadata::default();
+            metadata.extensions_mut().try_merge(extensions)?;
+            let span = candidate.span();
+            Ok(Expr::MetaExpr(
+                crate::MetaExpr {
+                    metadata,
+                    expr: Box::new(candidate),
+                },
+                span,
+            ))
         }
     }
 }
@@ -175,7 +239,7 @@ impl Metadata {
     /// Read-only traversal for analyses that need binder scope and diagnostic
     /// paths. Structured snapshots cannot mutate the stored payload. Rewriters
     /// use `try_map_expressions`, which never exposes structural roots.
-    pub fn visit_syntax(&self, f: &mut impl FnMut(MetadataName<'_>, &Expr)) {
+    pub fn visit_syntax(&self, f: &mut impl FnMut(MetadataName, &Expr)) {
         use MetadataValue as V;
         for value in self.values() {
             let key = MetadataName::Core(value.key());
@@ -270,9 +334,6 @@ impl Metadata {
                 | V::Destructure(_) => {}
             }
         }
-        for (key, value) in self.extensions().iter() {
-            f(MetadataName::Extension(key), value);
-        }
     }
     /// Rebuild expression leaves with role information. Every changed payload
     /// is re-admitted before the candidate can replace its original metadata.
@@ -280,7 +341,11 @@ impl Metadata {
         &self,
         f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
     ) -> Result<Self, E> {
-        self.try_map_payloads(f, true, &mut |metadata, _| Ok(metadata))
+        self.try_map_payloads(
+            &mut |value, role| Ok(f(value, role)?.try_inherit_extensions(value)?),
+            true,
+            &mut |metadata, _| Ok(metadata),
+        )
     }
 
     /// Rebuild exactly the borrowed leaves yielded by `visit_expressions`, in
@@ -290,7 +355,11 @@ impl Metadata {
         &self,
         f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
     ) -> Result<Self, E> {
-        self.try_map_payloads(f, false, &mut |metadata, _| Ok(metadata))
+        self.try_map_payloads(
+            &mut |value, role| Ok(f(value, role)?.try_inherit_extensions(value)?),
+            false,
+            &mut |metadata, _| Ok(metadata),
+        )
     }
     /// Transform annotations attached to structural payloads separately from
     /// expressions. The callback receives the owning tag (or a detached binder)
@@ -300,7 +369,11 @@ impl Metadata {
         f: &mut impl FnMut(&Expr, MetadataRole) -> Result<Expr, E>,
         annotations: &mut impl FnMut(Metadata, Option<DeepTag>) -> Result<Metadata, E>,
     ) -> Result<Self, E> {
-        self.try_map_payloads(f, true, annotations)
+        self.try_map_payloads(
+            &mut |value, role| Ok(f(value, role)?.try_inherit_extensions(value)?),
+            true,
+            annotations,
+        )
     }
 
     fn try_map_payloads<E: From<MetadataError>>(
@@ -321,7 +394,10 @@ impl Metadata {
             let metadata = v
                 .metadata
                 .try_map_payloads(f, rewrite_bindings, annotations)?;
-            let metadata = annotations(metadata, owner)?;
+            let mut metadata = annotations(metadata, owner)?;
+            metadata
+                .extensions_mut()
+                .try_merge(v.metadata.extensions())?;
             if let Some(owner) = owner {
                 crate::metadata::validate_typed_container(owner, &metadata)?;
             } else {
@@ -520,9 +596,7 @@ impl Metadata {
             result.insert(rebuilt)?;
         }
         for (key, value) in self.extensions().iter() {
-            result
-                .extensions_mut()
-                .insert(key.into(), f(value, R::Syntax)?)?;
+            result.extensions_mut().insert(key.into(), value.clone())?;
         }
         Ok(result)
     }

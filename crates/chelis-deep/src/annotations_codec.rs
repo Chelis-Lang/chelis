@@ -146,7 +146,17 @@ pub(crate) fn decode_entries(entries: Vec<(String, RawExpr)>) -> Result<Metadata
             crate::metadata::validate_raw_payload(&key, &raw)?;
             meta.insert(decode_value(kind, raw)?)?;
         } else {
-            let value = crate::stamp_to_typed::stamp_bare(raw).map_err(|e| stamp_error(&key, e))?;
+            let value = match raw {
+                RawExpr::ExtensionData(data) => data,
+                raw => {
+                    let span = raw.span();
+                    crate::ExtensionData::from_raw(&raw).map_err(|error| {
+                        let mut invalid = invalid(&key, span, "well-formed extension data");
+                        invalid.detail = Some(error.to_string());
+                        invalid
+                    })?
+                }
+            };
             meta.extensions_mut().insert(key, value)?;
         }
     }
@@ -343,6 +353,7 @@ pub(crate) enum WireExpr {
     Node(Box<WireNode>, Span),
     BareList(Vec<WireExpr>, Span),
     UnknownForm(Box<WireUnknown>),
+    ExtensionData(crate::ExtensionData),
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireList {
@@ -374,6 +385,7 @@ pub(crate) struct WireUnknown {
 impl WireExpr {
     fn into_raw(self) -> RawExpr {
         match self {
+            Self::ExtensionData(data) => RawExpr::ExtensionData(data),
             Self::Atom(atom, span) => RawExpr::Atom(
                 match atom {
                     Atom::Name(v) => RawAtom::Symbol(v),
@@ -421,6 +433,13 @@ impl WireExpr {
 impl WireExpr {
     fn into_ast(self, key: &str) -> Result<Expr, MetadataError> {
         Ok(match self {
+            Self::ExtensionData(data) => {
+                return Err(invalid(
+                    key,
+                    data.span(),
+                    "program syntax, not extension data",
+                ));
+            }
             Self::Atom(atom, span) => Expr::Atom(atom, span),
             Self::List(list, span) => Expr::List(
                 crate::List {
@@ -491,9 +510,14 @@ impl WireMetadata {
             if let Some(kind) = MetadataKey::decode(&key) {
                 metadata.insert(decode_wire_value(kind, value)?)?;
             } else {
-                metadata
-                    .extensions_mut()
-                    .insert(key.clone(), value.into_ast(&key)?)?;
+                let WireExpr::ExtensionData(data) = value else {
+                    return Err(invalid(
+                        &key,
+                        Span::new(0, 0),
+                        "the explicit opaque extension-data encoding; regenerate the serialized AST",
+                    ));
+                };
+                metadata.extensions_mut().insert(key, data)?;
             }
         }
         Ok(metadata)
@@ -715,7 +739,7 @@ impl WireMetadata {
         entries.extend(
             meta.extensions()
                 .iter()
-                .map(|(k, v)| (k.to_string(), WireExpr::from_ast(v))),
+                .map(|(k, v)| (k.to_string(), WireExpr::ExtensionData(v.clone()))),
         );
         entries.sort_by(|(a, _), (b, _)| a.cmp(b));
         Self { entries }
@@ -811,6 +835,7 @@ impl WireExpr {
     }
     fn from_raw_data(raw: &RawExpr) -> Self {
         match raw {
+            RawExpr::ExtensionData(data) => Self::ExtensionData(data.clone()),
             RawExpr::Atom(a, span) => atom(
                 match a {
                     RawAtom::Symbol(v) => Atom::Name(v.clone()),

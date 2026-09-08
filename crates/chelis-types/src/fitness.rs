@@ -317,6 +317,7 @@ fn count_metadata(meta: &chelis_deep::Metadata) -> usize {
     fn raw_count(expr: &chelis_deep::RawExpr) -> usize {
         use chelis_deep::RawExpr;
         match expr {
+            RawExpr::ExtensionData(_) => 1,
             RawExpr::Atom(..) => 1,
             RawExpr::List(values, _) => 1 + values.iter().map(raw_count).sum::<usize>(),
             RawExpr::Map(values, _) => 1 + values.iter().map(|(_, v)| raw_count(v)).sum::<usize>(),

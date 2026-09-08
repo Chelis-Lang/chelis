@@ -42,7 +42,6 @@ pub fn print_expr_flat(expr: &Expr) -> String {
     Printer::flat().fmt_expr(&WireExpr::from_ast(expr), 0)
 }
 
-/// Render preserved invocation data for diagnostics without interpreting it.
 pub fn print_macro_source(source: &crate::annotations::MacroSource) -> String {
     Printer::flat().fmt_expr(
         &WireExpr::from_value(&crate::annotations::MetadataValue::Source(source.clone())),
@@ -89,6 +88,7 @@ impl Printer {
 
     fn fmt_expr(&self, expr: &WireExpr, indent: usize) -> String {
         match expr {
+            WireExpr::ExtensionData(data) => data.syntax().into(),
             WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
             WireExpr::Map(map, _) => self.fmt_map(map, indent),
             WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr(meta, indent),
@@ -113,6 +113,7 @@ impl Printer {
 
     fn fmt_expr_flat(&self, expr: &WireExpr) -> String {
         match expr {
+            WireExpr::ExtensionData(data) => data.syntax().into(),
             WireExpr::Atom(atom, _) => Self::fmt_atom(atom),
             WireExpr::Map(map, _) => Self::fmt_map_flat(map),
             WireExpr::MetaExpr(meta, _) => self.fmt_meta_expr_flat(meta),
@@ -418,7 +419,13 @@ mod tests {
                     ))
                     .unwrap();
             } else {
-                metadata.extensions_mut().insert(key.into(), value).unwrap();
+                metadata
+                    .extensions_mut()
+                    .insert(
+                        key.into(),
+                        crate::ExtensionData::parse(&print_expr_flat(&value)).unwrap(),
+                    )
+                    .unwrap();
             }
         }
         metadata

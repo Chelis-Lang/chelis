@@ -33,7 +33,7 @@ generator never decides where to attach it.
 ### Requirement: Metadata keys and active vocabulary
 
 Metadata keys SHALL use the identifier charset `[A-Za-z_][A-Za-z0-9_]*` (no hyphens) and
-carry compiler-relevant annotations. The `type` key SHALL be checked rather than trusted, and
+carry compiler-owned annotations or opaque producer data. The `type` key SHALL be checked rather than trusted, and
 metadata fields SHALL be preserved by all spec-defined transformations and round-trip through
 canonical form. The `surf_*` namespace SHALL be closed to `surf_path`,
 `surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, and
@@ -62,6 +62,30 @@ Repeatable Surf `with contract = "..."` property options SHALL be represented by
 
 - **WHEN** a `lit` node carries a `type` metadata annotation that disagrees with the value
 - **THEN** the checker verifies and rejects it rather than trusting the annotation
+
+### Requirement: Producer extensions are opaque data
+
+Producer extension values SHALL follow `spec/03-deep-syntax.md` [03-META-3]:
+lexical scalars, lists, ordered maps and prefix records, without program semantics.
+Nested keys and heads SHALL have no compiler authority; nested order, duplicate
+entries and scalar spelling SHALL survive. Semantic visitors SHALL exclude data.
+Surviving and replacement owners SHALL preserve their extensions, copies SHALL
+copy them, removed owners SHALL remove them, and unowned synthetic nodes SHALL
+start empty. Owner combination SHALL coalesce equal data and union distinct keys;
+conflicts SHALL skip an optional rewrite or reject a required combination.
+Deep-to-Surf conversion SHALL reject extensions it cannot preserve before emitting
+output, with the key and owner location.
+
+#### Scenario: Code-like producer data remains data
+
+- **WHEN** an extension contains `{type: false, type: (var {}), span: 1}`
+- **THEN** it is preserved without annotation validation or variable resolution
+- **AND** the same malformed contents in compiler-owned fields are rejected
+
+#### Scenario: Conflicting annotations cannot be overwritten
+
+- **WHEN** a required replacement combines two owners with different data for one key
+- **THEN** it reports the conflicting key and does not publish the replacement
 
 ### Requirement: Span metadata is an opaque validated string
 

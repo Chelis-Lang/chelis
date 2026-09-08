@@ -793,10 +793,19 @@ fn the_class_set_is_closed_and_each_member_is_covered() {
         FormClass::ListWithoutTagSymbol,
         FormClass::MetadataMap,
         FormClass::MetadataAnnotatedForm,
+        FormClass::ExtensionData,
     ];
     for class in all {
         // Exhaustiveness tripwire: a new variant breaks this match.
         match class {
+            FormClass::ExtensionData => {
+                let data = chelis_deep::RawExpr::ExtensionData(
+                    chelis_deep::ExtensionData::parse("(var {} x)").unwrap(),
+                );
+                assert_eq!(FormClass::of(&data), class);
+                assert!(chelis_deep::stamp_to_typed(vec![data]).is_err());
+                continue;
+            }
             FormClass::BareIdentifier
             | FormClass::BareIntegerLiteral
             | FormClass::BareFloatLiteral
@@ -814,7 +823,7 @@ fn the_class_set_is_closed_and_each_member_is_covered() {
             "{class:?} has no [03-PROG-2] coverage case"
         );
     }
-    assert_eq!(HEADLESS_TOP_LEVEL_FORMS.len(), all.len());
+    assert_eq!(HEADLESS_TOP_LEVEL_FORMS.len() + 1, all.len());
 }
 
 #[test]

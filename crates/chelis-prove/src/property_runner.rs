@@ -3790,8 +3790,8 @@ enum DeepSourceKind {
 /// matching the CLI discoverer's `property_source_kind` (F6): `None` for a
 /// non-property def; `Err` for a `chelis_role: "property"` def with an
 /// absent or invalid `property_source_kind` (a malformed property is an
-/// error on BOTH surfaces, never silently skipped). The legacy
-/// `c_earchin_role` witness without an explicit kind defaults to Bridge.
+/// error on BOTH surfaces, never silently skipped). Producer extensions
+/// carry no property-discovery authority.
 fn deep_property_source_kind(
     meta: &Metadata,
     name: &str,
@@ -3799,21 +3799,13 @@ fn deep_property_source_kind(
     let has_chelis = meta
         .chelis_role()
         .is_some_and(|value| value.value() == "property");
-    let has_legacy = meta
-        .extensions()
-        .get("c_earchin_role")
-        .and_then(string_value)
-        == Some("property_witness");
-    if !has_chelis && !has_legacy {
+    if !has_chelis {
         return Ok(None);
     }
     let Some(kind) = meta
         .property_source_kind()
         .map(|value| value.value().spelling())
     else {
-        if has_legacy {
-            return Ok(Some(DeepSourceKind::Bridge));
-        }
         return Err(format!(
             "property `{name}` metadata must include string `property_source_kind`"
         ));
@@ -4582,12 +4574,6 @@ fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
 fn symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {
         DeepExpr::Atom(DeepAtom::Name(value), _) => Some(value),
-        _ => None,
-    }
-}
-fn string_value(expr: &DeepExpr) -> Option<&str> {
-    match expr {
-        DeepExpr::Atom(DeepAtom::Str(value), _) => Some(value),
         _ => None,
     }
 }

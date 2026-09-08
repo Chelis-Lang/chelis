@@ -2315,26 +2315,15 @@ fn has_chelis_property_role(meta: &Metadata) -> bool {
     meta.chelis_role()
         .is_some_and(|role| role.value() == "property")
 }
-fn has_legacy_property_role(meta: &Metadata) -> bool {
-    meta.extensions()
-        .get("c_earchin_role")
-        .and_then(string_value)
-        == Some("property_witness")
-}
-
 fn property_source_kind(meta: &Metadata, name: &str) -> Result<Option<String>, String> {
     let has_chelis = has_chelis_property_role(meta);
-    let has_legacy = has_legacy_property_role(meta);
-    if !has_chelis && !has_legacy {
+    if !has_chelis {
         return Ok(None);
     }
     let Some(kind) = meta
         .property_source_kind()
         .map(|value| value.value().spelling())
     else {
-        if has_legacy {
-            return Ok(Some("bridge:c-earchin".to_string()));
-        }
         return Err(format!(
             "property `{name}` metadata must include string `property_source_kind`"
         ));
@@ -2772,13 +2761,6 @@ fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
 fn symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {
         DeepExpr::Atom(DeepAtom::Name(value), _) => Some(value),
-        _ => None,
-    }
-}
-
-fn string_value(expr: &DeepExpr) -> Option<&str> {
-    match expr {
-        DeepExpr::Atom(DeepAtom::Str(value), _) => Some(value),
         _ => None,
     }
 }

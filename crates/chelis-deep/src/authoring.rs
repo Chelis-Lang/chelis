@@ -404,7 +404,25 @@ pub fn replace_function(
     let new_decls = normalize_for_mutation(new_decls);
     let resolved = resolve_function(&module_exprs, function_name)?;
     let old_name = bare_name(&resolved.qualified_name).to_string();
-    let parsed = parse_function_bundle(&new_decls, Some(&old_name))?;
+    let mut parsed = parse_function_bundle(&new_decls, Some(&old_name))?;
+    let old_def = find_function_def(&module_exprs, function_name)?;
+    parsed.def = parsed.def.try_inherit_extensions(&old_def)?;
+    if let (Some(new), Some(old)) = (
+        &mut parsed.defsig,
+        find_function_defsig(&module_exprs, &old_name),
+    ) {
+        *new = new.clone().try_inherit_extensions(&old)?;
+    }
+    for decl in &mut parsed.ordered {
+        *decl = if tagged_list(decl, DeepTag::Def).is_some() {
+            parsed.def.clone()
+        } else {
+            parsed
+                .defsig
+                .clone()
+                .expect("bundle signatures have a signature")
+        };
+    }
 
     let mut rewritten = module_exprs.to_vec();
     let module = single_module_mut(&mut rewritten)?;
@@ -481,7 +499,7 @@ pub fn change_signature(
         if let Some(list) = tagged_list(decl, DeepTag::Defsig)
             && decl_name(list) == Some(target_name.as_str())
         {
-            *decl = new_defsig.clone();
+            *decl = new_defsig.clone().try_inherit_extensions(decl)?;
             replaced_defsig = true;
             continue;
         }
@@ -1357,7 +1375,8 @@ fn replace_def_params(def: &mut Expr, new_params: Expr) -> Result<(), AuthoringE
             "target `(fn ...)` has no params node".to_string(),
         ));
     }
-    fn_list.elements[FN_PARAMS_INDEX] = new_params;
+    fn_list.elements[FN_PARAMS_INDEX] =
+        new_params.try_inherit_extensions(&fn_list.elements[FN_PARAMS_INDEX])?;
     Ok(())
 }
 
@@ -1769,7 +1788,7 @@ mod tests {
                         let mut metadata = Metadata::default();
                         metadata
                             .extensions_mut()
-                            .insert("note".into(), Expr::Atom(Atom::Name("m".into()), sp()))
+                            .insert("note".into(), crate::ExtensionData::parse("m").unwrap())
                             .unwrap();
                         metadata
                     },

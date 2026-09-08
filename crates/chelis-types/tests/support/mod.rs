@@ -32,6 +32,7 @@ fn metadata(entries: Vec<(String, RawExpr)>) -> Metadata {
     fn wire(raw: RawExpr) -> serde_json::Value {
         use serde_json::json;
         match raw {
+            RawExpr::ExtensionData(data) => json!({"ExtensionData": data}),
             RawExpr::Atom(atom, span) => {
                 let atom = match atom {
                     RawAtom::Symbol(v) => Atom::Name(v),
@@ -67,12 +68,16 @@ fn metadata(entries: Vec<(String, RawExpr)>) -> Metadata {
             }
         }
     }
-    let encoded = serde_json::json!({"entries": entries.into_iter().map(|(key, value)| (key, wire(value))).collect::<Vec<_>>()});
+    let encoded = serde_json::json!({"entries": entries.into_iter().map(|(key, value)| {
+        let encoded = if chelis_deep::metadata::REGISTERED_METADATA_KEYS.contains(&key.as_str()) { wire(value) } else { serde_json::json!({"ExtensionData": chelis_deep::ExtensionData::from_raw(&value).unwrap()}) };
+        (key, encoded)
+    }).collect::<Vec<_>>()});
     serde_json::from_value(encoded).expect("legacy role fixture must have valid metadata payloads")
 }
 
 fn raw_to_legacy(raw: RawExpr) -> Expr {
     match raw {
+        RawExpr::ExtensionData(_) => panic!("opaque data cannot be a legacy program expression"),
         RawExpr::Atom(atom, span) => Expr::Atom(
             match atom {
                 RawAtom::Symbol(value) => Atom::Name(value),

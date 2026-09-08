@@ -13,7 +13,9 @@ use chelis_deep::{Atom, Expr, List, Metadata, UnknownFormData, parse_and_stamp};
 
 fn probe(value: Expr) -> Result<Metadata, chelis_deep::metadata::MetadataError> {
     let mut metadata = Metadata::default();
-    metadata.extensions_mut().insert("probe".into(), value)?;
+    metadata.insert(chelis_deep::annotations::MetadataValue::PropertySeed(
+        chelis_deep::annotations::RuntimeExpression::try_new(value)?,
+    ))?;
     Ok(metadata)
 }
 
@@ -277,10 +279,8 @@ fn node_metadata_replacement_revalidates_before_commit() {
     )
     .expect("clean node must construct");
 
-    let mut candidate = node.meta().clone();
-    let rejected = candidate
-        .extensions_mut()
-        .insert("probe".into(), raw_vocabulary_form("lit"));
+    let candidate = node.meta().clone();
+    let rejected = chelis_deep::annotations::RuntimeExpression::try_new(raw_vocabulary_form("lit"));
     assert!(rejected.unwrap_err().to_string().contains("lit"));
     assert!(candidate.is_empty());
     assert!(node.meta().is_empty());

@@ -45,8 +45,10 @@ Obligations:
    form of the chelis#885 oracle; obligation 2's structural-name controls
    are its over-application guard.
 
-8. [03-META-1/2]: metadata shapes and roles reject at ingress, with positive
-   controls for extensions, binder-map data, provenance, and canonical wrt.
+8. [03-META-1/2/3]: metadata shapes and roles reject at ingress, with positive
+   controls for opaque extensions, binder-map data, provenance, and canonical wrt.
+   The compiled suites prove opaque formatting and execution, explicit Surf
+   rejection, replacement ownership and conflicts, and macro/effect traversal.
    Obligation 5 also runs all 30 typed payloads, previous-producer JSON/binary
    fixtures, API privacy and raw-reader controls, linear admission cost, and
    the scalar/tensor duplicate-stamp execution corpus.
@@ -249,7 +251,7 @@ METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
     ("mismatched path", '(module {surf_path: "Totally.Different"} m.path)', "surf_path"),
     ("bare differentiation name", '(def {} g (grad {wrt: unwrapped} (var {} f)))', "wrt"),
     ("bare property expression", '(def {property_seed: unwrapped} f (lit {} 1))', "property_seed"),
-    ("nested malformed span", '(def {custom: {inner: (lit {span: 1} 2)}} f (lit {} 1))', "span"),
+    ("nested malformed span", '(def {property_seed: (lit {span: 1} 2)} f (lit {} 1))', "span"),
     ("duplicate extension", '(def {custom: 1, custom: 2} f (lit {} 1))', "custom"),
     ("duplicate producer span extension", '(def {span_future: 1, span_future: 2} f (lit {} 1))', "span_future"),
     ("duplicate annotation", '(def {span: "a", span: "b"} f (lit {} 1))', "span"),
@@ -257,6 +259,7 @@ METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
     ("incomplete dimension group", '(defdim {surf_dim_group_size: 2} n)', "surf_dim_group_size"),
 ]
 METADATA_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
+    ("opaque malformed-looking data", '(def {custom: {type: "ablation", inner: (lit {span: 1, surf_future: true} (var {})), inner: (unknown_macro unbound)}} f (lit {} 1))'),
     ("resource device string", '(defsig {} f (t-fn {eff: (effects {} (resource {} "gpu:0"))} (t-prim {} int32))) (def {} f (fn {} (params {}) (lit {} 1)))'),
     ("matching path and opaque span", '(module {surf_path: "M.Path", span: ""} m.path (def {} f (lit {} 1)))'),
     ("extensions and preserved provenance", '(def {source: (macro_name {surf_future: 1, span: 2} original_name), custom: {inner: (lit {span: "id"} 2)}, span_future: (a b)} f (lit {} 1))'),
@@ -279,6 +282,14 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "chelis-surf",
     "-p",
     "chelis-cli",
+    "-p",
+    "chelis-macros",
+    "--test",
+    "extension_data",
+    "--test",
+    "opaque_extensions",
+    "--test",
+    "issue_1087_variant_recursion",
     "--test",
     "stamp_to_typed",
     "--test",
@@ -904,7 +915,8 @@ def check_stamp_pass_integration_tests() -> None:
     """
     print("── Obligation 5: stamp pass integration tests green ──")
     run_compiled_suite("stamp and typed annotation contracts", STAMP_NEXTEST_COMMAND, timeout=900)
-    run_compiled_suite("typed annotation API privacy and positive controls", ("cargo", "test", "-p", "chelis-deep", "--doc", "annotations"))
+    run_compiled_suite("typed annotation API privacy and positive controls", ("cargo", "test", "-p", "chelis-deep", "--doc"))
+    run_compiled_suite("opaque effect traversal and data grammar boundary", ("cargo", "test", "-p", "chelis-effects", "-p", "chelis-validate", "--lib"))
     run_compiled_suite("annotation admission scaling", ("cargo", "test", "-p", "chelis-deep", "--lib", "nested_typed_annotation_admission_scales_linearly"))
 
 

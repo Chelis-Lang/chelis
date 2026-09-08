@@ -786,11 +786,8 @@ mod tests {
             },
             ZERO,
         );
-        let mut metadata = Metadata::default();
-        let error = metadata
-            .extensions_mut()
-            .insert("probe".into(), raw_in_meta)
-            .unwrap_err();
+        let metadata = Metadata::default();
+        let error = crate::annotations::RuntimeExpression::try_new(raw_in_meta).unwrap_err();
         assert!(error.to_string().contains("var"));
         assert!(
             metadata.is_empty(),
@@ -854,8 +851,9 @@ mod tests {
             meta: {
                 let mut metadata = Metadata::default();
                 metadata
-                    .extensions_mut()
-                    .insert("payload".into(), nested)
+                    .insert(crate::annotations::MetadataValue::PropertySeed(
+                        crate::annotations::RuntimeExpression::try_new(nested).unwrap(),
+                    ))
                     .unwrap();
                 metadata
             },

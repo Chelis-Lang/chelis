@@ -1775,12 +1775,15 @@ fn normalization_uses_metadata_roles_for_syntax_and_expressions() {
     )
     .unwrap();
     let printed = print_canonical(&normalize_deep_for_surface_roundtrip(&deep).unwrap());
-    assert!(printed.contains("custom: (tuple {})"), "{printed}");
+    assert!(
+        printed.contains("custom: (tuple {span: \"id\"})"),
+        "{printed}"
+    );
     assert!(
         printed.contains("property_seed: (lit {type: (t-unit {})} ())"),
         "{printed}"
     );
-    assert!(!printed.contains("span:"), "{printed}");
+    assert_eq!(printed.matches("span:").count(), 1, "{printed}");
 }
 
 #[test]

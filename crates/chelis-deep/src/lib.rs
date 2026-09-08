@@ -8,6 +8,8 @@ pub mod ast;
 pub mod authoring;
 pub mod dtype_bounds;
 pub mod effect_kind;
+mod extension_data;
+pub use extension_data::ExtensionData;
 pub mod lexer;
 pub mod literal_source;
 pub mod metadata;

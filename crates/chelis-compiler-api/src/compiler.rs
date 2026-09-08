@@ -5770,6 +5770,9 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
         use chelis_deep::raw::{RawAtom, RawExpr};
         let source_span = Some(span(expr.span()));
         let kind = match expr {
+            RawExpr::ExtensionData(data) => WireDeepExprKind::ExtensionData {
+                syntax: data.syntax().into(),
+            },
             RawExpr::Atom(atom, _) => WireDeepExprKind::Atom {
                 atom: match atom {
                     RawAtom::Symbol(value) => WireDeepAtom::Symbol { value },
@@ -6169,6 +6172,20 @@ mod tests {
             "{}",
             error.errors[0].message
         );
+    }
+
+    #[test]
+    fn opaque_extension_wire_is_explicit_and_preserves_scalar_spelling() {
+        let payload = "{type: false, type: (var {}), value: 1e-3f32}";
+        let exprs = chelis_deep::parse_and_stamp_file(&format!(
+            "(def {{tool_data: {payload}}} f (lit {{}} 1))"
+        ))
+        .unwrap();
+        let wire = serde_json::to_value(wire_deep_expr(&exprs[0])).unwrap();
+        let text = wire.to_string();
+        assert!(text.contains("extension_data"), "{text}");
+        assert!(text.contains(payload), "{text}");
+        assert!(chelis_deep::parse_and_stamp_file("(def {type: false} f (lit {} 1))").is_err());
     }
 
     #[test]
