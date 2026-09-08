@@ -601,10 +601,9 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
         "python3 scripts/gate.py integration --tests-only "
-        "--partition hash:${{ matrix.shard }}/2",
-        "python3 scripts/gate.py integration --support-only",
-        ".venv/bin/python -m unittest "
-        "scripts.test_nextest_profile_partition.ProfilePartitionTests",
+        "--partition hash:${{ matrix.shard }}/2 --test-archive target/ci-archives/workspace.tar.zst",
+        "python3 scripts/gate.py integration --support-only --support-slice frontend",
+        "python3 scripts/gate.py integration --support-only --support-slice domain",
     ),
     # Rule-id: GATE-STAGE-RUNTIME-REPRESENTATION -- chelis#893 Phase 0's oracle
     # is its own gate stage because its release-profile reproducers and serial
@@ -623,6 +622,9 @@ GATE_WORKER_RUN_COMMANDS = {
 # `gate.py` only owns the three workers above; every other job is listed by name
 # so a new job cannot silently escape a scope decision.
 NON_GATE_JOBS = {
+    # Archive producers compile the existing configurations; gate.py still owns execution.
+    "workspace-test-build",
+    "generalization-test-build",
     # CI-owned Python unit coverage; it runs no canonical gate stage.
     "script-unit",
     # Stable branch-protection aggregates, not command-producing workers.
@@ -1087,7 +1089,7 @@ class ListOutputTests(unittest.TestCase):
         self.assertTrue(owning_jobs, "some job must run `gate.py integration`")
         for name in owning_jobs:
             self.assertIn(
-                "taiki-e/install-action@nextest",
+                "tool: cargo-nextest@0.9.136",
                 blocks[name],
                 f"job `{name}` runs the oracle's stage but does not install "
                 "cargo-nextest",
@@ -1916,8 +1918,8 @@ def _assert_shared_rust_cache_writer_contract(workflow: str) -> None:
 
     expected = {
         "linux-workspace": (
-            "workspace-tests-shard",
-            "${{ matrix.shard == 1 }}",
+            "workspace-test-build",
+            "true",
         ),
         "macos-workspace": (
             "macos-workspace-shard",
@@ -2185,9 +2187,9 @@ class CiParityTests(unittest.TestCase):
         oracle_block = _ci_job_block("generalize-sweep-oracle")
         aggregate_block = _ci_job_block("integration")
         command = (
-            "cargo nextest run --workspace --profile ci-full "
-            "--ignore-default-filter "
-            "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
+            "cargo nextest run --archive-file target/ci-archives/generalization.tar.zst "
+            "--extract-to . --extract-overwrite --profile ci-full "
+            "--ignore-default-filter --no-fail-fast "
             "-E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
             "| (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
             "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' "
@@ -2201,11 +2203,11 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("fail-fast: false", shard_block)
         self.assertIn("shard: [1, 2, 3, 4]", shard_block)
-        self.assertIn("needs: [changes]", shard_block)
+        self.assertIn("needs: [changes, generalization-test-build]", shard_block)
         self.assertIn("contents: read", shard_block)
         self.assertIn("dtolnay/rust-toolchain@stable", shard_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", shard_block)
-        self.assertIn("taiki-e/install-action@nextest", shard_block)
+        self.assertIn("tool: cargo-nextest@0.9.136", shard_block)
         _assert_executable_run_once(shard_block, command)
 
         self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
@@ -2252,17 +2254,11 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("fail-fast: false", shard_block)
         self.assertIn("scripts/gate.py integration --tests-only", shard_block)
         self.assertIn("scripts/gate.py integration --support-only", shard_block)
-        self.assertIn(
-            "- name: Gate (integration support subset)\n"
-            "        if: matrix.shard == 2",
-            shard_block,
-        )
-        self.assertIn(
-            "- name: Verify nextest profile coverage\n"
-            "        if: matrix.shard == 1",
-            shard_block,
-        )
-        self.assertEqual(shard_block.count("--support-only"), 1)
+        for title, shard, subset in (("frontend", 1, "frontend"), ("domain", 2, "domain")):
+            self.assertIn(f"- name: Gate ({title} support subset)\n        if: matrix.shard == {shard}", shard_block)
+            _assert_executable_run_once(shard_block, f"python3 scripts/gate.py integration --support-only --support-slice {subset}")
+        self.assertEqual(shard_block.count("--support-only"), 2)
+        self.assertIn("needs: [changes, workspace-test-build]", shard_block)
         self.assertIn(
             "needs: [changes, workspace-tests-shard]",
             aggregate_block,
@@ -2586,9 +2582,11 @@ class CiParityTests(unittest.TestCase):
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
         _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
         workspace_inputs = _rust_cache_inputs(
-            _ci_job_block("workspace-tests-shard")
+            _ci_job_block("workspace-test-build")
         )
         read_only_jobs = (
+            "workspace-tests-shard",
+            "generalization-test-build",
             "dtype-phase3-oracle",
             "faithful-observation-phase2-oracle",
             "compiled-value-ownership-phase0-oracle",
@@ -2597,7 +2595,7 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(
-            workspace_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+            workspace_inputs.get("save-if"), "true"
         )
         macos_inputs = _rust_cache_inputs(
             _ci_job_block("macos-workspace-shard")
@@ -2882,8 +2880,8 @@ class CiParityTests(unittest.TestCase):
             _assert_read_only_workspace_cache(mutated)
 
     def test_profile_partition_set_math_runs_continuously(self):
-        workspace_block = _ci_job_block("workspace-tests-shard")
-        generalization_block = _ci_job_block("generalize-sweep-oracle-shard")
+        workspace_block = _ci_job_block("workspace-test-build")
+        generalization_block = _ci_job_block("generalization-test-build")
         default_census = (
             ".venv/bin/python -m unittest "
             "scripts.test_nextest_profile_partition.ProfilePartitionTests"
@@ -2899,11 +2897,8 @@ class CiParityTests(unittest.TestCase):
         # shard recompiled the workspace a second time (4.4 hosted minutes).
         self.assertNotIn("GeneralizationPartitionTests", workspace_block)
         self.assertNotIn("ProfilePartitionTests", generalization_block)
-        self.assertIn(
-            "- name: Verify generalization lane selection\n"
-            "        if: matrix.shard == 1",
-            generalization_block,
-        )
+        self.assertNotIn("matrix.shard", workspace_block)
+        self.assertNotIn("matrix.shard", generalization_block)
 
     def test_quoted_oracle_name_is_not_an_executable_oracle_step(self):
         block = _ci_job_block("dtype-phase3-oracle")
@@ -3902,6 +3897,8 @@ class DocsOnlySkipTests(unittest.TestCase):
 
     # Jobs that must skip on a docs-only PR.
     HEAVY_GATED_JOBS = {
+        "workspace-test-build",
+        "generalization-test-build",
         "lint-rust",
         "script-unit",
         "workspace-tests-shard",
@@ -3974,8 +3971,9 @@ class DocsOnlySkipTests(unittest.TestCase):
             self.assertIn(job, attrs, f"heavy job '{job}' missing")
             self.assertEqual(
                 attrs[job].get("needs"),
-                "[changes]",
-                f"'{job}' must `needs: [changes]` to read docs_only",
+                {"workspace-tests-shard": "[changes, workspace-test-build]",
+                 "generalize-sweep-oracle-shard": "[changes, generalization-test-build]"}.get(job, "[changes]"),
+                f"'{job}' must depend on changes and its archive producer",
             )
             cond = attrs[job].get("if", "")
             # Must reference the docs_only output ...

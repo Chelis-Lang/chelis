@@ -16,6 +16,11 @@ import subprocess
 import sys
 from typing import Callable, Mapping, Sequence
 
+try:
+    import ci_test_archive
+except ModuleNotFoundError:
+    from scripts import ci_test_archive
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
@@ -75,7 +80,15 @@ def run_oracle(
 ) -> None:
     env = dict(os.environ if environment is None else environment)
     env["CARGO_HUSKY_DONT_INSTALL_HOOKS"] = "1"
+    archive = ci_test_archive.from_environment(env)
     for command in commands:
+        if archive is not None and list(command[:3]) == ["cargo", "nextest", "run"]:
+            command = ci_test_archive.reuse_command(command, archive)
+        elif archive is not None and tuple(command) == FOCUSED_COMMANDS[-1]:
+            command = ci_test_archive.reuse_command(
+                ["cargo", "nextest", "run", "-p", "chelis-cli", "--test",
+                 "issue_1205_front_end_performance", "--run-ignored", "only",
+                 "--test-threads", "1", "--no-fail-fast"], archive)
         rendered = command_text(command)
         print(f"compiler front-end performance oracle: RUN {rendered}", flush=True)
         result = runner(list(command), cwd=REPO_ROOT, env=env, check=False)

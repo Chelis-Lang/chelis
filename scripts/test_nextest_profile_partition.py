@@ -34,9 +34,10 @@ Three tiers of check:
     two nightly-owned contention cases stay out of it.
 
 The last two classes list different compiled configurations, and that is
-why CI runs them in different jobs. `ProfilePartitionTests` runs on workspace
-shard 1, whose default-feature build is warm; `GeneralizationPartitionTests`
-runs on generalization shard 1, whose feature-enabled build is warm. Listing
+why CI runs them in different jobs. `ProfilePartitionTests` runs on
+workspace-test-build, whose default-feature build is warm;
+`GeneralizationPartitionTests` runs on generalization-test-build, whose
+feature-enabled build is warm. Listing
 the generalization lane on the workspace shard recompiled the workspace under
 a second feature set and cost 4.4 hosted minutes per run. Both classes also
 run wherever the whole module is invoked, so a developer machine still sees
