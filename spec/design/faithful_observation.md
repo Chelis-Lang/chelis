@@ -906,6 +906,14 @@ to the frozen inventory. The independently reviewed
 mixing. The definition guard also rejects deleting or emptying the new row,
 changing it to library-only parity, or removing its corpus entry.
 
+PR #1647 adds `checked_reshape.ch` and `parity_checked_reshape` to the frozen
+inventory. Independent runtime and generated host/DAG UBSan controls exercise
+exact stored bits, wide empty shapes, invalid metadata rejection, and independent
+owned reshape storage. The parity row checks exact rendered eval/C observations;
+it does not establish empty-list dtype preservation in eval, whose pre-existing
+fallback is tracked in #1650. The definition guard retains executable admission
+and the corpus entry.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the

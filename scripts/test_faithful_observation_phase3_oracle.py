@@ -209,6 +209,36 @@ fn hidden_value_row() {}
             )
         )
 
+    def test_checked_reshape_parity_remains_a_required_executable_row(self) -> None:
+        name = "parity_checked_reshape"
+        self.assertIn(name, oracle.REQUIRED_TESTS[oracle.PARITY_SOURCE])
+        for replacement in (
+            "{}",
+            '{ drive_parity(&examples_root().join("checked_reshape.ch"), false); }',
+        ):
+            with self.subTest(replacement=replacement):
+                sources = oracle.shipped_sources()
+                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+                    sources[oracle.PARITY_SOURCE], name, replacement
+                )
+                self.assertTrue(
+                    any(name in item for item in oracle.definition_digest_violations(sources))
+                )
+
+        sources = oracle.shipped_sources()
+        source = sources[oracle.PARITY_SOURCE]
+        sources[oracle.PARITY_SOURCE] = source.replace(
+            f"fn {name}()", "fn deleted_checked_reshape_row()"
+        )
+        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
+        sources[oracle.PARITY_SOURCE] = source.replace('        "checked_reshape.ch",\n', "")
+        self.assertTrue(
+            any(
+                "parity_corpus_is_complete" in item
+                for item in oracle.definition_digest_violations(sources)
+            )
+        )
+
     def test_generic_shape_parity_remains_a_required_executable_row(self) -> None:
         name = "parity_generic_explicit_shape"
         for replacement in (
