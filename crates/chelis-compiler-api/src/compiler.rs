@@ -1879,7 +1879,7 @@ fn execution_artifact_from_compiled(
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
                 let result =
-                    chelis_backend_c::codegen_with_options(&verified, entry_symbol, options)
+                    chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
                         .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     entry_symbol,
@@ -2017,7 +2017,7 @@ fn execution_artifact_from_compiled(
             .map_err(|error| {
                 stage_error("ownership", error.to_string(), GeneralKind::CompileError)
             })?;
-            let result = chelis_backend_c::codegen_with_options(&verified, &func_name, options)
+            let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
                 .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
                 &func_name,
@@ -2129,7 +2129,7 @@ fn execution_artifact_from_compiled(
             .map_err(|error| {
                 stage_error("ownership", error.to_string(), GeneralKind::CompileError)
             })?;
-            let result = chelis_backend_hip::codegen_hip(&verified, &func_name)
+            let result = chelis_backend_hip::codegen_hip(verified, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
                 &func_name,

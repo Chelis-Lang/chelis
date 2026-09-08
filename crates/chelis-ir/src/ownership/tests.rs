@@ -15,7 +15,7 @@ use super::ir::{
     OwnershipProgram as RawProgram, OwnershipUse, ParamMode, ScheduleState, Terminal, Terminator,
     Unit, UnitId, UnitKind,
 };
-use super::{DagDirective, DagOwnershipPlan};
+use super::{DagDirective, DagOwnershipPlan, LiveByteBound};
 use crate::host::{
     ConcreteHostFunction, ConcreteHostProgram, HostBinding, HostDisplayRoot, HostExpr,
     HostExprKind, HostFunctionOrigin,
@@ -47,6 +47,26 @@ fn parameter_info(prim: Prim, origin: OwnerOrigin) -> OwnerInfo {
         origin,
         names: Vec::new(),
     }
+}
+
+fn value_info(ty: ConcreteHostType, origin: OwnerOrigin) -> OwnerInfo {
+    OwnerInfo {
+        class: classify(&ty, Placement::Value).unwrap(),
+        ty,
+        placement: Placement::Value,
+        origin,
+        names: Vec::new(),
+    }
+}
+
+fn fixed_tensor_info(elements: usize) -> OwnerInfo {
+    value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(elements)],
+            precision: Prim::F32,
+        }),
+        OwnerOrigin::Owned,
+    )
 }
 
 fn block(id: u32, params: Vec<BlockParam>, ops: Vec<Op>, mut terminator: Terminator) -> Block {
@@ -972,6 +992,323 @@ fn verifier_derives_a_sealed_live_heap_owner_bound() {
             expected as usize
         );
     }
+}
+
+#[test]
+fn verified_live_byte_bound_uses_exact_tensor_payload_costs() {
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(0)),
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), fixed_tensor_info(2))]),
+    );
+
+    let verified = super::verify::verify(&program).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Exact(8),
+        "two f32 elements carry eight logical TensorStorage bytes; the descriptor is zero-byte ledger metadata"
+    );
+}
+
+#[test]
+fn verified_live_byte_bound_marks_dynamic_heap_costs_unknown() {
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(0)),
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+
+    let verified = super::verify::verify(&program).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Unknown,
+        "a string's runtime len+1 allocation cannot be derived from its owner type"
+    );
+}
+
+#[test]
+fn verified_live_byte_bound_marks_runtime_tensor_dimensions_unknown() {
+    let dynamic = value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        }),
+        OwnerOrigin::Owned,
+    );
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(0)),
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), dynamic)]),
+    );
+
+    let verified = super::verify::verify(&program).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Unknown
+    );
+}
+
+#[test]
+fn verified_live_byte_bound_overflow_fails_closed() {
+    let too_large = value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(usize::MAX)],
+            precision: Prim::F32,
+        }),
+        OwnerOrigin::Owned,
+    );
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(0)),
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), too_large)]),
+    );
+
+    assert!(matches!(
+        super::verify::verify(&program),
+        Err(OwnershipError::LiveByteBoundOverflow { .. })
+    ));
+}
+
+#[test]
+fn verified_live_byte_bound_rejects_a_deferred_tensor_dtype() {
+    let deferred = value_info(
+        ConcreteHostType::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F8e4m3,
+        }),
+        OwnerOrigin::Owned,
+    );
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(0)),
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), deferred)]),
+    );
+
+    assert!(matches!(
+        super::verify::verify(&program),
+        Err(OwnershipError::LiveByteBoundDType {
+            owner: 0,
+            dtype: "f8e4m3",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn verified_live_byte_bound_safely_overapproximates_aliasing_clones() {
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                Op::Copy {
+                    dest: OwnerId(1),
+                    source: Operand {
+                        owner: OwnerId(0),
+                        use_: OwnershipUse::Clone,
+                    },
+                },
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(1)),
+                },
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(0)),
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([
+            (OwnerId(0), fixed_tensor_info(2)),
+            (OwnerId(1), fixed_tensor_info(2)),
+        ]),
+    );
+
+    let verified = super::verify::verify(&program).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Exact(16),
+        "two logical owners alias one eight-byte storage allocation, so owner-summing is a safe upper bound rather than ledger equality"
+    );
+}
+
+#[test]
+fn verified_live_byte_bound_composes_caller_carry_plus_callee_peak() {
+    let mut program = direct_call_program(false, UnitId(2));
+    program.units[1]
+        .owners
+        .insert(OwnerId(2), fixed_tensor_info(2));
+    program.units[1].blocks[0].ops.insert(
+        0,
+        Operation {
+            id: OpId(20),
+            role: OperationRole::Semantic,
+            kind: define(2),
+        },
+    );
+    program.units[1].blocks[0].ops.push(Operation {
+        id: OpId(21),
+        role: OperationRole::Semantic,
+        kind: Op::Drop {
+            owner: Operand::move_(OwnerId(2)),
+        },
+    });
+    program.units[2]
+        .owners
+        .insert(OwnerId(1), fixed_tensor_info(4));
+    program.units[2].blocks[0].ops.insert(
+        0,
+        Operation {
+            id: OpId(20),
+            role: OperationRole::Semantic,
+            kind: define(1),
+        },
+    );
+    program.units[2].blocks[0].ops.push(Operation {
+        id: OpId(21),
+        role: OperationRole::Semantic,
+        kind: Op::Drop {
+            owner: Operand::move_(OwnerId(1)),
+        },
+    });
+
+    let verified = super::verify::verify(&program).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Exact(24),
+        "the caller's live eight-byte tensor must be added to the callee's sixteen-byte local peak"
+    );
+}
+
+fn recursive_byte_bound_program(drop_before_call: bool) -> RawProgram {
+    let tensor = Operation {
+        id: OpId(10),
+        role: OperationRole::Semantic,
+        kind: define(0),
+    };
+    let terminal = Operation {
+        id: OpId(11),
+        role: OperationRole::Semantic,
+        kind: Op::Drop {
+            owner: Operand::move_(OwnerId(0)),
+        },
+    };
+    let call = Operation {
+        id: OpId(12),
+        role: OperationRole::Semantic,
+        kind: Op::Apply {
+            dest: Some(OwnerId(1)),
+            label: "diagnostic recursion label".into(),
+            kind: ApplyKind::DirectCall { callee: UnitId(1) },
+            schema: OperationSchema::new(
+                Vec::new(),
+                Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+            ),
+            args: Vec::new(),
+        },
+    };
+    let ops = if drop_before_call {
+        vec![tensor, terminal, call]
+    } else {
+        vec![tensor, call, terminal]
+    };
+    RawProgram {
+        units: vec![
+            Unit {
+                id: UnitId(0),
+                name: "roots".into(),
+                kind: UnitKind::Roots,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: None,
+                entry: BlockId(0),
+                blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+                owners: BTreeMap::new(),
+            },
+            Unit {
+                id: UnitId(1),
+                name: "recursive".into(),
+                kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: Some(CallableBody::new(BlockId(0))),
+                entry: BlockId(0),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    ops,
+                    terminator: Terminator::Return {
+                        result: Operand::move_(OwnerId(1)),
+                    },
+                }],
+                owners: BTreeMap::from([
+                    (OwnerId(0), fixed_tensor_info(4)),
+                    (OwnerId(1), info(Prim::Int64, OwnerOrigin::Owned)),
+                ]),
+            },
+        ],
+    }
+}
+
+#[test]
+fn zero_carry_recursive_scc_has_a_finite_verified_byte_bound() {
+    let verified = super::verify::verify(&recursive_byte_bound_program(true)).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Exact(16)
+    );
+}
+
+#[test]
+fn positive_carry_recursive_scc_is_verified_unbounded() {
+    let verified = super::verify::verify(&recursive_byte_bound_program(false)).unwrap();
+    assert_eq!(
+        verified.live_set_bound().max_live_bytes,
+        LiveByteBound::Unbounded
+    );
 }
 
 #[test]
@@ -2266,6 +2603,24 @@ fn diamond_uses_the_post_dominating_join_instead_of_lexical_block_order() {
         },
         super::last_use::SchedulePoint::BeforeTerminator(BlockId(0)),
     ));
+    super::last_use::require_postdominates_for_test(
+        &program.units[0],
+        super::last_use::SchedulePoint::AfterOperation {
+            block: BlockId(3),
+            operation: OpId(3 << 16),
+        },
+        super::last_use::SchedulePoint::BeforeTerminator(BlockId(0)),
+    )
+    .unwrap();
+    assert!(matches!(
+        super::last_use::require_postdominates_for_test(
+            &program.units[0],
+            super::last_use::SchedulePoint::Edge(EdgeId(12)),
+            super::last_use::SchedulePoint::BeforeTerminator(BlockId(0)),
+        ),
+        Err(OwnershipError::LoweringInvariant { detail, .. })
+            if detail.contains("does not post-dominate")
+    ));
     assert_eq!(
         scheduled_block_terminal(&program.units[0].blocks[3], 1),
         Some(1)
@@ -2274,37 +2629,38 @@ fn diamond_uses_the_post_dominating_join_instead_of_lexical_block_order() {
 }
 
 #[test]
-fn excluded_loop_and_tail_shapes_fail_closed_and_stale_provisionals_are_rejected() {
-    let mut loop_program = roots(
+fn postdominance_queries_scale_over_long_straight_line_cfgs() {
+    const OP_COUNT: u32 = 4_096;
+    let program = roots(
         vec![block(
             0,
             vec![],
-            vec![],
-            Terminator::Loop {
-                list: Operand::borrow(OwnerId(0)),
-                body_edge: Edge::new(EdgeId(10), BlockId(0), vec![]),
-                exit_edge: Edge::new(EdgeId(11), BlockId(0), vec![]),
-            },
+            (0..OP_COUNT).map(|_| borrow_op(0)).collect(),
+            Terminator::Exit,
         )],
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::ExternalBorrow))]),
     );
-    assert!(matches!(
-        schedule(&mut loop_program),
-        Err(OwnershipError::LastUseSchedulingDeferred {
-            feature: "loop",
-            ..
-        })
-    ));
+    let unit = &program.units[0];
+    let entry = super::last_use::SchedulePoint::BlockEntry(BlockId(0));
+    let first = super::last_use::SchedulePoint::AfterOperation {
+        block: BlockId(0),
+        operation: OpId(0),
+    };
+    let last = super::last_use::SchedulePoint::AfterOperation {
+        block: BlockId(0),
+        operation: OpId(OP_COUNT - 1),
+    };
 
-    let mut tail_program = direct_call_program(false, UnitId(2));
+    super::last_use::require_postdominates_for_test(unit, last, entry).unwrap();
     assert!(matches!(
-        schedule(&mut tail_program),
-        Err(OwnershipError::LastUseSchedulingDeferred {
-            feature: "direct call",
-            ..
-        })
+        super::last_use::require_postdominates_for_test(unit, first, last),
+        Err(OwnershipError::LoweringInvariant { detail, .. })
+            if detail.contains("does not post-dominate")
     ));
+}
 
+#[test]
+fn stale_provisionals_are_rejected() {
     let mut stale = roots(
         vec![block(0, vec![], vec![define(0)], Terminator::Exit)],
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
@@ -2313,6 +2669,199 @@ fn excluded_loop_and_tail_shapes_fail_closed_and_stale_provisionals_are_rejected
     assert!(matches!(
         super::last_use::verify_canonical(&stale),
         Err(OwnershipError::StaleProvisionalTerminal { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn scheduler_drops_iteration_local_owner_before_back_edge_and_rejects_delay() {
+    let mut body = block(
+        2,
+        vec![],
+        vec![define(1), borrow_op(1)],
+        Terminator::Jump(Edge::new(EdgeId(13), BlockId(1), vec![])),
+    );
+    body.ops.push(provisional(90, 1, true));
+    let mut program = roots(
+        vec![
+            block(
+                0,
+                vec![BlockParam {
+                    owner: OwnerId(0),
+                    mode: ParamMode::EntryBorrow,
+                }],
+                vec![],
+                Terminator::Jump(Edge::new(EdgeId(10), BlockId(1), vec![])),
+            ),
+            block(
+                1,
+                vec![],
+                vec![],
+                Terminator::Loop {
+                    list: Operand::borrow(OwnerId(0)),
+                    body_edge: Edge::new(EdgeId(11), BlockId(2), vec![]),
+                    exit_edge: Edge::new(EdgeId(12), BlockId(3), vec![]),
+                },
+            ),
+            body,
+            block(3, vec![], vec![], Terminator::Exit),
+        ],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::String, OwnerOrigin::ExternalBorrow)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+
+    schedule(&mut program).unwrap();
+    let body = &program.units[0].blocks[2];
+    assert_eq!(scheduled_block_terminal(body, 1), Some(2));
+    super::last_use::verify_canonical(&program).unwrap();
+
+    let delayed = program.units[0].blocks[2].ops.pop().unwrap();
+    assert_eq!(delayed.role, OperationRole::ScheduledScopeExit);
+    program.units[0].blocks[2]
+        .terminator
+        .edges_mut()
+        .next()
+        .unwrap()
+        .terminals
+        .push(edge_terminal(90, Terminal::Drop(OwnerId(1))));
+    assert!(matches!(
+        super::last_use::verify_canonical(&program),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 1, .. })
+    ));
+}
+
+#[test]
+fn scheduler_keeps_owned_loop_list_through_body_and_drops_only_on_exit_edge() {
+    let mut exit = block(3, vec![], vec![], Terminator::Exit);
+    exit.ops.push(provisional(90, 0, true));
+    let mut program = roots(
+        vec![
+            block(
+                0,
+                vec![],
+                vec![define(0)],
+                Terminator::Jump(Edge::new(EdgeId(10), BlockId(1), vec![])),
+            ),
+            block(
+                1,
+                vec![],
+                vec![],
+                Terminator::Loop {
+                    list: Operand::borrow(OwnerId(0)),
+                    body_edge: Edge::new(EdgeId(11), BlockId(2), vec![]),
+                    exit_edge: Edge::new(EdgeId(12), BlockId(3), vec![]),
+                },
+            ),
+            block(
+                2,
+                vec![],
+                vec![borrow_op(0)],
+                Terminator::Jump(Edge::new(EdgeId(13), BlockId(1), vec![])),
+            ),
+            exit,
+        ],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+
+    schedule(&mut program).unwrap();
+    let header = &program.units[0].blocks[1];
+    let body_edge = header
+        .terminator
+        .edges()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap();
+    let exit_edge = header
+        .terminator
+        .edges()
+        .find(|edge| edge.id == EdgeId(12))
+        .unwrap();
+    assert!(body_edge.terminals.is_empty());
+    assert_eq!(
+        exit_edge.terminals,
+        vec![edge_terminal(90, Terminal::Drop(OwnerId(0)))]
+    );
+    super::last_use::verify_canonical(&program).unwrap();
+
+    let mut wrong = program;
+    let header = &mut wrong.units[0].blocks[1];
+    let terminal = header
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(12))
+        .unwrap()
+        .terminals
+        .pop()
+        .unwrap();
+    header
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .terminals
+        .push(terminal);
+    assert!(matches!(
+        super::last_use::verify_canonical(&wrong),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn scheduler_terminates_nonargument_frame_owner_before_typed_tail_call() {
+    let mut program = direct_call_program(false, UnitId(2));
+    program.units[1]
+        .owners
+        .insert(OwnerId(2), info(Prim::String, OwnerOrigin::Owned));
+    program.units[1].blocks[0].ops.insert(
+        0,
+        Operation {
+            id: OpId(40),
+            role: OperationRole::Semantic,
+            kind: define(2),
+        },
+    );
+    program.units[1].blocks[0]
+        .ops
+        .push(provisional(90, 2, true));
+
+    schedule(&mut program).unwrap();
+    let caller = &program.units[1].blocks[0];
+    let drop = scheduled_block_terminal(caller, 2).unwrap();
+    let call = caller
+        .ops
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation.kind,
+                Op::Apply {
+                    kind: ApplyKind::DirectCall { .. },
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(drop < call, "tail-frame drop must precede direct call");
+    super::last_use::verify_canonical(&program).unwrap();
+
+    let mut delayed = program;
+    let terminal = delayed.units[1].blocks[0].ops.remove(drop);
+    let call = delayed.units[1].blocks[0]
+        .ops
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation.kind,
+                Op::Apply {
+                    kind: ApplyKind::DirectCall { .. },
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    delayed.units[1].blocks[0].ops.insert(call + 1, terminal);
+    assert!(matches!(
+        super::last_use::verify_canonical(&delayed),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 2, .. })
     ));
 }
 
@@ -2488,6 +3037,76 @@ fn scheduler_rebuilds_host_sites_from_stable_operation_and_edge_identities() {
             }
         ] if *operation == edge_terminal
     ));
+}
+
+#[test]
+fn scheduler_rebuilds_a_tail_terminal_before_the_direct_call_action() {
+    let mut program = direct_call_program(false, UnitId(2));
+    program.units[1]
+        .owners
+        .insert(OwnerId(2), info(Prim::String, OwnerOrigin::Owned));
+    program.units[1].blocks[0].ops.insert(
+        0,
+        Operation {
+            id: OpId(20),
+            role: OperationRole::Semantic,
+            kind: define(2),
+        },
+    );
+    program.units[1].blocks[1]
+        .ops
+        .push(provisional(90, 2, true));
+    let mut sites = HostSiteMap {
+        records: vec![
+            HostSiteRecord {
+                id: HostSiteId::from_index(0),
+                unit: 1,
+                kind: HostSiteKind::Expression,
+                actions: vec![
+                    HostSiteAction::Operation {
+                        unit: 1,
+                        block: BlockId(0),
+                        operation: OpId(20),
+                    },
+                    HostSiteAction::Operation {
+                        unit: 1,
+                        block: BlockId(0),
+                        operation: OpId(0),
+                    },
+                ],
+            },
+            HostSiteRecord {
+                id: HostSiteId::from_index(1),
+                unit: 1,
+                kind: HostSiteKind::FunctionReturn,
+                actions: vec![HostSiteAction::Operation {
+                    unit: 1,
+                    block: BlockId(1),
+                    operation: OpId(90),
+                }],
+            },
+        ],
+    };
+
+    super::last_use::schedule(&mut program, &mut sites).unwrap();
+    assert!(matches!(
+        sites.records[0].actions.as_slice(),
+        [
+            HostSiteAction::Operation {
+                operation: OpId(20),
+                ..
+            },
+            HostSiteAction::Operation {
+                operation: OpId(90),
+                ..
+            },
+            HostSiteAction::Operation {
+                operation: OpId(0),
+                ..
+            }
+        ]
+    ));
+    assert!(sites.records[1].actions.is_empty());
 }
 
 #[test]
@@ -2687,7 +3306,7 @@ fn unused_owned_block_parameter_dies_after_incoming_transfer_at_its_exact_site()
 }
 
 #[test]
-fn untyped_back_edge_shape_is_deferred_instead_of_self_certifying() {
+fn nonterminating_back_edge_fails_closed_without_an_exit_path() {
     let mut program = roots(
         vec![block(
             0,
@@ -2699,9 +3318,55 @@ fn untyped_back_edge_shape_is_deferred_instead_of_self_certifying() {
     );
     assert!(matches!(
         schedule(&mut program),
-        Err(OwnershipError::LastUseSchedulingDeferred {
-            feature: "cyclic control flow",
-            ..
-        })
+        Err(OwnershipError::LastUseSchedulingUnsupported { unit, feature })
+            if unit == "roots" && feature.contains("nonterminating")
     ));
+}
+
+#[test]
+fn cyclic_jump_with_a_reachable_exit_uses_the_fixed_point() {
+    let mut body = block(
+        2,
+        vec![],
+        vec![define(1), borrow_op(1)],
+        Terminator::Jump(Edge::new(EdgeId(13), BlockId(1), vec![])),
+    );
+    body.ops.push(provisional(90, 1, true));
+    let mut program = roots(
+        vec![
+            block(
+                0,
+                vec![BlockParam {
+                    owner: OwnerId(0),
+                    mode: ParamMode::EntryBorrow,
+                }],
+                vec![],
+                Terminator::Jump(Edge::new(EdgeId(10), BlockId(1), vec![])),
+            ),
+            block(
+                1,
+                vec![],
+                vec![],
+                Terminator::Branch {
+                    condition: Operand::borrow(OwnerId(0)),
+                    then_edge: Edge::new(EdgeId(11), BlockId(2), vec![]),
+                    else_edge: Edge::new(EdgeId(12), BlockId(3), vec![]),
+                },
+            ),
+            body,
+            block(3, vec![], vec![], Terminator::Exit),
+        ],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+
+    schedule(&mut program).unwrap();
+    assert_eq!(
+        scheduled_block_terminal(&program.units[0].blocks[2], 1),
+        Some(2),
+        "the iteration-local owner must die before the ordinary Jump back-edge"
+    );
+    super::last_use::verify_canonical(&program).unwrap();
 }

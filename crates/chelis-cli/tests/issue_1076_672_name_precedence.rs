@@ -133,7 +133,7 @@ def unwrap_record(value: RecordBox) -> f64 = match value with {
   | Shared { value } => value
 }
 def unwrap_positional(value: PositionalBox) -> f64 = match value with {
-  | Shared(inner) => inner
+  | Shared(value) => value
 }
 record_out = unwrap_record(Shared { value: 1.0f64 })
 positional_out = unwrap_positional(Shared(2.0f64))
@@ -146,7 +146,7 @@ def unwrap_record(value: RecordBox) -> f64 = match value with {
   | Shared { value } => value
 }
 def unwrap_positional(value: PositionalBox) -> f64 = match value with {
-  | Shared(inner) => inner
+  | Shared(value) => value
 }
 record_out = unwrap_record(Shared { value: 1.0f64 })
 positional_out = unwrap_positional(Shared(2.0f64))

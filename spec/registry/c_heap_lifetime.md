@@ -59,3 +59,4 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | tensor begin write | `chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor)` |
 | tensor write view | `chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard)` |
 | tensor end write | `void chelis_tensor_end_write(chelis_tensor_write *guard)` |
+| tensor repurpose | `void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape)` |

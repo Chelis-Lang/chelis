@@ -11,23 +11,25 @@ use chelis_types::ScalarValue;
 
 /// chelis#616: the Metal lane requires compile-time movement bounds (it rejects
 /// symbolic movement shapes via `require_movement_shape`). This converter
-/// materializes the literal bound for the emitters and panics on a node-valued
-/// (runtime) bound as a defensive backstop.
-fn metal_bound_to_usize(b: &RtDim) -> usize {
+/// materializes the literal bound for the emitters and returns an unsupported
+/// detail for any runtime/symbolic form that reaches this defensive boundary.
+fn metal_bound_to_usize(b: &RtDim) -> Result<usize, String> {
     match b {
-        RtDim::Lit(n) => *n,
-        RtDim::ToEnd => chelis_ir::dag::SHRINK_TO_END,
-        RtDim::Node(_) => panic!(
+        RtDim::Lit(n) => Ok(*n),
+        RtDim::ToEnd => Ok(chelis_ir::dag::SHRINK_TO_END),
+        RtDim::Node(_) => Err(
             "Metal backend reached a node-valued (runtime) movement bound; runtime-symbolic \
              movement bounds are not supported on the Metal lane (chelis#616)"
+                .to_string(),
         ),
-        RtDim::Sym(name) => panic!(
+        RtDim::Sym(name) => Err(format!(
             "Metal backend reached a symbolic movement bound `{name}`; verify rejects \
              symbolic dims outside reshape targets (chelis#616)"
-        ),
-        RtDim::InputAxis { .. } => panic!(
+        )),
+        RtDim::InputAxis { .. } => Err(
             "Metal backend reached InputAxis on a movement owner; IR verification only admits \
              InputAxis for Expand and Reshape"
+                .to_string(),
         ),
     }
 }
@@ -80,7 +82,8 @@ mod rejection_authority_tests {
         );
         dag.add_root(output);
         let verified = crate::testing::verified_dag(&dag).unwrap();
-        let emitted = emit_verified_dag(verified.emission(), "verified_drop").unwrap();
+        let plan = crate::plan_metal(verified);
+        let emitted = emit_verified_dag(&plan, "verified_drop").unwrap();
 
         assert!(emitted.mm_source.contains("verified_drop"));
         assert!(!emitted.mm_source.contains("chelis_tensor_release"));
@@ -98,7 +101,8 @@ mod rejection_authority_tests {
         dag.add_node(RiscOp::Drop, vec![borrowed], ty, None);
         dag.add_root(borrowed);
         let verified = crate::testing::verified_dag(&dag).unwrap();
-        let emitted = emit_verified_dag(verified.emission(), "borrowed_drop").unwrap();
+        let plan = crate::plan_metal(verified);
+        let emitted = emit_verified_dag(&plan, "borrowed_drop").unwrap();
 
         assert!(emitted.mm_source.contains("borrowed_drop"));
         assert!(!emitted.mm_source.contains("chelis_tensor_release"));
@@ -106,10 +110,10 @@ mod rejection_authority_tests {
     }
 }
 
-fn metal_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
+fn metal_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Result<Vec<(usize, usize)>, String> {
     bounds
         .iter()
-        .map(|(s, e)| (metal_bound_to_usize(s), metal_bound_to_usize(e)))
+        .map(|(s, e)| Ok((metal_bound_to_usize(s)?, metal_bound_to_usize(e)?)))
         .collect()
 }
 use chelis_types::types::Prim;
@@ -118,6 +122,7 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use crate::blas;
 use crate::dtype;
 use crate::kernels;
+use crate::{MetalAllocationId, MetalNeverReuse};
 use chelis_unord::{UnordMap, UnordSet};
 
 /// Distinct input labels in DAG order.
@@ -192,107 +197,65 @@ pub fn output_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
     output_specs(dag).into_iter().map(|s| s.label).collect()
 }
 
-/// Stub mm-source carrying a structured reason in its abort message.
-/// Used when emit_dag returns Err so the runtime diagnostic explains
-/// why the DAG was rejected (e.g., integer matmul per spec §5.7.2)
-/// instead of the bare "not yet implemented" string. The hint is
-/// embedded as a comment in the source AND printed at abort time.
-pub fn stub_mm_source_with_reason(func_name: &str, hint: &str) -> String {
-    let trimmed = hint.trim();
-    let hint_comment = if trimmed.is_empty() {
-        String::new()
-    } else {
-        // Sanitize so a producer-supplied error message cannot break
-        // out of the C++ `// ...` comment context.
-        let safe = chelis_ir::span_sanitize::sanitize_for_comment(trimmed);
-        format!("// reason: {safe}\n")
-    };
-    let runtime_msg = if trimmed.is_empty() {
-        format!("chelis Metal backend stub: codegen for `{func_name}` not yet implemented")
-    } else {
-        // The runtime diagnostic must survive a C string literal, so
-        // escape any `\` and `\"`. Newlines are flattened to spaces so
-        // the abort message stays single-line.
-        let escaped = trimmed.replace('\\', "\\\\").replace('"', "\\\"");
-        let oneline = escaped.replace('\n', " ");
-        format!(
-            "chelis Metal backend stub: codegen for `{func_name}` not yet implemented; \
-             reason: {oneline}"
-        )
-    };
-    format!(
-        r#"// Generated by chelis --target metal (M1 fallback stub)
-{hint_comment}#import "chelis_metal_runtime.h"
-#include "chelis_runtime.h"
-#include <stdlib.h>
-#include <stdio.h>
-
-extern "C" void {func_name}(chelis_tensor **inputs, int n_in,
-                            chelis_tensor **outputs, int n_out) {{
-    (void)inputs; (void)n_in; (void)outputs; (void)n_out;
-    fprintf(stderr,
-        "{runtime_msg}\n");
-    abort();
-}}
-"#
-    )
-}
-
-/// Inspect the DAG and the emit_dag error message to derive a more
-/// precise hint than the bare error. Called by `codegen_metal` when
-/// emit_dag returns Err.
+/// Exact physical-allocation projection for the current Metal emitter.
 ///
-/// Currently surfaces the integer-matmul §5.7.2 hint when the DAG
-/// contains a Sum-rooted matmul subgraph at integer precision (the
-/// shape that `blas::detect_matmul_pattern` rejects, falling through
-/// to the stub). Additional reason categories slot in here as the
-/// stub gains more failure modes.
-pub fn stub_reason_hint(dag: VerifiedDagView<'_>, base_reason: &str) -> String {
-    use chelis_types::types::Prim;
-    // If any Sum node has integer operand precision and matches the
-    // expand+mul+sum matmul shape, surface the §5.7.2 hint. The
-    // detector itself rejects integer matmul so we cannot reuse it
-    // here; instead, walk the Sum nodes directly and check for the
-    // integer matmul shape.
-    for node in dag.nodes() {
-        if !matches!(node.op, RiscOp::Sum { .. }) {
-            continue;
-        }
-        if node.inputs.len() != 1 {
-            continue;
-        }
-        let mul = match dag.get(node.inputs[0]) {
-            Some(n) if matches!(n.op, RiscOp::Mul) => n,
-            _ => continue,
-        };
-        if mul.inputs.len() != 2 {
-            continue;
-        }
-        let lhs_prec = mul.output_type.precision;
-        let is_int = matches!(
-            lhs_prec,
-            Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
-        );
-        if !is_int {
-            continue;
-        }
-        let lhs = match dag.get(mul.inputs[0]) {
-            Some(n) => n,
-            None => continue,
-        };
-        let rhs = match dag.get(mul.inputs[1]) {
-            Some(n) => n,
-            None => continue,
-        };
-        if matches!(lhs.op, RiscOp::Expand { .. }) && matches!(rhs.op, RiscOp::Expand { .. }) {
-            return format!(
-                "integer matmul not admitted per spec/04-type-system.md §5.7.2; \
-                 use floats (f32/f16/bf16) or implement quantization explicitly. \
-                 Original emit error: {base_reason}"
-            );
+/// Nodes folded into a matmul kernel and the synthetic Cast that names its
+/// already-downcast result are virtual. Store, Drop, and unsupported nodes do
+/// not allocate either. This list is checked against every actual
+/// `chelis_metal_alloc` claim before codegen may return an artifact.
+pub(crate) fn allocation_nodes(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
+    let mut matmul_consumed = UnordSet::new();
+    let mut matmul_heads = UnordSet::new();
+    for (sum_id, _) in blas::find_all_matmuls(dag) {
+        matmul_heads.insert(sum_id.0);
+        if let Some(sum_node) = dag.get(sum_id)
+            && sum_node.inputs.len() == 1
+        {
+            let mul_id = sum_node.inputs[0];
+            matmul_consumed.insert(mul_id.0);
+            if let Some(mul_node) = dag.get(mul_id) {
+                for input in &mul_node.inputs {
+                    matmul_consumed.insert(input.0);
+                }
+            }
         }
     }
-    base_reason.to_string()
+
+    dag.nodes()
+        .iter()
+        .filter_map(|node| {
+            if matmul_consumed.contains(&node.id.0) {
+                return None;
+            }
+            let allocates = match &node.op {
+                RiscOp::Load { .. } | RiscOp::Const { .. } => true,
+                RiscOp::Neg
+                | RiscOp::Exp
+                | RiscOp::Log
+                | RiscOp::Sin
+                | RiscOp::Sqrt
+                | RiscOp::Cos
+                | RiscOp::Tan
+                | RiscOp::Atan
+                | RiscOp::Abs
+                | RiscOp::Floor
+                | RiscOp::Ceil
+                | RiscOp::Round
+                | RiscOp::Relu
+                | RiscOp::Add
+                | RiscOp::Mul
+                | RiscOp::ReluAdjoint
+                | RiscOp::Sum { axis: 0, .. }
+                | RiscOp::MaxReduce { axis: 0 }
+                | RiscOp::MinReduce { axis: 0 }
+                | RiscOp::Pad { .. }
+                | RiscOp::Shrink { .. } => true,
+                RiscOp::Sum { axis: 1, .. } => matmul_heads.contains(&node.id.0),
+                _ => false,
+            };
+            allocates.then_some(node.id)
+        })
+        .collect()
 }
 
 /// Result of an emit pass — source plus the materialized peak-device-bytes
@@ -308,20 +271,15 @@ pub struct EmitResult {
 }
 
 pub(crate) fn emit_verified_dag(
-    dag: VerifiedDagView<'_>,
+    plan: &MetalNeverReuse,
     func_name: &str,
-) -> Result<EmitResult, String> {
-    // chelis#1277 C4.1: the Metal codegen entry has no typed error channel
-    // (`codegen_metal` falls back to an aborting stub), so a sourceless
-    // mapping is rendered into the stub's reason here rather than returned
-    // as a typed receipt. Metal device-path rows sit at their recorded
-    // `lane_divergent` baseline until chelis#1383, per runtime_extents.md
-    // C2.5.
-    dag.check_axis_sources(Stage::Codegen("metal"))
-        .map_err(|unsupported| unsupported.to_string())?;
+) -> Result<EmitResult, Unsupported> {
+    let dag = plan.dag();
+    reject_f64(dag)?;
+    dag.check_axis_sources(Stage::Codegen("metal"))?;
     reject_integer_abs(dag)?;
-    let mut e = Emitter::new(func_name);
-    e.emit(dag)?;
+    let mut e = Emitter::new(func_name, plan);
+    e.emit(dag).map_err(metal_emission_unsupported)?;
     let peak_device_bytes = e.peak_device_bytes();
     Ok(EmitResult {
         mm_source: e.into_source(),
@@ -329,10 +287,41 @@ pub(crate) fn emit_verified_dag(
     })
 }
 
+fn reject_f64(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+    if let Some(node) = dag
+        .nodes()
+        .iter()
+        .find(|node| node.output_type.precision == Prim::F64)
+    {
+        return Err(Unsupported::new(
+            UnsupportedKind::Dtype("f64".to_string()),
+            format!("a Metal DAG value at node {}", node.id.0),
+            Stage::Codegen("metal"),
+            chelis_types::deliberate_rejection!(
+                "[04-TGT-1]",
+                "Apple Silicon has no FP64 ALUs; use `--target c` or `--target hip`"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn metal_emission_unsupported(detail: String) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Construct("Metal DAG lowering".to_string()),
+        detail,
+        Stage::Codegen("metal"),
+        chelis_types::unimplemented_rejection!(
+            1383,
+            "Metal's typed no-reuse boundary rejects unsupported DAGs before artifact emission; use a supported Metal graph or select another compiled target"
+        ),
+    )
+}
+
 /// The Metal unary template maps `Abs` to `fabs`; reject integer inputs at
 /// the public emission boundary until Phase 3 provides a typed, trapping
 /// backend kernel (chelis#699).
-fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), String> {
+fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
     if let Some(node) = dag.first_integer_abs_node() {
         return Err(Unsupported::new(
             UnsupportedKind::Op("Abs".to_string()),
@@ -343,8 +332,7 @@ fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), String> {
                 "integer abs code generation waits for the typed, trapping Phase 3 \
                  kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
             ),
-        )
-        .to_string());
+        ));
     }
     Ok(())
 }
@@ -363,6 +351,10 @@ struct TensorPlan {
     n: usize,
     /// Row-major shape (dimensions listed in declaration order).
     shape: Vec<usize>,
+    /// Opaque identity claimed from `MetalNeverReuse` at the exact physical
+    /// allocation site. Virtual folded nodes inherit their source plan and
+    /// therefore never claim a second identity.
+    allocation: MetalAllocationId,
 }
 
 impl TensorPlan {
@@ -375,8 +367,10 @@ impl TensorPlan {
     }
 }
 
-struct Emitter {
+struct Emitter<'plan> {
     func_name: String,
+    allocation_plan: &'plan MetalNeverReuse,
+    claimed_allocations: UnordSet<MetalAllocationId>,
     body: Vec<String>,
     /// Collected MSL kernel sources, one per compute node, in emission order.
     /// `(c_var_for_pso, kernel_name, msl_source)`.
@@ -394,16 +388,45 @@ struct Emitter {
     matmuls: UnordMap<usize, blas::MatmulInfo>,
 }
 
-impl Emitter {
-    fn new(func_name: &str) -> Self {
+impl<'plan> Emitter<'plan> {
+    fn new(func_name: &str, allocation_plan: &'plan MetalNeverReuse) -> Self {
         Self {
             func_name: func_name.to_string(),
+            allocation_plan,
+            claimed_allocations: UnordSet::new(),
             body: Vec::new(),
             kernels: Vec::new(),
             plans: Vec::new(),
             matmul_consumed: UnordSet::new(),
             matmuls: UnordMap::new(),
         }
+    }
+
+    fn claim_allocation(&mut self, node: NodeId) -> Result<MetalAllocationId, String> {
+        let id = self.allocation_plan.allocation_for(node).ok_or_else(|| {
+            format!(
+                "Metal no-reuse plan has no physical allocation identity for node {}",
+                node.0
+            )
+        })?;
+        if !self.claimed_allocations.insert(id) {
+            return Err(format!(
+                "Metal no-reuse plan reused one physical allocation identity at node {}",
+                node.0
+            ));
+        }
+        Ok(id)
+    }
+
+    fn verify_allocation_bijection(&self) -> Result<(), String> {
+        if self.claimed_allocations.len() != self.allocation_plan.allocation_count() {
+            return Err(format!(
+                "Metal no-reuse plan/emitter allocation mismatch: planned {}, claimed {}",
+                self.allocation_plan.allocation_count(),
+                self.claimed_allocations.len()
+            ));
+        }
+        Ok(())
     }
 
     /// Build the deduped, lex-sorted `// span:` comment block for a node.
@@ -516,7 +539,7 @@ impl Emitter {
             }
             self.emit_root_writeback(idx, spec)?;
         }
-        Ok(())
+        self.verify_allocation_bijection()
     }
 
     fn emit_root_writeback(&mut self, idx: usize, spec: &OutputSpec) -> Result<(), String> {
@@ -752,9 +775,9 @@ impl Emitter {
             // buffers, mirroring the HIP path. The GPU==eval numeric proof
             // is the manual `gpu_correctness` Mac gate.
             RiscOp::Pad { padding, fill } => {
-                self.emit_pad(node, &metal_pairs_to_usize(padding), *fill)
+                self.emit_pad(node, &metal_pairs_to_usize(padding)?, *fill)
             }
-            RiscOp::Shrink { bounds } => self.emit_shrink(node, &metal_pairs_to_usize(bounds)),
+            RiscOp::Shrink { bounds } => self.emit_shrink(node, &metal_pairs_to_usize(bounds)?),
 
             other => Err(format!(
                 "Metal M4 emit: node {id} op {other:?} not yet supported \
@@ -858,6 +881,7 @@ impl Emitter {
             .position(|l| l == name)
             .ok_or_else(|| format!("Load `{name}` not registered in input_labels"))?;
         let buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         // Host-safe sizeof: see `dtype::host_sizeof_expr` (MSL `half`/`bfloat`
         // are not visible to host C++).
         let bytes = format!("{n}u * {}", dtype::host_sizeof_expr(prec));
@@ -884,6 +908,7 @@ impl Emitter {
             prec,
             n,
             shape,
+            allocation,
         });
         Ok(())
     }
@@ -891,6 +916,7 @@ impl Emitter {
     fn emit_const(&mut self, node: &DagNode, value: f64) -> Result<(), String> {
         let (n, prec) = self.require_static_rank1(&node.output_type, "Const")?;
         let buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         // Both the byte-count and the fill body route through host-safe
         // helpers in `dtype` (MSL `half`/`bfloat` are not visible to host
         // C++ and would fail to compile under `clang++ -fobjc-arc`). The
@@ -915,6 +941,7 @@ impl Emitter {
             prec,
             n,
             shape: vec![n],
+            allocation,
         });
         Ok(())
     }
@@ -997,6 +1024,7 @@ impl Emitter {
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         // Host-safe sizeof: see `dtype::host_sizeof_expr`.
         let bytes = format!("{n}u * {}", dtype::host_sizeof_expr(prec));
         self.push_span_comments(node);
@@ -1019,6 +1047,7 @@ impl Emitter {
             prec,
             n,
             shape: vec![n],
+            allocation,
         });
         let _ = dag;
         Ok(())
@@ -1084,6 +1113,7 @@ impl Emitter {
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         // Host-safe sizeof: see `dtype::host_sizeof_expr`.
         let bytes = format!("{n}u * {}", dtype::host_sizeof_expr(prec));
         self.push_span_comments(node);
@@ -1107,6 +1137,7 @@ impl Emitter {
             prec,
             n,
             shape: vec![n],
+            allocation,
         });
         let _ = dag;
         Ok(())
@@ -1195,6 +1226,7 @@ impl Emitter {
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         // Output is one accumulator-typed scalar; host-safe sizeof per
         // `dtype::host_sizeof_expr` (panics on f64; host-safe for the
         // active per-backend dtype matrix).
@@ -1229,6 +1261,7 @@ impl Emitter {
             prec: expected_acc,
             n: 1,
             shape: vec![],
+            allocation,
         });
         Ok(())
     }
@@ -1291,6 +1324,7 @@ impl Emitter {
         let elem_bytes = dtype::metal_elem_size(prec);
         let out_n = info.m * info.n;
         let out_buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         self.push_span_comments(node);
         self.body.push(format!(
             "// node {} = matmul {}x{}*{}x{} ({})",
@@ -1389,6 +1423,7 @@ impl Emitter {
             prec,
             n: out_n,
             shape: vec![info.m, info.n],
+            allocation,
         });
         Ok(())
     }
@@ -1500,6 +1535,7 @@ impl Emitter {
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         let bytes = format!("{out_n}u * {}", dtype::host_sizeof_expr(prec));
         self.push_span_comments(node);
         self.body
@@ -1532,6 +1568,7 @@ impl Emitter {
             prec,
             n: out_n,
             shape: out_shape,
+            allocation,
         });
         Ok(())
     }
@@ -1579,6 +1616,7 @@ impl Emitter {
             .push((pso_var.clone(), kernel_name.clone(), src));
 
         let out_buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
         let bytes = format!("{out_n}u * {}", dtype::host_sizeof_expr(prec));
         self.push_span_comments(node);
         self.body
@@ -1603,6 +1641,7 @@ impl Emitter {
             prec,
             n: out_n,
             shape: out_shape,
+            allocation,
         });
         Ok(())
     }
@@ -1751,15 +1790,17 @@ impl Emitter {
 
     /// Sum of per-buffer allocations the emitted host code will issue.
     ///
-    /// Each materialized DAG node owns one device buffer (no slot reuse
-    /// yet — that's M-phase planner work). Bytes per element follows
-    /// the MSL type, matching what the emitter passes to
+    /// Each materialized DAG node owns one device buffer under the typed
+    /// `MetalNeverReuse` contract. Bytes per element follows the MSL type,
+    /// matching what the emitter passes to
     /// `chelis_metal_alloc`. On Apple Silicon unified memory this is
     /// also the peak system RAM cost for tensor storage.
     fn peak_device_bytes(&self) -> usize {
+        let mut counted = UnordSet::new();
         self.plans
             .iter()
             .filter_map(|p| p.as_ref())
+            .filter(|p| counted.insert(p.allocation))
             .map(|p| {
                 // Honor the per-dtype element width via the central
                 // helper so no caller hardcodes `sizeof(float)`

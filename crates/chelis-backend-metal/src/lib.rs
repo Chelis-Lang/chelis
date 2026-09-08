@@ -31,17 +31,95 @@ pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
 use chelis_unord::UnordMap;
 
 use chelis_ir::dag::DimExpr;
+use chelis_ir::dag::NodeId;
+use chelis_ir::ownership::{VerifiedDagProgram, VerifiedDagView};
+use chelis_types::unsupported::Unsupported;
 
 pub mod blas;
 pub mod dtype;
 mod emit;
 pub mod kernels;
 
+/// Opaque identity for one physical Metal allocation.
+///
+/// The key cannot be constructed outside this crate. Equality is exposed so
+/// structural tests can prove that two materialized nodes did not collapse
+/// onto one allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MetalAllocationId {
+    key: usize,
+}
+
+#[derive(Debug)]
+struct DistinctMetalAllocation {
+    node: NodeId,
+    id: MetalAllocationId,
+}
+
+/// Target projection whose representation cannot carry storage reuse.
+///
+/// [`plan_metal`] is the only construction path. The fields are private, the
+/// type is neither `Clone` nor `Copy`, and it contains only the exact verified
+/// DAG plus one distinct identity for every physical allocation the Metal
+/// emitter will make.
+pub struct MetalNeverReuse {
+    program: VerifiedDagProgram,
+    allocations: Vec<DistinctMetalAllocation>,
+}
+
+impl MetalNeverReuse {
+    pub(crate) fn dag(&self) -> VerifiedDagView<'_> {
+        self.program.emission()
+    }
+
+    pub fn allocation_for(&self, node: NodeId) -> Option<MetalAllocationId> {
+        self.allocations
+            .iter()
+            .find(|allocation| allocation.node == node)
+            .map(|allocation| allocation.id)
+    }
+
+    pub fn allocation_count(&self) -> usize {
+        self.allocations.len()
+    }
+}
+
+/// Project a verified DAG onto Metal's closed no-reuse allocation plan.
+///
+/// Virtual nodes folded into a kernel are excluded. Every node that reaches
+/// a physical `chelis_metal_alloc` site receives exactly one opaque identity;
+/// emission checks the resulting bijection before returning an artifact.
+/// The verified input is moved into the plan and cannot be reused to mint a
+/// second target projection:
+///
+/// ```compile_fail
+/// # use chelis_ir::ownership::VerifiedDagProgram;
+/// fn reuse_verified(program: VerifiedDagProgram) {
+///     let _plan = chelis_backend_metal::plan_metal(program);
+///     let _other_projection = program.emission();
+/// }
+/// ```
+pub fn plan_metal(program: VerifiedDagProgram) -> MetalNeverReuse {
+    let allocations = emit::allocation_nodes(program.emission())
+        .into_iter()
+        .enumerate()
+        .map(|(key, node)| DistinctMetalAllocation {
+            node,
+            id: MetalAllocationId { key },
+        })
+        .collect();
+    MetalNeverReuse {
+        program,
+        allocations,
+    }
+}
+
 /// Result of Metal code generation.
 ///
 /// Field-for-field peer of `chelis_backend_hip::HipCodegenResult`. Renames:
 /// `c_source` → `mm_source` because the generated host file is Objective-C++
 /// (`.mm`), not C.
+#[derive(Debug)]
 pub struct MetalCodegenResult {
     /// Generated Objective-C++ host source. Embeds MSL kernel strings as
     /// C++11 raw string literals and `#import "chelis_metal_runtime.h"`.
@@ -108,12 +186,10 @@ pub fn runtime_dir() -> &'static str {
 ///                chelis_tensor **outputs, int n_out);
 /// ```
 ///
-/// **M2 first cut:** real elementwise emission for same-shape contiguous
-/// rank-1 tensors. Falls back to a stub-with-abort body when the M2
-/// emitter rejects the DAG (e.g., reductions land in M4, matmul in M5,
-/// broadcasts/strides incremental). The stub still links and emits the
-/// correct ABI, so CLI/structural tests remain stable as the supported
-/// surface grows.
+/// Unsupported DAGs return the typed [05-UNS] failure channel. They never
+/// produce an Objective-C++ artifact containing a delayed abort stub.
+///
+/// A raw DAG cannot be passed directly to Metal:
 ///
 /// ```compile_fail
 /// # use chelis_ir::dag::Dag;
@@ -121,30 +197,70 @@ pub fn runtime_dir() -> &'static str {
 ///     let _ = chelis_backend_metal::codegen_metal(raw, "unchecked");
 /// }
 /// ```
+///
+/// Neither can the verified DAG boundary used by C/HIP today:
+///
+/// ```compile_fail
+/// # use chelis_ir::ownership::VerifiedDagProgram;
+/// fn bypass(reuse_capable: &VerifiedDagProgram) {
+///     let _ = chelis_backend_metal::codegen_metal(reuse_capable, "unchecked");
+/// }
+/// ```
+///
+/// A token-carrying target projection is likewise not substitutable for the
+/// exact no-reuse type:
+///
+/// ```compile_fail
+/// # use chelis_ir::ownership::VerifiedDagProgram;
+/// struct ReuseCapable<'a> {
+///     dag: &'a VerifiedDagProgram,
+///     reusable_storage_token: &'a (),
+/// }
+/// fn bypass(reuse_capable: &ReuseCapable<'_>) {
+///     let _ = chelis_backend_metal::codegen_metal(reuse_capable, "unchecked");
+/// }
+/// ```
+///
+/// The no-reuse plan itself has no public constructor, so a caller cannot
+/// attach a reuse token or forge an incomplete allocation projection:
+///
+/// ```compile_fail
+/// # use chelis_backend_metal::MetalNeverReuse;
+/// # use chelis_ir::ownership::VerifiedDagProgram;
+/// fn forge(program: VerifiedDagProgram) -> MetalNeverReuse {
+///     MetalNeverReuse { program, allocations: Vec::new() }
+/// }
+/// ```
+///
+/// The plan is linear at the public emission edge: codegen consumes it, so it
+/// cannot emit twice or be cloned into a second capability.
+///
+/// ```compile_fail
+/// # use chelis_backend_metal::{codegen_metal, MetalNeverReuse};
+/// fn emit_twice(plan: MetalNeverReuse) {
+///     let _ = codegen_metal(plan, "first");
+///     let _ = codegen_metal(plan, "second");
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use chelis_backend_metal::MetalNeverReuse;
+/// fn clone_plan(plan: MetalNeverReuse) {
+///     let _second = plan.clone();
+/// }
+/// ```
 pub fn codegen_metal(
-    dag: &chelis_ir::ownership::VerifiedDagProgram,
+    plan: MetalNeverReuse,
     func_name: &str,
-) -> MetalCodegenResult {
-    let dag = dag.emission();
+) -> Result<MetalCodegenResult, Unsupported> {
+    let dag = plan.dag();
     let input_labels = emit::input_labels(dag);
     let output_labels = emit::output_labels(dag);
     let symbolic_dims = dag.symbolic_params();
 
-    let (mm_source, peak_device_bytes) = match emit::emit_verified_dag(dag, func_name) {
-        Ok(r) => (r.mm_source, r.peak_device_bytes),
-        // Unsupported DAG shape: keep the stub so the build pipeline (CLI
-        // dispatch, file emission, link recipe) stays consistent. Calling
-        // the stub aborts at runtime, surfacing the unsupported case
-        // rather than silently miscompiling. Peak bytes is 0 in this
-        // case; the stub allocates nothing. The error reason is threaded
-        // into the stub so the user sees a meaningful diagnostic
-        // (e.g., the integer-matmul §5.7.2 hint) instead of a bare
-        // "not yet implemented" string.
-        Err(reason) => {
-            let hint = emit::stub_reason_hint(dag, &reason);
-            (emit::stub_mm_source_with_reason(func_name, &hint), 0)
-        }
-    };
+    let emitted = emit::emit_verified_dag(&plan, func_name)?;
+    let mm_source = emitted.mm_source;
+    let peak_device_bytes = emitted.peak_device_bytes;
     let h_header = format!(
         "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
@@ -157,7 +273,7 @@ pub fn codegen_metal(
          Apple Silicon unified memory means this is also peak system RAM for tensor storage)"
     );
 
-    MetalCodegenResult {
+    Ok(MetalCodegenResult {
         mm_source,
         h_header,
         compile_flags: vec!["-std=c++17".to_string(), "-fobjc-arc".to_string()],
@@ -180,7 +296,7 @@ pub fn codegen_metal(
         peak_device_bytes_estimate: Some(peak_device_bytes),
         peak_device_bytes_terms: Vec::new(),
         peak_device_bytes_static_extra: peak_device_bytes,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -9360,7 +9360,7 @@ fn cmd_build_c(
     };
     let selected = chelis_backend_c::prepare_dag_for_codegen(dag, options);
     let verified = verified_dag_codegen_program(selected)?;
-    let mut result = chelis_backend_c::codegen_with_options(&verified, func_name, options)?;
+    let mut result = chelis_backend_c::codegen_with_options(verified, func_name, options)?;
     let symbolic_dims = if result.symbolic_dims.is_empty() {
         symbolic_dims
     } else {
@@ -9666,7 +9666,7 @@ fn cmd_build_hip(
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let selected = chelis_backend_hip::prepare_dag_for_codegen(dag);
     let verified = verified_dag_codegen_program(selected)?;
-    let mut result = chelis_backend_hip::codegen_hip(&verified, func_name)?;
+    let mut result = chelis_backend_hip::codegen_hip(verified, func_name)?;
     let requires_main = root_manifest.requires_main();
     if requires_main {
         let root_names = tensor_manifest_root_names(
@@ -9766,7 +9766,8 @@ fn cmd_build_metal(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let verified = verified_dag_codegen_program(dag)?;
-    let result = chelis_backend_metal::codegen_metal(&verified, func_name);
+    let plan = chelis_backend_metal::plan_metal(verified);
+    let result = chelis_backend_metal::codegen_metal(plan, func_name)?;
 
     let out_dir = output
         .map(|p| p.to_path_buf())

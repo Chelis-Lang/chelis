@@ -458,5 +458,5 @@ class RedTeamRegressionTests(unittest.TestCase):
         rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
         headers = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn("Sixty are Rust and seven are C or Objective-C headers", source)
-        self.assertEqual((rust, headers), (60, 7))
+        self.assertIn("Sixty-one are Rust and seven are C or Objective-C headers", source)
+        self.assertEqual((rust, headers), (61, 7))

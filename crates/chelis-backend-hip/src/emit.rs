@@ -3,10 +3,14 @@
 //! Generates C source that includes HIP runtime, embeds kernel source strings,
 //! and walks the DAG in topological order launching kernels on GPU.
 
+use std::collections::BTreeMap;
+
 use chelis_ir::dag::{
     DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
 };
-use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagView};
+use chelis_ir::ownership::{
+    HipStorageLane, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
+};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{ElementRef, ScalarValue};
@@ -19,6 +23,18 @@ fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
         chelis_types::deliberate_rejection!(
             "[04-TOT-2]",
             "verified ownership and the retained DAG payload must agree exactly; no backend-local ownership fallback is permitted"
+        ),
+    )
+}
+
+fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("storage planning".to_string()),
+        error.to_string(),
+        Stage::Codegen("hip"),
+        chelis_types::deliberate_rejection!(
+            "[04-SHAPE-1]",
+            "HIP storage placement requires the verified exact-capacity plan"
         ),
     )
 }
@@ -74,7 +90,7 @@ fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {
 }
 
 use crate::blas;
-use crate::fusion::{FusedInPlaceSpec, fused_in_place_spec};
+use crate::fusion::{FusedReuseMechanics, HipFusedReuse};
 use crate::kernels;
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
@@ -93,6 +109,9 @@ pub struct HipEmitter {
     kernel_sources: Vec<(String, String)>,
     /// Planner-driven slot/wrapper ownership.
     plan: MemoryPlan,
+    /// Linear reuse authorities minted by the shared planner. Both kernel
+    /// signatures and host/device wrappers derive mechanics from this map.
+    fused_reuse: BTreeMap<NodeId, HipFusedReuse>,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
     reduction_inlined: chelis_unord::UnordSet<usize>,
     /// Worst-case inline staged-reduction scratch requirement outside the slot plan.
@@ -234,9 +253,10 @@ impl HipEmitter {
 
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(
-        dag: VerifiedDagView<'_>,
+        mut storage_plan: VerifiedStoragePlan<HipStorageLane>,
         func_name: &str,
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
+        let dag = storage_plan.emission();
         Self::reject_integer_abs(dag)?;
         Self::reject_count(dag)?;
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
@@ -286,13 +306,25 @@ impl HipEmitter {
 
         let reduction_inlined = dag.reduction_inlined_fused_elems();
         let output_specs = Self::output_specs(dag);
-        let output_ids: Vec<NodeId> = output_specs.iter().map(|o| o.id).collect();
-        let plan = MemoryPlan::build(dag, &output_ids, &reduction_inlined);
+        let plan = MemoryPlan::from_shared(&storage_plan);
+        let node_ids = dag.nodes().iter().map(|node| node.id).collect::<Vec<_>>();
+        let mut fused_reuse = BTreeMap::new();
+        for node in node_ids {
+            if let Some(token) = storage_plan
+                .take_reuse_for(node)
+                .map_err(unsupported_storage_plan)?
+            {
+                let has_later_owner = plan.slot_has_later_owner(node);
+                fused_reuse.insert(node, HipFusedReuse::new(token, has_later_owner));
+            }
+        }
+        let dag = storage_plan.emission();
         let mut e = HipEmitter {
             lines: Vec::new(),
             indent: 0,
             kernel_sources: Vec::new(),
             plan,
+            fused_reuse,
             reduction_inlined: reduction_inlined
                 .to_sorted()
                 .into_iter()
@@ -1501,7 +1533,8 @@ impl HipEmitter {
             }
             RiscOp::Copy => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::FusedElem { ops } => {
-                let aliased_ext = fused_in_place_spec(node, dag).map(|reusable| {
+                let aliased_ext = self.fused_reuse.get(&node.id).map(|reuse| {
+                    let reusable = reuse.mechanics(node.id).reusable_input;
                     node.inputs
                         .iter()
                         .position(|&input| input == reusable)
@@ -1970,11 +2003,10 @@ impl HipEmitter {
             }
             RiscOp::FusedElem { ops } => {
                 let kernel_name = format!("kernel_fused_{}", node.id.0);
-                let in_place =
-                    fused_in_place_spec(node, dag).map(|reusable_input| FusedInPlaceSpec {
-                        reusable_input,
-                        slot_has_later_owner: self.slot_has_later_owner(id),
-                    });
+                let in_place = self
+                    .fused_reuse
+                    .get(&node.id)
+                    .map(|reuse| reuse.mechanics(node.id));
                 self.emit_fused_launch(
                     node.id.0,
                     &kernel_name,
@@ -2037,21 +2069,6 @@ impl HipEmitter {
             NodeMemoryKind::UniqueInput { slot, .. } | NodeMemoryKind::SlotBacked { slot } => *slot,
             other => panic!("node {id} does not own slot-backed storage: {other:?}"),
         }
-    }
-
-    /// True iff some node strictly after `id` in topological order also
-    /// owns the slot that `id` owns. Mirrors the C-side
-    /// `slot_has_later_owner` used by the in-place fused-elementwise
-    /// wrapper to decide whether to defer slot allocation to the
-    /// non-aliased fall-back branch.
-    fn slot_has_later_owner(&self, id: usize) -> bool {
-        let slot_id = self.slot_id_for_node(id);
-        self.plan.iter_node_kinds().skip(id + 1).any(|kind| {
-            matches!(
-                kind,
-                NodeMemoryKind::SlotBacked { slot } if *slot == slot_id
-            )
-        })
     }
 
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
@@ -2732,7 +2749,7 @@ impl HipEmitter {
         inputs: &[NodeId],
         _ops: &[chelis_ir::dag::FusedStep],
         ty: &TensorType,
-        in_place: Option<FusedInPlaceSpec>,
+        in_place: Option<FusedReuseMechanics>,
     ) {
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
@@ -2800,7 +2817,12 @@ impl HipEmitter {
     /// applies: declare the slot variable on the first-owner path and
     /// defer allocation to inside the non-contiguous branch when the
     /// slot has no later owners.
-    fn emit_fused_in_place_wrapper(&mut self, id: usize, ty: &TensorType, spec: FusedInPlaceSpec) {
+    fn emit_fused_in_place_wrapper(
+        &mut self,
+        id: usize,
+        ty: &TensorType,
+        spec: FusedReuseMechanics,
+    ) {
         let slot_id = self.slot_id_for_node(id);
         let slot_is_first_owner = self.plan.slot(slot_id).first_owner == NodeId(id);
         let ndim = Self::ndim(ty);
@@ -4223,7 +4245,9 @@ mod tests {
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
         let verified = crate::testing::verified_dag(dag)
             .expect("HIP emitter unit-test DAG must verify ownership");
-        HipEmitter::emit_dag(verified.emission(), name)
+        let plan = chelis_ir::ownership::plan_hip_storage(verified)
+            .expect("HIP emitter unit-test DAG must plan exact storage");
+        HipEmitter::emit_dag(plan, name)
     }
 
     #[test]
@@ -4468,6 +4492,31 @@ mod tests {
         dag
     }
 
+    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+        let scale = dag.add_node(
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(
+            RiscOp::FusedElem { ops },
+            vec![owned, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, owned);
+        dag.add_root(fused);
+        dag
+    }
+
     #[test]
     fn sparse_scatter_add_emits_hip_atomic_kernel() {
         let mut dag = Dag::new();
@@ -4510,17 +4559,18 @@ mod tests {
         assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
     }
 
-    /// Perf-F2(b) shipped: with a single-consumer reusable input
-    /// (here `x`, the FusedElem's first external), the kernel ships
+    /// A program-owned `Copy` with a terminal fused use receives the shared
+    /// reuse token. The kernel ships
     /// the in-place shape — `__restrict__` only on non-aliased
     /// externals (`ext1`), never on the aliased external (`ext0`) or
     /// `out`.
     #[test]
     fn fused_reusable_input_emits_hip_in_place_restrict_shape() {
-        let dag = fused_mul_reusable_input_dag();
+        let dag = fused_mul_program_owned_reusable_input_dag();
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
-        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
+        assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_3("));
+        assert!(hip.contains("d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size);"));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
         assert!(!hip.contains("const float *__restrict__ ext0"));
         // Output must NOT carry __restrict__ — it aliases ext0.
@@ -4530,10 +4580,9 @@ mod tests {
         assert!(hip.contains("const float *__restrict__ ext1"));
     }
 
-    /// chelis#1214 Phase 0 expected failure: a reusable program input is
+    /// chelis#1214: a reusable program input is
     /// caller-owned and must not supply the produced tensor's storage.
     #[test]
-    #[ignore = "chelis#1214: HIP does not yet reject caller-owned reuse"]
     fn fused_in_place_does_not_alias_a_caller_owned_input() {
         let dag = fused_mul_reusable_input_dag();
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
@@ -4544,10 +4593,9 @@ mod tests {
         );
     }
 
-    /// chelis#1214 Phase 0 expected failure: metadata views preserve the
+    /// chelis#1214: metadata views preserve the
     /// caller-owned provenance of their source storage.
     #[test]
-    #[ignore = "chelis#1214: HIP does not yet reject caller-owned view reuse"]
     fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
         let mut dag = Dag::new();
         let x = dag.add_node(

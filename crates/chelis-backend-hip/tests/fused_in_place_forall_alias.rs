@@ -1,6 +1,5 @@
-//! Perf-F2(b): HIP in-place fused-elementwise aliasing must admit
-//! scoped same-property `forall` / binder-equivalent aliases, mirroring
-//! the C-side W1-B (`crates/chelis-backend-c/tests/fused_in_place_forall_alias.rs`).
+//! HIP in-place fused-elementwise aliasing consumes the shared planner's
+//! exact shape, dtype, capacity, operation, and lifetime proof.
 //!
 //! Wire format expectations are pinned with exact full-statement
 //! `contains` strings (not partial fragments) so a regression that
@@ -9,9 +8,8 @@
 //! appears verbatim in the emitted HIP host code or the embedded
 //! kernel-source string declaration.
 //!
-//! Boundary: this file exercises only the in-place fusion gate
-//! `chelis-backend-hip::fusion::fused_in_place_spec` and the
-//! `chelis-backend-hip::emit` paths it threads through. It does not
+//! Boundary: this file exercises the shared proof as consumed by the HIP
+//! kernel-signature and wrapper paths. It does not
 //! touch the BLAS dispatch (W1-A) or the new `Scatter` emit branch
 //! (W2-A); both are intentionally out of scope here.
 
@@ -51,11 +49,11 @@ fn vec_lit_i32(n: usize) -> TensorType {
 }
 
 /// Build a 3-input fan-in FusedElem chain: `((a + b) * c)` where `a`
-/// is the reusable input. Each external input is a `Realize` so memory
+/// is the reusable input. Each external input is a `Copy` so memory
 /// planning treats it as `SlotBacked` (intermediate), mirroring how
 /// `copy(x)` fan-in shapes materialize after the linearity analyzer
 /// attaches the reuse hint. This mirrors the C-side fan_in_dag helper
-/// exactly (same node creation order, same Realize wrappers) so the
+/// exactly (same node creation order, same `Copy` wrappers) so the
 /// emitted node ids are predictable: `a = NodeId(1)`, `b = NodeId(3)`,
 /// `c = NodeId(5)`, `fused = NodeId(6)`.
 fn fan_in_dag(
@@ -182,12 +180,10 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
     );
 }
 
-/// Positive — binder-equivalent: FusedElem output uses
-/// `Named("seq", Some(4))` while reusable input uses `Lit(4)`. The
-/// binder-equivalent predicate must admit the in-place alias even
-/// though structural `DimInfo` equality fails.
+/// Positive: a literal and a resolved named extent with value four have
+/// exact-equal `CapacityKey`s despite their different source spelling.
 #[test]
-fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
+fn fan_in_resolved_lit_to_named_aliases_reusable_input() {
     let (dag, fused, a) = fan_in_dag(
         vec_lit_f32(4),
         vec_named_f32("seq", 4),
@@ -202,7 +198,7 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
     let alias = expected_in_place_view_alias(fused_id, a_id, "4");
     assert!(
         hip.contains(&alias),
-        "binder-equivalent Lit->Named fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
+        "exact Lit->resolved-Named fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
     );
     assert!(
         hip.contains(&expected_contiguity_guard(a_id)),
@@ -214,11 +210,10 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
     );
 }
 
-/// Positive — binder-equivalent the other direction: FusedElem output
-/// uses `Lit(4)` while reusable input is `Named("seq", Some(4))`. The
-/// alias must still fire — the predicate is symmetric.
+/// Positive: resolved exact equality is symmetric when the source uses a
+/// named extent and the consumer uses a literal extent.
 #[test]
-fn fan_in_binder_equivalent_named_to_lit_aliases_reusable_input() {
+fn fan_in_resolved_named_to_lit_aliases_reusable_input() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_f32("seq", 4),
         vec_lit_f32(4),
@@ -233,13 +228,11 @@ fn fan_in_binder_equivalent_named_to_lit_aliases_reusable_input() {
     let alias = expected_in_place_view_alias(fused_id, a_id, "4");
     assert!(
         hip.contains(&alias),
-        "binder-equivalent Named->Lit fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
+        "exact resolved-Named->Lit fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
     );
 }
 
-/// Positive — canonical same-binder case: both sides use
-/// `Named("seq", Some(4))`. The alias must fire under
-/// binder-equivalence.
+/// Positive: matching resolved named extents satisfy the exact proof.
 #[test]
 fn fan_in_same_named_binder_aliases_reusable_input() {
     let (dag, fused, a) = fan_in_dag(
@@ -256,15 +249,14 @@ fn fan_in_same_named_binder_aliases_reusable_input() {
     let alias = expected_in_place_view_alias(fused_id, a_id, "4");
     assert!(
         hip.contains(&alias),
-        "same-binder Named fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
+        "matching resolved Named fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
     );
 }
 
-/// Positive — named binder with unknown size on the reusable side:
-/// `Named("seq", None)` must still be binder-equivalent to
-/// `Named("seq", Some(4))` because the binder name is the alias proof.
+/// Negative — an unresolved source axis is not an exact proof of literal
+/// four, even if its display name matches the resolved output name.
 #[test]
-fn fan_in_named_binder_with_unknown_size_aliases() {
+fn fan_in_unresolved_axis_does_not_alias_resolved_literal() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_unsized_f32("seq"),
         vec_named_f32("seq", 4),
@@ -276,23 +268,22 @@ fn fan_in_named_binder_with_unknown_size_aliases() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
     assert!(
-        hip.contains(&alias),
-        "binder-equivalent Named(unsized)->Named(sized) fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
+        !hip.contains(&forbidden_alias),
+        "an unresolved axis must not authorize reuse as literal four; got:\n{hip}"
     );
+    assert!(!hip.contains(&expected_contiguity_guard(a_id)), "{hip}");
 }
 
 // ---------------------------------------------------------------------
 // Negative cases
 // ---------------------------------------------------------------------
 
-/// Negative — different binder names: `Named("batch", Some(4))` is
-/// NOT binder-equivalent to `Named("seq", Some(4))`. No in-place
-/// alias, no bare declaration, no contiguity guard. The output goes
-/// through the standard slot-backed wrapper.
+/// Positive — resolved named dimensions are exact literals. Different source
+/// spellings do not defeat a proof that both axes are exactly four.
 #[test]
-fn fan_in_different_named_binders_does_not_alias() {
+fn fan_in_different_resolved_names_alias_exact_equal_shape() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_f32("batch", 4),
         vec_named_f32("seq", 4),
@@ -304,31 +295,18 @@ fn fan_in_different_named_binders_does_not_alias() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let alias = expected_in_place_view_alias(fused_id, a_id, "4");
     assert!(
-        !hip.contains(&forbidden_alias),
-        "different-binder fan-in must NOT alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
+        hip.contains(&alias),
+        "resolved exact-equal shapes must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
     );
-    let forbidden_guard = expected_contiguity_guard(a_id);
     assert!(
-        !hip.contains(&forbidden_guard),
-        "different-binder fan-in must NOT emit contiguity guard on reusable input; got:\n{hip}"
-    );
-    let forbidden_bare = expected_bare_declaration(fused_id);
-    assert!(
-        !hip.contains(&forbidden_bare),
-        "different-binder fan-in must NOT emit bare GPU tensor declaration; got:\n{hip}"
-    );
-    // Fall-back path: kernel uses the legacy non-__restrict__ shape.
-    assert!(
-        !hip.contains("__restrict__ ext0"),
-        "fall-back path must not adopt in-place __restrict__ shape; got:\n{hip}"
+        hip.contains(&expected_contiguity_guard(a_id)),
+        "exact reuse must emit the guard derived from the same source token; got:\n{hip}"
     );
 }
 
-/// Negative — different concrete sizes on the same binder name: a
-/// `Named("seq", Some(4))` is NOT binder-equivalent to
-/// `Named("seq", Some(8))`.
+/// Negative: a repeated name cannot equate conflicting exact extent values.
 #[test]
 fn fan_in_same_binder_different_known_size_does_not_alias() {
     let (dag, fused, a) = fan_in_dag(
@@ -347,7 +325,7 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
     let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "8");
     assert!(
         !hip.contains(&forbidden_alias),
-        "binder with conflicting known sizes must NOT alias; got:\n{hip}"
+        "conflicting known sizes must NOT alias; got:\n{hip}"
     );
     let forbidden_guard = expected_contiguity_guard(a_id);
     assert!(
@@ -356,9 +334,8 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
     );
 }
 
-/// Negative — different precision: Int32 vs F32 is never
-/// binder-equivalent even with matching dim shapes; dtype is part of
-/// the alias proof.
+/// Negative: Int32 and F32 have distinct exact representations even with
+/// matching extents; representation is part of the alias proof.
 ///
 /// Re-authored by chelis#730 Phase 1 (census row 5, chelis#689): the
 /// former `elem_kind` F32 wildcard let this mixed-precision fused
@@ -388,8 +365,8 @@ fn fan_in_different_precision_does_not_alias() {
     );
 }
 
-/// Negative — multi-consumer reusable input: even with
-/// binder-equivalent shapes, an input with more than one consumer
+/// Negative: even with exact-equal shape and representation, an input with
+/// more than one consumer
 /// must NOT be aliased in-place. Mutating the shared buffer would
 /// corrupt the second consumer's read.
 #[test]
@@ -422,8 +399,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     );
     dag.set_reusable_input(fused, a);
 
-    // Second consumer of `a` forces fall-back even with
-    // binder-equivalent shapes.
+    // The second consumer keeps `a` live and forces a fresh fused output.
     let other = dag.add_node(RiscOp::Neg, vec![a], vec_named_f32("seq", 4), None);
     dag.add_root(fused);
     dag.add_root(other);
@@ -436,7 +412,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
     assert!(
         !hip.contains(&forbidden_alias),
-        "multi-consumer reusable input must NOT alias even with binder-equivalent shapes; got:\n{hip}"
+        "multi-consumer reusable input must NOT alias even with exact shape; got:\n{hip}"
     );
     let forbidden_guard = expected_contiguity_guard(a_id);
     assert!(
@@ -445,9 +421,8 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     );
 }
 
-/// Negative — different rank: a rank-1 reusable input and a rank-2
-/// FusedElem output are never binder-equivalent, regardless of total
-/// element count.
+/// Negative: equal total capacity does not satisfy the per-axis exact-shape
+/// requirement when source and consumer ranks differ.
 #[test]
 fn fan_in_different_rank_does_not_alias() {
     let ty_r1 = TensorType {

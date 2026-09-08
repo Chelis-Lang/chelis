@@ -1179,6 +1179,13 @@ fn validate_scalar(value: chelis_scalar, context: &str) -> RuntimeDType {
     dtype
 }
 
+fn exact_i64_scalar(value: chelis_scalar, context: &str) -> i64 {
+    if validate_scalar(value, context) != RuntimeDType::I64 {
+        runtime_fail!("Domain: {context} requires int64 tagged metadata");
+    }
+    i64::from_ne_bytes(value.bits.to_ne_bytes())
+}
+
 unsafe fn payload_bytes(value: &chelis_value_payload) -> &[u8; 16] {
     &*(value as *const chelis_value_payload).cast::<[u8; 16]>()
 }
@@ -2053,6 +2060,69 @@ pub unsafe extern "C" fn chelis_tensor_read_view(tensor: *const chelis_tensor) -
     };
     unlock_tensor(tensor_ref, TENSOR_ACCESS_IDLE);
     view
+}
+
+/// Reset one unique runtime-owned tensor descriptor to an exact same-byte
+/// shape without reallocating or transferring its storage.
+///
+/// # Safety
+///
+/// `tensor` must be a live tensor owner and `shape` must point to the number
+/// of readable tagged extents named by `rank` when that rank is positive. The
+/// runtime validates the full [05-OP-44] tagged-metadata, uniqueness,
+/// provenance, and capacity contract.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_repurpose(
+    tensor: *mut chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let rank_i64 = exact_i64_scalar(rank, "chelis_tensor_repurpose rank");
+    let rank = c_int::try_from(rank_i64).unwrap_or_else(|_| {
+        runtime_fail!("Overflow: chelis_tensor_repurpose rank {rank_i64} exceeds int32")
+    });
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: chelis_tensor_repurpose has null shape for rank {rank}");
+    }
+    let mut decoded_shape = Vec::with_capacity(rank.max(0) as usize);
+    for axis in 0..rank.max(0) as usize {
+        decoded_shape.push(exact_i64_scalar(
+            *shape.add(axis),
+            "chelis_tensor_repurpose shape extent",
+        ));
+    }
+    let tensor_ref = lock_tensor_idle(tensor, "chelis_tensor_repurpose");
+    let dtype = validate_tensor_contents(tensor_ref, "chelis_tensor_repurpose");
+    if tensor_ref.header.strong.load(Ordering::Relaxed) != 1 {
+        runtime_fail!("Domain: chelis_tensor_repurpose requires a unique tensor owner");
+    }
+    let storage = &*tensor_ref.storage;
+    if storage.header.strong.load(Ordering::Relaxed) != 1 {
+        runtime_fail!("Domain: chelis_tensor_repurpose requires unique tensor storage");
+    }
+    if storage.provenance != TensorStorageProvenance::RuntimeOwned {
+        runtime_fail!("Domain: chelis_tensor_repurpose requires runtime-owned storage");
+    }
+    let metadata = checked_tensor_metadata(
+        rank,
+        decoded_shape.as_ptr(),
+        dtype,
+        "chelis_tensor_repurpose",
+    );
+    if metadata.required_bytes != storage.byte_capacity {
+        runtime_fail!(
+            "Domain: chelis_tensor_repurpose byte size {} does not equal storage capacity {}",
+            metadata.required_bytes,
+            storage.byte_capacity
+        );
+    }
+
+    (*tensor).shape = metadata.shape;
+    (*tensor).strides = metadata.strides;
+    (*tensor).size = metadata.size;
+    (*tensor).rank = metadata.rank;
+    debug_assert_eq!((*tensor).dtype, metadata.dtype.id() as chelis_dtype);
+    unlock_tensor(&*tensor, TENSOR_ACCESS_IDLE);
 }
 
 #[no_mangle]
@@ -5326,6 +5396,205 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
 mod tests {
     use super::*;
     use std::ffi::CStr;
+    #[cfg(feature = "ownership-ledger")]
+    use std::fs;
+    #[cfg(feature = "ownership-ledger")]
+    use std::process::{Command, Output};
+
+    #[cfg(feature = "ownership-ledger")]
+    const SHARED_STORAGE_CHILD_CASE: &str = "CHELIS_SHARED_STORAGE_WRITE_CHILD_CASE";
+
+    #[cfg(feature = "ownership-ledger")]
+    const OWNERSHIP_LEDGER_PATH: &str = "CHELIS_OWNERSHIP_LEDGER_PATH";
+
+    #[cfg(feature = "ownership-ledger")]
+    fn shared_storage_ledger_path(case: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "chelis-shared-storage-write-{}-{case}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    #[cfg(feature = "ownership-ledger")]
+    fn run_shared_storage_child(case: &str, ledger: &std::path::Path) -> Output {
+        let _ = fs::remove_file(ledger);
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "tests::shared_tensor_storage_write_guard_child",
+                "--nocapture",
+            ])
+            .env(SHARED_STORAGE_CHILD_CASE, case)
+            .env(OWNERSHIP_LEDGER_PATH, ledger)
+            .output()
+            .unwrap_or_else(|error| panic!("run shared-storage child `{case}`: {error}"))
+    }
+
+    /// Construct the private shape of a tensor view for the one runtime
+    /// condition that the public ABI deliberately cannot manufacture: two
+    /// unique descriptors retaining one storage allocation. This helper is
+    /// test-only and follows the descriptor constructor/finalizer ownership
+    /// protocol exactly.
+    #[cfg(feature = "ownership-ledger")]
+    unsafe fn shared_storage_test_view(source: *mut chelis_tensor) -> *mut chelis_tensor {
+        let source = &*source;
+        retain_header(
+            source.storage.cast(),
+            ownership_ledger::Kind::TensorStorage,
+            "shared_storage_test_view storage",
+        );
+
+        let mut view = Box::new(chelis_tensor {
+            header: HeapHeader::new(ownership_ledger::Kind::Tensor),
+            storage: source.storage,
+            shape: source.shape.clone(),
+            strides: source.strides.clone(),
+            size: source.size,
+            rank: source.rank,
+            dtype: source.dtype,
+            access: AtomicU8::new(TENSOR_ACCESS_IDLE),
+            write_guard: chelis_tensor_write {
+                tensor: ptr::null_mut(),
+            },
+        });
+        let view_pointer: *mut chelis_tensor = &mut *view;
+        view.write_guard.tensor = view_pointer;
+        let view = Box::into_raw(view);
+        ledger_allocation(
+            view.cast(),
+            ownership_ledger::Kind::Tensor,
+            0,
+            "shared_storage_test_view descriptor",
+        );
+        view
+    }
+
+    #[test]
+    #[cfg(feature = "ownership-ledger")]
+    fn shared_tensor_storage_write_guard_child() {
+        let Ok(case) = std::env::var(SHARED_STORAGE_CHILD_CASE) else {
+            return;
+        };
+
+        unsafe {
+            let shape = [2_i64];
+            let tensor = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_F32);
+            let view = shared_storage_test_view(tensor);
+
+            assert_eq!(
+                (*tensor).header.strong.load(Ordering::Relaxed),
+                1,
+                "the source descriptor itself must remain unique"
+            );
+            assert_eq!(
+                (*view).header.strong.load(Ordering::Relaxed),
+                1,
+                "the sharing view descriptor must itself be unique"
+            );
+            assert_eq!(
+                (*(*tensor).storage).header.strong.load(Ordering::Relaxed),
+                2,
+                "the two descriptors must retain one shared storage allocation"
+            );
+
+            match case.as_str() {
+                "shared-storage" => {
+                    let _ = chelis_tensor_begin_write(tensor);
+                    panic!("begin_write accepted a unique descriptor over shared storage");
+                }
+                "released-view" => {
+                    chelis_tensor_release(view);
+                    assert_eq!(
+                        (*tensor).header.strong.load(Ordering::Relaxed),
+                        1,
+                        "releasing the view must not consume the source descriptor"
+                    );
+                    assert_eq!(
+                        (*(*tensor).storage).header.strong.load(Ordering::Relaxed),
+                        1,
+                        "releasing the view must restore unique storage"
+                    );
+
+                    let guard = chelis_tensor_begin_write(tensor);
+                    let write = chelis_tensor_write_view(guard);
+                    assert_eq!(write.count, 2);
+                    *(write.data as *mut f32) = 7.25;
+                    chelis_tensor_end_write(guard);
+                    let read = chelis_tensor_read_view(tensor);
+                    assert_eq!(*(read.data as *const f32), 7.25);
+                    chelis_tensor_release(tensor);
+                }
+                other => panic!("unknown shared-storage write child case `{other}`"),
+            }
+        }
+    }
+
+    /// [05-OP-44] requires both uniqueness conditions independently. A
+    /// descriptor strong count of one cannot authorize a write while a second
+    /// descriptor still owns the same TensorStorage.
+    #[test]
+    #[cfg(feature = "ownership-ledger")]
+    fn unique_descriptor_over_shared_storage_cannot_begin_write() {
+        let path = shared_storage_ledger_path("shared-storage");
+        let output = run_shared_storage_child("shared-storage", &path);
+        assert!(
+            !output.status.success(),
+            "begin_write returned with two live storage owners"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Domain:"), "{stderr}");
+        assert!(
+            stderr.contains("requires unique tensor storage"),
+            "{stderr}"
+        );
+
+        let ledger = fs::read_to_string(&path).expect("shared-storage negative ledger");
+        assert!(
+            ledger.contains(r#""event":"retain""#)
+                && ledger.contains(
+                    r#""kind":"TensorStorage","bytes":8,"owners_before":1,"owners_after":2"#
+                ),
+            "{ledger}"
+        );
+        assert!(
+            ledger.contains(r#""live_owners":4,"live_bytes":8"#),
+            "the failing child must report both live descriptors and both storage owners: {ledger}"
+        );
+        assert!(ledger.contains(r#""invalid_operations":0"#), "{ledger}");
+        let _ = fs::remove_file(path);
+    }
+
+    /// The positive twin releases the sharing descriptor first. Its finalizer
+    /// consumes exactly one storage owner, after which begin/end write succeeds
+    /// and the ledger returns every descriptor, owner, and byte to zero.
+    #[test]
+    #[cfg(feature = "ownership-ledger")]
+    fn releasing_storage_view_restores_write_and_balances_ledger() {
+        let path = shared_storage_ledger_path("released-view");
+        let output = run_shared_storage_child("released-view", &path);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let ledger = fs::read_to_string(&path).expect("released-view ledger");
+        assert!(
+            ledger.contains(r#""event":"release""#)
+                && ledger.contains(
+                    r#""kind":"TensorStorage","bytes":8,"owners_before":2,"owners_after":1"#
+                ),
+            "{ledger}"
+        );
+        assert!(
+            ledger.contains(
+                r#""event":"summary","allocations":3,"finalized":3,"live_owners":0,"live_bytes":0"#
+            ),
+            "{ledger}"
+        );
+        assert!(ledger.contains(r#""invalid_operations":0"#), "{ledger}");
+        let _ = fs::remove_file(path);
+    }
 
     unsafe fn runtime_str(value: &str) -> chelis_string {
         let c = CString::new(value).expect("cstring");

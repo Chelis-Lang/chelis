@@ -21,9 +21,9 @@
 //! | bool  |  -  |  -  | bool → bool                | rejected      |
 //!
 //! Negative coverage:
-//! - f64 reaches `require_metal_admissible` and falls through to the
-//!   stub artifact (the user-facing rejection happens at the CLI gate
-//!   per spec/04-type-system.md §1.1.3).
+//! - f64 reaches `require_metal_admissible` and returns a typed rejection
+//!   without an artifact (the user-facing rejection normally happens at
+//!   the CLI gate per spec/04-type-system.md §1.1.3).
 //! - mixed-precision matmul fails the `precision` check in `MatmulInfo`
 //!   construction; the detector returns `None` and matmul never reaches
 //!   codegen.
@@ -32,7 +32,7 @@ mod support;
 use chelis_backend_metal::dtype;
 use chelis_ir::dag::{Dag, DagNode, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use support::codegen_metal;
+use support::{codegen_metal, try_codegen_metal};
 
 fn vec_prec(n: usize, p: Prim) -> TensorType {
     TensorType {
@@ -206,8 +206,8 @@ fn build_matmul_dag(prec: Prim) -> Dag {
 
 fn assert_real_kernel(src: &str, ctx: &str) {
     assert!(
-        !src.contains("M1 fallback stub"),
-        "{ctx}: emit must produce a real kernel, not the stub fallback. \nSource was:\n{src}"
+        src.contains("kernel void") || src.contains("chelis_metal_mps_gemm_"),
+        "{ctx}: emit must produce a real kernel or MPS dispatch. \nSource was:\n{src}"
     );
 }
 
@@ -426,45 +426,36 @@ fn matmul_bf16_dispatches_to_tiled_msl() {
 }
 
 #[test]
-fn matmul_int_rejected_at_codegen_falls_through_to_stub() {
+fn matmul_int_rejected_at_codegen_returns_typed_unsupported() {
     // Integer matmul never reaches a healthy backend (rejected at
     // type-check per §5.7.2). The Metal blas detector also rejects it,
     // so the matmul subgraph isn't recognized; the lone Sum that
-    // remains then trips the require_static_rank1 / accumulator path
-    // and the emitter falls through to the stub. Test guards that
-    // codegen does NOT silently emit a tiled int-typed matmul kernel.
+    // remains then trips the require_static_rank1 / accumulator path.
+    // Codegen must fail before it can advertise an artifact.
     for prec in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         let dag = build_matmul_dag(prec);
-        let result = codegen_metal(&dag, "mmk_int");
-        let src = &result.mm_source;
-        assert!(
-            !src.contains("chelis_metal_mps_gemm_"),
-            "int matmul ({prec:?}) must not call any MPS helper: {src}"
+        let error = try_codegen_metal(&dag, "mmk_int").unwrap_err();
+        assert_eq!(
+            error.stage,
+            chelis_types::unsupported::Stage::Codegen("metal")
         );
-        assert!(
-            !src.contains("kernel void k_matmul"),
-            "int matmul ({prec:?}) must not emit a tiled MSL matmul kernel: {src}"
-        );
+        assert!(error.to_string().starts_with("unsupported:"), "{error}");
     }
 }
 
 // ---------------------------------------------------------------------------
-// Negative coverage: f64 falls through (CLI gate is the user-facing reject)
+// Negative coverage: f64 returns a typed error (CLI gate normally rejects first)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn f64_codegen_falls_through_to_stub() {
+fn f64_codegen_returns_typed_unsupported() {
     // f64 is hard-rejected at the CLI gate (test elsewhere) AND at the
     // codegen entry. Reaching codegen with f64 is a contract drift; the
     // emitter must not synthesize a kernel using a fictional MSL `double`
-    // type. Falling through to the stub is the defense-in-depth outcome.
+    // type or any other artifact.
     let dag = build_add_dag(Prim::F64);
-    let result = codegen_metal(&dag, "addk_f64");
-    assert!(
-        result.mm_source.contains("M1 fallback stub"),
-        "f64 must surface as the stub fallback (CLI gate is user-facing reject): {}",
-        result.mm_source
-    );
+    let error = try_codegen_metal(&dag, "addk_f64").unwrap_err();
+    assert!(error.to_string().contains("[04-TGT-1]"), "{error}");
 }
 
 // ---------------------------------------------------------------------------

@@ -1,41 +1,24 @@
-//! Phase 0 planner-level witness for chelis#888, HIP lane.
+//! Exact-capacity planner regressions for chelis#888, HIP lane.
 //!
 //! This is the twin of
 //! `crates/chelis-backend-c/tests/issue_888_capacity_collision.rs`.
-//! `crates/chelis-backend-hip/src/memory.rs` carries a verbatim copy of the C
-//! backend's `capacity_fits` and `logical_elements`, so #888 is one defect
-//! with two instances and a witness for only one of them understates the
-//! class. Phase 1 has to repair both, and both witnesses have to invert
-//! together.
-//!
-//! Every test in this file is a Phase 0 *characterization of a known-bad
-//! behavior*. Each one asserts the wrong answer the HIP memory planner
-//! produces today, so that Phase 1's exact `CapacityKey` cannot land
-//! silently. When that repair lands these tests must **invert** (the
-//! collision case must start allocating distinct slots) and move into the
-//! Phase 1 positive controls. They must not be deleted.
+//! The retired C and HIP backends carried independent lossy capacity
+//! predicates, so #888 was one class with two production paths. Both
+//! adapters now consume the same exact `CapacityKey` storage plan.
 //!
 //! Mechanism, in one paragraph. `DimExprKey` folds concrete dimension factors
 //! with `saturating_mul` (`chelis_ir::dag`), and saturation is not injective:
 //! two products that both exceed `usize::MAX` clamp to the same
-//! `usize::MAX`. `capacity_fits` in `crates/chelis-backend-hip/src/memory.rs`
-//! falls back to raw key equality whenever either capacity is non-concrete,
-//! which is exactly the case for any shape carrying a symbolic axis. So two
-//! symbolic shapes whose true element counts differ by a factor of two
-//! compare equal, and the slot-reuse search hands the larger value a buffer
-//! sized for the smaller one.
+//! `usize::MAX`. The retired HIP planner compared that lossy key when a
+//! symbolic capacity was not concrete, allowing distinct capacities to share
+//! one physical slot. The adapter now exposes only the shared exact plan.
 //!
-//! The HIP planner is not a byte-for-byte copy of the C one: it classifies
-//! program inputs as `UniqueInput` slots rather than borrowed loads, and it
-//! aliases repeated loads. Neither difference touches this DAG, which is a
-//! const followed by two elementwise nodes, so the slot arithmetic below is
-//! the C witness's arithmetic exercised through the HIP code path rather
-//! than an assumption that the two files agree.
-
-use chelis_unord::UnordSet;
+//! HIP still maps entry inputs to device mirror slots and aliases repeated
+//! loads, but neither target mechanic is capacity authority.
 
 use chelis_backend_hip::memory::{MemoryPlan, NodeMemoryKind};
 use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::ownership::plan_hip_storage;
 use chelis_types::types::Prim;
 mod support;
 
@@ -45,8 +28,8 @@ const SMALL_TAIL: usize = 1 << 40;
 const LARGE_TAIL: usize = 1 << 41;
 const HEAD: usize = 1 << 40;
 
-/// `tensor[n, 2^40, tail, f32]`: one symbolic axis, so `as_concrete` returns
-/// `None` and `capacity_fits` is forced onto the key-equality branch.
+/// `tensor[n, 2^40, tail, f32]`: one symbolic axis, so the retired lossy
+/// capacity fold took its key-equality branch.
 fn saturating_tensor(tail: usize) -> TensorType {
     TensorType {
         dims: vec![
@@ -83,9 +66,8 @@ fn exact_concrete_elements(ty: &TensorType) -> u128 {
         .product()
 }
 
-/// `memory::logical_elements` is private, and it folds the extents left to
-/// right into a `DimExpr::Mul` chain. Mirror that shape so the expected
-/// `SlotPlan::capacity_elems` below is an exact value, not a re-derivation.
+/// Mirror the adapter's renderable allocation expression so the expected
+/// `SlotPlan::capacity_elems` is exact.
 fn logical_elements(ty: &TensorType) -> DimExpr {
     ty.dims
         .iter()
@@ -101,9 +83,8 @@ fn logical_elements(ty: &TensorType) -> DimExpr {
 ///
 /// The lifetimes are what make the reuse search reachable: `a` dies at `b`,
 /// `b` is still live when `c` is born, so `c` is offered slot 0 (a's slot)
-/// and rejected from slot 1 (b's), and only `capacity_fits` decides whether
-/// it takes slot 0. The third `build` argument is HIP's reduction-inlined
-/// set; this DAG inlines nothing.
+/// and rejected from slot 1 (b's). Exact capacity decides whether it may
+/// take slot 0.
 fn chain_plan(
     a_type: TensorType,
     b_type: TensorType,
@@ -120,18 +101,15 @@ fn chain_plan(
     let c = dag.add_node(RiscOp::Neg, vec![b], c_type, None);
     dag.add_root(c);
     let verified = support::verified_dag(&dag);
-    let plan = MemoryPlan::build(verified.emission(), &[c], &UnordSet::new());
+    let shared = plan_hip_storage(verified).expect("exact HIP storage plan");
+    let plan = MemoryPlan::from_shared(&shared);
     (plan, a, b, c)
 }
 
-/// PHASE 0 CHARACTERIZATION OF A KNOWN-BAD BEHAVIOR.
-///
-/// This asserts the wrong plan: a value needing `n * 2^81` elements is given
-/// the slot allocated for `n * 2^80`. Phase 1's exact `CapacityKey` must make
-/// this test fail, at which point it inverts to assert three distinct slots.
-/// Do not delete it.
+/// A value needing `n * 2^81` elements must not receive the slot allocated
+/// for `n * 2^80`, even though the retired normalized keys collide.
 #[test]
-fn phase0_hip_planner_reuses_a_slot_sized_for_half_the_requested_capacity() {
+fn exact_hip_planner_separates_saturated_legacy_key_collision() {
     let small = saturating_tensor(SMALL_TAIL);
     let large = saturating_tensor(LARGE_TAIL);
 
@@ -151,23 +129,23 @@ fn phase0_hip_planner_reuses_a_slot_sized_for_half_the_requested_capacity() {
 
     let (plan, a, b, c) = chain_plan(small.clone(), small.clone(), large.clone());
 
-    // The observable wrong outcome: two slots, and the large value `c` is
-    // assigned to slot 0, the slot the small value `a` created.
+    // The repaired outcome: all three concurrently incompatible capacities
+    // have distinct slots.
     assert_eq!(
         plan.slots().len(),
-        2,
-        "the collision hides the third capacity, so only two slots are created"
+        3,
+        "the exact key must preserve the third distinct capacity"
     );
     assert_eq!(plan.node_kind(a), &NodeMemoryKind::SlotBacked { slot: 0 });
     assert_eq!(plan.node_kind(b), &NodeMemoryKind::SlotBacked { slot: 1 });
     assert_eq!(
         plan.node_kind(c),
-        &NodeMemoryKind::SlotBacked { slot: 0 },
-        "chelis#888: the larger value reuses the smaller value's slot"
+        &NodeMemoryKind::SlotBacked { slot: 2 },
+        "the larger value must not reuse the smaller value's slot"
     );
 
-    // And slot 0 really is sized for the smaller shape, so the reuse is an
-    // under-allocation by exactly a factor of two, not a harmless alias.
+    // Slot 0 remains sized for the smaller shape; assigning c to it would be
+    // an under-allocation by exactly a factor of two.
     let slot = plan.slot(0);
     assert_eq!(slot.first_owner, a);
     assert_eq!(
@@ -181,9 +159,8 @@ fn phase0_hip_planner_reuses_a_slot_sized_for_half_the_requested_capacity() {
         "the two capacities are structurally distinct expressions"
     );
 
-    // Lower-level companion: the exact false equality that produced the plan
-    // above. Both capacities saturate to the same key, and neither is
-    // concrete, so `capacity_fits` takes its key-equality branch.
+    // Historical premise: the retired lossy keys collide. This equality is
+    // evidence for the regression and is no longer storage authority.
     let small_capacity = logical_elements(&small);
     let large_capacity = logical_elements(&large);
     assert_eq!(small_capacity.as_concrete(), None);
@@ -202,7 +179,7 @@ fn phase0_hip_planner_reuses_a_slot_sized_for_half_the_requested_capacity() {
 /// Identical DAG shape and identical lifetimes, with the same symbolic axis,
 /// but concrete factors small enough that the fold does not saturate. Here
 /// the planner is correct: the larger value refuses the smaller slot and
-/// takes a third one. This test must keep passing through Phase 1.
+/// takes a third one.
 #[test]
 fn representable_symbolic_capacities_do_not_share_a_hip_slot() {
     let small = representable_tensor(4);
@@ -228,8 +205,7 @@ fn representable_symbolic_capacities_do_not_share_a_hip_slot() {
 /// tests above are not just observing a planner that never reuses anything.
 ///
 /// Same chain, one capacity throughout: `c` legitimately inherits `a`'s slot
-/// because the capacities are genuinely equal. This test must keep passing
-/// through Phase 1.
+/// because the capacities are genuinely equal.
 #[test]
 fn equal_symbolic_capacities_still_share_a_hip_slot() {
     let same = representable_tensor(4);

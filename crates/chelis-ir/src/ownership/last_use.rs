@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::error::OwnershipError;
 use super::ir::{
-    ApplyKind, Block, BlockId, EdgeId, EdgeTerminal, HostSiteAction, HostSiteMap, Op, OpId,
-    Operation, OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ScheduleState,
-    Terminal, Terminator, Unit, UnitId,
+    Block, BlockId, EdgeId, EdgeTerminal, HostSiteAction, HostSiteMap, Op, OpId, Operation,
+    OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ScheduleState, Terminal,
+    Terminator, Unit, UnitId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,33 +19,25 @@ pub(super) enum SchedulePoint {
 
 #[derive(Debug)]
 struct ExpandedCfg {
-    #[allow(
-        dead_code,
-        reason = "retained as a sealed expanded-CFG scheduling fact"
-    )]
     successors: BTreeMap<SchedulePoint, BTreeSet<SchedulePoint>>,
     #[allow(
         dead_code,
         reason = "retained as a sealed expanded-CFG scheduling fact"
     )]
     predecessors: BTreeMap<SchedulePoint, BTreeSet<SchedulePoint>>,
-    postdominators: BTreeMap<SchedulePoint, BTreeSet<SchedulePoint>>,
 }
 
 #[derive(Debug)]
 #[allow(
     dead_code,
-    reason = "the private scheduler is wired into lowering by the next Phase 3 milestone"
+    reason = "the production scheduler returns these sealed CFG facts for structural tests"
 )]
 pub(super) struct ScheduleFacts {
     cfgs: BTreeMap<UnitId, ExpandedCfg>,
 }
 
 impl ScheduleFacts {
-    #[allow(
-        dead_code,
-        reason = "the private scheduler is wired into lowering by the next Phase 3 milestone"
-    )]
+    #[cfg(test)]
     pub(super) fn postdominates(
         &self,
         unit: UnitId,
@@ -54,8 +46,7 @@ impl ScheduleFacts {
     ) -> bool {
         self.cfgs
             .get(&unit)
-            .and_then(|cfg| cfg.postdominators.get(&point))
-            .is_some_and(|set| set.contains(&candidate))
+            .is_some_and(|cfg| point_postdominates(cfg, candidate, point))
     }
 
     #[cfg(test)]
@@ -101,20 +92,16 @@ pub(super) fn has_schedule(program: &OwnershipProgram) -> bool {
     program
         .units
         .iter()
-        .any(|unit| unit.schedule == ScheduleState::CanonicalAcyclic)
+        .any(|unit| unit.schedule == ScheduleState::CanonicalLastUse)
 }
 
-#[allow(
-    dead_code,
-    reason = "the private scheduler is wired into lowering by the next Phase 3 milestone"
-)]
 pub(super) fn schedule(
     program: &mut OwnershipProgram,
     sites: &mut HostSiteMap,
 ) -> Result<ScheduleFacts, OwnershipError> {
-    for unit in &program.units {
-        reject_deferred_shapes(unit)?;
-    }
+    // Verify the conservative Phase-2 graph before removing any provisional
+    // terminal.  Cycles are admitted here, but unsupported structural shapes
+    // still fail closed in ordinary ownership verification.
     super::verify::verify(program)?;
     let mut pending_cfgs = program
         .units
@@ -201,7 +188,7 @@ pub(super) fn schedule(
             }
         }
         apply_placements(unit, &placements)?;
-        unit.schedule = ScheduleState::CanonicalAcyclic;
+        unit.schedule = ScheduleState::CanonicalLastUse;
         cfgs.insert(unit.id, cfg);
         placed_by_unit.push((unit_index, placements));
     }
@@ -213,7 +200,7 @@ pub(super) fn schedule(
 
 pub(super) fn verify_canonical(program: &OwnershipProgram) -> Result<(), OwnershipError> {
     for unit in &program.units {
-        if unit.schedule != ScheduleState::CanonicalAcyclic {
+        if unit.schedule != ScheduleState::CanonicalLastUse {
             if let Some((owner, _)) = provisional_in(unit) {
                 return Err(OwnershipError::StaleProvisionalTerminal {
                     unit: unit.name.clone(),
@@ -222,7 +209,6 @@ pub(super) fn verify_canonical(program: &OwnershipProgram) -> Result<(), Ownersh
             }
             continue;
         }
-        reject_deferred_shapes(unit)?;
         let cfg = expanded_cfg(unit)?;
         if let Some((owner, _)) = provisional_in(unit) {
             return Err(OwnershipError::StaleProvisionalTerminal {
@@ -284,80 +270,6 @@ pub(super) fn verify_canonical(program: &OwnershipProgram) -> Result<(), Ownersh
         verify_terminal_order(unit)?;
     }
     Ok(())
-}
-
-fn reject_deferred_shapes(unit: &Unit) -> Result<(), OwnershipError> {
-    if unit
-        .blocks
-        .iter()
-        .any(|block| matches!(block.terminator, Terminator::Loop { .. }))
-    {
-        return Err(OwnershipError::LastUseSchedulingDeferred {
-            unit: unit.name.clone(),
-            feature: "loop",
-        });
-    }
-    if unit
-        .blocks
-        .iter()
-        .flat_map(|block| &block.ops)
-        .any(|operation| {
-            matches!(
-                operation.kind,
-                Op::Apply {
-                    kind: ApplyKind::DirectCall { .. },
-                    ..
-                }
-            )
-        })
-    {
-        return Err(OwnershipError::LastUseSchedulingDeferred {
-            unit: unit.name.clone(),
-            feature: "direct call",
-        });
-    }
-    if has_block_cycle(unit) {
-        return Err(OwnershipError::LastUseSchedulingDeferred {
-            unit: unit.name.clone(),
-            feature: "cyclic control flow",
-        });
-    }
-    Ok(())
-}
-
-fn has_block_cycle(unit: &Unit) -> bool {
-    fn visit(
-        unit: &Unit,
-        block: BlockId,
-        visiting: &mut BTreeSet<BlockId>,
-        visited: &mut BTreeSet<BlockId>,
-    ) -> bool {
-        if visited.contains(&block) {
-            return false;
-        }
-        if !visiting.insert(block) {
-            return true;
-        }
-        let cycle = unit
-            .blocks
-            .iter()
-            .find(|candidate| candidate.id == block)
-            .is_some_and(|current| {
-                current
-                    .terminator
-                    .edges()
-                    .any(|edge| visit(unit, edge.target, visiting, visited))
-            });
-        visiting.remove(&block);
-        visited.insert(block);
-        cycle
-    }
-
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    unit.blocks
-        .iter()
-        .any(|block| visit(unit, block.id, &mut visiting, &mut visited))
 }
 
 fn expanded_cfg(unit: &Unit) -> Result<ExpandedCfg, OwnershipError> {
@@ -441,53 +353,40 @@ fn expanded_cfg(unit: &Unit) -> Result<ExpandedCfg, OwnershipError> {
             pending.extend(successors.get(&point).into_iter().flatten().copied());
         }
     }
+    if !all.contains(&SchedulePoint::Exit) {
+        return Err(OwnershipError::LastUseSchedulingUnsupported {
+            unit: unit.name.clone(),
+            feature: "a nonterminating control-flow component with no exit path",
+        });
+    }
     if all.len() != successors.len() {
         return Err(invariant(
             unit,
             "expanded CFG contains an unreachable scheduling point",
         ));
     }
-    let mut postdominators = successors
-        .keys()
-        .map(|point| {
-            (
-                *point,
-                if *point == SchedulePoint::Exit {
-                    BTreeSet::from([SchedulePoint::Exit])
-                } else {
-                    all.clone()
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    loop {
-        let mut changed = false;
-        for (&point, next) in &successors {
-            if point == SchedulePoint::Exit {
-                continue;
-            }
-            let mut intersection = all.clone();
-            for successor in next {
-                intersection = intersection
-                    .intersection(&postdominators[successor])
-                    .copied()
-                    .collect();
-            }
-            intersection.insert(point);
-            if postdominators[&point] != intersection {
-                postdominators.insert(point, intersection);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
     Ok(ExpandedCfg {
         successors,
         predecessors,
-        postdominators,
     })
+}
+
+fn point_postdominates(cfg: &ExpandedCfg, candidate: SchedulePoint, point: SchedulePoint) -> bool {
+    if !cfg.successors.contains_key(&candidate) || !cfg.successors.contains_key(&point) {
+        return false;
+    }
+    let mut pending = vec![point];
+    let mut visited = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if current == candidate || !visited.insert(current) {
+            continue;
+        }
+        if current == SchedulePoint::Exit {
+            return false;
+        }
+        pending.extend(cfg.successors.get(&current).into_iter().flatten().copied());
+    }
+    true
 }
 
 fn remove_provisionals(unit: &mut Unit) -> Result<Vec<Seed>, OwnershipError> {
@@ -590,53 +489,59 @@ fn scheduler_plan_from(
     start: usize,
     placements: &mut Vec<Placement>,
 ) -> Result<(), OwnershipError> {
-    let block_ref = find_block(unit, block)?;
-    let ops = non_scheduled_ops(block_ref).collect::<Vec<_>>();
-    if ops
-        .iter()
-        .skip(start)
-        .any(|operation| operation_fixed_consume(&operation.kind, owner))
-        || terminator_fixed_consume(&block_ref.terminator, owner)
-    {
-        return Ok(());
-    }
-    let last_local = ops
-        .iter()
-        .enumerate()
-        .skip(start)
-        .filter(|(_, operation)| operation_nonterminal_use(&operation.kind, owner))
-        .map(|(index, _)| index + 1)
-        .next_back();
-    let terminator_use = terminator_nonterminal_use(&block_ref.terminator, owner);
-    let edges = block_ref.terminator.edges().collect::<Vec<_>>();
-    let target_futures = edges
-        .iter()
-        .map(|edge| block_needs_owner(unit, edge.target, owner, &mut BTreeMap::new()))
-        .collect::<Vec<_>>();
-    let leaves_block = terminator_use
-        || edges
-            .iter()
-            .any(|edge| edge_nonterminal_use(edge, owner) || edge_fixed_consume(edge, owner))
-        || target_futures.iter().any(|future| *future);
-    if !leaves_block {
-        let after = match last_local {
-            Some(last) => last,
-            None => start,
-        };
-        placements.push(Placement::InBlock { block, after });
-        return Ok(());
-    }
-    for (edge, has_future) in edges.into_iter().zip(target_futures) {
-        if edge_fixed_consume(edge, owner) {
+    let future = scheduler_future_need(unit, owner);
+    let mut pending = vec![(block, start)];
+    let mut visited = BTreeSet::new();
+    while let Some((block, start)) = pending.pop() {
+        if !visited.insert((block, start)) {
             continue;
         }
-        if has_future {
-            scheduler_plan_from(unit, owner, edge.target, 0, placements)?;
-        } else {
-            placements.push(Placement::OnEdge {
-                source: block,
-                edge: edge.id,
+        let block_ref = find_block(unit, block)?;
+        let ops = non_scheduled_ops(block_ref).collect::<Vec<_>>();
+        if ops
+            .iter()
+            .skip(start)
+            .any(|operation| operation_fixed_consume(&operation.kind, owner))
+            || terminator_fixed_consume(&block_ref.terminator, owner)
+        {
+            continue;
+        }
+        let last_local = ops
+            .iter()
+            .enumerate()
+            .skip(start)
+            .filter(|(_, operation)| operation_nonterminal_use(&operation.kind, owner))
+            .map(|(index, _)| index + 1)
+            .next_back();
+        let edges = block_ref.terminator.edges().collect::<Vec<_>>();
+        let target_futures = edges
+            .iter()
+            .map(|edge| future.get(&edge.target).copied().unwrap_or(false))
+            .collect::<Vec<_>>();
+        let leaves_block = terminator_nonterminal_use(&block_ref.terminator, owner)
+            || edges
+                .iter()
+                .any(|edge| edge_nonterminal_use(edge, owner) || edge_fixed_consume(edge, owner))
+            || target_futures.iter().any(|needed| *needed);
+        if !leaves_block {
+            placements.push(Placement::InBlock {
+                block,
+                after: last_local.unwrap_or(start),
             });
+            continue;
+        }
+        for (edge, has_future) in edges.into_iter().zip(target_futures) {
+            if edge_fixed_consume(edge, owner) {
+                continue;
+            }
+            if has_future {
+                pending.push((edge.target, 0));
+            } else {
+                placements.push(Placement::OnEdge {
+                    source: block,
+                    edge: edge.id,
+                });
+            }
         }
     }
     Ok(())
@@ -651,52 +556,59 @@ fn verifier_plan_from(
     start: usize,
     expected: &mut Vec<Placement>,
 ) -> Result<(), OwnershipError> {
-    let current = find_block(unit, block)?;
-    let operations = non_scheduled_ops(current).collect::<Vec<_>>();
-    if operations
-        .iter()
-        .skip(start)
-        .any(|operation| operation_fixed_consume(&operation.kind, owner))
-        || terminator_fixed_consume(&current.terminator, owner)
-    {
-        return Ok(());
-    }
-    let last_use = operations
-        .iter()
-        .enumerate()
-        .skip(start)
-        .rev()
-        .find(|(_, operation)| operation_nonterminal_use(&operation.kind, owner))
-        .map(|(index, _)| index + 1);
-    let successors = current.terminator.edges().collect::<Vec<_>>();
-    let successor_needs = successors
-        .iter()
-        .map(|edge| verifier_future_need(unit, edge.target, owner, &mut BTreeMap::new()))
-        .collect::<Vec<_>>();
-    let exits_block = terminator_nonterminal_use(&current.terminator, owner)
-        || successors
-            .iter()
-            .any(|edge| edge_nonterminal_use(edge, owner) || edge_fixed_consume(edge, owner))
-        || successor_needs.iter().any(|needed| *needed);
-    if !exits_block {
-        let after = match last_use {
-            Some(last) => last,
-            None => start,
-        };
-        expected.push(Placement::InBlock { block, after });
-        return Ok(());
-    }
-    for (edge, needed) in successors.into_iter().zip(successor_needs) {
-        if edge_fixed_consume(edge, owner) {
+    let future = verifier_future_need(unit, owner);
+    let mut pending = vec![(block, start)];
+    let mut visited = BTreeSet::new();
+    while let Some((block, start)) = pending.pop() {
+        if !visited.insert((block, start)) {
             continue;
         }
-        if needed {
-            verifier_plan_from(unit, owner, edge.target, 0, expected)?;
-        } else {
-            expected.push(Placement::OnEdge {
-                source: block,
-                edge: edge.id,
+        let current = find_block(unit, block)?;
+        let operations = non_scheduled_ops(current).collect::<Vec<_>>();
+        if operations
+            .iter()
+            .skip(start)
+            .any(|operation| operation_fixed_consume(&operation.kind, owner))
+            || terminator_fixed_consume(&current.terminator, owner)
+        {
+            continue;
+        }
+        let last_use = operations
+            .iter()
+            .enumerate()
+            .skip(start)
+            .rev()
+            .find(|(_, operation)| operation_nonterminal_use(&operation.kind, owner))
+            .map(|(index, _)| index + 1);
+        let successors = current.terminator.edges().collect::<Vec<_>>();
+        let successor_needs = successors
+            .iter()
+            .map(|edge| future.get(&edge.target).copied().unwrap_or(false))
+            .collect::<Vec<_>>();
+        let exits_block = terminator_nonterminal_use(&current.terminator, owner)
+            || successors
+                .iter()
+                .any(|edge| edge_nonterminal_use(edge, owner) || edge_fixed_consume(edge, owner))
+            || successor_needs.iter().any(|needed| *needed);
+        if !exits_block {
+            expected.push(Placement::InBlock {
+                block,
+                after: last_use.unwrap_or(start),
             });
+            continue;
+        }
+        for (edge, needed) in successors.into_iter().zip(successor_needs) {
+            if edge_fixed_consume(edge, owner) {
+                continue;
+            }
+            if needed {
+                pending.push((edge.target, 0));
+            } else {
+                expected.push(Placement::OnEdge {
+                    source: block,
+                    edge: edge.id,
+                });
+            }
         }
     }
     Ok(())
@@ -777,60 +689,99 @@ fn verifier_expand_block_entry(
     Ok(())
 }
 
-fn block_needs_owner(
-    unit: &Unit,
-    block: BlockId,
-    owner: OwnerId,
-    memo: &mut BTreeMap<BlockId, bool>,
-) -> bool {
-    if let Some(value) = memo.get(&block) {
-        return *value;
+/// Scheduler-owned monotone fixed point. Re-entering a block which defines
+/// the same structural owner starts a new loop-iteration instance and cannot
+/// keep the preceding instance live.
+fn scheduler_future_need(unit: &Unit, owner: OwnerId) -> BTreeMap<BlockId, bool> {
+    let mut need = unit
+        .blocks
+        .iter()
+        .map(|block| (block.id, false))
+        .collect::<BTreeMap<_, _>>();
+    loop {
+        let mut changed = false;
+        for block in unit.blocks.iter().rev() {
+            let value = scheduler_block_need(unit, block, owner, &need);
+            if need[&block.id] != value {
+                need.insert(block.id, value);
+                changed = true;
+            }
+        }
+        if !changed {
+            return need;
+        }
     }
-    memo.insert(block, false);
-    let Some(current) = unit.blocks.iter().find(|candidate| candidate.id == block) else {
-        return false;
-    };
-    let value = non_scheduled_ops(current).any(|operation| {
-        operation_nonterminal_use(&operation.kind, owner)
-            || operation_fixed_consume(&operation.kind, owner)
-    }) || terminator_nonterminal_use(&current.terminator, owner)
-        || terminator_fixed_consume(&current.terminator, owner)
-        || current.terminator.edges().any(|edge| {
-            edge_nonterminal_use(edge, owner)
-                || edge_fixed_consume(edge, owner)
-                || block_needs_owner(unit, edge.target, owner, memo)
-        });
-    memo.insert(block, value);
-    value
 }
 
-fn verifier_future_need(
-    unit: &Unit,
-    block: BlockId,
+fn scheduler_block_need(
+    _unit: &Unit,
+    block: &Block,
     owner: OwnerId,
-    seen: &mut BTreeMap<BlockId, bool>,
+    need: &BTreeMap<BlockId, bool>,
 ) -> bool {
-    if let Some(answer) = seen.get(&block) {
-        return *answer;
-    }
-    seen.insert(block, false);
-    let Some(current) = unit.blocks.iter().find(|candidate| candidate.id == block) else {
+    if block.params.iter().any(|param| param.owner == owner) {
         return false;
-    };
-    let mut answer = false;
-    for operation in non_scheduled_ops(current) {
-        answer |= operation_nonterminal_use(&operation.kind, owner);
-        answer |= operation_fixed_consume(&operation.kind, owner);
     }
-    answer |= terminator_nonterminal_use(&current.terminator, owner);
-    answer |= terminator_fixed_consume(&current.terminator, owner);
-    for edge in current.terminator.edges() {
-        answer |= edge_nonterminal_use(edge, owner);
-        answer |= edge_fixed_consume(edge, owner);
-        answer |= verifier_future_need(unit, edge.target, owner, seen);
+    let mut local = false;
+    for operation in non_scheduled_ops(block) {
+        if destination(&operation.kind) == Some(owner) {
+            return local;
+        }
+        local |= operation_nonterminal_use(&operation.kind, owner)
+            || operation_fixed_consume(&operation.kind, owner);
     }
-    seen.insert(block, answer);
-    answer
+    local
+        || terminator_nonterminal_use(&block.terminator, owner)
+        || terminator_fixed_consume(&block.terminator, owner)
+        || block.terminator.edges().any(|edge| {
+            edge_nonterminal_use(edge, owner)
+                || edge_fixed_consume(edge, owner)
+                || need.get(&edge.target).copied().unwrap_or(false)
+        })
+}
+
+/// Canonical verification deliberately owns a second fixed-point traversal;
+/// it consumes no scheduler liveness or placement facts.
+fn verifier_future_need(unit: &Unit, owner: OwnerId) -> BTreeMap<BlockId, bool> {
+    let mut result = unit
+        .blocks
+        .iter()
+        .map(|block| (block.id, false))
+        .collect::<BTreeMap<_, _>>();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for current in &unit.blocks {
+            let answer = if current.params.iter().any(|param| param.owner == owner) {
+                false
+            } else {
+                let mut before_redefinition = false;
+                let mut redefined = false;
+                for operation in non_scheduled_ops(current) {
+                    if destination(&operation.kind) == Some(owner) {
+                        redefined = true;
+                        break;
+                    }
+                    before_redefinition |= operation_nonterminal_use(&operation.kind, owner);
+                    before_redefinition |= operation_fixed_consume(&operation.kind, owner);
+                }
+                before_redefinition
+                    || (!redefined
+                        && (terminator_nonterminal_use(&current.terminator, owner)
+                            || terminator_fixed_consume(&current.terminator, owner)
+                            || current.terminator.edges().any(|edge| {
+                                edge_nonterminal_use(edge, owner)
+                                    || edge_fixed_consume(edge, owner)
+                                    || result.get(&edge.target).copied().unwrap_or(false)
+                            })))
+            };
+            if result[&current.id] != answer {
+                result.insert(current.id, answer);
+                changed = true;
+            }
+        }
+    }
+    result
 }
 
 fn rebuild_host_sites(
@@ -857,17 +808,24 @@ fn rebuild_host_sites(
             )
         });
     }
+    let mut inserted = BTreeMap::<(usize, Placement), usize>::new();
     for (unit_index, terminals) in placed {
         let unit = &program.units[*unit_index];
         let mut terminals = terminals.iter().collect::<Vec<_>>();
         terminals
             .sort_by_key(|terminal| (terminal.point, std::cmp::Reverse(terminal.definition_order)));
         for terminal in terminals {
-            let site = match terminal.point {
-                Placement::OnEdge { source, edge } => sites
-                    .records
-                    .iter_mut()
-                    .find(|record| record_anchors_edge(record, *unit_index, unit, source, edge)),
+            let (site_index, anchor) = match terminal.point {
+                Placement::OnEdge { source, edge } => {
+                    sites
+                        .records
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, record)| {
+                            edge_anchor_position(record, *unit_index, unit, source, edge)
+                                .map(|anchor| (index, anchor + 1))
+                        })
+                }
                 Placement::InBlock { block, after } => {
                     let anchor = if after == 0 {
                         None
@@ -884,22 +842,34 @@ fn rebuild_host_sites(
                                 })?,
                         )
                     };
-                    sites.records.iter_mut().find(|record| {
-                        record.actions.iter().any(|action| match *action {
-                            HostSiteAction::Operation {
-                                unit,
-                                block: action_block,
-                                operation,
-                            } => {
-                                unit == *unit_index
-                                    && action_block == block
-                                    && anchor == Some(operation)
-                            }
-                            _ => false,
-                        }) || (after == 0
-                            && record.unit == *unit_index
-                            && record.kind == super::ir::HostSiteKind::FunctionEntry)
-                    })
+                    sites
+                        .records
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, record)| {
+                            record
+                                .actions
+                                .iter()
+                                .position(|action| match *action {
+                                    HostSiteAction::Operation {
+                                        unit,
+                                        block: action_block,
+                                        operation,
+                                    } => {
+                                        unit == *unit_index
+                                            && action_block == block
+                                            && anchor == Some(operation)
+                                    }
+                                    _ => false,
+                                })
+                                .map(|anchor| (index, anchor + 1))
+                                .or_else(|| {
+                                    (after == 0
+                                        && record.unit == *unit_index
+                                        && record.kind == super::ir::HostSiteKind::FunctionEntry)
+                                        .then_some((index, 0))
+                                })
+                        })
                 }
             }
             .ok_or_else(|| OwnershipError::HostSiteMap {
@@ -908,27 +878,32 @@ fn rebuild_host_sites(
                     terminal.id.0
                 ),
             })?;
+            let offset = inserted.entry((site_index, terminal.point)).or_default();
             let block = match terminal.point {
                 Placement::InBlock { block, .. } | Placement::OnEdge { source: block, .. } => block,
             };
-            site.actions.push(HostSiteAction::Operation {
-                unit: *unit_index,
-                block,
-                operation: terminal.id,
-            });
+            sites.records[site_index].actions.insert(
+                anchor + *offset,
+                HostSiteAction::Operation {
+                    unit: *unit_index,
+                    block,
+                    operation: terminal.id,
+                },
+            );
+            *offset += 1;
         }
     }
     Ok(())
 }
 
-fn record_anchors_edge(
+fn edge_anchor_position(
     record: &super::ir::HostSiteRecord,
     unit_index: usize,
     unit: &Unit,
     source: BlockId,
     edge: EdgeId,
-) -> bool {
-    record.actions.iter().any(|action| match *action {
+) -> Option<usize> {
+    record.actions.iter().position(|action| match *action {
         HostSiteAction::ControlEdge {
             unit,
             edge: action_edge,
@@ -1161,6 +1136,11 @@ fn check_complete_postdominating_frontier(
     definition_after: usize,
     placements: &[Placement],
 ) -> Result<(), OwnershipError> {
+    // A multi-placement result is a path-local death frontier: the scheduler
+    // and verifier independently reconstruct the full set from structural
+    // future-use facts, and no one member necessarily post-dominates the
+    // definition. A single placement has no such collective proof and must
+    // itself post-dominate the definition point.
     if definition_after == 0 && definition_block != unit.entry {
         // A block parameter is materialized by each incoming edge. Its unused
         // death point is therefore edge-local, immediately after transfer,
@@ -1184,18 +1164,35 @@ fn check_complete_postdominating_frontier(
         let terminal = *frontier
             .first()
             .expect("single complete terminal frontier has one point");
-        if !cfg
-            .postdominators
-            .get(&definition)
-            .is_some_and(|postdominators| postdominators.contains(&terminal))
-        {
-            return Err(invariant(
-                unit,
-                "single death frontier does not post-dominate its definition",
-            ));
-        }
+        require_postdominates(unit, cfg, terminal, definition)?;
     }
     Ok(())
+}
+
+fn require_postdominates(
+    unit: &Unit,
+    cfg: &ExpandedCfg,
+    candidate: SchedulePoint,
+    point: SchedulePoint,
+) -> Result<(), OwnershipError> {
+    if point_postdominates(cfg, candidate, point) {
+        Ok(())
+    } else {
+        Err(invariant(
+            unit,
+            "single death frontier does not post-dominate its definition",
+        ))
+    }
+}
+
+#[cfg(test)]
+pub(super) fn require_postdominates_for_test(
+    unit: &Unit,
+    candidate: SchedulePoint,
+    point: SchedulePoint,
+) -> Result<(), OwnershipError> {
+    let cfg = expanded_cfg(unit)?;
+    require_postdominates(unit, &cfg, candidate, point)
 }
 
 fn fixed_consume_points(unit: &Unit, owner: OwnerId) -> BTreeSet<SchedulePoint> {

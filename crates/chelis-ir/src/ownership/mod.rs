@@ -122,10 +122,16 @@ mod ir;
 mod last_use;
 mod lower;
 mod render;
+mod storage;
 mod verify;
 
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
+pub use storage::{
+    CStorageLane, ExactStorageCapacity, HipStorageLane, ReusableOwnedStorage, StorageLane,
+    StoragePlacement, StorageSlotId, StorageSlotPlan, VerifiedStorageLayout, VerifiedStoragePlan,
+    plan_c_storage, plan_c_storage_layout, plan_hip_storage,
+};
 
 /// Whether a class member's own output dim carries an extent the checker
 /// already resolved.
@@ -492,8 +498,22 @@ pub enum VerifiedApplyKind {
 /// can be smuggled into a selected control-flow edge.
 #[derive(Debug, Clone, Copy)]
 pub enum VerifiedTerminalView<'a> {
-    Drop(VerifiedOwnerView<'a>),
-    Discard(VerifiedOwnerView<'a>),
+    Drop {
+        operation: VerifiedOperationId,
+        owner: VerifiedOwnerView<'a>,
+    },
+    Discard {
+        operation: VerifiedOperationId,
+        owner: VerifiedOwnerView<'a>,
+    },
+}
+
+impl VerifiedTerminalView<'_> {
+    pub fn operation(self) -> VerifiedOperationId {
+        match self {
+            Self::Drop { operation, .. } | Self::Discard { operation, .. } => operation,
+        }
+    }
 }
 
 /// Read-only metadata for one verified logical owner.
@@ -783,11 +803,17 @@ fn verified_edge<'a>(
             .iter()
             .map(|terminal| match terminal.kind {
                 ir::Terminal::Drop(owner) => {
-                    verified_owner(program, unit, owner).map(VerifiedTerminalView::Drop)
+                    verified_owner(program, unit, owner).map(|owner| VerifiedTerminalView::Drop {
+                        operation: VerifiedOperationId { key: terminal.id.0 },
+                        owner,
+                    })
                 }
-                ir::Terminal::Discard(owner) => {
-                    verified_owner(program, unit, owner).map(VerifiedTerminalView::Discard)
-                }
+                ir::Terminal::Discard(owner) => verified_owner(program, unit, owner).map(|owner| {
+                    VerifiedTerminalView::Discard {
+                        operation: VerifiedOperationId { key: terminal.id.0 },
+                        owner,
+                    }
+                }),
             })
             .collect::<Option<Vec<_>>>()?,
     })
@@ -1259,13 +1285,40 @@ pub enum PayloadKind {
     Dag,
 }
 
-/// Sealed verifier-derived live-set summary. Milestone 1 records the maximum
-/// simultaneous heap-owner count; the Phase 3 scheduler extends this proof to
-/// exact byte costs and recursive call-graph composition before the oracle can
-/// consume it.
+/// Sealed verifier-derived live-byte upper bound.
+///
+/// Verification composes local owner costs through the direct-call graph and
+/// classifies runtime-dependent or positively recursive storage explicitly.
+/// The oracle handoff remains an integration step with the reuse proof because
+/// physical reused-slot capacity can exceed a tensor's logical shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveByteBound {
+    Exact(u64),
+    Unknown,
+    Unbounded,
+}
+
+impl LiveByteBound {
+    fn maximum(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unbounded, _) | (_, Self::Unbounded) => Self::Unbounded,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Exact(lhs), Self::Exact(rhs)) => Self::Exact(lhs.max(rhs)),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct VerifiedLiveSetBound {
     max_live_heap_owners: usize,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 3 physical-storage and ledger handoff awaits chelis#893 CapacityKey"
+        )
+    )]
+    max_live_bytes: LiveByteBound,
 }
 
 impl VerifiedLiveSetBound {
@@ -1360,13 +1413,15 @@ pub fn lower_host_ownership(
 ) -> Result<HostOwnershipProgram, OwnershipError> {
     let root_bindings = lower::materialize_manifest_roots(&mut host, manifested.manifest())?;
     let mut sites = ir::HostSiteBuilder::default();
-    let program = lower::lower(
+    let mut program = lower::lower(
         manifested.checked(),
         &host,
         manifested.manifest(),
         &root_bindings,
         &mut sites,
     )?;
+    let mut sites = sites.finish();
+    last_use::schedule(&mut program, &mut sites)?;
     let nested_dags = lower_nested_dags(&host)?;
     Ok(OwnershipProgram {
         payload: HostEmissionPayload {
@@ -1375,7 +1430,7 @@ pub fn lower_host_ownership(
         },
         proof: OwnershipProof::Host {
             program,
-            sites: sites.finish(),
+            sites,
             nested_dags,
         },
     })

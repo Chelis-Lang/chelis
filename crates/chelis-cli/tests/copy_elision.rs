@@ -10,10 +10,10 @@
 //!   * Zero `memcpy` calls. Explicit copies materialize through the same
 //!     contiguous realization loop used by `realize`, not through raw byte
 //!     copying.
-//!   * Ten independently owned tensor allocations in the Phase 1 baseline:
-//!     explicit copy materialization plus fused fan-in intermediates. Borrowed
-//!     `chelis_slot*` / `chelis_alloc_view` wrappers are absent; shared-storage
-//!     reuse remains disabled until Phase 3's proof-bearing planner.
+//!   * Ten independently owned tensor values: six fresh physical allocations
+//!     plus four exact-capacity repurposes selected by Phase 3's proof-bearing
+//!     planner. Borrowed `chelis_slot*` / `chelis_alloc_view` wrappers remain
+//!     absent.
 //!   * Multiple `parallel for simd` blocks — kernel fusion combines the
 //!     elementwise unary results and the add chain into SIMD-vectorized
 //!     loops without source-level add intermediates.
@@ -21,24 +21,23 @@
 //!     qualifier. This is the linearity → no-aliasing guarantee surfacing in
 //!     the C codegen so the host compiler can vectorize aggressively.
 //!
-//! Net: explicit `copy()` is visible to the IR/cost surface. Phase 1 keeps each
-//! allocation independently owned; Phase 3 may reuse storage only after its
-//! shared proof establishes safe non-overlap.
+//! Net: explicit `copy()` remains visible to the IR/cost surface while Phase 3
+//! reuses physical storage only where its shared proof establishes safe
+//! non-overlap and exact capacity.
 //!
 //! ## Cost profile (computed from emitted C)
 //!
 //! For the probe shape `tensor[1024, 1024, f32]` (~4 MiB per buffer):
-//!   * 10 owned buffers × (1024×1024×4 B) = **40 MiB peak helper storage**.
+//!   * 6 physical buffers × (1024×1024×4 B) = **24 MiB peak helper storage**.
 //!   * The input `x` itself is borrowed (not allocated) so it does not
 //!     contribute to the helper's allocation footprint.
-//!   * Every temporary remains live until the function epilogue. Phase 3 owns
-//!     the shared proof that may safely reintroduce storage reuse.
+//!   * Every physical buffer remains live until the function epilogue; four
+//!     logical results repurpose exact-capacity storage without allocating.
 //!
 //! Linear projection to a 2 GiB input (~22300×22300 f32 ≈ 2 GiB):
 //!   * Caller-side: 1 × 2 GiB input.
-//!   * Helper-side: 10 × 2 GiB owned buffers = **20 GiB peak working set**.
-//!   * Total RAM with the input: ~22 GiB. Phase 3's shared reuse proof may
-//!     collapse this further; Phase 1 deliberately does not.
+//!   * Helper-side: 6 × 2 GiB physical buffers = **12 GiB peak working set**.
+//!   * Total RAM with the input: ~14 GiB.
 
 use std::fs;
 use std::process::Command;
@@ -69,8 +68,8 @@ fn build_copy_elision_c_source() -> String {
 }
 
 /// Sum of bytes allocated by every `chelis_alloc(N, (int64_t[]){...}, CHELIS_<T>)`
-/// call in the C source. In the Phase 1 no-reuse baseline every owned temporary
-/// remains live through the final allocation, so this is the helper peak.
+/// call in the C source. Every Phase 3 physical slot remains live through the
+/// final allocation in this probe, so this is the helper peak.
 ///
 /// Returns (total_bytes, allocation_count, per_alloc_bytes).
 pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
@@ -149,6 +148,7 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
     let source = build_copy_elision_c_source();
 
     let alloc_calls = source.matches("chelis_alloc(").count();
+    let repurpose_calls = source.matches("chelis_tensor_repurpose(").count();
     let memcpy_calls = source.matches("memcpy(").count();
     let fused_kernels = source.matches("parallel for simd").count();
     let restrict_qualifiers = source.matches("restrict").count();
@@ -162,17 +162,24 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
     );
 
     assert_eq!(
-        alloc_calls, 10,
-        "expected the Phase 1 no-reuse baseline to materialize 10 independently \
-         owned C tensor allocations. A different count changes the temporary \
-         ownership/cost profile."
+        (alloc_calls, repurpose_calls),
+        (6, 4),
+        "expected Phase 3 to materialize ten logical tensor values as six fresh \
+         physical allocations and four exact-capacity repurposes. A different \
+         split changes the temporary ownership/cost profile."
+    );
+    assert_eq!(
+        alloc_calls + repurpose_calls,
+        10,
+        "explicit copy materialization and fused fan-in must still produce all \
+         ten logical tensor values even when physical storage is reused"
     );
 
     assert_eq!(
         (borrowed_slot_wrappers, legacy_view_allocations),
         (0, 0),
-        "Phase 1 must not synthesize borrowed slot wrappers or the removed \
-         chelis_alloc_view path; shared-storage reuse requires Phase 3's proof"
+        "Phase 3 must reuse proven storage directly, without borrowed slot \
+         wrappers or the removed chelis_alloc_view path"
     );
 
     assert!(
@@ -199,12 +206,12 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
          ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
-    // For tensor[1024, 1024, f32], each owned buffer is 4 MiB. Phase 1
-    // materializes ten and releases the nine non-result owners at epilogue.
-    let expected = 10 * 1024 * 1024 * 4; // 40 MiB
+    // For tensor[1024, 1024, f32], each physical buffer is 4 MiB. Phase 3
+    // allocates six slots and repurposes four of them for later logical values.
+    let expected = 6 * 1024 * 1024 * 4; // 24 MiB
     assert_eq!(
         total_bytes, expected,
-        "expected peak C owned-buffer footprint of 40 MiB (10 × 4 MiB), \
+        "expected peak C physical-buffer footprint of 24 MiB (6 × 4 MiB), \
          got {total_bytes} bytes ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
@@ -219,7 +226,7 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
     );
 
     // Linear projection: scale input from 4 MiB (1024×1024 f32) to 2 GiB
-    // (~512× larger). Ten owned buffers scale to a 20 GiB helper-side peak.
+    // (~512× larger). Six physical buffers scale to a 12 GiB helper-side peak.
     let scale_to_2gib = (2_u64 * 1024 * 1024 * 1024) / (1024 * 1024 * 4);
     let projected_2gib_peak_bytes = (total_bytes as u64) * scale_to_2gib;
     let projected_2gib_peak_gib = projected_2gib_peak_bytes as f64 / (1024.0 * 1024.0 * 1024.0);

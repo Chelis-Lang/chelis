@@ -7,6 +7,7 @@ use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
     ConcreteHostProgram, HostDisplayRoot, HostFunctionOrigin, HostTensorHelper,
 };
+use crate::host_type_state::ConcreteHostType;
 
 use super::classify::{Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
@@ -20,6 +21,19 @@ use super::ir::{
 struct CallableSchema {
     operation: super::ir::OperationSchema,
     parameter_classes: Vec<ValueClass>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectCallLiveCost {
+    callee: UnitId,
+    carry: super::LiveByteBound,
+}
+
+#[derive(Debug)]
+struct UnitLiveFacts {
+    max_live_heap_owners: usize,
+    local_max_live_bytes: super::LiveByteBound,
+    direct_calls: Vec<DirectCallLiveCost>,
 }
 
 #[derive(Debug)]
@@ -68,10 +82,12 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, Own
             callable_schemas.insert(unit.id, schema);
         }
     }
+    let mut live_facts = BTreeMap::new();
     let mut max_live_heap_owners = 0;
     for unit in &program.units {
-        max_live_heap_owners =
-            max_live_heap_owners.max(verify_unit(unit, &units, &callable_schemas)?);
+        let facts = verify_unit(unit, &units, &callable_schemas)?;
+        max_live_heap_owners = max_live_heap_owners.max(facts.max_live_heap_owners);
+        live_facts.insert(unit.id, facts);
     }
     if roots != 1 {
         return Err(OwnershipError::RootUnitCount { actual: roots });
@@ -81,6 +97,7 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, Own
         tail_calls,
         live_set_bound: super::VerifiedLiveSetBound {
             max_live_heap_owners,
+            max_live_bytes: compose_live_byte_bound(&program.units, &live_facts)?,
         },
     })
 }
@@ -945,7 +962,7 @@ fn verify_unit(
     unit: &Unit,
     units: &BTreeMap<UnitId, &Unit>,
     callable_schemas: &BTreeMap<UnitId, CallableSchema>,
-) -> Result<usize, OwnershipError> {
+) -> Result<UnitLiveFacts, OwnershipError> {
     if !matches!(
         (unit.kind, unit.callable_body),
         (UnitKind::Roots, None) | (UnitKind::Function, Some(_))
@@ -1012,18 +1029,54 @@ fn verify_unit(
     let mut incoming = BTreeMap::from([(unit.entry, initial)]);
     let mut queue = VecDeque::from([unit.entry]);
     let mut max_live_heap_owners = 0;
+    let mut local_max_live_bytes = super::LiveByteBound::Exact(0);
+    let mut direct_calls = Vec::new();
     while let Some(id) = queue.pop_front() {
         let block = blocks[&id];
         let mut live = incoming[&id].clone();
         check_borrows(unit, block.id, &live)?;
         max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
+        local_max_live_bytes = local_max_live_bytes.maximum(live_byte_cost(unit, &live)?);
         for operation in &block.ops {
+            if let Op::Apply {
+                kind: ApplyKind::DirectCall { callee },
+                args,
+                ..
+            } = &operation.kind
+            {
+                let mut carry = live.clone();
+                for arg in args {
+                    if arg.use_ == OwnershipUse::Move {
+                        carry.remove(&arg.owner);
+                    }
+                }
+                direct_calls.push(DirectCallLiveCost {
+                    callee: *callee,
+                    carry: live_byte_cost(unit, &carry)?,
+                });
+            }
             if let Some(dest) = destination(&operation.kind)
                 && unit.owners[&dest].class.is_heap()
             {
                 // Account for the transient point after result allocation and
                 // before moved inputs receive their post-operation terminal.
                 max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live) + 1);
+                if !matches!(
+                    &operation.kind,
+                    Op::Apply {
+                        kind: ApplyKind::DirectCall { .. },
+                        ..
+                    }
+                ) {
+                    local_max_live_bytes = local_max_live_bytes.maximum(add_live_byte_bounds(
+                        live_byte_cost(unit, &live)?,
+                        owner_byte_cost(unit, dest)?,
+                        format!(
+                            "accounting for `{}` operation o{} result",
+                            unit.name, operation.id.0
+                        ),
+                    )?);
+                }
             }
             verify_op(
                 unit,
@@ -1035,6 +1088,7 @@ fn verify_unit(
                 &mut live,
             )?;
             max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
+            local_max_live_bytes = local_max_live_bytes.maximum(live_byte_cost(unit, &live)?);
         }
         verify_terminator(
             unit,
@@ -1046,7 +1100,11 @@ fn verify_unit(
             &mut queue,
         )?;
     }
-    Ok(max_live_heap_owners)
+    Ok(UnitLiveFacts {
+        max_live_heap_owners,
+        local_max_live_bytes,
+        direct_calls,
+    })
 }
 
 fn derive_callable_schema(unit: &Unit) -> Result<Option<CallableSchema>, OwnershipError> {
@@ -1215,6 +1273,231 @@ fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
             unit.owners[owner].origin == OwnerOrigin::Owned && unit.owners[owner].class.is_heap()
         })
         .count()
+}
+
+fn add_live_byte_bounds(
+    lhs: super::LiveByteBound,
+    rhs: super::LiveByteBound,
+    context: String,
+) -> Result<super::LiveByteBound, OwnershipError> {
+    match (lhs, rhs) {
+        (super::LiveByteBound::Unbounded, _) | (_, super::LiveByteBound::Unbounded) => {
+            Ok(super::LiveByteBound::Unbounded)
+        }
+        (super::LiveByteBound::Unknown, _) | (_, super::LiveByteBound::Unknown) => {
+            Ok(super::LiveByteBound::Unknown)
+        }
+        (super::LiveByteBound::Exact(lhs), super::LiveByteBound::Exact(rhs)) => lhs
+            .checked_add(rhs)
+            .map(super::LiveByteBound::Exact)
+            .ok_or(OwnershipError::LiveByteBoundOverflow { context }),
+    }
+}
+
+fn owner_byte_cost(unit: &Unit, owner: OwnerId) -> Result<super::LiveByteBound, OwnershipError> {
+    let info = unit
+        .owners
+        .get(&owner)
+        .ok_or_else(|| incomplete(unit, owner, "metadata"))?;
+    let ConcreteHostType::Tensor(tensor) = &info.ty else {
+        return Ok(if info.class.is_heap() {
+            super::LiveByteBound::Unknown
+        } else {
+            super::LiveByteBound::Exact(0)
+        });
+    };
+    if tensor.precision == Prim::String {
+        return Ok(super::LiveByteBound::Unknown);
+    }
+    let dtype =
+        tensor
+            .precision
+            .runtime_dtype()
+            .map_err(|_| OwnershipError::LiveByteBoundDType {
+                unit: unit.name.clone(),
+                owner: owner.0,
+                dtype: tensor.precision.name(),
+            })?;
+    let width =
+        u64::try_from(dtype.byte_width()).map_err(|_| OwnershipError::LiveByteBoundOverflow {
+            context: format!(
+                "converting `{}` owner %{} runtime dtype width",
+                unit.name, owner.0
+            ),
+        })?;
+    let mut elements = 1u64;
+    for dim in &tensor.dims {
+        let value = match dim {
+            crate::dag::DimInfo::Lit(value) | crate::dag::DimInfo::Named(_, Some(value)) => {
+                u64::try_from(*value).map_err(|_| OwnershipError::LiveByteBoundOverflow {
+                    context: format!(
+                        "converting `{}` owner %{} tensor dimension {value}",
+                        unit.name, owner.0
+                    ),
+                })?
+            }
+            crate::dag::DimInfo::Named(_, None) => return Ok(super::LiveByteBound::Unknown),
+        };
+        elements =
+            elements
+                .checked_mul(value)
+                .ok_or_else(|| OwnershipError::LiveByteBoundOverflow {
+                    context: format!(
+                        "multiplying `{}` owner %{} tensor dimensions",
+                        unit.name, owner.0
+                    ),
+                })?;
+    }
+    elements
+        .checked_mul(width)
+        .map(super::LiveByteBound::Exact)
+        .ok_or_else(|| OwnershipError::LiveByteBoundOverflow {
+            context: format!(
+                "multiplying `{}` owner %{} tensor elements by dtype width",
+                unit.name, owner.0
+            ),
+        })
+}
+
+fn live_byte_cost(
+    unit: &Unit,
+    live: &BTreeSet<OwnerId>,
+) -> Result<super::LiveByteBound, OwnershipError> {
+    let mut result = super::LiveByteBound::Exact(0);
+    for owner in live {
+        let info = unit
+            .owners
+            .get(owner)
+            .ok_or_else(|| incomplete(unit, *owner, "metadata"))?;
+        if info.origin != OwnerOrigin::Owned || !info.class.is_heap() {
+            continue;
+        }
+        result = add_live_byte_bounds(
+            result,
+            owner_byte_cost(unit, *owner)?,
+            format!("summing live owners in `{}`", unit.name),
+        )?;
+    }
+    Ok(result)
+}
+
+fn unit_reaches(start: UnitId, target: UnitId, facts: &BTreeMap<UnitId, UnitLiveFacts>) -> bool {
+    let mut pending = vec![start];
+    let mut visited = BTreeSet::new();
+    while let Some(unit) = pending.pop() {
+        if unit == target {
+            return true;
+        }
+        if visited.insert(unit)
+            && let Some(next) = facts.get(&unit)
+        {
+            pending.extend(next.direct_calls.iter().map(|call| call.callee));
+        }
+    }
+    false
+}
+
+#[derive(Debug)]
+struct ComponentLiveFacts {
+    local: super::LiveByteBound,
+    outgoing: Vec<(usize, super::LiveByteBound)>,
+}
+
+fn compose_live_byte_bound(
+    units: &[Unit],
+    facts: &BTreeMap<UnitId, UnitLiveFacts>,
+) -> Result<super::LiveByteBound, OwnershipError> {
+    let mut remaining = units.iter().map(|unit| unit.id).collect::<BTreeSet<_>>();
+    let mut components = Vec::<BTreeSet<UnitId>>::new();
+    while let Some(first) = remaining.first().copied() {
+        let component = remaining
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                unit_reaches(first, *candidate, facts) && unit_reaches(*candidate, first, facts)
+            })
+            .collect::<BTreeSet<_>>();
+        for unit in &component {
+            remaining.remove(unit);
+        }
+        components.push(component);
+    }
+    let component_of = components
+        .iter()
+        .enumerate()
+        .flat_map(|(component, units)| units.iter().map(move |unit| (*unit, component)))
+        .collect::<BTreeMap<_, _>>();
+    let mut composed = components
+        .iter()
+        .map(|_| ComponentLiveFacts {
+            local: super::LiveByteBound::Exact(0),
+            outgoing: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    for unit in units {
+        let component = component_of[&unit.id];
+        let unit_facts = &facts[&unit.id];
+        composed[component].local = composed[component]
+            .local
+            .maximum(unit_facts.local_max_live_bytes);
+        for call in &unit_facts.direct_calls {
+            let callee_component = component_of[&call.callee];
+            if callee_component == component {
+                composed[component].local = composed[component].local.maximum(match call.carry {
+                    super::LiveByteBound::Exact(0) => super::LiveByteBound::Exact(0),
+                    super::LiveByteBound::Exact(_) | super::LiveByteBound::Unbounded => {
+                        super::LiveByteBound::Unbounded
+                    }
+                    super::LiveByteBound::Unknown => super::LiveByteBound::Unknown,
+                });
+            } else {
+                composed[component]
+                    .outgoing
+                    .push((callee_component, call.carry));
+            }
+        }
+    }
+
+    fn component_bound(
+        index: usize,
+        facts: &[ComponentLiveFacts],
+        memo: &mut [Option<super::LiveByteBound>],
+        visiting: &mut BTreeSet<usize>,
+    ) -> Result<super::LiveByteBound, OwnershipError> {
+        if let Some(bound) = memo[index] {
+            return Ok(bound);
+        }
+        if !visiting.insert(index) {
+            return Err(OwnershipError::LoweringInvariant {
+                unit: "verified live-byte bound".to_string(),
+                detail: "SCC condensation graph retained a cycle".to_string(),
+            });
+        }
+        let mut bound = facts[index].local;
+        for (callee, carry) in &facts[index].outgoing {
+            let callee = component_bound(*callee, facts, memo, visiting)?;
+            bound = bound.maximum(add_live_byte_bounds(
+                *carry,
+                callee,
+                "composing caller carry with callee peak".to_string(),
+            )?);
+        }
+        visiting.remove(&index);
+        memo[index] = Some(bound);
+        Ok(bound)
+    }
+
+    let mut memo = vec![None; composed.len()];
+    let mut result = super::LiveByteBound::Exact(0);
+    for index in 0..composed.len() {
+        result = result.maximum(component_bound(
+            index,
+            &composed,
+            &mut memo,
+            &mut BTreeSet::new(),
+        )?);
+    }
+    Ok(result)
 }
 
 fn blocks(unit: &Unit) -> Result<BTreeMap<BlockId, &Block>, OwnershipError> {

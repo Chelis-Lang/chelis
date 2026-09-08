@@ -2099,9 +2099,25 @@ exact ADT identity by [05-OP-34].
 > an allocation or consuming the descriptor owner. `chelis_tensor_write_view` borrows its `const` guard and
 > is valid only while that guard is live; an ended guard has no view. Fill
 > under [05-OP-31] and every other public
-> mutation take the guard, never the descriptor. The runtime performs these
+> element mutation takes the guard, never the descriptor. The runtime performs these
 > checks itself on the live counts and write state; a compiler's reuse proof
 > never replaces them.
+>
+> `chelis_tensor_repurpose` is the one descriptor-metadata mutation. Its rank
+> and each shape extent arrive as exact `int64` `chelis_scalar` values; any
+> other scalar dtype or a nonzero reserved byte traps `Domain`. It
+> succeeds only when the descriptor has exactly one live owner, its storage
+> has exactly one live descriptor, the storage is runtime-owned, and no write
+> guard is active. It validates `rank` and `shape` by the same rules as
+> `chelis_alloc`, using the descriptor's existing dtype, and requires the new
+> checked byte size to equal the storage allocation's byte capacity exactly.
+> It then replaces the rank, shape, canonical row-major strides, and element
+> count while preserving the descriptor, storage, dtype, stored bits, and all
+> owner counts. Success invalidates every earlier read view for the descriptor;
+> a failed uniqueness, provenance, active-guard, or exact-capacity condition
+> traps `Domain`, and invalid metadata arithmetic traps `Overflow`, without
+> adopting, freeing, transferring, or reallocating storage bytes. This
+> operation is outside AD and has no adjoint or accumulator.
 >
 > An entry borrow, following [04-LIN-7], is a descriptor over storage the
 > caller owns: `chelis_tensor_entry_borrow` validates the declared rank,

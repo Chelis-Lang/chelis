@@ -6,7 +6,7 @@ use chelis_types::unsupported::Unsupported;
 
 pub fn codegen_hip(dag: &Dag, name: &str) -> Result<HipCodegenResult, Unsupported> {
     let verified = verified_dag(dag);
-    chelis_backend_hip::codegen_hip(&verified, name)
+    chelis_backend_hip::codegen_hip(verified, name)
 }
 
 pub fn verified_dag(dag: &Dag) -> chelis_ir::ownership::VerifiedDagProgram {

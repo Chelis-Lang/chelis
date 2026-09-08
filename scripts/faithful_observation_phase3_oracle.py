@@ -104,7 +104,7 @@ REQUIRED_TESTS = {
     },
     REJECTED_SOURCE: {
         "rejected_cells_fail_the_build_with_their_pinned_diagnostics",
-        "metal_rank2_abort_stub_names_itself_in_the_emission",
+        "metal_rank2_gap_rejects_without_an_artifact",
         "runtime_rejected_cells_abort_with_their_pinned_diagnostics",
     },
 }
@@ -224,7 +224,7 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "agreement_width_nonconformance_is_behavioral": "8b99a54287fe3517ab80544f77a25eadda35a9d84ec85f0687e15fa4910feb86",
     },
     REJECTED_SOURCE: {
-        "metal_rank2_abort_stub_names_itself_in_the_emission": "24edf2a745fc9665b0a2d9497040752cecf77cfdac153990d4c7dcfe0ed81f74",
+        "metal_rank2_gap_rejects_without_an_artifact": "bfc6fefc2678cea4e76a9bf9935e00e23b7dd1af4a8c98ecfe982cca3f7ff18e",
         "rejected_cells_fail_the_build_with_their_pinned_diagnostics": "c1751e1db4ab78e882ed73710c3a4367c724fb223f718ccb800430c40a1ebd12",
         "runtime_rejected_cells_abort_with_their_pinned_diagnostics": "d37afb668293c790033ab1f469f7535ff780a19a4c68cc1e5b88092013ec2a60",
     },

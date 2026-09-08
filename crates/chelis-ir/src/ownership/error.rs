@@ -172,8 +172,16 @@ pub enum OwnershipError {
         owner: u32,
         block: u32,
     },
-    #[error("last-use scheduling for `{unit}` defers {feature} to the next milestone")]
-    LastUseSchedulingDeferred { unit: String, feature: &'static str },
+    #[error("last-use scheduling for `{unit}` does not support {feature}")]
+    LastUseSchedulingUnsupported { unit: String, feature: &'static str },
+    #[error("verified live-byte bound overflow while {context}")]
+    LiveByteBoundOverflow { context: String },
+    #[error("verified live-byte bound for `{unit}` owner %{owner} cannot size dtype `{dtype}`")]
+    LiveByteBoundDType {
+        unit: String,
+        owner: u32,
+        dtype: &'static str,
+    },
     #[error("owner %{owner} in `{unit}` has a noncanonical terminal: {detail}")]
     NonCanonicalTerminal {
         unit: String,
@@ -221,4 +229,10 @@ pub enum OwnershipError {
     DagDirectiveMap { detail: String },
     #[error("DAG root n{root} does not name an owned producer")]
     DagInvalidRoot { root: usize },
+    #[error("DAG storage capacity for n{node} is not exact: {detail}")]
+    DagStorageCapacity { node: usize, detail: String },
+    #[error("DAG storage planner cannot represent dtype `{dtype}` for n{node}")]
+    DagStorageDType { node: usize, dtype: &'static str },
+    #[error("DAG storage reuse token for n{consumer} was already consumed")]
+    DagStorageReuseTaken { consumer: usize },
 }

@@ -377,7 +377,8 @@ EXPECTED_OP_MANIFESTS = {
 | tensor read view | `chelis_read_view chelis_tensor_read_view(const chelis_tensor *tensor)` |
 | tensor begin write | `chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor)` |
 | tensor write view | `chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard)` |
-| tensor end write | `void chelis_tensor_end_write(chelis_tensor_write *guard)` |""".splitlines()
+| tensor end write | `void chelis_tensor_end_write(chelis_tensor_write *guard)` |
+| tensor repurpose | `void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape)` |""".splitlines()
     ),
     "05-OP-38": tuple(
         """\
@@ -446,7 +447,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
     "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
     "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
-    "05-OP-44": "8780fd73492c0289b4ed995891f72e43fcca4171ae0925ce9766117f5ff9ede1",
+    "05-OP-44": "5da56d56c928f228c0ed069c078696b648863e440c732ee41e8a23626757ea4e",
 }
 
 # The markers are part of the freeze contract: each must occur exactly once,

@@ -4,19 +4,19 @@
 //! elementwise (M2), full-axis rank-1 reductions (M4), tiled matmul (M5).
 //! Cases the M-phase explicitly defers (bool-through-where, cast,
 //! symbolic dims, broadcasts/strides, partial-axis reductions, oversized
-//! reductions) must fall through to the stub-with-abort body cleanly,
-//! not silently miscompile.
+//! reductions) must return a typed unsupported error before artifact
+//! emission, not silently miscompile.
 //!
 //! Mirrors `chelis-backend-hip/tests/codegen_adversarial.rs` in spirit;
 //! coverage breadth grows as later phases add real support for each case.
-//! When a case here flips from "falls through to stub" to "emits real
+//! When a case here flips from "returns unsupported" to "emits real
 //! kernels", that's a signal the corresponding phase has shipped — flip
 //! the assertion.
 
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use support::codegen_metal;
+use support::{codegen_metal, try_codegen_metal};
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -39,17 +39,19 @@ fn mat_f32(r: usize, c: usize) -> TensorType {
     }
 }
 
-fn assert_falls_through_to_stub(src: &str, label: &str) {
+fn assert_typed_unsupported(error: &chelis_types::unsupported::Unsupported, label: &str) {
+    let rendered = error.to_string();
     assert!(
-        src.contains("M1 fallback stub") && src.contains("abort()"),
-        "{label}: expected fall-through to stub (with abort), got:\n{src}"
+        rendered.starts_with("unsupported:")
+            && error.stage == chelis_types::unsupported::Stage::Codegen("metal"),
+        "{label}: expected typed Metal codegen rejection, got:\n{rendered}"
     );
 }
 
 fn assert_emits_real_kernel(src: &str, label: &str) {
     assert!(
-        !src.contains("M1 fallback stub"),
-        "{label}: expected real emission, got stub:\n{src}"
+        src.contains("kernel void") || src.contains("chelis_metal_host_to_device"),
+        "{label}: expected a real kernel or concrete transfer emission:\n{src}"
     );
 }
 
@@ -195,7 +197,7 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
 }
 
 // ===========================================================================
-// Cases the M-phase explicitly defers — must fall through to stub.
+// Cases the M-phase explicitly defers — must return typed unsupported.
 // ===========================================================================
 
 #[test]
@@ -226,7 +228,7 @@ fn m7_partial_axis_reduction_is_rejected_before_codegen() {
 }
 
 #[test]
-fn m7_oversized_reduction_falls_through_to_stub() {
+fn m7_oversized_reduction_returns_typed_unsupported() {
     // n > 4096 exceeds the single-threadgroup wrap-loop ceiling. Two-pass
     // reduction is M4.next; until then, this MUST fall through.
     let mut dag = Dag::new();
@@ -247,8 +249,8 @@ fn m7_oversized_reduction_falls_through_to_stub() {
     );
     dag.add_root(r);
 
-    let result = codegen_metal(&dag, "big");
-    assert_falls_through_to_stub(&result.mm_source, "oversized reduction");
+    let error = try_codegen_metal(&dag, "big").unwrap_err();
+    assert_typed_unsupported(&error, "oversized reduction");
 }
 
 #[test]
@@ -275,10 +277,7 @@ fn m7_non_power_of_two_reduction_emits_real_kernel() {
 
         let result = codegen_metal(&dag, &format!("sum_{n}"));
         let src = &result.mm_source;
-        assert!(
-            !src.contains("M1 fallback stub"),
-            "n={n}: must emit real reduction kernel, got stub:\n{src}"
-        );
+        assert!(src.contains("kernel void"), "n={n}: missing kernel:\n{src}");
         // Dispatch must always use TG_SIZE=256 regardless of n, so the
         // tree-reduce loop terminates exactly at every halving step.
         assert!(
@@ -289,7 +288,7 @@ fn m7_non_power_of_two_reduction_emits_real_kernel() {
 }
 
 #[test]
-fn m7_rank2_elementwise_without_matmul_falls_through_to_stub() {
+fn m7_rank2_elementwise_without_matmul_returns_typed_unsupported() {
     // M-phase emits rank-2 only in the matmul subgraph specialization.
     // A bare rank-2 add has no broadcast/stride machinery yet.
     let mut dag = Dag::new();
@@ -308,12 +307,12 @@ fn m7_rank2_elementwise_without_matmul_falls_through_to_stub() {
     let s = dag.add_node(RiscOp::Add, vec![a, b], mat_f32(4, 4), None);
     dag.add_root(s);
 
-    let result = codegen_metal(&dag, "rank2add");
-    assert_falls_through_to_stub(&result.mm_source, "rank-2 bare elementwise");
+    let error = try_codegen_metal(&dag, "rank2add").unwrap_err();
+    assert_typed_unsupported(&error, "rank-2 bare elementwise");
 }
 
 #[test]
-fn m7_bool_load_through_where_falls_through_to_stub() {
+fn m7_bool_load_without_where_emits_real_output() {
     // Bool tensors are emittable as `device const bool*` in MSL kernels
     // (verified in M2 prelude on Apple Silicon family 7+), but the
     // M-phase emitter doesn't yet wire bool inputs through `where` or
@@ -403,11 +402,11 @@ fn wsm1_unary_transcendental_on_int_rejected_before_codegen() {
 }
 
 #[test]
-fn wsm1_f64_matmul_falls_through_to_stub() {
+fn wsm1_f64_matmul_returns_typed_unsupported() {
     // f64 on Metal is hard-rejected per spec §1.1.3. A DAG that
     // reaches the codegen entry must bail; emit_dag's
-    // `require_metal_admissible` returns the FP64-ALU diagnostic and
-    // the result falls through to the stub artifact.
+    // `require_metal_admissible` returns the FP64-ALU diagnostic without
+    // creating an artifact.
     let mat_f64 = |r: usize, c: usize| TensorType {
         dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
         precision: Prim::F64,
@@ -420,10 +419,7 @@ fn wsm1_f64_matmul_falls_through_to_stub() {
         None,
     );
     dag.add_root(a);
-    let result = codegen_metal(&dag, "f64_load");
-    assert!(
-        result.mm_source.contains("M1 fallback stub"),
-        "f64 input must surface via the stub fallback (CLI gate is the user-facing reject): {}",
-        result.mm_source
-    );
+    let error = try_codegen_metal(&dag, "f64_load").unwrap_err();
+    assert_typed_unsupported(&error, "f64 input");
+    assert!(error.to_string().contains("[04-TGT-1]"), "{error}");
 }

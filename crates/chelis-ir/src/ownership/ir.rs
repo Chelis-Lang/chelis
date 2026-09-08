@@ -347,7 +347,7 @@ pub(crate) enum UnitKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScheduleState {
     Phase2ScopeExit,
-    CanonicalAcyclic,
+    CanonicalLastUse,
 }
 
 /// Structural identity of the callable body boundary. Authored functions may

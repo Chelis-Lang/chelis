@@ -913,9 +913,9 @@ fn build_training_programs_from_compiled(
     )
     .map_err(|e| e.to_string())?;
     let train_c =
-        chelis_backend_c::codegen(&c_verified, "chelis_train").map_err(|e| e.to_string())?;
-    let train_hip = chelis_backend_hip::codegen_hip(&hip_verified, "chelis_train")
-        .map_err(|e| e.to_string())?;
+        chelis_backend_c::codegen(c_verified, "chelis_train").map_err(|e| e.to_string())?;
+    let train_hip =
+        chelis_backend_hip::codegen_hip(hip_verified, "chelis_train").map_err(|e| e.to_string())?;
 
     let train_labels = output_index_map(&train_c.output_labels);
     if !train_labels.contains_key("eval_output") {
@@ -950,9 +950,8 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
         chelis_ir::ownership::lower_dag_ownership(hip_selected).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let cpu =
-        chelis_backend_c::codegen(&c_verified, "chelis_forward").map_err(|e| e.to_string())?;
-    let hip = chelis_backend_hip::codegen_hip(&hip_verified, "chelis_forward")
+    let cpu = chelis_backend_c::codegen(c_verified, "chelis_forward").map_err(|e| e.to_string())?;
+    let hip = chelis_backend_hip::codegen_hip(hip_verified, "chelis_forward")
         .map_err(|e| e.to_string())?;
     let output_index = *output_index_map(&cpu.output_labels)
         .get("out")

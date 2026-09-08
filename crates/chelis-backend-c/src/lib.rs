@@ -110,7 +110,7 @@ pub struct CodegenOptions {
 /// }
 /// ```
 pub fn codegen(
-    dag: &chelis_ir::ownership::VerifiedDagProgram,
+    dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     codegen_with_options(dag, func_name, CodegenOptions::default())
@@ -153,23 +153,27 @@ pub fn codegen_host_program(
 
 /// Generate C source code from a RISC DAG with explicit backend options.
 pub fn codegen_with_options(
-    dag: &chelis_ir::ownership::VerifiedDagProgram,
+    dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
     options: CodegenOptions,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
-    let dag = dag.emission();
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
-    let needs_blas = options.use_blas
-        && dag
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. }));
-    let input_labels = emit::CEmitter::input_labels(dag);
-    let output_labels = emit::CEmitter::output_labels(dag);
-    let symbolic_dims = dag.symbolic_params();
+    let (needs_blas, input_labels, output_labels, symbolic_dims) = {
+        let emission = dag.emission();
+        (
+            options.use_blas
+                && emission
+                    .nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. })),
+            emit::CEmitter::input_labels(emission),
+            emit::CEmitter::output_labels(emission),
+            emission.symbolic_params(),
+        )
+    };
+    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
     Ok(CodegenResult {
         c_source,
         h_header,
@@ -260,7 +264,7 @@ mod tests {
     ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
         let verified = crate::testing::verified_dag(dag, options)
             .expect("C backend unit-test DAG must verify ownership");
-        super::codegen_with_options(&verified, name, options)
+        super::codegen_with_options(verified, name, options)
     }
 
     fn codegen_host_program(
@@ -592,7 +596,7 @@ mod tests {
         let verified = crate::testing::verified_dag(&dag, options)
             .expect("static-entry test DAG must verify ownership");
         let result =
-            emit::CEmitter::emit_dag_with_options(&verified, "internal_helper", options).unwrap();
+            emit::CEmitter::emit_dag_with_options(verified, "internal_helper", options).unwrap();
         assert!(
             result.contains("static void internal_helper("),
             "internal helper must be static; got source starting:\n{}",

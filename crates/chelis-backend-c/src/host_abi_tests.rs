@@ -208,16 +208,40 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
     }
 
     let c = sources[0].1;
-    assert!(c.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(c.contains("dag: chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(!c.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
     assert!(c.contains("program: &chelis_ir::ownership::VerifiedHostProgram"));
     assert!(c.contains("mod emit;"));
     assert!(c.contains("mod host_emit;"));
 
     let hip = sources[1].1;
-    assert!(hip.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(hip.contains("dag: chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(!hip.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
 
     let metal = sources[2].1;
-    assert!(metal.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+    let public_signature = |name: &str| {
+        let marker = format!("pub fn {name}(");
+        let start = metal
+            .find(&marker)
+            .unwrap_or_else(|| panic!("Metal public `{name}` boundary is missing"));
+        let rest = &metal[start..];
+        &rest[..rest.find('{').unwrap_or(rest.len())]
+    };
+    let plan = public_signature("plan_metal");
+    assert!(plan.contains("program: VerifiedDagProgram"), "{plan}");
+    assert!(plan.contains("-> MetalNeverReuse"), "{plan}");
+    assert!(!plan.contains("&VerifiedDagProgram"), "{plan}");
+    assert!(!plan.contains("&Dag"), "{plan}");
+
+    let emit = public_signature("codegen_metal");
+    assert!(emit.contains("plan: MetalNeverReuse"), "{emit}");
+    assert!(
+        emit.contains("-> Result<MetalCodegenResult, Unsupported>"),
+        "{emit}"
+    );
+    assert!(!emit.contains("&MetalNeverReuse"), "{emit}");
+    assert!(!emit.contains("VerifiedDagProgram"), "{emit}");
+    assert!(!emit.contains("&Dag"), "{emit}");
 }
 
 fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
@@ -247,6 +271,32 @@ fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHost
     .expect("verify host ownership")
 }
 
+fn emitted_function_body<'a>(source: &'a str, name: &str) -> &'a str {
+    for (offset, _) in source.match_indices(&format!("{name}(")) {
+        let tail = &source[offset..];
+        let Some(open) = tail.find('{') else {
+            continue;
+        };
+        if tail.find(';').is_some_and(|semicolon| semicolon < open) {
+            continue;
+        }
+        let mut depth = 0usize;
+        for (index, byte) in tail[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &tail[open + 1..open + index];
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    panic!("missing emitted definition for {name}:\n{source}")
+}
+
 #[test]
 fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
     let source = include_str!(
@@ -267,6 +317,217 @@ fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
         emitted.matches("= step(").count(),
         0,
         "internal recursion must never re-enter the external cloning adapter:\n{emitted}"
+    );
+    let owned_body = emitted_function_body(&emitted, body);
+    let recursive_call = owned_body
+        .find(&format!("= {body}("))
+        .unwrap_or_else(|| panic!("missing recursive owned-body call:\n{owned_body}"));
+    assert!(
+        owned_body[..recursive_call].contains("chelis_tensor_release("),
+        "at least one non-carried frame tensor must release before recursion:\n{owned_body}"
+    );
+    assert!(
+        !owned_body[recursive_call..].contains("chelis_tensor_release("),
+        "a frame-local terminal emitted before recursion must not be duplicated after the tail call:\n{owned_body}"
+    );
+}
+
+#[test]
+fn user_call_pre_actions_require_one_structural_direct_call_authority() {
+    use chelis_ir::ownership::{VerifiedApplyKind, VerifiedHostAction, VerifiedHostOperation};
+
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_1.ch"
+    );
+    let verified = verified_host_from_source(source);
+    let projected = crate::host_abi::project_program(verified.emission())
+        .expect("project verified recursive fixture");
+    let direct_site = projected
+        .sites()
+        .iter()
+        .find(|site| {
+            site.directives.iter().any(|action| {
+                matches!(
+                    action,
+                    VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                        kind: VerifiedApplyKind::DirectCall { .. },
+                        ..
+                    })
+                )
+            })
+        })
+        .expect("recursive fixture exposes a typed direct-call site");
+    assert!(crate::host_emit::direct_call_action_index(direct_site).is_ok());
+
+    let mut missing = direct_site.clone();
+    for action in &mut missing.directives {
+        if let VerifiedHostAction::Operation(VerifiedHostOperation::Apply { kind, .. }) = action
+            && matches!(kind, VerifiedApplyKind::DirectCall { .. })
+        {
+            *kind = VerifiedApplyKind::Intrinsic;
+        }
+    }
+    let error = crate::host_emit::direct_call_action_index(&missing)
+        .expect_err("an intrinsic Apply must not authorize pre-call terminal emission");
+    assert!(
+        error.to_string().contains("no direct-call authority"),
+        "missing authority must fail closed for the structural reason: {error}"
+    );
+
+    let mut duplicated = direct_site.clone();
+    let duplicate = duplicated
+        .directives
+        .iter()
+        .find(|action| {
+            matches!(
+                action,
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    kind: VerifiedApplyKind::DirectCall { .. },
+                    ..
+                })
+            )
+        })
+        .expect("typed direct-call action")
+        .clone();
+    duplicated.directives.push(duplicate);
+    let error = crate::host_emit::direct_call_action_index(&duplicated)
+        .expect_err("duplicated direct-call authority must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("multiple direct-call authorities"),
+        "duplicate authority must fail for the structural reason: {error}"
+    );
+}
+
+#[test]
+fn selected_if_edges_emit_one_path_local_release_each() {
+    let verified = verified_host_from_source(
+        "def choose(flag: bool) -> int64 = {\n\
+           dead = \"owned\"\n\
+           if flag then 1i64 else string_len(dead)\n\
+         }\n\
+         out = choose(true)\n",
+    );
+    let emitted = crate::codegen_host_program(&verified, "selected_if_edge_release")
+        .unwrap()
+        .c_source;
+    let choose = emitted_function_body(&emitted, "choose__chelis_owned_body");
+
+    assert_eq!(
+        choose.matches("chelis_string_release(").count(),
+        2,
+        "the string is released on the selected unused edge and after its last use on the other arm:\n{choose}"
+    );
+}
+
+#[test]
+fn manifest_root_clone_terminal_and_consume_emit_in_verified_order_once() {
+    let verified = verified_host_from_source("out = \"owned\"\n");
+    let emitted = crate::codegen_host_program(&verified, "manifest_root_terminal_order")
+        .unwrap()
+        .c_source;
+    let main = emitted_function_body(&emitted, "main");
+    let retain = main
+        .find("chelis_string_retain(")
+        .unwrap_or_else(|| panic!("missing manifest-root clone retain:\n{main}"));
+    let releases = main
+        .match_indices("chelis_string_release(")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        releases.len(),
+        2,
+        "the original owner and root-copy owner must each release exactly once:\n{main}"
+    );
+    let observe = main
+        .find("printf(\"%s = \", \"out\")")
+        .unwrap_or_else(|| panic!("missing manifested-root observation:\n{main}"));
+    assert!(
+        retain < releases[0] && releases[0] < observe && observe < releases[1],
+        "verified Clone -> scheduled Drop -> ManifestRoot -> RootConsume order must survive C emission:\n{main}"
+    );
+}
+
+#[test]
+fn loop_source_release_is_emitted_after_the_loop_not_on_each_back_edge() {
+    let verified = verified_host_from_source(
+        "xs = [1i64, 2i64]\n\
+         ys = map(fn (v: int64) -> v, xs)\n",
+    );
+    let emitted = crate::codegen_host_program(&verified, "loop_exit_release")
+        .unwrap()
+        .c_source;
+    let main = emitted_function_body(&emitted, "main");
+    let ys_binding = main
+        .find("chelis_list* ys = __binding_1_value;")
+        .unwrap_or_else(|| panic!("missing post-loop ys binding:\n{main}"));
+    let xs_observe = main
+        .find("printf(\"%s = \", \"xs\")")
+        .unwrap_or_else(|| panic!("missing source-list root observation:\n{main}"));
+    let xs_releases = main
+        .match_indices("chelis_list_release(__binding_0_value);")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        xs_releases.len(),
+        2,
+        "xs has one scheduled source-owner release and one manifested root-copy consume:\n{main}"
+    );
+    assert!(
+        ys_binding < xs_releases[0] && xs_releases[0] < xs_observe && xs_observe < xs_releases[1],
+        "the loop must finish before xs dies, and its retained root copy must survive observation:\n{main}"
+    );
+}
+
+#[test]
+fn fold_dead_heap_accumulator_binds_the_body_edge_before_its_release() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1346_fold_fresh.ch"
+    );
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, "fold_fresh_control")
+        .expect("verified fold edge terminals must have physical C bindings")
+        .c_source;
+    let main = emitted_function_body(&emitted, "main");
+    let loop_start = main
+        .find("for (int64_t __i = 0;")
+        .unwrap_or_else(|| panic!("missing emitted fold loop:\n{main}"));
+    let loop_body = &main[loop_start..];
+
+    assert_eq!(
+        loop_body
+            .matches("chelis_tuple_release(__fold_acc_")
+            .count(),
+        1,
+        "the unused owned accumulator must release once on each selected body edge:\n{loop_body}"
+    );
+    let released = loop_body
+        .split_once("chelis_tuple_release(")
+        .and_then(|(_, tail)| tail.split_once(')'))
+        .map(|(name, _)| name)
+        .unwrap_or_else(|| panic!("missing fold accumulator release:\n{loop_body}"));
+    assert!(
+        loop_body.contains(&format!("{released} = NULL;")),
+        "the physical callback alias must not retain a released pointer:\n{loop_body}"
+    );
+}
+
+#[test]
+fn nested_option_match_releases_the_scrutinee_on_both_selected_arms() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1352_match_option_fresh.ch"
+    );
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, "match_option_fresh_control")
+        .expect("verified nested match terminals must survive C emission")
+        .c_source;
+    let choose = emitted_function_body(&emitted, "choose__chelis_owned_body");
+
+    assert_eq!(
+        choose.matches("chelis_option_release(__let_0);").count(),
+        2,
+        "each selected match arm must release the borrowed scrutinee after its final use:\n{choose}"
     );
 }
 

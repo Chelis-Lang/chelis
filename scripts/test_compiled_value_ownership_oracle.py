@@ -36,8 +36,10 @@ EXPECTED_FIXTURE_IDS = frozenset(
     aggregate-refcount-scalar-control recursive-depth-1-control
     recursive-scalar-control recursive-depth-32 recursive-depth-128
     recursive-depth-288 c-caller-owned-reuse c-caller-owned-view-reuse
+    c-program-owned-reuse c-dropped-slot-no-reuse
     hip-caller-owned-reuse hip-caller-owned-view-reuse hip-no-reuse-control
-    hip-caller-bytes-unchanged-hardware root-alias-clean distinct-roots-clean
+    hip-caller-bytes-unchanged-hardware hip-program-owned-reuse-hardware
+    root-alias-clean distinct-roots-clean
     captured-copy-clean fresh-function-binding-clean fold-alias-single-owner
     fold-fresh-control if-mixed-fresh-arm match-adt-mixed-fresh-arm
     match-option-mixed-fresh-control if-alias-control fresh-call-argument
@@ -119,12 +121,16 @@ EXPECTED_COUNTERPARTS = {
             {
                 "c-caller-owned-reuse",
                 "c-caller-owned-view-reuse",
+                "c-program-owned-reuse",
                 "hip-caller-owned-reuse",
                 "hip-caller-owned-view-reuse",
                 "hip-caller-bytes-unchanged-hardware",
+                "hip-program-owned-reuse-hardware",
             }
         ),
-        "negative": frozenset({"hip-no-reuse-control"}),
+        "negative": frozenset(
+            {"c-dropped-slot-no-reuse", "hip-no-reuse-control"}
+        ),
     },
     1222: {
         "positive": frozenset({"root-alias-clean"}),
@@ -213,10 +219,7 @@ class ManifestContractTests(unittest.TestCase):
                 for receipt in row.test_receipt
             )
         }
-        self.assertEqual(
-            failed,
-            {"hip-caller-owned-reuse", "hip-caller-owned-view-reuse"},
-        )
+        self.assertEqual(failed, set())
 
     def test_self_test_census_matches_the_loaded_suite(self) -> None:
         fixture = next(
@@ -309,6 +312,8 @@ class ManifestContractTests(unittest.TestCase):
             1346,
             1352,
             1356,
+            1214,
+            1206,
         }
         for issue in open_children:
             rows = [fixture for fixture in fixtures if fixture.issue == issue]
@@ -510,14 +515,27 @@ class ManifestContractTests(unittest.TestCase):
         for fixture_id in (
             "c-caller-owned-reuse",
             "c-caller-owned-view-reuse",
+            "c-program-owned-reuse",
+            "c-dropped-slot-no-reuse",
             "hip-caller-owned-reuse",
             "hip-caller-owned-view-reuse",
             "hip-no-reuse-control",
             "hip-caller-bytes-unchanged-hardware",
+            "hip-program-owned-reuse-hardware",
         ):
             with self.subTest(fixture=fixture_id):
                 self.assertIn(fixture_id, rows)
                 self.assertEqual(len(rows[fixture_id].test_census), 1)
+
+        for fixture_id in (
+            "hip-caller-owned-reuse",
+            "hip-caller-owned-view-reuse",
+            "hip-caller-bytes-unchanged-hardware",
+            "hip-program-owned-reuse-hardware",
+        ):
+            with self.subTest(fixture=fixture_id):
+                self.assertIsInstance(rows[fixture_id].expected, oracle.MustPass)
+                self.assertEqual(rows[fixture_id].green_by, 0)
 
         control = rows["hip-no-reuse-control"]
         test_name = (
@@ -667,6 +685,78 @@ class ManifestContractTests(unittest.TestCase):
                 "backend-local-ownership-predicate-restored: C host emission reads a generic owner binder spelling",
             ):
                 oracle.validate_active_mutation_contracts("2")
+
+    def test_phase_three_storage_proof_mutations_fail_closed(self) -> None:
+        oracle.validate_active_mutation_contracts("3")
+        storage_path = oracle.REPO_ROOT / "crates/chelis-ir/src/ownership/storage.rs"
+        c_memory_path = oracle.REPO_ROOT / "crates/chelis-backend-c/src/memory.rs"
+        metal_path = oracle.REPO_ROOT / "crates/chelis-backend-metal/src/lib.rs"
+        runtime_path = oracle.REPO_ROOT / "crates/chelis-runtime/src/lib.rs"
+        runtime_header_path = (
+            oracle.REPO_ROOT / "crates/chelis-runtime/include/chelis_runtime.h"
+        )
+        original_read_text = Path.read_text
+
+        cases = (
+            (
+                storage_path,
+                "    for slot in slots {",
+                "    for slot in slots.iter().skip(1) {",
+                "physical-byte authority",
+            ),
+            (
+                storage_path,
+                "            .checked_add(bytes)",
+                "            .wrapping_add(bytes)",
+                "physical-byte authority",
+            ),
+            (
+                storage_path,
+                "        if !self.terminal_use {",
+                "        if false && !self.terminal_use {",
+                "shared storage proof",
+            ),
+            (
+                c_memory_path,
+                "//! C emission adapter for the shared `chelis-ir` storage plan.",
+                "//! C emission adapter for the shared `chelis-ir` storage plan.\n// DimExprKey capacity_fits",
+                "backend-local capacity authority",
+            ),
+            (
+                metal_path,
+                "pub struct MetalNeverReuse {\n    program: VerifiedDagProgram,",
+                "pub struct MetalNeverReuse {\n    program: &VerifiedDagProgram,",
+                "Metal no-reuse boundary",
+            ),
+            (
+                runtime_path,
+                "    if metadata.required_bytes != storage.byte_capacity {",
+                "    if false && metadata.required_bytes != storage.byte_capacity {",
+                "runtime repurpose defense",
+            ),
+            (
+                runtime_header_path,
+                "void chelis_tensor_repurpose(chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape);",
+                "void chelis_tensor_repurpose(chelis_tensor *tensor, int32_t rank, const int64_t *shape);",
+                "runtime repurpose defense",
+            ),
+        )
+        for path, needle, replacement, diagnostic in cases:
+            source = original_read_text(path)
+            mutated = source.replace(needle, replacement, 1)
+            self.assertNotEqual(mutated, source)
+
+            def read_mutated(
+                candidate: Path, *args: object, **kwargs: object
+            ) -> str:
+                if candidate == path:
+                    return mutated
+                return original_read_text(candidate, *args, **kwargs)
+
+            with self.subTest(path=path):
+                with mock.patch.object(Path, "read_text", new=read_mutated):
+                    with self.assertRaisesRegex(oracle.OracleFailure, diagnostic):
+                        oracle.validate_active_mutation_contracts("3")
 
 
 class LedgerContractTests(unittest.TestCase):
@@ -1132,7 +1222,7 @@ class ReceiptContractTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 2)
                 self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
 
-    def test_expected_failing_test_must_execute_and_fail(self) -> None:
+    def test_promoted_reuse_test_failure_is_detected(self) -> None:
         fixture = next(
             row
             for row in oracle.fixture_manifest()
@@ -1157,7 +1247,7 @@ class ReceiptContractTests(unittest.TestCase):
         context = mock.Mock(environment={})
         with mock.patch.object(oracle, "_run", side_effect=(listed, executed)):
             detection = oracle._execute_command(context, fixture)
-        self.assertIs(detection.detector, oracle.Detector.SOURCE_CONTRACT)
+        self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
 
     def test_forged_import_transcript_cannot_replace_python_callbacks(self) -> None:
         fixture = next(
@@ -1331,15 +1421,6 @@ if __name__ == "__main__":
                 ),
                 101,
             ),
-            (
-                "hip-caller-owned-reuse",
-                (
-                    "test "
-                    f"{rows['hip-caller-owned-reuse'].test_census[0]} ... ok",
-                    "test result: ok. 1 passed; 0 failed; 0 ignored;",
-                ),
-                0,
-            ),
         )
         context = mock.Mock(environment={})
         for fixture_id, execution_lines, returncode in cases:
@@ -1389,6 +1470,10 @@ if __name__ == "__main__":
             row
             for row in oracle.fixture_manifest()
             if row.id == "recursive-depth-32"
+        )
+        fixture = replace(
+            fixture,
+            ledger_receipt=oracle.ledger_receipt(peak_live_bytes=4720),
         )
         ledger = oracle.Ledger(
             records=(),
