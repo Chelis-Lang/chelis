@@ -32,6 +32,12 @@ artifact. Nextest extracts into the checkout's `target` tree so compiled-in
 CLI paths remain valid. The producer and consumers install the same Python
 and C dependencies as the existing workers.
 
+The runtime static library is an explicit extra archive input. A Cargo
+`test --no-run` build supplies the exact current `chelis_runtime` artifact
+filenames through JSON messages; nextest reuses that build and includes those
+files. A cached filename or glob is never the authority for this handoff.
+Missing current artifact messages or files fail archive creation.
+
 Artifacts are compressed by nextest, uploaded without a second compression
 pass, and retained for one day. A rerun may overwrite the same configuration's
 artifact within that run; its identity is still checked. The archive contains
@@ -55,10 +61,12 @@ their separate builds. Those remaining configurations keep #1502/#1503 open.
 .venv/bin/python -m unittest scripts.ci_archive_execution
 ```
 
-The executable probe creates a tiny Rust fixture, archives both feature
-configurations, compares original and reused test lists, and runs passing,
+The executable probe creates a tiny Rust fixture with a runtime static library
+and a CLI, archives both feature configurations, removes the entire producer
+target, compares original and reused test lists, and runs passing,
 failing, absent, and explicitly ignored selections. It also rejects a different
-configuration and corrupted archive. The workspace producer runs this probe
+configuration and corrupted archive, and requires both the CLI and static
+library to work after extraction. The workspace producer runs this probe
 before building Chelis. Workflow tests reject missing producer dependencies
 and cross-run downloads; existing gates still check exact partition coverage,
 support ownership, cache writers, docs-only gating, and aggregate failure.

@@ -12,6 +12,7 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +95,48 @@ def reuse_command(command, path: Path) -> list[str]:
     return result + ["--archive-file", str(path), "--extract-to", str(ROOT), "--extract-overwrite"]
 
 
+def archive_config(configuration: str) -> str:
+    """Capture the current Cargo build's runtime staticlib, never a cached glob.
+
+    Nextest does not automatically include static libraries. Cargo's artifact
+    messages identify the exact file for this feature configuration, including
+    a fresh cache hit. The subsequent nextest archive reuses that same build.
+    """
+    # gate.py imports the oracle constants before its Python 3.11 handoff.
+    import tomllib
+
+    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
+    if target != (ROOT / "target").resolve():
+        raise ValueError("CI archives require the checkout's target directory")
+    result = subprocess.run(["cargo", "test", "--no-run", "--workspace",
+                             *CONFIGURATIONS[configuration], "--message-format=json"],
+                            cwd=ROOT, check=True, stdout=subprocess.PIPE, text=True)
+    runtime = set()
+    for line in result.stdout.splitlines():
+        message = json.loads(line)
+        artifact = message.get("target", {})
+        if (message.get("reason") == "compiler-artifact" and
+                artifact.get("name") == "chelis_runtime" and
+                "staticlib" in artifact.get("crate_types", [])):
+            for name in message["filenames"]:
+                if name.endswith(".a"):
+                    path = Path(name).resolve()
+                    if not path.is_file():
+                        raise ValueError(f"Missing runtime staticlib: {path}")
+                    runtime.add(path.relative_to(target).as_posix())
+    if not runtime:
+        raise ValueError("Current Cargo build did not report a chelis_runtime staticlib")
+    config_path = ROOT / ".config/nextest.toml"
+    source = config_path.read_text() if config_path.exists() else ""
+    config = tomllib.loads(source)
+    if "archive" in config.get("profile", {}).get("default", {}):
+        raise ValueError("Default archive settings must be incorporated by ci_test_archive.py")
+    includes = ",\n".join(
+        '{ path = ' + json.dumps(path) + ', relative-to = "target", on-missing = "error" }'
+        for path in sorted(runtime))
+    return source + "\n[profile.default.archive]\ninclude = [\n" + includes + "\n]\n"
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("create", "verify"))
@@ -105,9 +148,13 @@ def main(argv=None) -> int:
             verify(args.archive_file, args.configuration)
         else:
             args.archive_file.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["cargo", "nextest", "archive", "--workspace",
-                            *CONFIGURATIONS[args.configuration], "--archive-file", str(args.archive_file)],
-                           cwd=ROOT, check=True)
+            config = archive_config(args.configuration)
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", dir=ROOT / "target") as settings:
+                settings.write(config)
+                settings.flush()
+                subprocess.run(["cargo", "nextest", "archive", "--workspace",
+                                *CONFIGURATIONS[args.configuration], "--config-file", settings.name,
+                                "--archive-file", str(args.archive_file)], cwd=ROOT, check=True)
             manifest = {"identity": identity(args.configuration), "sha256": digest(args.archive_file)}
             args.archive_file.with_suffix(args.archive_file.suffix + ".json").write_text(
                 json.dumps(manifest, sort_keys=True) + "\n")

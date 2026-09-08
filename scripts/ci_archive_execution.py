@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -27,6 +28,9 @@ class ExecutionTests(unittest.TestCase):
 name = "chelis-types"
 version = "0.0.0"
 edition = "2021"
+[lib]
+name = "chelis_runtime"
+crate-type = ["staticlib", "rlib"]
 [workspace]
 [features]
 generalize-sweep-oracle = []
@@ -35,9 +39,23 @@ generalize-sweep-oracle = []
 #[cfg(feature = "generalize-sweep-oracle")]
 #[test] fn feature_pass() {}
 ''')
+            (root / "src/main.rs").write_text('fn main() { print!("archive-cli"); }\n')
             (root / "tests/stamp_to_typed.rs").write_text('''#[test] fn positive() {}
 #[test] fn negative() { panic!("archive negative control"); }
 #[test] #[ignore] fn ignored() {}
+#[test] fn runtime_present() {
+    let deps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/deps");
+    assert!(std::fs::read_dir(deps).unwrap().any(|entry| {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("libchelis_runtime") && name.ends_with(".a")
+    }), "runtime staticlib must come from the archive");
+}
+#[test] fn cli_present() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_chelis-types")).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"archive-cli");
+}
 ''')
             env = {**os.environ, "CARGO_TARGET_DIR": str(root / "target"),
                    "CARGO_HUSKY_DONT_INSTALL_HOOKS": "1"}
@@ -64,15 +82,19 @@ generalize-sweep-oracle = []
                         archive.verify(path, "generalization" if configuration == "workspace" else "workspace")
                     base = ["cargo", "nextest", "list", "--workspace", "--message-format", "json"]
                     built = listed([*base, *archive.CONFIGURATIONS[configuration]])
+                    selection = ["cargo", "nextest", "list", "-p", "chelis-types", "--test",
+                                 "stamp_to_typed", "-E", "test(=positive)", "--message-format", "json"]
+                    built_selection = listed([*selection, *archive.CONFIGURATIONS[configuration]])
+                    # Nothing from compilation may supply a consumer's runtime artifacts.
+                    shutil.rmtree(root / "target")
                     reused = listed(archive.reuse_command(base, path))
                     self.assertEqual(built, reused)
                     self.assertEqual(any(row[1] == "feature_pass" for row in reused),
                                      configuration == "generalization")
-                    selection = ["cargo", "nextest", "list", "-p", "chelis-types", "--test",
-                                 "stamp_to_typed", "-E", "test(=positive)", "--message-format", "json"]
-                    self.assertEqual(listed([*selection, *archive.CONFIGURATIONS[configuration]]),
+                    self.assertEqual(built_selection,
                                      listed(archive.reuse_command(selection, path)))
-                    for name, succeeds in (("positive", True), ("negative", False), ("absent", False)):
+                    for name, succeeds in (("positive", True), ("runtime_present", True), ("cli_present", True),
+                                           ("negative", False), ("absent", False)):
                         command = ["cargo", "nextest", "run", "-p", "chelis-types", "--test",
                                    "stamp_to_typed", "-E", f"test(={name})", "--no-fail-fast"]
                         result = invoke(archive.reuse_command(command, path))

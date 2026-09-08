@@ -1,6 +1,12 @@
 """Archive reuse preserves test selection and rejects the wrong build."""
 
 import tempfile
+import json
+import os
+import subprocess
+import tomllib
+import builtins
+import runpy
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -11,6 +17,43 @@ from scripts import gate
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_gate_bootstrap_import_does_not_require_python_311_modules(self):
+        original = builtins.__import__
+        def before_handoff(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ModuleNotFoundError("tomllib is unavailable before the gate handoff")
+            return original(name, *args, **kwargs)
+        with patch.object(builtins, "__import__", side_effect=before_handoff):
+            runpy.run_path(str(Path(archive.__file__)))
+
+    def test_current_cargo_artifacts_own_staticlib_inclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            current = deps / "libchelis_runtime-current.a"
+            current.write_bytes(b"current")
+            (deps / "libchelis_runtime-stale.a").write_bytes(b"stale")
+            message = {"reason": "compiler-artifact", "target": {
+                "name": "chelis_runtime", "crate_types": ["staticlib", "rlib"]},
+                "filenames": [str(current)]}
+            result = subprocess.CompletedProcess([], 0, stdout=json.dumps(message))
+            with patch.object(archive, "ROOT", root), \
+                    patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), \
+                    patch.object(archive.subprocess, "run", return_value=result):
+                config = tomllib.loads(archive.archive_config("workspace"))
+                self.assertEqual(config["profile"]["default"]["archive"]["include"], [{
+                    "path": "debug/deps/libchelis_runtime-current.a", "relative-to": "target",
+                    "on-missing": "error"}])
+                # A cached file alone never supplies authority for the archive.
+                result.stdout = ""
+                with self.assertRaisesRegex(ValueError, "did not report"):
+                    archive.archive_config("workspace")
+                result.stdout = json.dumps(message)
+                current.unlink()
+                with self.assertRaisesRegex(ValueError, "Missing runtime"):
+                    archive.archive_config("workspace")
+
     def test_package_and_binary_selection_survive_archive_reuse(self):
         command = ["cargo", "nextest", "run", "-p", "chelis-deep", "-p", "chelis-types",
                    "--test", "stamp_to_typed", "--test", "typed_metadata", "--no-fail-fast"]
