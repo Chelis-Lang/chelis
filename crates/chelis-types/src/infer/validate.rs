@@ -12,7 +12,7 @@ pub(super) fn validate_ir_program(
     top_level_references: &TopLevelReferenceGraph,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    top_level_references.report_eager_cycle_errors(errors);
+    top_level_references.report_initialization_errors(errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();

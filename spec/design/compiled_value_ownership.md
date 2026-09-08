@@ -94,9 +94,10 @@ No arrow after verification may accept the pre-verification form.
   fields and validates every handle state it can observe.
 - Closing [#1339], [#763], [#893], or [#912] from this design change. Their
   contracts interlock with this plan, but their parentage and assignees remain.
-- Claiming the Tier 1 launch subset fixed before its C-lane ownership rows and
-  [#1339] prerequisite are green. The stronger full-class oracle is not the
-  [#1362] release gate.
+- Claiming [#1339] fixed from this plan's direct forward-capture rows. The
+  ownership launch subset and the distinct top-level-initialization release
+  blocker have separate oracles. The stronger full-class ownership oracle is
+  not the [#1362] release gate.
 
 ## Vocabulary
 
@@ -562,7 +563,7 @@ The [#1362] Tier 1 A launch invocation is:
 ```
 
 It requires the C-lane regressions for [#1344], [#1346], and [#1356], plus the
-separately classified [#1339] prerequisite, and exits zero only with final line
+direct-forward [#1339] rejection controls, and exits zero only with final line
 `COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS`. It excludes Python, HIP, Metal,
 and the non-launch child rows exactly as [#1362] does. The implementation phases
 may be structural prerequisites for those rows without making every issue they
@@ -573,11 +574,13 @@ value itself, is now an exact checker rejection rather than a compiled expected
 failure: both annotated heap-capture shapes and the unannotated control report
 an unbound forward value before build, following [04-INF-4]'s source-order
 decision. Those three rows leave no emitted ownership behavior for the
-ownership phases to repair. [#1339]'s **indirect** shape does: when an earlier
-value's initializer calls a function that reads a later-assigned value, every
-reference obeys [04-INF-4] and the emitted `main` still assigns in source
-order, so the compiled read of an unassigned global survives. It is unchanged
-by that decision, is not an ownership defect, and remains owned by [#1339].
+ownership phases to repair. [#1339]'s **indirect** shape remains outside this
+oracle: without [04-INF-8], an earlier value's initializer could call a
+function that reads a later-assigned value before source-ordered `main`
+assigns it. [04-INF-8] rejects that program at the checker using PP6's
+complete eager-reference graph; runtime initialization remains source ordered.
+It is not an ownership defect, and only [#1339]'s dedicated oracle can close
+it.
 
 The final invocation is:
 
@@ -620,10 +623,10 @@ The complete run covers:
 8. clean normal teardown with zero live allocations and no invalid release;
 9. the existing [#1222] and [#1344] regressions; and
 10. [#1339]'s annotated list/tensor forward captures and unannotated control as
-    exact source-order rejections, a separately classified Tier 1 prerequisite
-    rather than a member of this ownership class. Its indirect
-    initializer-through-a-call shape is not covered by those rows and is not
-    an ownership defect.
+    exact source-order rejections, separately classified controls rather than
+    members of this ownership class. Its indirect initializer-through-a-call
+    shape is owned by [04-INF-8] and the dedicated [#1339] oracle; it is not
+    covered by these rows and is not an ownership defect.
 
 Required mutations include:
 
@@ -719,11 +722,12 @@ existing [#1222]/[#1344] regressions, and the open issue reproducers.
   balance fixtures;
 - negative `Option[function]` and recursive function-container fixtures that
   require the exact [#879] target rejection; and
-- an explicit external-prerequisite row for [#1339].
+- explicit direct-forward rejection controls for [#1339].
 
 The current failing children are represented as typed expected failures. Closed
-[#1222] and [#1344] are green controls, and [#1339]'s external-prerequisite rows
-are green exact checker rejections. No production ownership code changes.
+[#1222] and [#1344] are green controls, and [#1339]'s direct-forward rows are
+green exact checker rejections. The acyclic indirect initialization blocker is
+not part of this oracle. No production ownership code changes.
 
 **Not this phase:** refcounts, ABI changes, ownership IR, release scheduling,
 backend reuse fixes, or the general closure ABI owned by [#879].
@@ -977,10 +981,11 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
   ownership suite remains independently callable and spec-derived.
 - **[#1339]:** initialization order is a distinct Tier 1 class. Its annotated
   list/tensor captures and unannotated control must reject as unbound before
-  backend emission; its indirect initializer-through-a-call shape stays open
-  under that issue. Those regressions run beside the ownership suite so the
-  launch gate is complete, but the issue is not parented here and does not
-  change this issue map.
+  backend emission; [04-INF-8] separately requires its indirect
+  initializer-through-a-call shape to reject after PP6 completes the shared
+  eager graph. The direct regressions run beside the ownership suite, but they
+  do not complete that release blocker. The issue is not parented here and
+  does not change this issue map.
 - **[#729]:** numeric representation and operation semantics remain controlling.
   The target opaque tagged carrier changes the C construction boundary without
   changing any per-dtype value rule. The Phase 1 entry amendment and

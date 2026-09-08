@@ -880,6 +880,22 @@ stores a function value that reads the initialized binding and that no
 initializer ever applies, is written so the function receives that value as
 an argument instead of reading the top-level binding.
 
+> **[04-INF-8]** For a top-level eager value `V`, every non-function
+> top-level value in `V`'s eager reference set ([04-INF-7]) SHALL be available
+> before `V`'s declaration. If `V` itself does not occur in the set, a member
+> declared later than `V` is a type error reported as `UnboundVariable`, naming
+> both `V` and the later value, whichever checker entry receives the program
+> and before evaluation or lowering begins. The comparison is against `V`'s
+> source position, not the position of a function or nested lambda that
+> contains the textual reference. If `V` itself occurs in the set,
+> [04-INF-7]'s `CycleDetected` verdict takes precedence. Function declarations
+> and recursive function groups remain
+> governed by [04-INF-2] and [04-INF-3]; a forward function reference is legal
+> when every non-function value in its eager closure is already available to
+> the initiating eager value. Values imported from an already-checked library
+> are available before the current unit and do not participate in this
+> source-position comparison.
+
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."

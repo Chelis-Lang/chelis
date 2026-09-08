@@ -277,11 +277,11 @@ pub(crate) fn emit_host_abi_program(
     // call time). [04-INF-4] rejects a DIRECT forward reference from a
     // compiled function to a later binding at check time, annotated or not,
     // so a hoisted binding a function names is initialized before the first
-    // user call that reads it. That does not cover the INDIRECT shape, where
-    // an earlier binding's initializer calls a function that reads a later
-    // binding: every reference there is legal and `main()` still assigns in
-    // binding order, so the callee reads a zero-initialized static. That
-    // remainder is chelis#1339.
+    // user call that reads it. [04-INF-8] closes the INDIRECT shape too: when
+    // an earlier binding's initializer calls a function that reaches a later
+    // value, the checker rejects the initiating root before this emitter runs.
+    // `main()` remains source ordered; the checker, not a reordered backend,
+    // owns the top-level initialization frontier (chelis#1339).
     let captured_globals = captured_global_names(program);
     if !captured_globals.is_empty() {
         body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());

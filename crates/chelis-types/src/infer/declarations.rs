@@ -420,6 +420,76 @@ pub(super) struct TopLevelReferenceGraph {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct LaterEagerValueDependency {
+    pub(super) root: usize,
+    pub(super) later: usize,
+    pub(super) path: Vec<usize>,
+    pub(super) root_has_direct_forward_reference: bool,
+}
+
+struct TopLevelInitializationAnalysis {
+    adjacency: Vec<Vec<usize>>,
+    eager_cycle_components: Vec<Vec<usize>>,
+    cyclic_eager_vertices: Vec<bool>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LATER_DEPENDENCY_CANCEL_AFTER_EDGES: RefCell<Option<(usize, CancelToken)>> =
+        const { RefCell::new(None) };
+}
+
+fn later_dependency_edge_inspected() {
+    #[cfg(test)]
+    LATER_DEPENDENCY_CANCEL_AFTER_EDGES.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        let Some((remaining, token)) = hook.as_mut() else {
+            return;
+        };
+        *remaining -= 1;
+        if *remaining == 0 {
+            token.cancel();
+            hook.take();
+        }
+    });
+}
+
+#[cfg(test)]
+struct LaterDependencyCancellationHook;
+
+#[cfg(test)]
+impl Drop for LaterDependencyCancellationHook {
+    fn drop(&mut self) {
+        LATER_DEPENDENCY_CANCEL_AFTER_EDGES.with(|hook| hook.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+fn cancel_later_dependency_after_edges_for_test(
+    inspections: usize,
+    token: CancelToken,
+) -> LaterDependencyCancellationHook {
+    assert!(inspections > 0);
+    LATER_DEPENDENCY_CANCEL_AFTER_EDGES.with(|hook| {
+        assert!(hook.borrow_mut().replace((inspections, token)).is_none());
+    });
+    LaterDependencyCancellationHook
+}
+
+fn initialization_cancelled(cancel: Option<&CancelToken>, errors: &mut DiagnosticSink<'_>) -> bool {
+    if !cancel.is_some_and(CancelToken::is_cancelled) {
+        return false;
+    }
+    if !errors
+        .iter()
+        .any(|error| crate::cancel::is_cancellation(&error.message))
+    {
+        errors.push(crate::cancel::cancellation_check_error());
+    }
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TopLevelReferenceComponent {
     /// Flattened `def` item ordinals in source order.
     pub(super) members: Vec<usize>,
@@ -583,6 +653,56 @@ impl TopLevelReferenceGraph {
         }
     }
 
+    /// Later eager values whose inferred schemes must be available while one
+    /// cyclic full-reference component is co-inferred.
+    ///
+    /// [04-INF-8] gives `CycleDetected` precedence when an eager root occurs
+    /// in its own reachable closure. If a member of that exact SCC also reads
+    /// a value declared after one of its eager roots, ordinary [04-INF-4]
+    /// visibility would emit `UnboundVariable` before the cycle reporter can
+    /// publish the owning verdict. These targets are not cycle members: the
+    /// scheduler infers them first and the component scope grants their
+    /// already-established bindings temporary visibility. The source-order
+    /// rule remains unchanged everywhere else.
+    pub(super) fn cycle_precedence_targets(&self, component_items: &[usize]) -> Vec<usize> {
+        if !self.complete {
+            return Vec::new();
+        }
+        let member_vertices = component_items
+            .iter()
+            .filter_map(|item| self.definition_vertex_by_item.get(*item).copied().flatten())
+            .collect::<UnordSet<_>>();
+        let Some(earliest_eager_root) = member_vertices
+            .to_sorted()
+            .into_iter()
+            .filter_map(|vertex| {
+                let definition = &self.definitions[*vertex];
+                (definition.kind == TopLevelDefinitionKind::EagerValue)
+                    .then_some(definition.item_index)
+            })
+            .min()
+        else {
+            return Vec::new();
+        };
+
+        let mut targets = BTreeSet::new();
+        for &item in component_items {
+            let Some(references) = self.item_references.get(item) else {
+                continue;
+            };
+            for reference in references {
+                let target = &self.definitions[reference.target];
+                if target.kind == TopLevelDefinitionKind::EagerValue
+                    && target.item_index > earliest_eager_root
+                    && !member_vertices.contains(&reference.target)
+                {
+                    targets.insert(reference.target);
+                }
+            }
+        }
+        targets.into_iter().collect()
+    }
+
     fn adjacency(&self) -> Vec<Vec<usize>> {
         self.outgoing
             .iter()
@@ -601,17 +721,19 @@ impl TopLevelReferenceGraph {
             .collect()
     }
 
-    fn cyclic_eager_components(&self) -> Vec<Vec<usize>> {
-        if !self.complete {
-            return Vec::new();
+    fn initialization_analysis(
+        &self,
+        cancel: Option<&CancelToken>,
+    ) -> Option<TopLevelInitializationAnalysis> {
+        let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
+        if !self.complete || cancelled() {
+            return None;
         }
         let adjacency = self.adjacency();
-        let Some(mut components) = unprofiled_scc_vertex_components(
-            &adjacency,
-            crate::cancel::current_cancel_token().as_ref(),
-        ) else {
-            return Vec::new();
-        };
+        if cancelled() {
+            return None;
+        }
+        let mut components = unprofiled_scc_vertex_components(&adjacency, cancel)?;
         components.retain(|component| {
             let cyclic = component.len() > 1
                 || component
@@ -622,7 +744,11 @@ impl TopLevelReferenceGraph {
                     self.definitions[*vertex].kind == TopLevelDefinitionKind::EagerValue
                 })
         });
+        let mut cyclic_eager_vertices = vec![false; self.definitions.len()];
         for component in &mut components {
+            for &vertex in component.iter() {
+                cyclic_eager_vertices[vertex] = true;
+            }
             component.sort_by_key(|vertex| {
                 let definition = &self.definitions[*vertex];
                 (definition.item_index, definition.name.clone())
@@ -635,11 +761,34 @@ impl TopLevelReferenceGraph {
                 .min()
                 .unwrap_or(usize::MAX)
         });
-        components
+        if cancelled() {
+            return None;
+        }
+        Some(TopLevelInitializationAnalysis {
+            adjacency,
+            eager_cycle_components: components,
+            cyclic_eager_vertices,
+        })
     }
 
-    fn cycle_path(&self, component: &[usize]) -> Vec<usize> {
-        let adjacency = self.adjacency();
+    #[cfg(test)]
+    fn cyclic_eager_components(&self) -> Vec<Vec<usize>> {
+        let cancel = crate::cancel::current_cancel_token();
+        self.initialization_analysis(cancel.as_ref())
+            .map(|analysis| analysis.eager_cycle_components)
+            .unwrap_or_default()
+    }
+
+    fn cycle_path(
+        &self,
+        adjacency: &[Vec<usize>],
+        component: &[usize],
+        cancel: Option<&CancelToken>,
+    ) -> Option<Vec<usize>> {
+        let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
+        if cancelled() {
+            return None;
+        }
         let members = component.iter().copied().collect::<UnordSet<_>>();
         let start = component
             .iter()
@@ -651,7 +800,7 @@ impl TopLevelReferenceGraph {
             })
             .expect("an eager cycle component contains an eager value");
         if adjacency[start].binary_search(&start).is_ok() {
-            return vec![start, start];
+            return Some(vec![start, start]);
         }
 
         // Find the deterministic shortest return path from each source-order
@@ -665,17 +814,23 @@ impl TopLevelReferenceGraph {
             let mut seen = UnordSet::new();
             seen.insert(first);
             while let Some(vertex) = queue.pop_front() {
+                if cancelled() {
+                    return None;
+                }
                 if vertex == start {
                     let mut reverse = vec![start];
                     let mut current = start;
                     while current != first {
+                        if cancelled() {
+                            return None;
+                        }
                         current = predecessor[&current];
                         reverse.push(current);
                     }
                     reverse.reverse();
                     let mut path = vec![start];
                     path.extend(reverse);
-                    return path;
+                    return Some(path);
                 }
                 for &next in adjacency[vertex]
                     .iter()
@@ -691,14 +846,184 @@ impl TopLevelReferenceGraph {
         unreachable!("every member of an SCC reaches its eager start")
     }
 
-    pub(super) fn report_eager_cycle_errors(&self, errors: &mut DiagnosticSink<'_>) {
-        for component in self.cyclic_eager_components() {
-            let path = self.cycle_path(&component);
+    /// [04-INF-8]: deterministic acyclic transitive dependencies from an eager
+    /// root to a later eager value. Direct forward reads remain owned by
+    /// `infer_var` at their exact source span and are omitted here, so the graph
+    /// adds exactly one diagnostic per indirect `(root, later)` pair rather than
+    /// duplicating [04-INF-4]'s established diagnostic.
+    #[cfg(test)]
+    pub(super) fn acyclic_later_eager_value_dependencies(
+        &self,
+    ) -> Option<Vec<LaterEagerValueDependency>> {
+        let cancel = crate::cancel::current_cancel_token();
+        let analysis = self.initialization_analysis(cancel.as_ref())?;
+        self.later_eager_value_dependencies(&analysis, cancel.as_ref())
+    }
+
+    fn later_eager_value_dependencies(
+        &self,
+        analysis: &TopLevelInitializationAnalysis,
+        cancel: Option<&CancelToken>,
+    ) -> Option<Vec<LaterEagerValueDependency>> {
+        let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
+        let vertex_count = self.definitions.len();
+        let mut visit_epoch = vec![0usize; vertex_count];
+        let mut predecessor = vec![usize::MAX; vertex_count];
+        let mut queue = VecDeque::new();
+        let mut reached_later = Vec::new();
+        let mut findings = Vec::new();
+        let mut epoch = 0usize;
+
+        for root in self
+            .definitions
+            .iter()
+            .enumerate()
+            .filter(|(_, definition)| definition.kind == TopLevelDefinitionKind::EagerValue)
+            .map(|(vertex, _)| vertex)
+        {
+            if cancelled() {
+                return None;
+            }
+            // CycleDetected takes precedence only when this eager root is
+            // itself in the cycle. A different reachable eager cycle does
+            // not erase an otherwise independent root-to-later violation.
+            if analysis.cyclic_eager_vertices[root] {
+                continue;
+            }
+
+            epoch += 1;
+            visit_epoch[root] = epoch;
+            queue.clear();
+            queue.push_back(root);
+            reached_later.clear();
+            while let Some(vertex) = queue.pop_front() {
+                if cancelled() {
+                    return None;
+                }
+                for &next in &analysis.adjacency[vertex] {
+                    later_dependency_edge_inspected();
+                    if cancelled() {
+                        return None;
+                    }
+                    if vertex == root
+                        && self.definitions[next].kind == TopLevelDefinitionKind::EagerValue
+                        && self.definitions[next].item_index > self.definitions[root].item_index
+                    {
+                        // A direct source-forward value read is either owned
+                        // by [04-INF-4], or resolves a same-name prior-library
+                        // binding. In neither case is that edge a dependency
+                        // on the current unit's later definition. Exclude it
+                        // from this search while retaining distinct indirect
+                        // paths from the same root to the same later value.
+                        continue;
+                    }
+                    if visit_epoch[next] == epoch {
+                        continue;
+                    }
+                    visit_epoch[next] = epoch;
+                    predecessor[next] = vertex;
+                    queue.push_back(next);
+                    if self.definitions[next].kind == TopLevelDefinitionKind::EagerValue
+                        && self.definitions[next].item_index > self.definitions[root].item_index
+                    {
+                        reached_later.push(next);
+                    }
+                }
+            }
+
+            reached_later.sort_by_key(|later| {
+                let definition = &self.definitions[*later];
+                (definition.item_index, definition.name.clone())
+            });
+            reached_later.dedup();
+            for &later in &reached_later {
+                if cancelled() {
+                    return None;
+                }
+                let mut path = vec![later];
+                let mut current = later;
+                while current != root {
+                    if cancelled() {
+                        return None;
+                    }
+                    current = predecessor[current];
+                    debug_assert_ne!(
+                        current,
+                        usize::MAX,
+                        "a reached vertex has a predecessor before the root"
+                    );
+                    path.push(current);
+                }
+                path.reverse();
+                findings.push(LaterEagerValueDependency {
+                    root,
+                    later,
+                    path,
+                    root_has_direct_forward_reference: analysis.adjacency[root]
+                        .binary_search(&later)
+                        .is_ok(),
+                });
+            }
+        }
+        findings.sort_by_key(|finding| {
+            (
+                self.definitions[finding.root].item_index,
+                self.definitions[finding.later].item_index,
+                self.definitions[finding.root].name.clone(),
+                self.definitions[finding.later].name.clone(),
+            )
+        });
+        if cancelled() {
+            return None;
+        }
+        Some(findings)
+    }
+
+    pub(super) fn report_initialization_errors(&self, errors: &mut DiagnosticSink<'_>) {
+        let cancel = crate::cancel::current_cancel_token();
+        let Some(analysis) = self.initialization_analysis(cancel.as_ref()) else {
+            initialization_cancelled(cancel.as_ref(), errors);
+            return;
+        };
+        let Some(findings) = self.later_eager_value_dependencies(&analysis, cancel.as_ref()) else {
+            initialization_cancelled(cancel.as_ref(), errors);
+            return;
+        };
+
+        // Stage the complete report before mutating the sink. If cancellation
+        // interrupts SCC analysis, cycle-path recovery, or reachability, the
+        // policy report stays unpublished and this boundary records only the
+        // cancellation diagnostic, even if the sink already has source errors.
+        let mut cycle_paths = Vec::with_capacity(analysis.eager_cycle_components.len());
+        for component in &analysis.eager_cycle_components {
+            let Some(path) = self.cycle_path(&analysis.adjacency, component, cancel.as_ref())
+            else {
+                initialization_cancelled(cancel.as_ref(), errors);
+                return;
+            };
+            cycle_paths.push(path);
+        }
+        if initialization_cancelled(cancel.as_ref(), errors) {
+            return;
+        }
+
+        let existing_unbound_names = errors
+            .iter()
+            .filter_map(|error| match &error.kind {
+                CheckErrorKind::UnboundVariable { identifier } => Some(identifier.clone()),
+                _ => None,
+            })
+            .collect::<UnordSet<_>>();
+        let mut staged = Vec::with_capacity(cycle_paths.len() + findings.len());
+        for path in cycle_paths {
+            if initialization_cancelled(cancel.as_ref(), errors) {
+                return;
+            }
             let names = path
                 .iter()
                 .map(|vertex| self.definitions[*vertex].name.as_str())
                 .collect::<Vec<_>>();
-            errors.push(CheckError::new(
+            staged.push(CheckError::new(
                 CheckErrorKind::CycleDetected,
                 format!("binding cycle: {}", names.join(" -> ")),
                 vec![
@@ -707,6 +1032,44 @@ impl TopLevelReferenceGraph {
                         .to_string(),
                 ],
             ));
+        }
+        for finding in findings {
+            if initialization_cancelled(cancel.as_ref(), errors) {
+                return;
+            }
+            let root = &self.definitions[finding.root];
+            let later = &self.definitions[finding.later];
+            if finding.root_has_direct_forward_reference
+                && existing_unbound_names.contains(&later.name)
+            {
+                continue;
+            }
+            let path = finding
+                .path
+                .iter()
+                .map(|vertex| self.definitions[*vertex].name.as_str())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            staged.push(CheckError::new(
+                CheckErrorKind::UnboundVariable {
+                    identifier: later.name.clone(),
+                },
+                format!(
+                    "top-level eager value `{}` reaches later value `{}` during initialization \
+                     through {path} ([04-INF-8])",
+                    root.name, later.name
+                ),
+                vec![format!(
+                    "Move `{}` before `{}`, or pass its value explicitly",
+                    later.name, root.name
+                )],
+            ));
+        }
+        if initialization_cancelled(cancel.as_ref(), errors) {
+            return;
+        }
+        for error in staged {
+            errors.push(error);
         }
     }
 }
@@ -2236,12 +2599,219 @@ pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
 mod top_level_reference_graph_tests {
     use super::*;
 
-    fn graph(source: &str) -> TopLevelReferenceGraph {
+    fn surf_program(source: &str) -> Vec<deep::Expr> {
         let declarations = chelis_surf::parser::parse_str(source)
             .unwrap_or_else(|error| panic!("graph fixture must parse: {error:?}\n{source}"));
-        let exprs = chelis_surf::desugar::desugar_program(&declarations);
+        chelis_surf::desugar::desugar_program(&declarations)
+    }
+
+    fn graph(source: &str) -> TopLevelReferenceGraph {
+        let exprs = surf_program(source);
         let items = top_level_decl_items_with_modules(&exprs);
         TopLevelReferenceGraph::build(&items)
+    }
+
+    /// [04-INF-8] regression: the compiled-wrong-answer shape is one
+    /// deterministic `(root, later)` finding, with the transitive path that
+    /// explains why individually legal references are jointly illegal.
+    #[test]
+    fn indirect_later_value_dependency_is_reported_once_per_pair() {
+        let graph = graph(
+            "module IndirectLater\n\n\
+             u = ping(1)\n\n\
+             v1 = 5\n\n\
+             def ping(n: int32) -> int32 = add(n, v1)\n",
+        );
+        let findings = graph
+            .acyclic_later_eager_value_dependencies()
+            .expect("uncancelled analysis completes");
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let finding = &findings[0];
+        assert_eq!(graph.definition(finding.root).name, "u");
+        assert_eq!(graph.definition(finding.later).name, "v1");
+        assert_eq!(
+            finding
+                .path
+                .iter()
+                .map(|vertex| graph.definition(*vertex).name.as_str())
+                .collect::<Vec<_>>(),
+            ["u", "ping", "v1"]
+        );
+    }
+
+    /// [04-INF-4]/[04-INF-8] de-duplication lock: without a prior context
+    /// binding, the direct forward reference remains infer_var's one located
+    /// error even when an alternative indirect path reaches the same value.
+    #[test]
+    fn direct_forward_reference_with_an_indirect_alternative_is_reported_once() {
+        let exprs = surf_program(
+            "module DirectWins\n\n\
+             u = add(v1, ping(1))\n\n\
+             v1 = 5\n\n\
+             def ping(n: int32) -> int32 = add(n, v1)\n",
+        );
+        let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
+        let matching = report
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    &error.kind,
+                    CheckErrorKind::UnboundVariable { identifier } if identifier == "v1"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "{:#?}", report.errors);
+        assert!(
+            !matching[0].message.contains("[04-INF-8]"),
+            "the existing direct diagnostic owns de-duplication: {:#?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn pure_direct_forward_reference_remains_one_diagnostic() {
+        let exprs = surf_program(
+            "module PureDirect\n\n\
+             root = add(later, (1 : int32))\n\n\
+             later = (5 : int32)\n",
+        );
+        let report = crate::check_ir_program(&exprs).expect_err("direct read must reject");
+        let matching = report
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    &error.kind,
+                    CheckErrorKind::UnboundVariable { identifier } if identifier == "later"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "{:#?}", report.errors);
+        assert!(!matching[0].message.contains("[04-INF-8]"));
+    }
+
+    /// A direct same-name read may resolve a prior library binding, while a
+    /// function declared after the current-unit value captures that new value.
+    /// The direct graph edge must not hide the distinct indirect dependency.
+    #[test]
+    fn prior_context_direct_binding_does_not_hide_current_unit_indirect_dependency() {
+        let library = surf_program("module Prior\n\nlater = (1 : int32)\n");
+        let context = crate::build_type_env_from_library(&library)
+            .expect("the prior int32 binding builds a reusable context");
+        let current = surf_program(
+            "module Current\n\n\
+             root = add(later, read_current(0))\n\n\
+             later = (5 : int32)\n\n\
+             def read_current(n: int32) -> int32 = add(n, later)\n",
+        );
+        let report = crate::check_ir_with_context(&context, &current)
+            .expect_err("the indirect dependency on current-unit later must reject");
+        let matching = report
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    &error.kind,
+                    CheckErrorKind::UnboundVariable { identifier } if identifier == "later"
+                ) && error.message.contains("`root`")
+                    && error.message.contains("[04-INF-8]")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "{:#?}", report.errors);
+    }
+
+    /// An unrelated root's direct [04-INF-4] error for the same identifier
+    /// does not own or suppress this root's distinct indirect [04-INF-8] path.
+    #[test]
+    fn unrelated_direct_error_does_not_suppress_another_roots_indirect_dependency() {
+        let exprs = surf_program(
+            "module UnrelatedDirect\n\n\
+             unrelated = later\n\n\
+             root = read_current(0)\n\n\
+             later = (5 : int32)\n\n\
+             def read_current(n: int32) -> int32 = add(n, later)\n",
+        );
+        let report = crate::check_ir_program(&exprs)
+            .expect_err("both roots' distinct initialization errors must reject");
+        let direct = report
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    &error.kind,
+                    CheckErrorKind::UnboundVariable { identifier } if identifier == "later"
+                ) && !error.message.contains("[04-INF-8]")
+            })
+            .count();
+        let indirect = report
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    &error.kind,
+                    CheckErrorKind::UnboundVariable { identifier } if identifier == "later"
+                ) && error.message.contains("`root`")
+                    && error.message.contains("[04-INF-8]")
+            })
+            .count();
+        assert_eq!(direct, 1, "{:#?}", report.errors);
+        assert_eq!(indirect, 1, "{:#?}", report.errors);
+    }
+
+    /// A reachable but separate eager cycle does not take precedence over an
+    /// independent root-to-later [04-INF-8] violation.
+    #[test]
+    fn separate_reachable_cycle_preserves_root_later_diagnostic() {
+        let exprs = surf_program(
+            "module SeparateCycle\n\n\
+             root = add(read_later(0), enter_cycle())\n\n\
+             later = (5 : int32)\n\n\
+             cycle_value = enter_cycle()\n\n\
+             def read_later(n: int32) -> int32 = add(n, later)\n\n\
+             def enter_cycle() -> int32 = cycle_value\n",
+        );
+        let report = crate::check_ir_program(&exprs)
+            .expect_err("both the eager cycle and indirect later dependency must reject");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| matches!(error.kind, CheckErrorKind::CycleDetected)),
+            "{:#?}",
+            report.errors
+        );
+        let matching = report
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    &error.kind,
+                    CheckErrorKind::UnboundVariable { identifier } if identifier == "later"
+                ) && error.message.contains("`root`")
+                    && error.message.contains("[04-INF-8]")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "{:#?}", report.errors);
+    }
+
+    /// Negative parity: backward and independent values do not acquire an
+    /// [04-INF-8] edge merely because a function is involved.
+    #[test]
+    fn backward_and_independent_values_stay_out_of_the_later_set() {
+        for source in [
+            "module Backward\n\nv1 = 5\n\nu = ping(1)\n\ndef ping(n: int32) -> int32 = add(n, v1)\n",
+            "module Independent\n\nu = ping(1)\n\nv1 = 5\n\ndef ping(n: int32) -> int32 = n\n",
+        ] {
+            let graph = graph(source);
+            assert!(
+                graph
+                    .acyclic_later_eager_value_dependencies()
+                    .expect("uncancelled analysis completes")
+                    .is_empty(),
+                "{source}"
+            );
+        }
     }
 
     /// [04-INF-7] regression: lambda bodies and applications feed the same
@@ -2269,5 +2839,100 @@ mod top_level_reference_graph_tests {
         assert_eq!(components.len(), 1, "{components:#?}");
         assert!(components[0].contains(&carried), "{components:#?}");
         assert!(components[0].contains(&f), "{components:#?}");
+        assert!(
+            graph
+                .acyclic_later_eager_value_dependencies()
+                .expect("uncancelled analysis completes")
+                .is_empty()
+        );
+    }
+
+    /// Public-check diagnostic lock for [04-INF-8]: graph reachability adds one
+    /// error, not one per traversal path, and the message names both endpoints.
+    #[test]
+    fn checker_reports_one_root_later_diagnostic_for_the_indirect_shape() {
+        let source = "module IndirectLaterDiagnostic\n\n\
+                      u = ping(1)\n\n\
+                      v1 = 5\n\n\
+                      def ping(n: int32) -> int32 = add(n, v1)\n";
+        let exprs = surf_program(source);
+        let report = crate::check_ir_program(&exprs).expect_err("[04-INF-8] must reject");
+        let matching = report
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    &error.kind,
+                    CheckErrorKind::UnboundVariable { identifier } if identifier == "v1"
+                ) && error.message.contains("`u`")
+                    && error.message.contains("`v1`")
+                    && error.message.contains("[04-INF-8]")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "{:#?}", report.errors);
+    }
+
+    #[test]
+    fn cancellation_during_later_reachability_emits_only_cancellation() {
+        let exprs = surf_program(
+            "module CancelLaterDependency\n\n\
+             root = read_current(0)\n\n\
+             later = (5 : int32)\n\n\
+             def read_current(n: int32) -> int32 = add(n, later)\n",
+        );
+        let token = CancelToken::new();
+        let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
+        let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);
+        let report = crate::check_ir_program(&exprs)
+            .expect_err("cancelled initialization analysis must reject");
+        assert_eq!(report.errors.len(), 1, "{:#?}", report.errors);
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|error| crate::cancel::is_cancellation(&error.message)),
+            "cancelled reachability must publish only the cancellation diagnostic: {:#?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn cancellation_during_later_reachability_survives_prior_source_errors() {
+        let exprs = surf_program(
+            "module CancelAfterError\n\n\
+             broken = missing\n\n\
+             root = read_current(0)\n\n\
+             later = (5 : int32)\n\n\
+             def read_current(n: int32) -> int32 = add(n, later)\n",
+        );
+        let token = CancelToken::new();
+        let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
+        let _reachability_hook = cancel_later_dependency_after_edges_for_test(1, token);
+        let report = crate::check_ir_program(&exprs)
+            .expect_err("source failure plus cancelled initialization analysis must reject");
+        assert!(
+            report.errors.iter().any(|error| matches!(
+                &error.kind,
+                CheckErrorKind::UnboundVariable { identifier } if identifier == "missing"
+            )),
+            "{:#?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| crate::cancel::is_cancellation(&error.message)),
+            "a pre-existing source error must not bypass cancellation: {:#?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|error| !error.message.contains("[04-INF-8]")),
+            "cancelled reachability must not publish a partial policy report: {:#?}",
+            report.errors
+        );
     }
 }

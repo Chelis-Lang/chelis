@@ -94,6 +94,7 @@ impl ComponentLevelScope {
     fn enter(
         indices: &[usize],
         items: &[(Option<String>, &deep::Expr)],
+        cycle_precedence_names: &[String],
         env: &mut Env,
         var_gen: &VarGen,
         subst: &mut Subst,
@@ -105,10 +106,11 @@ impl ComponentLevelScope {
             .filter(|name| seen.insert((*name).to_string()))
             .map(|name| (name.to_string(), env.lookup(name).cloned()))
             .collect::<Vec<_>>();
-        let active_component = members
+        let mut active_component = members
             .iter()
             .map(|(name, _)| name.clone())
             .collect::<UnordSet<_>>();
+        active_component.extend(cycle_precedence_names.iter().cloned());
         let prior_active_component = env.replace_active_top_level_component(active_component);
         Self {
             level: subst.enter_level(var_gen),
@@ -290,8 +292,25 @@ pub(super) fn infer_program_with_product_in_session(
         }
         let cyclic = group.cyclic;
         let recursion_active = !group.recursive_function_indices.is_empty();
-        let mut component_scope = cyclic
-            .then(|| ComponentLevelScope::enter(&group.indices, &items, &mut env, &vg, &mut subst));
+        let cycle_precedence_names = if cyclic {
+            top_level_references
+                .cycle_precedence_targets(&group.indices)
+                .into_iter()
+                .map(|target| top_level_references.definition(target).name.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut component_scope = cyclic.then(|| {
+            ComponentLevelScope::enter(
+                &group.indices,
+                &items,
+                &cycle_precedence_names,
+                &mut env,
+                &vg,
+                &mut subst,
+            )
+        });
         let provisional_types = if cyclic {
             prebind_cyclic_component_schemes(
                 &group.indices,
@@ -1119,7 +1138,7 @@ pub(crate) fn check_typed_program_in_session(
     // `CycleDetected`.
     product
         .top_level_references
-        .report_eager_cycle_errors(errors);
+        .report_initialization_errors(errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1356,9 +1375,15 @@ pub(super) fn infer_ir_program_with_state(
         let cyclic = group.cyclic;
         let recursion_active = !group.recursive_function_indices.is_empty();
         let mut component_scope = cyclic.then(|| {
+            let cycle_precedence_names = top_level_references
+                .cycle_precedence_targets(&group.indices)
+                .into_iter()
+                .map(|target| top_level_references.definition(target).name.clone())
+                .collect::<Vec<_>>();
             ComponentLevelScope::enter(
                 &group.indices,
                 &items,
+                &cycle_precedence_names,
                 &mut state.env,
                 &state.var_gen,
                 &mut state.subst,
@@ -1700,10 +1725,12 @@ fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> Declared
 ///
 /// This is availability, not ordinary source visibility. Whether a name is in
 /// scope is decided by `Env::top_level_value_visibility` from source position.
-/// The sole extra capability is the exact active cyclic component: its
-/// provisional members see one another only while that rejected component is
-/// co-inferred, and the component scope restores the prior capability on
-/// every exit. No schedule position can otherwise widen or narrow [04-INF-4].
+/// The sole extra capability is owned by the exact active cyclic component:
+/// its provisional members see one another, and [04-INF-8] precedence targets
+/// that the graph scheduled first remain visible, only while that rejected
+/// component is co-inferred. The component scope restores the prior capability
+/// on every exit. No schedule position can otherwise widen or narrow
+/// [04-INF-4].
 /// `crates/chelis-types/src/infer/tests/schedule_invariants.rs` asserts the
 /// invariants above directly on the returned order.
 #[cfg(test)]
@@ -1812,6 +1839,28 @@ fn primary_inference_schedule_with_reference_graph(
             if let Some(&declaration) = hole_signature_definitions.get(name) {
                 edges.insert((vertex_of[declaration], reader));
             }
+        }
+    }
+
+    // [04-INF-8] cycle precedence: an eager root that occurs in its own
+    // full-reference component is rejected by CycleDetected alone. Infer any
+    // later eager value referenced from that exact component first, so the
+    // component's narrow visibility capability can resolve the real scheme
+    // instead of leaking an earlier [04-INF-4] UnboundVariable. These edges
+    // cannot cycle after SCC contraction: a target with a path back into the
+    // component would already be one of its members.
+    for component in &reference_components.components {
+        if !component.cyclic {
+            continue;
+        }
+        let Some(&representative) = component.members.iter().min() else {
+            continue;
+        };
+        for target in references.cycle_precedence_targets(&component.members) {
+            edges.insert((
+                vertex_of[references.definition(target).item_index],
+                vertex_of[representative],
+            ));
         }
     }
     edges.retain(|(before, after)| before != after);
@@ -2302,17 +2351,33 @@ mod component_level_scope_tests {
         let indices = vec![0, 1];
         let mut env = Env::new();
         env.bind("left".to_string(), Scheme::mono(Type::Prim(Prim::Int32)));
+        env.bind(
+            "precedence".to_string(),
+            Scheme::mono(Type::Prim(Prim::Int64)),
+        );
         let mut var_gen = VarGen::default();
         let mut subst = Subst::new();
 
         env.note_top_level_value_ordinal("right".to_string(), 1, None);
         env.note_top_level_value_ordinal("outside".to_string(), 2, None);
+        env.note_top_level_value_ordinal("precedence".to_string(), 3, None);
         env.set_current_declaration_ordinal(Some(0));
         let _empty_component =
             env.replace_active_top_level_component(["outside".to_string()].into_iter().collect());
-        let scope = ComponentLevelScope::enter(&indices, &items, &mut env, &var_gen, &mut subst);
+        let scope = ComponentLevelScope::enter(
+            &indices,
+            &items,
+            &["precedence".to_string()],
+            &mut env,
+            &var_gen,
+            &mut subst,
+        );
         assert!(matches!(
             env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::Visible
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
             TopLevelValueVisibility::Visible
         ));
         assert!(matches!(
@@ -2337,8 +2402,17 @@ mod component_level_scope_tests {
         assert_eq!(subst.current_level(), 0);
         assert!(env.lookup("left").is_none());
         assert!(env.lookup("right").is_none());
+        assert_eq!(
+            env.lookup("precedence").map(|scheme| &scheme.body),
+            Some(&Type::Prim(Prim::Int64)),
+            "an already-inferred precedence target is visibility-only"
+        );
         assert!(matches!(
             env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
             TopLevelValueVisibility::NotYetDeclared { .. }
         ));
         assert!(matches!(
@@ -2356,14 +2430,30 @@ mod component_level_scope_tests {
         let mut env = Env::new();
         let prior = Scheme::mono(Type::Prim(Prim::Bool));
         env.bind("left".to_string(), prior.clone());
+        env.bind(
+            "precedence".to_string(),
+            Scheme::mono(Type::Prim(Prim::Int64)),
+        );
         let mut var_gen = VarGen::default();
         let mut subst = Subst::new();
         env.note_top_level_value_ordinal("right".to_string(), 1, None);
         env.note_top_level_value_ordinal("outside".to_string(), 2, None);
+        env.note_top_level_value_ordinal("precedence".to_string(), 3, None);
         env.set_current_declaration_ordinal(Some(0));
         let _empty_component =
             env.replace_active_top_level_component(["outside".to_string()].into_iter().collect());
-        let scope = ComponentLevelScope::enter(&indices, &items, &mut env, &var_gen, &mut subst);
+        let scope = ComponentLevelScope::enter(
+            &indices,
+            &items,
+            &["precedence".to_string()],
+            &mut env,
+            &var_gen,
+            &mut subst,
+        );
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
+            TopLevelValueVisibility::Visible
+        ));
         prebind_cyclic_component_schemes(
             &indices,
             &items,
@@ -2397,8 +2487,17 @@ mod component_level_scope_tests {
         assert_eq!(restored.rvars, prior.rvars);
         assert_eq!(restored.body, prior.body);
         assert!(env.lookup("right").is_none());
+        assert_eq!(
+            env.lookup("precedence").map(|scheme| &scheme.body),
+            Some(&Type::Prim(Prim::Int64)),
+            "abort must not roll back an already-inferred precedence target"
+        );
         assert!(matches!(
             env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("precedence"),
             TopLevelValueVisibility::NotYetDeclared { .. }
         ));
         assert!(matches!(

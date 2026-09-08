@@ -203,12 +203,13 @@ pub struct Env {
     /// owns them rather than against the schedule's position.
     #[serde(skip)]
     current_declaration_ordinal: Option<usize>,
-    /// Exact names in the full-reference component currently being
-    /// co-inferred. A cyclic component is prebound monomorphically, so these
-    /// bindings must be visible to one another even when source order would
-    /// ordinarily hide a later eager value. The inference driver installs
-    /// this capability only for that component and restores the prior set on
-    /// both completion and cancellation; it is never serialized.
+    /// Exact names temporarily visible while one cyclic full-reference
+    /// component is co-inferred. This contains the component's provisional
+    /// members and, for [04-INF-8] cycle precedence, any later eager target
+    /// that the scheduler has already inferred for that component. The
+    /// inference driver installs this capability only for the rejected cycle
+    /// and restores the prior set on both completion and cancellation; it is
+    /// never serialized.
     #[serde(skip)]
     active_top_level_component: UnordSet<String>,
 }
@@ -432,9 +433,10 @@ impl Env {
         self.current_declaration_ordinal = ordinal;
     }
 
-    /// Replace the exact full-reference component whose provisional eager
-    /// bindings may bypass ordinary source-position visibility. The returned
-    /// capability must be restored before the inference level is left.
+    /// Replace the exact cyclic-component capability whose provisional member
+    /// bindings and already-inferred [04-INF-8] precedence targets may bypass
+    /// ordinary source-position visibility. The returned capability must be
+    /// restored before the inference level is left.
     #[must_use = "restore the prior top-level component capability on every exit"]
     pub(crate) fn replace_active_top_level_component(
         &mut self,
@@ -444,8 +446,10 @@ impl Env {
     }
 
     /// [04-INF-4]: whether `name` resolves to a top-level eager value that is
-    /// already declared at the current declaration, or is a provisional
-    /// member of the exact cyclic component currently being co-inferred.
+    /// already declared at the current declaration, is a provisional member
+    /// of the exact cyclic component currently being co-inferred, or is one
+    /// of that rejected component's already-inferred [04-INF-8] precedence
+    /// targets.
     ///
     /// `Visible` covers every name this rule does not govern: a lexical
     /// binding that shadows the value, an imported or library name, a
@@ -454,9 +458,9 @@ impl Env {
     /// (`x: T = x`) legal without any prebinding. A later value is
     /// `NotYetDeclared`, carrying the outer binding it shadows when there is
     /// one so the caller can resolve against the still-current outer scope.
-    /// Active-component membership is checked after lexical shadowing and
-    /// before source order: this lets only the component's own provisional
-    /// bindings cross that boundary while preserving local-name precedence.
+    /// Active-capability membership is checked after lexical shadowing and
+    /// before source order: this lets only exact graph-owned cycle bindings
+    /// cross that boundary while preserving local-name precedence.
     pub(crate) fn top_level_value_visibility(&self, name: &str) -> TopLevelValueVisibility<'_> {
         if self.lexical_bindings.contains(name) {
             return TopLevelValueVisibility::Visible;
