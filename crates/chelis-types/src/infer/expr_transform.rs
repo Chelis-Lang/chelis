@@ -170,8 +170,9 @@ fn wrt_selector(expr: &deep::Expr) -> Option<WrtSelector<'_>> {
     // and `chelis-backend-c`.
     //
     // It is a chelis#1107-class carrier question on chelis#1125's [04-TOT-5]
-    // ingress-parity axis, not this seam's class, so it is filed there rather
-    // than fixed inside a migration that claims to change no verdict.
+    // ingress-parity axis, not this seam's class. Filed as chelis#1618, a
+    // sub-issue of chelis#1125, rather than fixed inside a migration that
+    // claims to change no verdict.
     if let deep::Expr::List(tuple, _) = expr
         && get_tag(tuple) == Some(DeepTag::Tuple)
     {
