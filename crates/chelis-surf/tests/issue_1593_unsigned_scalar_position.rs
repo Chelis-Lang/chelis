@@ -29,6 +29,11 @@ const UNSIGNED: [&str; 8] = [
     "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
 ];
 
+/// Two of the other §1.1.1 reserved-but-deferred spellings. The scalar arm
+/// consults one predicate over both families because the tensor precision slot
+/// does, so these ride the same repair and are claimed at these two names only.
+const DEFERRED: [&str; 2] = ["complex64", "int4"];
+
 fn deep_of(source: &str) -> String {
     let decls = parse_str(source).expect("parse");
     print_canonical_flat(&desugar_program(&decls))
@@ -186,5 +191,62 @@ fn the_formatter_leaves_an_unsigned_spelling_unchanged() {
         );
         let twice = format_source(&once).expect("format twice");
         assert_eq!(once, twice, "formatter idempotence on `{name}`");
+    }
+}
+
+/// REGRESSION test. §5.8.1's rule is stated on the category, so an explicit
+/// `[..]` quantifier list does not rebind a reserved spelling. Below the
+/// quantifier check this still produced `(t-var {} u8)`.
+#[test]
+fn an_explicit_binder_does_not_rebind_a_reserved_scalar_name() {
+    for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
+        let deep = deep_of(&format!(
+            "module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"
+        ));
+        assert_reaches_rejection(&deep, name, "an explicit binder in a scalar position");
+    }
+}
+
+/// REGRESSION test. The tensor form of the same hole. The precision slot's
+/// quantifier check sat above its reserved-name row, so an explicit binder
+/// defeated the very fall-through the scalar arm was copying.
+#[test]
+fn an_explicit_binder_does_not_rebind_a_reserved_tensor_precision() {
+    for name in UNSIGNED.iter().chain(DEFERRED.iter()) {
+        let deep = deep_of(&format!(
+            "module P.M\nexport (f)\n\
+             def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+        ));
+        assert_reaches_rejection(&deep, name, "an explicit binder in a tensor precision slot");
+    }
+}
+
+/// DISPOSITION LOCK. Green in both states, and the positive control for the
+/// two rows above: an explicit binder list with an ordinary lowercase name
+/// still binds, in both the scalar and the tensor precision position.
+#[test]
+fn an_explicit_binder_with_an_ordinary_name_still_binds() {
+    let scalar = deep_of("module P.M\nexport (f)\ndef f[p](x: p) -> p = x\n");
+    assert!(
+        scalar.contains(&tvar_of("p")) && !scalar.contains(&prim_of("p")),
+        "`p` must stay an explicitly bound type variable: {scalar}"
+    );
+    let tensor = deep_of("module P.M\nexport (f)\ndef f[p](x: tensor[3, p]) -> tensor[3, p] = x\n");
+    assert!(
+        tensor.contains(&tvar_of("p")) && !tensor.contains(&prim_of("p")),
+        "`p` must stay a bound precision variable: {tensor}"
+    );
+}
+
+/// REGRESSION test. The reserved-but-deferred family reaches the same
+/// rejection in a scalar position, because the scalar arm consults the same
+/// predicate pair the tensor precision slot does.
+#[test]
+fn the_deferred_family_reaches_the_rejection_in_a_scalar_position() {
+    for name in DEFERRED {
+        let deep = deep_of(&format!(
+            "module P.M\nexport (f)\ndef f(x: {name}) -> {name} = x\n"
+        ));
+        assert_reaches_rejection(&deep, name, "a scalar parameter and return");
     }
 }

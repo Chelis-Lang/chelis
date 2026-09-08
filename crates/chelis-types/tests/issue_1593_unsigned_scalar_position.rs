@@ -24,6 +24,26 @@ const UNSIGNED: [&str; 8] = [
     "u8", "u16", "u32", "u64", "uint8", "uint16", "uint32", "uint64",
 ];
 
+/// Two of the other §1.1.1 reserved-but-deferred spellings, which ride the
+/// same repair because the scalar arm consults the tensor precision slot's
+/// predicate pair. Claimed at these two names only.
+const DEFERRED: [&str; 2] = ["complex64", "int4"];
+
+/// The deferred family's own §1.1.1 diagnostic, whose wording differs from the
+/// unsigned one.
+fn assert_deferred_diagnostic(source: &str, name: &str, position: &str) {
+    let messages = messages(source);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains(&format!("`{name}`"))
+                && message.contains("is reserved but deferred")
+                && message.contains("spec/04-type-system.md §1.1.1")),
+        "the diagnostic for `{name}` in {position} must name the spelling and \
+         cite §1.1.1; got: {messages:?}"
+    );
+}
+
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
@@ -223,6 +243,77 @@ fn signed_spellings_do_not_match_the_unsigned_family() {
             messages.is_empty(),
             "`{name}` is an active primitive (or an accepted input spelling \
              for one) and must still be accepted: {messages:?}"
+        );
+    }
+}
+
+/// REGRESSION test. An explicit `[..]` quantifier list does not rebind a
+/// reserved spelling, per §5.8.1's category rule. Both the scalar and the
+/// tensor precision position, and both reserved families.
+#[test]
+fn an_explicit_binder_does_not_rebind_a_reserved_name() {
+    for name in UNSIGNED {
+        assert_unsigned_diagnostic(
+            &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
+            name,
+            "an explicit binder in a scalar position",
+        );
+        let tensor = messages(&format!(
+            "module P.M\nexport (f)\n\
+             def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+        ));
+        assert!(
+            tensor
+                .iter()
+                .any(|message| message.contains("unsigned integer types are deferred")),
+            "an explicit binder must not rebind `{name}` in a tensor precision \
+             slot; got: {tensor:?}"
+        );
+    }
+    for name in DEFERRED {
+        assert_deferred_diagnostic(
+            &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
+            name,
+            "an explicit binder in a scalar position",
+        );
+        assert_deferred_diagnostic(
+            &format!(
+                "module P.M\nexport (f)\n\
+                 def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+            ),
+            name,
+            "an explicit binder in a tensor precision slot",
+        );
+    }
+}
+
+/// DISPOSITION LOCK. Green in both states, and the positive control for the
+/// row above: an explicit binder with an ordinary lowercase name still binds
+/// and the program still checks clean, in both positions.
+#[test]
+fn an_explicit_binder_with_an_ordinary_name_still_checks_clean() {
+    for source in [
+        "module P.M\nexport (f)\ndef f[p](x: p) -> p = x\n",
+        "module P.M\nexport (f)\ndef f[p](x: tensor[3, p]) -> tensor[3, p] = x\n",
+    ] {
+        let messages = messages(source);
+        assert!(
+            messages.is_empty(),
+            "an ordinary explicit binder must still bind: {source}\n{messages:?}"
+        );
+    }
+}
+
+/// REGRESSION test. The reserved-but-deferred family in a scalar position.
+/// Before, `def f(x: complex64) -> complex64 = x` scored 1.0 with an empty
+/// error vector, exactly as the unsigned family did.
+#[test]
+fn the_deferred_family_is_rejected_in_a_scalar_position() {
+    for name in DEFERRED {
+        assert_deferred_diagnostic(
+            &format!("module P.M\nexport (f)\ndef f(x: {name}) -> {name} = x\n"),
+            name,
+            "a scalar parameter and return",
         );
     }
 }

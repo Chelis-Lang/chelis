@@ -419,7 +419,11 @@ The `spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`,
 `u32`, `u64`, `uint8`, `uint16`, `uint32`, `uint64`) are explicitly
 excluded from implicit collection so they reach the type-checker's
 §1.1.2 rejection path with a precise diagnostic, rather than being
-silently absorbed as quantifiers.
+silently absorbed as quantifiers. The exclusion is not confined to
+implicit collection: a name reserved under `spec/04-type-system.md`
+§1.1.1 names no type variable in any type position, so a `[..]` clause
+does not rebind one. The clause overrides the case-split of §3.1, not
+the reserved and primitive spellings.
 
 The same identifier in a def's `[..]` clause may act as either a
 dim-var or a precision tvar depending on its position inside a

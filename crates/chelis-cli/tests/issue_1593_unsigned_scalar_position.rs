@@ -174,3 +174,83 @@ fn the_short_signed_aliases_are_untouched() {
         );
     }
 }
+
+/// REGRESSION test. Both binder forms at both ingresses: an explicit `[..]`
+/// clause does not rebind a reserved spelling, in the scalar position or in
+/// the tensor precision slot, through `chelis check` on Surf and through the
+/// Deep that `chelis deep` prints.
+#[test]
+fn an_explicit_binder_does_not_rebind_a_reserved_name_at_either_ingress() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    for name in UNSIGNED {
+        for (label, source) in [
+            (
+                "scalar",
+                format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
+            ),
+            (
+                "tensor precision",
+                format!(
+                    "module P.M\nexport (f)\n\
+                     def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+                ),
+            ),
+        ] {
+            fs::write(root.join("binder.ch"), &source).expect("write");
+
+            let checked = text(&run(root, &["check", "binder.ch"]));
+            assert!(
+                !checked.contains("\"score\": 1,"),
+                "an explicit binder must not rebind `{name}` in a {label} \
+                 position: {checked}"
+            );
+            assert!(
+                checked.contains("unsigned integer types are deferred"),
+                "the {label} binder form must carry the §1.1.1 diagnostic for \
+                 `{name}`: {checked}"
+            );
+
+            let printed =
+                String::from_utf8_lossy(&run(root, &["deep", "binder.ch"]).stdout).to_string();
+            assert!(
+                printed.contains(&format!("(t-prim {{}} {name})"))
+                    && !printed.contains(&format!("(t-var {{}} {name})")),
+                "the desugared Deep must not quantify `{name}` in a {label} \
+                 position: {printed}"
+            );
+            fs::write(root.join("binder.dp"), &printed).expect("write dp");
+            let deep_checked = text(&run(root, &["check", "binder.dp"]));
+            assert!(
+                !deep_checked.contains("\"score\": 1,")
+                    && deep_checked.contains("unsigned integer types are deferred"),
+                "the Deep ingress must reject the {label} binder form for \
+                 `{name}`: {deep_checked}"
+            );
+        }
+    }
+}
+
+/// DISPOSITION LOCK. Green in both states. The positive control: an explicit
+/// binder with an ordinary lowercase name still binds at both ingresses.
+#[test]
+fn an_explicit_binder_with_an_ordinary_name_still_scores_one() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    for source in [
+        "module P.M\nexport (f)\ndef f[p](x: p) -> p = x\n",
+        "module P.M\nexport (f)\ndef f[p](x: tensor[3, p]) -> tensor[3, p] = x\n",
+    ] {
+        fs::write(root.join("bound.ch"), source).expect("write");
+        let checked = text(&run(root, &["check", "bound.ch"]));
+        assert!(
+            checked.contains("\"score\": 1,"),
+            "an ordinary explicit binder must still bind: {source}\n{checked}"
+        );
+        let printed = String::from_utf8_lossy(&run(root, &["deep", "bound.ch"]).stdout).to_string();
+        assert!(
+            printed.contains("(t-var {} p)"),
+            "`p` must stay a bound type variable: {printed}"
+        );
+    }
+}

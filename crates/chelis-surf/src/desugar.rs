@@ -925,7 +925,7 @@ pub(crate) fn canonical_primitive_name(name: &str) -> Option<&'static str> {
 /// the type-checker's §1.1.1 rejection path with a precise diagnostic,
 /// NOT as candidate quantified type variables.
 ///
-/// Mirrors `chelis_types::infer::is_unsigned_dtype_name`. Kept as a
+/// Mirrors `chelis_types::deep_type::is_unsigned_dtype_name`. Kept as a
 /// parallel const here because chelis-surf does not depend on
 /// chelis-types and pulling in the dependency just for this list
 /// would invert the desugar / typecheck layering.
@@ -940,7 +940,7 @@ const UNSIGNED_DTYPE_NAMES: &[&str] = &[
 /// type-checker's §1.1.1 rejection path as `(t-prim {} <name>)`, not be
 /// quietly absorbed as candidate quantified type variables.
 ///
-/// Mirrors `chelis_types::infer::is_deferred_dtype_name`.
+/// Mirrors `chelis_types::deep_type::is_deferred_dtype_name`.
 const DEFERRED_DTYPE_NAMES: &[&str] = &[
     "f8e5m2",
     "int4",
@@ -950,6 +950,20 @@ const DEFERRED_DTYPE_NAMES: &[&str] = &[
     "decimal128",
     "decimal256",
 ];
+
+/// True if `name` is reserved under `spec/04-type-system.md` §1.1.1 and
+/// therefore names no type at all: the §1.1.2 unsigned spellings or one of the
+/// other reserved-but-deferred names.
+///
+/// A reserved spelling is not a candidate type variable and is not rebindable
+/// by an explicit quantifier list. §5.8.1 states the rule on the category, so
+/// this predicate is the category and every type-name decision below consults
+/// exactly it. Splitting the two lists across two decisions is what let
+/// `def f[u8](x: u8) -> u8 = x` keep scoring 1.0 after the first repair
+/// (chelis#1593).
+fn is_reserved_dtype_name(name: &str) -> bool {
+    UNSIGNED_DTYPE_NAMES.contains(&name) || DEFERRED_DTYPE_NAMES.contains(&name)
+}
 
 // ---------------------------------------------------------------------------
 // Declarations
@@ -2618,8 +2632,7 @@ fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &UnordSet<String>) -
 fn is_candidate_tvar_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_lowercase())
         && canonical_primitive_name(name).is_none()
-        && !UNSIGNED_DTYPE_NAMES.contains(&name)
-        && !DEFERRED_DTYPE_NAMES.contains(&name)
+        && !is_reserved_dtype_name(name)
 }
 
 /// Compute the set of free, lowercase, non-primitive identifiers used
@@ -2749,9 +2762,10 @@ fn desugar_type_with_scope_mode(
             //   call site (chelis#293). Without this, an uppercase
             //   quantifier name was misclassified as a rigid ADT and
             //   every call site failed with `type mismatch: P vs ..`.
-            // - A §1.1.2 unsigned spelling is a reserved name that names
-            //   no primitive, and stays `(t-prim {} <name>)` so the
-            //   checker's rejection fires (chelis#1593).
+            // - A name reserved under §1.1.1 names no type at all and
+            //   stays `(t-prim {} <name>)` so the checker's rejection
+            //   fires. It outranks the quantifier set, exactly as the
+            //   primitive arm does (chelis#1593).
             // - Otherwise the lexical case-split applies: a PascalCase
             //   name is an ADT; a lowercase name is a free `t-var`
             //   whose binding the type checker resolves downstream.
@@ -2759,17 +2773,22 @@ fn desugar_type_with_scope_mode(
                 node(DeepTag::TUnit, vec![])
             } else if let Some(canonical) = canonical_primitive_name(name) {
                 node(DeepTag::TPrim, vec![sym(canonical)])
-            } else if tvar_set.contains(name.as_str()) {
-                node(DeepTag::TVar, vec![sym(name)])
-            } else if UNSIGNED_DTYPE_NAMES.contains(&name.as_str()) {
+            } else if is_reserved_dtype_name(name) {
                 // chelis#1593. `is_candidate_tvar_name` already keeps these
-                // names out of the implicit quantifier set, which is only half
+                // names out of the IMPLICIT quantifier set, which is only half
                 // of what `spec/04-type-system.md` §5.8.1 asks for: excluding a
-                // name from the set does nothing while the fall-through below
-                // quantifies it anyway. `def f(x: u8) -> u8 = x` therefore
-                // typed as `forall u8. u8 -> u8` and scored 1.0. The
-                // `tensor[...]` precision slot has always had the right
-                // fall-through; this gives the scalar arm the same one.
+                // name from the set does nothing while a later arm quantifies
+                // it anyway. `def f(x: u8) -> u8 = x` therefore typed as
+                // `forall u8. u8 -> u8` and scored 1.0.
+                //
+                // Above `tvar_set` rather than below it, because §5.8.1 states
+                // the rule on the category: a reserved spelling names no type
+                // variable in any type position, and an explicit `[..]` clause
+                // does not rebind it. §P4b's clause overrides the
+                // PascalCase-vs-snake_case case-split, which is a different
+                // rule; the primitive arm above already outranks a binder for
+                // the same reason. Below `tvar_set`, `def f[u8](x: u8) -> u8`
+                // still scored 1.0.
                 //
                 // Mapped to NOTHING, unlike chelis#1587's `i8`..`i64` above:
                 // those are input spellings for active primitives and
@@ -2777,6 +2796,8 @@ fn desugar_type_with_scope_mode(
                 // `Prim::parse_name` must keep failing on them. Same class,
                 // opposite repair.
                 node(DeepTag::TPrim, vec![sym(name)])
+            } else if tvar_set.contains(name.as_str()) {
+                node(DeepTag::TVar, vec![sym(name)])
             } else if name.starts_with(|c: char| c.is_uppercase()) {
                 node(DeepTag::TAdt, vec![sym(name)])
             } else {
@@ -2836,6 +2857,14 @@ fn desugar_type_with_scope_mode(
             // it against the closed primitive set via Prim::parse_name.
             let prec_node = match canonical_primitive_name(precision) {
                 Some(canonical) => node(DeepTag::TPrim, vec![sym(canonical)]),
+                // A §1.1.1 reserved spelling outranks the quantifier set here
+                // for the reason it does in the scalar arm above: an explicit
+                // `[..]` clause does not rebind a name the language reserved.
+                // Without this row `def f[u8](x: tensor[3, u8])` scored 1.0
+                // even after the scalar arm was repaired (chelis#1593).
+                None if is_reserved_dtype_name(precision) => {
+                    node(DeepTag::TPrim, vec![sym(precision)])
+                }
                 None if tvar_set.contains(precision.as_str()) => {
                     node(DeepTag::TVar, vec![sym(precision)])
                 }
