@@ -51,6 +51,49 @@ fn assert_failed_report(name: &str, extension: &str, source: &str, expected_kind
     );
 }
 
+fn assert_only_cycle_report(name: &str, source: &str) {
+    let (success, report) = check_report(name, "ch", source);
+    assert!(!success, "{name}: initialization cycle exited successfully");
+    let errors = report["errors"].as_array().expect("errors array");
+    assert!(
+        errors.iter().any(|error| error["kind"] == "CycleDetected"),
+        "{name}: expected CycleDetected: {report:#}"
+    );
+    assert!(
+        errors.iter().all(|error| error["kind"] == "CycleDetected"),
+        "{name}: component co-inference leaked a non-cycle diagnostic: {report:#}"
+    );
+}
+
+fn assert_check_eval_build_cycle(name: &str, source: &str) {
+    assert_only_cycle_report(name, source);
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join(format!("{name}.ch"));
+    write_file(&path, source);
+    let path = path.to_str().expect("UTF-8 fixture path");
+    for (command, arguments) in [
+        ("eval", vec!["eval", "--file", path]),
+        ("build", vec!["build", path, "--target", "c"]),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(arguments)
+            .output()
+            .unwrap_or_else(|error| panic!("chelis {command} must run: {error}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains("binding cycle:"),
+            "{name}: {command} must reject before execution/lowering; stdout={} stderr={stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            !stderr.contains("unbound variable"),
+            "{name}: {command} leaked scheduling-order UnboundVariable: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn check_rejects_forward_values_on_deep_and_surf_surfaces() {
     assert_failed_report(
@@ -180,6 +223,42 @@ fn eval_and_build_reject_forward_values_before_execution_or_lowering() {
 }
 
 #[test]
+fn check_eval_and_build_reject_higher_order_lambda_cycles() {
+    for (name, source) in [
+        (
+            "returned_lambda_annotated",
+            "module ReturnedLambdaAnnotatedCli\n\n\
+             result: int32 = (make_reader())(1)\n\n\
+             def make_reader() = fn (x: int32) -> read_result(x)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+        (
+            "returned_lambda_unannotated",
+            "module ReturnedLambdaInferredCli\n\n\
+             result = (make_reader())(1)\n\n\
+             def make_reader() = fn (x: int32) -> read_result(x)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+        (
+            "stored_lambda_annotated",
+            "module StoredLambdaAnnotatedCli\n\n\
+             stored = fn (x: int32) -> read_result(x)\n\n\
+             result: int32 = stored(1)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+        (
+            "stored_lambda_unannotated",
+            "module StoredLambdaInferredCli\n\n\
+             stored = fn (x: int32) -> read_result(x)\n\n\
+             result = stored(1)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+    ] {
+        assert_check_eval_build_cycle(name, source);
+    }
+}
+
+#[test]
 fn eval_and_build_reject_a_later_external_input_before_lowering() {
     let directory = tempdir().expect("tempdir");
     for (name, source) in [
@@ -288,40 +367,35 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
     );
 }
 
-/// chelis#1485 at the public surface, restated for the narrowed mirror edge.
-///
-/// A value naming a function that reads the value back. With `f` SIGNED the
-/// mirror edge is gone (chelis#1486), the schedule no longer stalls, and the
-/// program checks clean; with `g` `defsig`-less the mirror edge remains and
-/// the backward read still reports unbound.
-///
-/// The clean row is an intermediate state, not the disposition. [04-INF-7]
-/// makes this program an eager value cycle and chelis#1487 gives the detector
-/// the lambda and value-stack edges it needs to say so, at which point this
-/// row becomes `CycleDetected`.
-///
-/// Disposition lock: the signed row moved with this change, the `defsig`-less
-/// row did not, and either moving again reddens the test.
+/// chelis#1485 / [04-INF-7] at the public surface. Full-reference components
+/// reject identically regardless of whether the reader has a complete header,
+/// is reached through a lambda, or has no `defsig`. Component co-inference may
+/// use provisional bindings, but no `UnboundVariable` may escape.
 #[test]
 fn a_value_that_names_a_function_reading_it_back_is_a_recorded_stall() {
-    assert_clean_report(
+    assert_only_cycle_report(
         "mirror_escape_signed",
-        "ch",
         "module MirrorEscape\n\n\
          def anchor() -> int32 = 1\n\n\
          carried = wrap(f)\n\n\
          def wrap(g) = g\n\n\
          def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
     );
-    assert_failed_report(
+    assert_only_cycle_report(
+        "mirror_escape_lambda",
+        "module PickEscape\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = pick(fn (x: int32) -> f(x))\n\n\
+         def pick(g) = 5\n\n\
+         def f(n: int32) -> int32 = add(n, carried)\n",
+    );
+    assert_only_cycle_report(
         "mirror_escape_defsig_less",
-        "ch",
         "module WrapEscape\n\n\
          def anchor() -> int32 = 1\n\n\
          carried = wrap(g)\n\n\
          def wrap(h) = h\n\n\
          def g(n) = if (n <= 0) then 0 else carried((n - 1))\n",
-        "UnboundVariable",
     );
 }
 

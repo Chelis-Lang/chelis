@@ -370,6 +370,487 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
     SignatureInferenceMetadata { functions }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TopLevelDefinitionKind {
+    Function,
+    EagerValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum TopLevelReferenceKind {
+    Read,
+    Apply,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TopLevelDefinition {
+    pub(super) item_index: usize,
+    pub(super) name: String,
+    pub(super) kind: TopLevelDefinitionKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct TopLevelReference {
+    pub(super) target: usize,
+    pub(super) kind: TopLevelReferenceKind,
+}
+
+/// One canonical syntactic reference graph for top-level inference.
+///
+/// Vertices are name-keyed top-level `def`s. `item_references` additionally
+/// records the outgoing references of every flattened item so the body
+/// scheduler can consume the same lexical walk as cycle detection and the
+/// function SCC planner. Edges point from the declaration/item containing the
+/// reference to the referenced definition. The edge kind distinguishes a bare
+/// read from direct application for diagnostics; reachability and SCCs use
+/// both, as [04-INF-7] requires.
+///
+/// Duplicate definitions are already rejected independently. For totality on
+/// such input, the first definition owns the vertex/ordinal while the last
+/// occurrence supplies its outgoing edges, matching the previous function
+/// planner and cycle detector.
+#[derive(Clone, Debug, Default)]
+pub(super) struct TopLevelReferenceGraph {
+    pub(super) definitions: Vec<TopLevelDefinition>,
+    pub(super) vertex_by_name: UnordMap<String, usize>,
+    pub(super) definition_vertex_by_item: Vec<Option<usize>>,
+    pub(super) outgoing: Vec<Vec<TopLevelReference>>,
+    pub(super) item_references: Vec<Vec<TopLevelReference>>,
+    pub(super) complete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TopLevelReferenceComponent {
+    /// Flattened `def` item ordinals in source order.
+    pub(super) members: Vec<usize>,
+    pub(super) cyclic: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct TopLevelReferenceComponents {
+    /// Components in dependency-first order. An edge `a -> b` means `a`
+    /// references `b`, so `b`'s component precedes `a`'s.
+    pub(super) components: Vec<TopLevelReferenceComponent>,
+    /// Flattened item ordinal -> component index. `defsig`, `deftype`, and
+    /// other non-definition items are `None` and remain scheduler singletons.
+    pub(super) component_by_item: Vec<Option<usize>>,
+    pub(super) complete: bool,
+}
+
+impl TopLevelReferenceGraph {
+    pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
+        profile_reference_graph_build();
+        let cancel = crate::cancel::current_cancel_token();
+        let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
+        let mut graph = Self {
+            definition_vertex_by_item: vec![None; items.len()],
+            item_references: vec![Vec::new(); items.len()],
+            complete: true,
+            ..Self::default()
+        };
+
+        let mut declared_signature_names = UnordSet::new();
+        for (_, expr) in items {
+            if cancelled() {
+                graph.complete = false;
+                return graph;
+            }
+            let Some((tag, _, kids)) = stamped_parts(expr) else {
+                continue;
+            };
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            if tag == DeepTag::Defsig {
+                declared_signature_names.insert(name.to_string());
+            }
+        }
+
+        for (item_index, (_, expr)) in items.iter().enumerate() {
+            if cancelled() {
+                graph.complete = false;
+                return graph;
+            }
+            let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+                continue;
+            };
+            let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
+                continue;
+            };
+            if let Some(vertex) = graph.vertex_by_name.get(name).copied() {
+                graph.definition_vertex_by_item[item_index] = Some(vertex);
+                continue;
+            }
+            let vertex = graph.definitions.len();
+            graph.vertex_by_name.insert(name.to_string(), vertex);
+            graph.definition_vertex_by_item[item_index] = Some(vertex);
+            graph.definitions.push(TopLevelDefinition {
+                item_index,
+                name: name.to_string(),
+                kind: if tagged_children(body, DeepTag::Fn).is_some() {
+                    TopLevelDefinitionKind::Function
+                } else {
+                    TopLevelDefinitionKind::EagerValue
+                },
+            });
+            graph.outgoing.push(Vec::new());
+        }
+
+        for (item_index, (_, expr)) in items.iter().enumerate() {
+            if cancelled() {
+                graph.complete = false;
+                return graph;
+            }
+            let mut references = BTreeSet::new();
+            let mut bound = Vec::new();
+            collect_top_level_references(expr, &graph.vertex_by_name, &mut bound, &mut references);
+
+            // [04-INF-4]: the literal self-reference of an explicitly typed
+            // external input is its declaration spelling, not an eager edge.
+            if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+                && let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1))
+                && (body_is_type_stamped_literal_self_ref(body, name)
+                    || (declared_signature_names.contains(name)
+                        && body_is_literal_self_ref_shape(body, name)))
+                && let Some(vertex) = graph.vertex_by_name.get(name).copied()
+            {
+                references.retain(|reference| reference.target != vertex);
+            }
+
+            let item_references = references.into_iter().collect::<Vec<_>>();
+            graph.item_references[item_index] = item_references.clone();
+            if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+                && let Some(name) = kids.first().and_then(symbol_name)
+                && let Some(vertex) = graph.vertex_by_name.get(name).copied()
+            {
+                // Last duplicate body wins, preserving the old planners'
+                // deterministic behavior on an already-invalid program.
+                graph.outgoing[vertex] = item_references;
+            }
+        }
+        graph
+    }
+
+    pub(super) fn definition(&self, vertex: usize) -> &TopLevelDefinition {
+        &self.definitions[vertex]
+    }
+
+    /// SCC projection of the full [04-INF-7] reference graph. This is the
+    /// shared seed for mixed body-inference components: scheduler-only mirror
+    /// and hole precedence edges may merge these components, but no consumer
+    /// may split one and reintroduce an inference-order `UnboundVariable` for
+    /// an eager cycle.
+    pub(super) fn inference_components(&self) -> TopLevelReferenceComponents {
+        if !self.complete {
+            return TopLevelReferenceComponents {
+                component_by_item: vec![None; self.item_references.len()],
+                complete: false,
+                ..TopLevelReferenceComponents::default()
+            };
+        }
+        let adjacency = self.adjacency();
+        let cancel = crate::cancel::current_cancel_token();
+        let Some(vertex_components) = unprofiled_scc_vertex_components(&adjacency, cancel.as_ref())
+        else {
+            return TopLevelReferenceComponents {
+                component_by_item: vec![None; self.item_references.len()],
+                complete: false,
+                ..TopLevelReferenceComponents::default()
+            };
+        };
+        let mut components = Vec::with_capacity(vertex_components.len());
+        let mut component_by_item = vec![None; self.item_references.len()];
+        for vertices in vertex_components {
+            let cyclic = vertices.len() > 1
+                || vertices
+                    .first()
+                    .is_some_and(|vertex| adjacency[*vertex].binary_search(vertex).is_ok());
+            let mut members = vertices
+                .iter()
+                .map(|vertex| self.definitions[*vertex].item_index)
+                .collect::<Vec<_>>();
+            members.sort_unstable();
+            let component_index = components.len();
+            for member in &members {
+                component_by_item[*member] = Some(component_index);
+            }
+            components.push(TopLevelReferenceComponent { members, cyclic });
+        }
+        TopLevelReferenceComponents {
+            components,
+            component_by_item,
+            complete: true,
+        }
+    }
+
+    fn adjacency(&self) -> Vec<Vec<usize>> {
+        self.outgoing
+            .iter()
+            .map(|references| {
+                let mut targets = references
+                    .iter()
+                    .map(|reference| reference.target)
+                    .collect::<Vec<_>>();
+                targets.sort_by_key(|target| {
+                    let definition = &self.definitions[*target];
+                    (definition.item_index, definition.name.clone())
+                });
+                targets.dedup();
+                targets
+            })
+            .collect()
+    }
+
+    fn cyclic_eager_components(&self) -> Vec<Vec<usize>> {
+        if !self.complete {
+            return Vec::new();
+        }
+        let adjacency = self.adjacency();
+        let Some(mut components) = unprofiled_scc_vertex_components(
+            &adjacency,
+            crate::cancel::current_cancel_token().as_ref(),
+        ) else {
+            return Vec::new();
+        };
+        components.retain(|component| {
+            let cyclic = component.len() > 1
+                || component
+                    .first()
+                    .is_some_and(|vertex| adjacency[*vertex].binary_search(vertex).is_ok());
+            cyclic
+                && component.iter().any(|vertex| {
+                    self.definitions[*vertex].kind == TopLevelDefinitionKind::EagerValue
+                })
+        });
+        for component in &mut components {
+            component.sort_by_key(|vertex| {
+                let definition = &self.definitions[*vertex];
+                (definition.item_index, definition.name.clone())
+            });
+        }
+        components.sort_by_key(|component| {
+            component
+                .iter()
+                .map(|vertex| self.definitions[*vertex].item_index)
+                .min()
+                .unwrap_or(usize::MAX)
+        });
+        components
+    }
+
+    fn cycle_path(&self, component: &[usize]) -> Vec<usize> {
+        let adjacency = self.adjacency();
+        let members = component.iter().copied().collect::<UnordSet<_>>();
+        let start = component
+            .iter()
+            .copied()
+            .filter(|vertex| self.definitions[*vertex].kind == TopLevelDefinitionKind::EagerValue)
+            .min_by_key(|vertex| {
+                let definition = &self.definitions[*vertex];
+                (definition.item_index, definition.name.clone())
+            })
+            .expect("an eager cycle component contains an eager value");
+        if adjacency[start].binary_search(&start).is_ok() {
+            return vec![start, start];
+        }
+
+        // Find the deterministic shortest return path from each source-order
+        // neighbor. Strong connectivity guarantees that one reaches `start`.
+        for &first in adjacency[start]
+            .iter()
+            .filter(|target| members.contains(target))
+        {
+            let mut queue = VecDeque::from([first]);
+            let mut predecessor = UnordMap::new();
+            let mut seen = UnordSet::new();
+            seen.insert(first);
+            while let Some(vertex) = queue.pop_front() {
+                if vertex == start {
+                    let mut reverse = vec![start];
+                    let mut current = start;
+                    while current != first {
+                        current = predecessor[&current];
+                        reverse.push(current);
+                    }
+                    reverse.reverse();
+                    let mut path = vec![start];
+                    path.extend(reverse);
+                    return path;
+                }
+                for &next in adjacency[vertex]
+                    .iter()
+                    .filter(|target| members.contains(target))
+                {
+                    if seen.insert(next) {
+                        predecessor.insert(next, vertex);
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+        unreachable!("every member of an SCC reaches its eager start")
+    }
+
+    pub(super) fn report_eager_cycle_errors(&self, errors: &mut DiagnosticSink<'_>) {
+        for component in self.cyclic_eager_components() {
+            let path = self.cycle_path(&component);
+            let names = path
+                .iter()
+                .map(|vertex| self.definitions[*vertex].name.as_str())
+                .collect::<Vec<_>>();
+            errors.push(CheckError::new(
+                CheckErrorKind::CycleDetected,
+                format!("binding cycle: {}", names.join(" -> ")),
+                vec![
+                    "Break the cycle by removing one of the self-referential definitions or \
+                     replacing it with a concrete value."
+                        .to_string(),
+                ],
+            ));
+        }
+    }
+}
+
+fn collect_top_level_references(
+    expr: &deep::Expr,
+    vertex_by_name: &UnordMap<String, usize>,
+    bound: &mut Vec<UnordSet<String>>,
+    references: &mut BTreeSet<TopLevelReference>,
+) {
+    stack_guard!("collect_top_level_references", expr);
+    match expr {
+        deep::Expr::Atom(_, _) => {}
+        deep::Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_top_level_references(value, vertex_by_name, bound, references);
+            }
+        }
+        // Metadata describes the expression; it is not executed as part of a
+        // top-level initializer. The stamped expression itself still is.
+        deep::Expr::MetaExpr(meta, _) => {
+            collect_top_level_references(&meta.expr, vertex_by_name, bound, references)
+        }
+        deep::Expr::List(list, _) => match get_tag(list) {
+            Some(DeepTag::App) => {
+                let kids = children(list);
+                if let Some(callee) = kids.first().and_then(var_name_expr)
+                    && vertex_by_name.contains_key(callee)
+                    && !is_bound_name(callee, bound)
+                {
+                    references.insert(TopLevelReference {
+                        target: vertex_by_name[callee],
+                        kind: TopLevelReferenceKind::Apply,
+                    });
+                } else if let Some(callee) = kids.first() {
+                    collect_top_level_references(callee, vertex_by_name, bound, references);
+                }
+                for argument in kids.iter().skip(1) {
+                    collect_top_level_references(argument, vertex_by_name, bound, references);
+                }
+            }
+            Some(DeepTag::Var) => {
+                if let Some(name) = children(list).first().and_then(symbol_name)
+                    && vertex_by_name.contains_key(name)
+                    && !is_bound_name(name, bound)
+                {
+                    references.insert(TopLevelReference {
+                        target: vertex_by_name[name],
+                        kind: TopLevelReferenceKind::Read,
+                    });
+                }
+            }
+            Some(DeepTag::Fn) => {
+                let kids = children(list);
+                if kids.len() >= 2 {
+                    bound.push(
+                        param_source_infos(&kids[0])
+                            .into_iter()
+                            .map(|(name, _)| name)
+                            .collect(),
+                    );
+                    // [04-INF-7]: nested lambda bodies are part of the eager
+                    // syntactic reference set even if the closure is stored.
+                    collect_top_level_references(&kids[1], vertex_by_name, bound, references);
+                    bound.pop();
+                }
+            }
+            Some(DeepTag::Let) => {
+                let kids = children(list);
+                if kids.len() < 2 {
+                    return;
+                }
+                bound.push(UnordSet::new());
+                if let Some(bind_kids) = kids
+                    .first()
+                    .and_then(|bindings| tagged_children(bindings, DeepTag::Bind))
+                {
+                    let mut index = 0;
+                    while index + 1 < bind_kids.len() {
+                        collect_top_level_references(
+                            &bind_kids[index + 1],
+                            vertex_by_name,
+                            bound,
+                            references,
+                        );
+                        if let Some(name) = symbol_name(&bind_kids[index]) {
+                            bound
+                                .last_mut()
+                                .expect("let scope exists")
+                                .insert(name.to_string());
+                        }
+                        index += 2;
+                    }
+                }
+                collect_top_level_references(&kids[1], vertex_by_name, bound, references);
+                bound.pop();
+            }
+            Some(DeepTag::Match) => {
+                let kids = children(list);
+                if let Some(scrutinee) = kids.first() {
+                    collect_top_level_references(scrutinee, vertex_by_name, bound, references);
+                }
+                for arm in kids.iter().skip(1) {
+                    let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
+                        collect_top_level_references(arm, vertex_by_name, bound, references);
+                        continue;
+                    };
+                    let Some(pattern) = arm_kids.first() else {
+                        continue;
+                    };
+                    bound.push(
+                        chelis_deep::pattern_binder_names(pattern)
+                            .into_iter()
+                            .collect(),
+                    );
+                    for scoped in arm_kids.iter().skip(1) {
+                        collect_top_level_references(scoped, vertex_by_name, bound, references);
+                    }
+                    bound.pop();
+                }
+            }
+            _ => {
+                for child in children(list) {
+                    collect_top_level_references(child, vertex_by_name, bound, references);
+                }
+            }
+        },
+        deep::Expr::Node(node, span) => {
+            let bridged = deep::Expr::List(node.to_list(*span), *span);
+            collect_top_level_references(&bridged, vertex_by_name, bound, references);
+        }
+        deep::Expr::BareList(elements, _) => {
+            for child in elements {
+                collect_top_level_references(child, vertex_by_name, bound, references);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_top_level_references(child, vertex_by_name, bound, references);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct FunctionInferenceMember {
     pub(super) item_index: usize,
@@ -397,92 +878,51 @@ impl Default for FunctionInferencePlan {
     }
 }
 
-struct FunctionDefItem<'a> {
-    vertex: usize,
-    item_index: usize,
-    name: String,
-    expr: &'a deep::Expr,
-}
-
 impl FunctionInferencePlan {
     /// Build the one canonical function dependency plan for an inference run.
     /// SCCs are constructed in O(vertices + edges), returned callee-first,
     /// and retain source order within each component.
+    #[cfg(test)]
     pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
+        let references = TopLevelReferenceGraph::build(items);
+        Self::build_from_reference_graph(&references)
+    }
+
+    /// Project the function-only SCC plan from the canonical top-level
+    /// reference graph. The main inference driver builds that graph once and
+    /// shares it with cycle diagnostics and the mixed-component scheduler.
+    pub(super) fn build_from_reference_graph(references: &TopLevelReferenceGraph) -> Self {
         profile_plan_build();
+        if !references.complete {
+            return Self::incomplete();
+        }
         let cancel = crate::cancel::current_cancel_token();
         let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
-        let mut vertex_by_name = UnordMap::<String, usize>::new();
-        let mut def_items = Vec::new();
-        for (item_index, (_, expr)) in items.iter().enumerate() {
+        let mut compact_by_reference_vertex = vec![None; references.definitions.len()];
+        let mut function_vertices = Vec::new();
+        for (reference_vertex, definition) in references.definitions.iter().enumerate() {
             if cancelled() {
                 return Self::incomplete();
             }
-            let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-                continue;
-            };
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                continue;
-            };
-            if kids
-                .get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn))
-                .is_none()
-            {
+            if definition.kind != TopLevelDefinitionKind::Function {
                 continue;
             }
-            let next_vertex = vertex_by_name.len();
-            let vertex = *vertex_by_name
-                .entry(name.to_string())
-                .or_insert(next_vertex);
-            def_items.push(FunctionDefItem {
-                vertex,
-                item_index,
-                name: name.to_string(),
-                expr,
-            });
+            compact_by_reference_vertex[reference_vertex] = Some(function_vertices.len());
+            function_vertices.push(reference_vertex);
         }
 
-        let def_names = vertex_by_name
-            .to_sorted()
-            .into_iter()
-            .map(|(name, _)| name.clone())
-            .collect::<UnordSet<_>>();
-        let mut graph = vec![Vec::<usize>::new(); vertex_by_name.len()];
-        for item in &def_items {
+        let mut graph = vec![Vec::<usize>::new(); function_vertices.len()];
+        for (vertex, &reference_vertex) in function_vertices.iter().enumerate() {
             if cancelled() {
                 return Self::incomplete();
             }
-            let Some((DeepTag::Def, _, kids)) = stamped_parts(item.expr) else {
-                continue;
-            };
-            let Some(fn_kids) = kids
-                .get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn))
-            else {
-                continue;
-            };
-            let (Some(params), Some(body)) = (fn_kids.first(), fn_kids.get(1)) else {
-                continue;
-            };
-            let mut bound = vec![
-                param_source_infos(params)
-                    .into_iter()
-                    .map(|(name, _)| name)
-                    .collect(),
-            ];
-            let mut calls = UnordSet::new();
-            collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
-            let mut callees = calls
-                .into_sorted()
-                .into_iter()
-                .filter_map(|name| vertex_by_name.get(&name).copied())
+            let mut callees = references.outgoing[reference_vertex]
+                .iter()
+                .filter_map(|reference| compact_by_reference_vertex[reference.target])
                 .collect::<Vec<_>>();
             callees.sort_unstable();
             callees.dedup();
-            // Preserve the previous duplicate-declaration behavior: the last
-            // well-formed body for one name supplies that name's adjacency.
-            graph[item.vertex] = callees;
+            graph[vertex] = callees;
         }
         profile_graph(graph.len(), graph.iter().map(Vec::len).sum());
 
@@ -502,12 +942,13 @@ impl FunctionInferencePlan {
                 recursive: false,
             })
             .collect::<Vec<_>>();
-        for item in def_items {
-            components[component_by_vertex[item.vertex]]
+        for (vertex, reference_vertex) in function_vertices.into_iter().enumerate() {
+            let definition = &references.definitions[reference_vertex];
+            components[component_by_vertex[vertex]]
                 .members
                 .push(FunctionInferenceMember {
-                    item_index: item.item_index,
-                    name: item.name,
+                    item_index: definition.item_index,
+                    name: definition.name.clone(),
                 });
         }
         for (component, vertices) in components.iter_mut().zip(&vertex_components) {
@@ -558,6 +999,21 @@ fn ordered_scc_vertex_components(
     graph: &[Vec<usize>],
     cancel: Option<&CancelToken>,
 ) -> Option<Vec<Vec<usize>>> {
+    scc_vertex_components(graph, cancel, true)
+}
+
+fn unprofiled_scc_vertex_components(
+    graph: &[Vec<usize>],
+    cancel: Option<&CancelToken>,
+) -> Option<Vec<Vec<usize>>> {
+    scc_vertex_components(graph, cancel, false)
+}
+
+fn scc_vertex_components(
+    graph: &[Vec<usize>],
+    cancel: Option<&CancelToken>,
+    profile: bool,
+) -> Option<Vec<Vec<usize>>> {
     let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
     let mut next_index = 0usize;
     let mut indices = vec![None; graph.len()];
@@ -580,7 +1036,9 @@ fn ordered_scc_vertex_components(
         next_index += 1;
         tarjan_stack.push(start);
         on_stack[start] = true;
-        profile_scc_vertex_entry();
+        if profile {
+            profile_scc_vertex_entry();
+        }
         frames.push(TarjanFrame {
             vertex: start,
             next_edge: 0,
@@ -593,14 +1051,18 @@ fn ordered_scc_vertex_components(
                 }
                 let callee = graph[frame.vertex][frame.next_edge];
                 frames.last_mut().expect("Tarjan frame exists").next_edge += 1;
-                profile_scc_edge_inspection();
+                if profile {
+                    profile_scc_edge_inspection();
+                }
                 if indices[callee].is_none() {
                     indices[callee] = Some(next_index);
                     lowlinks[callee] = next_index;
                     next_index += 1;
                     tarjan_stack.push(callee);
                     on_stack[callee] = true;
-                    profile_scc_vertex_entry();
+                    if profile {
+                        profile_scc_vertex_entry();
+                    }
                     frames.push(TarjanFrame {
                         vertex: callee,
                         next_edge: 0,
@@ -713,6 +1175,7 @@ fn ordered_scc_vertex_components(
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct FunctionPlanProfile {
     pub(super) plan_builds: usize,
+    pub(super) reference_graph_builds: usize,
     pub(super) graph_vertices: usize,
     pub(super) graph_edges: usize,
     pub(super) scc_vertex_entries: usize,
@@ -729,6 +1192,11 @@ thread_local! {
 fn profile_plan_build() {
     #[cfg(test)]
     FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().plan_builds += 1);
+}
+
+fn profile_reference_graph_build() {
+    #[cfg(test)]
+    FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().reference_graph_builds += 1);
 }
 
 fn profile_graph(vertices: usize, edges: usize) {
@@ -833,132 +1301,6 @@ pub(super) fn collect_authored_signature_types(
         }
     }
     signatures
-}
-
-pub(super) fn collect_top_level_calls(
-    expr: &deep::Expr,
-    def_names: &UnordSet<String>,
-    bound: &mut Vec<UnordSet<String>>,
-    calls: &mut UnordSet<String>,
-) {
-    // Bail before this walker's own unbounded recursion exhausts the native
-    // stack on a deeply-nested `app` body. This pass accumulates into
-    // `calls`/`bound` and carries no error vector, so it cannot push a
-    // diagnostic itself; the guard records the bail in `STACK_EXHAUSTED` so
-    // the check entry boundary still turns it into a hard located failure
-    // (never a silent partial collection). See `STACK_RED_ZONE_BYTES`.
-    stack_guard!("collect_top_level_calls", expr);
-    match expr {
-        deep::Expr::Atom(_, _) => {}
-        deep::Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_top_level_calls(value, def_names, bound, calls);
-            }
-        }
-        deep::Expr::MetaExpr(meta, _) => {
-            collect_top_level_calls(&meta.expr, def_names, bound, calls)
-        }
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::App) => {
-                let kids = children(list);
-                if let Some(callee) = kids.first().and_then(var_name_expr)
-                    && def_names.contains(callee)
-                    && !is_bound_name(callee, bound)
-                {
-                    calls.insert(callee.to_string());
-                }
-                for child in kids {
-                    collect_top_level_calls(child, def_names, bound, calls);
-                }
-            }
-            // A bare reference (alias binding, argument position, returned
-            // value) is a dependency edge too: an aliased in-group call is
-            // still recursion, and the §3.1.1 uniformity check only sees a
-            // group the SCC planner reports (spec/04 §3.1.1).
-            Some(DeepTag::Var) => {
-                if let Some(name) = children(list).first().and_then(symbol_name)
-                    && def_names.contains(name)
-                    && !is_bound_name(name, bound)
-                {
-                    calls.insert(name.to_string());
-                }
-            }
-            Some(DeepTag::Fn) => {
-                let kids = children(list);
-                if kids.len() >= 2 {
-                    bound.push(
-                        param_source_infos(&kids[0])
-                            .into_iter()
-                            .map(|(n, _)| n)
-                            .collect(),
-                    );
-                    collect_top_level_calls(&kids[1], def_names, bound, calls);
-                    bound.pop();
-                }
-            }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
-                if kids.len() < 2 {
-                    return;
-                }
-                let mut let_names = UnordSet::new();
-                if let Some(bind_kids) = kids
-                    .first()
-                    .and_then(|bind| tagged_children(bind, DeepTag::Bind))
-                {
-                    let mut index = 0;
-                    while index + 1 < bind_kids.len() {
-                        collect_top_level_calls(&bind_kids[index + 1], def_names, bound, calls);
-                        if let Some(name) = symbol_name(&bind_kids[index]) {
-                            let_names.insert(name.to_string());
-                        }
-                        index += 2;
-                    }
-                }
-                bound.push(let_names);
-                collect_top_level_calls(&kids[1], def_names, bound, calls);
-                bound.pop();
-            }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
-                if let Some(scrutinee) = kids.first() {
-                    collect_top_level_calls(scrutinee, def_names, bound, calls);
-                }
-                for arm in kids.iter().skip(1) {
-                    let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
-                        continue;
-                    };
-                    if arm_kids.len() < 3 {
-                        continue;
-                    }
-                    bound.push(pattern_names_for_signature(&arm_kids[0]));
-                    collect_top_level_calls(&arm_kids[1], def_names, bound, calls);
-                    collect_top_level_calls(&arm_kids[2], def_names, bound, calls);
-                    bound.pop();
-                }
-            }
-            _ => {
-                for child in children(list) {
-                    collect_top_level_calls(child, def_names, bound, calls);
-                }
-            }
-        },
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            collect_top_level_calls(&bridged, def_names, bound, calls);
-        }
-        deep::Expr::BareList(elems, _) => {
-            for child in elems {
-                collect_top_level_calls(child, def_names, bound, calls);
-            }
-        }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                collect_top_level_calls(child, def_names, bound, calls);
-            }
-        }
-    }
 }
 
 pub(crate) fn param_has_consuming_use(
@@ -1872,297 +2214,6 @@ pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> b
     }
 }
 
-/// Detect cycles among top-level `def` bindings.
-///
-/// An explicitly typed external-input pattern (`x: T = x` or `x = (x : T)`)
-/// is permitted: its literal self-loop declares an input rather than reading
-/// an eager value. An untyped `x = x`, or any cycle with an intermediate hop,
-/// is a real binding cycle and is reported as a `CycleDetected` error.
-pub(super) fn detect_top_level_binding_cycles(
-    exprs: &[deep::Expr],
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let mut def_names: Vec<String> = Vec::new();
-    let mut def_name_set: UnordSet<String> = UnordSet::new();
-    let mut def_bodies: UnordMap<String, &deep::Expr> = UnordMap::new();
-    let mut declared_signature_names: UnordSet<String> = UnordSet::new();
-    // Descend through `(module {} name ...)` wrappers so this check works
-    // on idiomatic Surf sources (every `.ch` file starts with `module X`,
-    // which desugars to a single top-level `module` list wrapping every
-    // declaration). Without this, the cycle check is a no-op in practice.
-    for expr in top_level_decl_items(exprs) {
-        let Some((tag, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        if tag == DeepTag::Defsig {
-            declared_signature_names.insert(name.to_string());
-            continue;
-        }
-        if tag == DeepTag::Def {
-            let Some(body) = kids.get(1) else { continue };
-            if !def_name_set.contains(name) {
-                def_name_set.insert(name.to_string());
-                def_names.push(name.to_string());
-            }
-            def_bodies.insert(name.to_string(), body);
-        }
-    }
-
-    // Phase 1: per-def, collect both the vars referenced EAGERLY (outside fn
-    // bodies) and the top-level fns APPLIED eagerly. Lazy refs inside fn
-    // bodies are captured separately so we can chain them in on demand.
-    let mut direct_refs: UnordMap<String, UnordSet<String>> = UnordMap::new();
-    let mut applied_fns: UnordMap<String, UnordSet<String>> = UnordMap::new();
-    let mut fn_body_refs: UnordMap<String, (UnordSet<String>, UnordSet<String>)> = UnordMap::new();
-    for name in &def_names {
-        let Some(body) = def_bodies.get(name) else {
-            continue;
-        };
-        let mut refs: UnordSet<String> = UnordSet::new();
-        let mut applied: UnordSet<String> = UnordSet::new();
-        let mut bound: UnordSet<String> = UnordSet::new();
-        collect_eager_refs(body, &mut bound, &mut refs, &mut applied);
-        direct_refs.insert(name.clone(), refs);
-        applied_fns.insert(name.clone(), applied);
-        // If this def's body IS itself a fn, also collect what its body
-        // references so callers of this def can chain.
-        if let deep::Expr::List(list, _) = body
-            && get_tag(list) == Some(DeepTag::Fn)
-            && let Some(fn_body) = children(list).get(1)
-        {
-            let mut inner_refs: UnordSet<String> = UnordSet::new();
-            let mut inner_applied: UnordSet<String> = UnordSet::new();
-            let mut inner_bound: UnordSet<String> = UnordSet::new();
-            // Bind the fn's own params so they aren't flagged as refs.
-            if let Some(params_list) = children(list).first()
-                && let deep::Expr::List(params, _) = params_list
-                && get_tag(params) == Some(DeepTag::Params)
-            {
-                for param in children(params) {
-                    if let Some(pname) = param_name_for_refs(param) {
-                        inner_bound.insert(pname);
-                    }
-                }
-            }
-            collect_eager_refs(
-                fn_body,
-                &mut inner_bound,
-                &mut inner_refs,
-                &mut inner_applied,
-            );
-            fn_body_refs.insert(name.clone(), (inner_refs, inner_applied));
-        }
-    }
-
-    // Phase 2: build two edge sets per def.
-    //   - value_edges[d]: names read AS VALUES in d's body (i.e. `(var x)`
-    //     where x is not a fn callee). Reading a value requires that value
-    //     to already be bound — a cycle here is a real binding cycle.
-    //   - call_edges[d]: names d CALLS (`(app (var f) ...)`). Calling a fn
-    //     pushes its body into eager evaluation but does NOT require f's
-    //     value — f is a callable, not a scalar. Recursive calls with base
-    //     cases terminate and don't close a cycle.
-    //
-    // Cycle condition: DFS from each VALUE def X, traversing both edge
-    // kinds transitively. Track the stack of VALUE defs we're currently
-    // evaluating. If a value-edge lands on a stack member, that's a real
-    // binding cycle. Fn names aren't pushed onto the stack — they are
-    // intermediates in the path.
-    let mut value_edges: UnordMap<String, Vec<String>> = UnordMap::new();
-    let mut call_edges: UnordMap<String, Vec<String>> = UnordMap::new();
-    for name in &def_names {
-        let body = def_bodies.get(name).copied();
-        let is_explicit_external_input = body.is_some_and(|body| {
-            body_is_type_stamped_literal_self_ref(body, name)
-                || (declared_signature_names.contains(name)
-                    && body_is_literal_self_ref_shape(body, name))
-        });
-        let body_is_fn = matches!(
-            body,
-            Some(deep::Expr::List(list, _)) if get_tag(list) == Some(DeepTag::Fn)
-        );
-
-        let (raw_refs, raw_applied) = if body_is_fn {
-            let empty_refs: UnordSet<String> = UnordSet::new();
-            let empty_applied: UnordSet<String> = UnordSet::new();
-            fn_body_refs
-                .get(name)
-                .map(|(r, a)| (r.clone(), a.clone()))
-                .unwrap_or((empty_refs, empty_applied))
-        } else {
-            (
-                direct_refs.get(name).cloned().unwrap_or_default(),
-                applied_fns.get(name).cloned().unwrap_or_default(),
-            )
-        };
-
-        let mut value_out: Vec<String> = raw_refs
-            .into_sorted()
-            .into_iter()
-            .filter(|r| {
-                if r == name && is_explicit_external_input {
-                    return false;
-                }
-                def_name_set.contains(r)
-            })
-            .collect();
-        let mut call_out: Vec<String> = raw_applied
-            .into_sorted()
-            .into_iter()
-            .filter(|r| def_name_set.contains(r))
-            .collect();
-        value_out.sort();
-        call_out.sort();
-        value_edges.insert(name.clone(), value_out);
-        call_edges.insert(name.clone(), call_out);
-    }
-
-    let mut reported: UnordSet<Vec<String>> = UnordSet::new();
-
-    // DFS from each value def. Track:
-    //   - `value_stack`: the value defs we're "currently evaluating". A
-    //     value_edge landing on a member of this stack is a cycle.
-    //   - `visited`: nodes we've already fully explored from some starting
-    //     value def. Avoids re-walking fn bodies we've cleared.
-    //   - `path`: the traversal path for error reporting (includes both
-    //     values and fns as intermediates).
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Color {
-        White,
-        Gray,
-        Black,
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn dfs(
-        node: &str,
-        is_value: &dyn Fn(&str) -> bool,
-        value_edges: &UnordMap<String, Vec<String>>,
-        call_edges: &UnordMap<String, Vec<String>>,
-        color: &mut UnordMap<String, Color>,
-        value_stack: &mut Vec<String>,
-        path: &mut Vec<String>,
-        reported: &mut UnordSet<Vec<String>>,
-        errors: &mut DiagnosticSink<'_>,
-    ) {
-        color.insert(node.to_string(), Color::Gray);
-        let this_is_value = is_value(node);
-        if this_is_value {
-            value_stack.push(node.to_string());
-        }
-        path.push(node.to_string());
-
-        if let Some(neighbors) = value_edges.get(node) {
-            for next in neighbors {
-                if let Some(start) = value_stack.iter().position(|s| s == next) {
-                    // Value-edge landing on a value currently being
-                    // evaluated → real binding cycle.
-                    let value_seg_start = path.iter().position(|s| s == &value_stack[start]);
-                    let cycle: Vec<String> = if let Some(s) = value_seg_start {
-                        path[s..].to_vec()
-                    } else {
-                        value_stack[start..].to_vec()
-                    };
-                    let mut canon = cycle.clone();
-                    if let Some((min_idx, _)) = canon.iter().enumerate().min_by(|a, b| a.1.cmp(b.1))
-                    {
-                        canon.rotate_left(min_idx);
-                    }
-                    if reported.insert(canon.clone()) {
-                        let mut pathstr = canon.clone();
-                        pathstr.push(canon[0].clone());
-                        let message = format!("binding cycle: {}", pathstr.join(" -> "));
-                        errors.push(CheckError::new(
-                            CheckErrorKind::CycleDetected,
-                            message,
-                            vec![
-                                "Break the cycle by removing one of the \
-                                 self-referential definitions or replacing it \
-                                 with a concrete value."
-                                    .to_string(),
-                            ],
-                        ));
-                    }
-                } else if color.get(next).copied().unwrap_or(Color::White) == Color::White {
-                    dfs(
-                        next,
-                        is_value,
-                        value_edges,
-                        call_edges,
-                        color,
-                        value_stack,
-                        path,
-                        reported,
-                        errors,
-                    );
-                }
-            }
-        }
-
-        if let Some(neighbors) = call_edges.get(node) {
-            for next in neighbors {
-                // Fn calls don't require the callee's VALUE — they just
-                // push the callee's body into eager evaluation. Gray nodes
-                // are mid-exploration (recursive reentry) — skip to avoid
-                // infinite DFS.
-                if color.get(next).copied().unwrap_or(Color::White) == Color::White {
-                    dfs(
-                        next,
-                        is_value,
-                        value_edges,
-                        call_edges,
-                        color,
-                        value_stack,
-                        path,
-                        reported,
-                        errors,
-                    );
-                }
-            }
-        }
-
-        path.pop();
-        if this_is_value {
-            value_stack.pop();
-        }
-        color.insert(node.to_string(), Color::Black);
-    }
-
-    let is_value = |name: &str| -> bool {
-        def_bodies
-            .get(name)
-            .map(|body| !matches!(body, deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn)))
-            .unwrap_or(false)
-    };
-    let mut color: UnordMap<String, Color> = def_names
-        .iter()
-        .map(|n| (n.clone(), Color::White))
-        .collect();
-    let mut value_stack: Vec<String> = Vec::new();
-    let mut path: Vec<String> = Vec::new();
-    for name in &def_names {
-        if !is_value(name) {
-            continue;
-        }
-        if color.get(name).copied() == Some(Color::White) {
-            dfs(
-                name,
-                &is_value,
-                &value_edges,
-                &call_edges,
-                &mut color,
-                &mut value_stack,
-                &mut path,
-                &mut reported,
-                errors,
-            );
-        }
-    }
-}
-
 pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
     stack_guard!("param_name_for_refs", param, None);
     match param {
@@ -2181,152 +2232,42 @@ pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
     }
 }
 
-/// Collect both eager references and top-level fn applications.
-///
-/// `refs` gets free `(var name)` references that fire at definition time
-/// (i.e., NOT inside an enclosing `fn` body).
-///
-/// `applied` gets names of fns called as `(app (var F) ...)` at definition
-/// time (again, not inside a nested fn body). Callers use `applied` to
-/// chain in the called fn's own eager refs for cycle detection — this is
-/// what catches top-level value cycles that route through a fn call:
-///
-/// ```text
-/// a = f()
-/// b = g()
-/// def f() = b
-/// def g() = a
-/// ```
-///
-/// Plain `collect_free_var_refs` (kept below for backward compatibility)
-/// ignores fn bodies entirely, which correctly permits mutual recursion
-/// between fn defs never called eagerly — but misses the cycle above.
-pub(super) fn collect_eager_refs(
-    expr: &deep::Expr,
-    bound: &mut UnordSet<String>,
-    refs: &mut UnordSet<String>,
-    applied: &mut UnordSet<String>,
-) {
-    stack_guard!("collect_eager_refs", expr);
-    match expr {
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::Var) => {
-                if let Some(name) = children(list).first().and_then(symbol_name)
-                    && !bound.contains(name)
-                {
-                    refs.insert(name.to_string());
-                }
-            }
-            Some(DeepTag::Fn) => {
-                // Skip fn body — only its application at this site (if any)
-                // is eager; the body itself is deferred.
-            }
-            Some(DeepTag::App) => {
-                let kids = children(list);
-                if let Some(callee) = kids.first()
-                    && let deep::Expr::List(clist, _) = callee
-                    && get_tag(clist) == Some(DeepTag::Var)
-                    && let Some(fname) = children(clist).first().and_then(symbol_name)
-                    && !bound.contains(fname)
-                {
-                    // Callee is in `applied` only — NOT in `refs`. For cycle
-                    // detection, reading `g` as a value is different from
-                    // calling `g()`: the former requires g's value now, the
-                    // latter just pushes g's body into eager evaluation and
-                    // may terminate at a base case.
-                    applied.insert(fname.to_string());
-                } else if let Some(callee) = kids.first() {
-                    collect_eager_refs(callee, bound, refs, applied);
-                }
-                for arg in kids.iter().skip(1) {
-                    collect_eager_refs(arg, bound, refs, applied);
-                }
-            }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
-                let mut added: Vec<String> = Vec::new();
-                if let Some(deep::Expr::List(bind_list, _)) = kids.first()
-                    && get_tag(bind_list) == Some(DeepTag::Bind)
-                {
-                    let bind_kids = children(bind_list);
-                    let mut i = 0;
-                    while i + 1 < bind_kids.len() {
-                        collect_eager_refs(&bind_kids[i + 1], bound, refs, applied);
-                        if let Some(name) = symbol_name(&bind_kids[i])
-                            && bound.insert(name.to_string())
-                        {
-                            added.push(name.to_string());
-                        }
-                        i += 2;
-                    }
-                }
-                if let Some(body) = kids.get(1) {
-                    collect_eager_refs(body, bound, refs, applied);
-                }
-                for name in added {
-                    bound.remove(&name);
-                }
-            }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
-                // The scrutinee is evaluated in the enclosing scope. Pattern
-                // binders exist only inside their own arm's guard and body.
-                if let Some(scrutinee) = kids.first() {
-                    collect_eager_refs(scrutinee, bound, refs, applied);
-                }
-                for arm in kids.iter().skip(1) {
-                    let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
-                        collect_eager_refs(arm, bound, refs, applied);
-                        continue;
-                    };
-                    let mut added = Vec::new();
-                    if let Some(pattern) = arm_kids.first() {
-                        for name in chelis_deep::pattern_binder_names(pattern) {
-                            if bound.insert(name.clone()) {
-                                added.push(name);
-                            }
-                        }
-                    }
-                    for scoped in arm_kids.iter().skip(1) {
-                        collect_eager_refs(scoped, bound, refs, applied);
-                    }
-                    for name in added {
-                        bound.remove(&name);
-                    }
-                }
-            }
-            _ => {
-                for elem in &list.elements {
-                    collect_eager_refs(elem, bound, refs, applied);
-                }
-            }
-        },
-        deep::Expr::Map(map, _) => {
-            for (_, v) in &map.entries {
-                collect_eager_refs(v, bound, refs, applied);
-            }
-        }
-        deep::Expr::MetaExpr(meta, _) => {
-            for (_, v) in &meta.entries {
-                collect_eager_refs(v, bound, refs, applied);
-            }
-            collect_eager_refs(&meta.expr, bound, refs, applied);
-        }
-        deep::Expr::Atom(_, _) => {}
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            collect_eager_refs(&bridged, bound, refs, applied);
-        }
-        deep::Expr::BareList(elems, _) => {
-            for child in elems {
-                collect_eager_refs(child, bound, refs, applied);
-            }
-        }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                collect_eager_refs(child, bound, refs, applied);
-            }
-        }
+#[cfg(test)]
+mod top_level_reference_graph_tests {
+    use super::*;
+
+    fn graph(source: &str) -> TopLevelReferenceGraph {
+        let declarations = chelis_surf::parser::parse_str(source)
+            .unwrap_or_else(|error| panic!("graph fixture must parse: {error:?}\n{source}"));
+        let exprs = chelis_surf::desugar::desugar_program(&declarations);
+        let items = top_level_decl_items_with_modules(&exprs);
+        TopLevelReferenceGraph::build(&items)
+    }
+
+    /// [04-INF-7] regression: lambda bodies and applications feed the same
+    /// full SCC projection that Slice C consumes.
+    #[test]
+    fn eager_lambda_cycle_is_one_component() {
+        let graph = graph(
+            "module LambdaCycle\n\n\
+             carried = map(fn (x: int32) -> f(x), [1, 2])\n\n\
+             def f(n: int32) -> int32 = add(n, carried)\n",
+        );
+        let carried = graph.vertex_by_name["carried"];
+        let f = graph.vertex_by_name["f"];
+        let projection = graph.inference_components();
+        assert!(projection.complete);
+        let component_index = projection.component_by_item[graph.definition(carried).item_index]
+            .expect("carried is scheduled in a definition component");
+        assert_eq!(
+            projection.component_by_item[graph.definition(f).item_index],
+            Some(component_index)
+        );
+        assert!(projection.components[component_index].cyclic);
+        assert_eq!(projection.components[component_index].members.len(), 2);
+        let components = graph.cyclic_eager_components();
+        assert_eq!(components.len(), 1, "{components:#?}");
+        assert!(components[0].contains(&carried), "{components:#?}");
+        assert!(components[0].contains(&f), "{components:#?}");
     }
 }

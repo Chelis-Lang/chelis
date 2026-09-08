@@ -9,9 +9,10 @@ use super::*;
 pub(super) fn validate_ir_program(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
+    top_level_references: &TopLevelReferenceGraph,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    detect_top_level_binding_cycles(exprs, errors);
+    top_level_references.report_eager_cycle_errors(errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();
