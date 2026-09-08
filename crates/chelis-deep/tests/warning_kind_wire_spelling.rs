@@ -1,4 +1,4 @@
-//! chelis#886: the validation-warning wire spellings are a published
+//! chelis#886: the validation-warning wire spellings are a consumer-visible
 //! identity, restated here independently of the projection that emits them.
 //!
 //! `check_snippet` spelled these with `{:?}`, which made the wire a function
@@ -35,7 +35,8 @@ fn every_warning_kind_projects_to_its_pinned_spelling() {
         assert_eq!(
             kind.wire_name(),
             expected,
-            "the wire spelling of {kind:?} is published; changing it is a wire \
+            "the wire spelling of {kind:?} is a consumer-visible identity; \
+             changing it is a wire \
              change and needs a deliberate migration, not a rename"
         );
     }

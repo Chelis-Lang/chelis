@@ -121,10 +121,14 @@ impl WarningKind {
     /// spellings independently, so a rename fails by name instead.
     ///
     /// "Published" would overstate it: nothing normative governs these four
-    /// strings -- they appear nowhere in `spec/` or `openspec/specs`, and the
-    /// repo's structural mechanism for exactly this concern
+    /// strings AS WIRE SPELLINGS. Two of them do occur in the spec as prose --
+    /// `spec/03-deep-syntax.md` §8.1 "Structural Validation" and §8.2 "Arity
+    /// Validation" name the categories these variants report -- but no text
+    /// anywhere enumerates the four as diagnostic identities a consumer may
+    /// match on. The repo's structural mechanism for exactly that concern
     /// (`chelis-vocab::DiagnosticKind`, `[05-UNS-6]`, and the diagnostic-kind
-    /// mutation oracle) does not cover `WarningKind`. Routing it there is the
+    /// mutation oracle, which targets only `chelis-compiler-api` and
+    /// `chelis-vocab`) does not cover `WarningKind`. Routing it there is the
     /// real fix and is a separate change; this table plus its test is the
     /// local one.
     pub fn wire_name(&self) -> &'static str {
