@@ -304,11 +304,33 @@ fn lower_surf_program(src: &str) -> Result<Dag, chelis_ir::lower::LowerDiagnosti
 /// the checker's rejection is not `fatal`-flagged, because that flag belongs
 /// to the lowering diagnostic type and has no analogue here, and it carries no
 /// `span_id`, because `MalformedForm` diagnostics from the slot seam are not
-/// span-located. Neither is a PP8 claim. The `extract_axis_raw` fatal arm this
-/// test used to witness is now unreachable from any checked program, which is
-/// what its own doc comment says it should be; it retains no test witness, and
-/// that is recorded in PR #1602 as residual scope rather than papered over
-/// with a replacement fixture.
+/// span-located. Neither is a PP8 claim.
+///
+/// WHICH GUARD LOST ITS WITNESS, precisely, because a maintainer reading this
+/// must not delete the wrong thing. It is the `DeepTag::Vmap` arm of
+/// `resolve_callable_expr_inner` (`chelis-ir/src/lower.rs:6716-6742`), which
+/// reads the axis with `extract_usize_value` and raises a fatal, located
+/// error whose message opens "`vmap` mapped axis is not a compile-time integer
+/// constant" and whose `span_id` is the axis node's. That message and that
+/// span are exactly what the deleted assertions required.
+///
+/// It is NOT `extract_axis_raw`, which this file's earlier note misnamed.
+/// `extract_axis_raw` is never called for `vmap`: its call sites pass
+/// "gather", "scatter_replace", "scatter_elements", "softmax", and the
+/// reduction path's forwarded `op`, so its message template cannot contain
+/// "vmap" and could never have satisfied the deleted assertion. That
+/// function's own lack of a message witness is pre-existing and is not
+/// something this change created.
+///
+/// AND THE GUARD IS NOT DEAD CODE. The chelis#524 block comment above names
+/// two routes to it: the `.dp` input path, and "any internal IR transform".
+/// Check time closes only the first. "Unreachable from any checked program"
+/// is therefore true but strictly narrower than "unreachable": an internal IR
+/// transform that synthesizes a `vmap` node with a non-constant axis still
+/// reaches this arm after the checker has passed, and that second route is
+/// the one now unwitnessed. No fixture is owed for it -- witnessing a
+/// fail-loud internal-contract guard would mean synthesizing IR no checked
+/// program can produce -- and PR #1602 records it as residual scope.
 #[test]
 fn issue524_runtime_vmap_axis_is_rejected_at_check_time() {
     let exprs = chelis_deep::parser::parse_str(VMAP_RUNTIME_AXIS_DEEP).expect("deep parse");
