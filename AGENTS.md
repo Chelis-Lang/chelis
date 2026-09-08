@@ -80,16 +80,37 @@ not drift.
   reviewer read never earns one.
 - Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
   exact head, changed files, the pull request's in-scope claims, the worktree and target
-  it may use and whether that target is free, the deadline (15 minutes unless the brief
-  says otherwise), and the delivery channel. The brief does not open with "read
+  it may use with pasted busy-signal output for that target, the context and
+  report-length budgets, the deadline (15 minutes unless the brief says otherwise), and
+  the delivery channel. The brief does not open with "read
   `AGENTS.md`".
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   reviewer an existing worktree and its warm target cache when the worktree is at the
   exact review head, has a known clean baseline, and has no concurrent writer or build
-  owner. The brief saying the target is free is the heavyweight-command handshake of
+  owner. The brief does not assert that last condition; it pastes evidence bearing on
+  it. Run
+  `.venv/bin/python scripts/worktree_status.py [--path PATH] [--json] [--quiet]`
+  and paste its output, with the time you took it, into the brief. That pasted output,
+  not the sentence around it, is the heavyweight-command handshake of
   [Build Concurrency And Process Hygiene](#build-concurrency-and-process-hygiene) for
   that target. Create a new worktree or target only when those reuse conditions do not
   hold.
+- Read what that signal actually says. It answers free, busy, unknown, or not clean,
+  and where those conflict the more cautious answer wins. Missing evidence withholds
+  free by design rather than standing in for an empty machine: a probe that could not
+  read the process table answers unknown, so unknown is a reason to wait rather than a
+  reason to proceed. A `--local` or full gate run is lease-proven and kernel-backed. A
+  run that takes no lease, `--fast` among them, is caught only by a scan of the
+  processes it spawned, so it is the weakest of the signals. A finished gate report is
+  printed under a history label and is never current state. Free is the probe's best
+  answer rather than a proof: it documents the residual case its own fail-safe does not
+  reach.
+- A reviewer whose probes mutate tracked source does not share a worktree with anything
+  that compiles, whatever the signal reports. This is an exception to warm reuse rather
+  than a caveat on it: sequencing narrows the window in which one agent's inserted
+  variant reaches another agent's build, and a separate worktree closes it.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §7
+  has the collisions both rules come from.
 - Before spawning a fresh round, inventory subagent handles created in your own current
   session. Retire only stale or failed handles that will not be used again; a standing
   reviewer awaiting a fix is neither. Do not disturb another developer's handles. If the
@@ -103,9 +124,17 @@ not drift.
 
 - Every pull request, documentation-only work included, gets at least one compliant
   red-team round before merge. Push first, after `python3 scripts/gate.py --fast`: the
-  round reviews the pushed head while CI runs on it. The full `--local` gate runs at
-  most once per pull request, on the committed candidate, immediately before
-  ready-for-review.
+  round reviews the pushed head while CI runs on it. The full `--local` gate covers the
+  head that goes ready-for-review. Run it late, on the committed candidate you intend
+  to ship, so one run normally suffices; when a review round changes that candidate the
+  earlier run stops describing it and you run it again. Evidence that predates the
+  repairs describes a head nobody is merging. The pull request records which head each
+  run covered, so a reader can check the evidence against the merged commit instead of
+  assuming the two match. A rebase that preserves the candidate's content is exempt per
+  [Worktree And Branch Discipline](#worktree-and-branch-discipline), and the record says
+  that the covered head differs from the merged one.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
+  has the runs behind this rule.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
@@ -145,10 +174,22 @@ not drift.
   inventories, mechanisms, or promises merely to absorb a finding. When a correction
   would require that expansion, reduce the claim and track the additional work outside
   the pull request.
-- Keep a pull request under about 1,000 hand-written changed lines; regenerated
-  artifacts, such as embedded skill copies and generated registries, do not count.
-  Slices that ship together are commits inside one pull request; slices that can ship
-  apart are separate pull requests.
+- Separability sizes a pull request. Slices that must ship together are commits
+  inside one pull request; slices that can ship apart are separate pull requests. A
+  line count does not decide it. About 1,000 hand-written changed lines, excluding
+  regenerated artifacts such as embedded skill copies and generated registries, is the
+  point at which you owe a sentence justifying that the work is still one shippable
+  slice. It is not a threshold the next line breaches, and arguing it as one argues
+  about the wrong quantity: a pull request already past the figure invites the
+  sunk-cost reading that finishing is cheaper than splitting, which is not a judgement.
+- The sharper signal is the ratio of cases a claim covers to cases its tests prove.
+  A pull request whose oracle proves a small fraction of what its claim asserts is too
+  big for that oracle at any line count, and the repair is to narrow the claim or
+  extend the oracle. This is the measurable form of the claim-granularity rule above.
+  Put size inside the reviewing round's scope and invite the reviewer to disagree with
+  it; a reviewer told that size is settled cannot raise the finding that matters here.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §6 has the
+  branches that outgrew the figure and the ratio that caught it.
 - A finding class is the underlying defect category or unmet obligation, not its file,
   line, or wording instance. Every round record names the class of each finding; when a
   report leaves one unlabeled, the orchestrator assigns it while recording the round.
@@ -581,6 +622,19 @@ When a public surface has an implicit invariant, make it explicit and test it.
   documentation edits and throwaway probes. Keep its branch, target, and scratch state
   task-owned, and give it its own environment per
   [Build Toolchain](#build-toolchain); never copy or symlink the primary `.venv`.
+- A worktree isolates the working tree, the index, and its own HEAD reflog. It does not
+  isolate the stash stack, `.git/info/exclude`, the hooks directory, or branch reflogs:
+  those are per repository, so every worktree on a clone shares one copy of each, and a
+  write to any of them is a write to every sibling's state. Having worked out that a
+  worktree's `.git` is a file pointing at the shared directory is not the same as
+  acting on it.
+- Do not run `git stash` in a shared clone. The stack is one stack for the whole
+  repository: `push` with a pathspec that matches nothing is a silent no-op, the
+  paired `pop` then takes whatever a peer session left on top, and `pop` says nothing
+  about whose work it just applied to your tree. To discard your own changes use
+  `git checkout -- <paths>`. To park them, copy the files to task-owned scratch space.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §5 records the
+  incident.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
@@ -594,8 +648,8 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
   before any history rewrite is published. Run `python3 scripts/gate.py --fast` on the
   result for a non-documentation change or the focused documentation checks for a
-  docs-only change; the once-per-pull-request `--local` run is not repeated for a
-  rebase. Never force-push a red gate. Obtain approval, then use an exact-head
+  docs-only change; a content-preserving rebase does not oblige a fresh `--local` run,
+  and the record notes that the covered head is not the merged one. Never force-push a red gate. Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
   neither does one whose only hand-resolved conflicts are generated or digest lines:
   regenerate `rejection_registry_generated.rs` with
@@ -714,14 +768,15 @@ Agent gates for non-documentation changes:
 
 ```sh
 python3 scripts/gate.py --fast    # before every push: fixes in place, then checks
-python3 scripts/gate.py --local   # once per PR, on the committed candidate
+python3 scripts/gate.py --local   # covers the head that goes ready-for-review
+python3 scripts/gate.py --detach --local   # same run, detached
+python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
 ```
 
 `scripts/gate.py` is the single source of truth for the per-PR gate. `--fast` is the
-pre-push gate: fix-in-place, run before every push. `--local` is the
-once-per-pull-request gate: run on the committed candidate immediately before
-ready-for-review, after the draft is pushed and CI has started. The bare full gate is
-CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
+pre-push gate: fix-in-place, run before every push. `--local` runs on the committed
+candidate after the draft is pushed and CI has started, and must cover the head that
+goes ready-for-review. The bare full gate is CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
@@ -785,7 +840,8 @@ completion oracle, and the tracker requires every fix in that class to run
 it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
 line.
 
-`--local` (chelis#360) is the once-per-PR gate on the committed candidate. It runs
+`--local` (chelis#360) is the gate on the committed candidate that goes
+ready-for-review. It runs
 two of the three workspace clippy configurations (`-D warnings`, compile-only): the
 default row and the solver-free-features row. The `--no-default-features` row is
 CI-owned through `gate.py lint-and-unit`, because `check_configuration_closure.py`
@@ -802,10 +858,18 @@ resolved from each member's `Cargo.toml`, not the directory name). The derived c
 list is always printed; "no crate changes detected" means the per-crate stage was
 skipped, not silently empty. The workspace nextest stage is CI-owned: run `--fast`
 before every push, push before the review round so the reviewer and CI see the same
-head, run `--local` once on the committed candidate immediately before
-ready-for-review, and let CI (macOS Smoke is the authoritative workspace oracle) run
-the full suite. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+head, run `--local` on the committed candidate that goes ready-for-review, and let CI
+(macOS Smoke is the authoritative workspace oracle) run the full suite. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on macOS.
+
+A cold `--local` run does not fit inside a foreground command budget, so do not start
+it as one. Launch it with `python3 scripts/gate.py --detach --local` and collect the
+result with `python3 scripts/gate.py --status [HANDLE]`. The launcher's exit code is a
+launch verdict and nothing more: the run's own exit code, exit 4 for a lease timeout
+included, arrives through `--status`. Record the `--status` verdict and the head it
+covered, never the launch.
+[`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
+has the runs that produced both rules.
 
 `--fast` is the inner-loop pass. It fixes in place and prints what it changed:
 `scripts/regen_all.py --tier 0` (the rejection registry, the embedded conformance
@@ -1007,6 +1071,68 @@ output. That failure looks like a code regression and is not one.
   resumes it immediately with the exact missing items. Prefer a clearly labelled partial
   report over silence or an overstated completion claim, and deduplicate repeated reports
   that race with a resume nudge.
+
+### Fan-Out Budget
+
+A fleet's running cost is the sum of its live contexts plus a shared usage window, and
+nothing reports either total. Meter both at the spawn, which is where the decision is
+actually made. [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §3
+has the fleet run these numbers come from.
+
+- Spawning more than five subagents live at once under one orchestrator needs the
+  user's explicit approval and a stated reason. Five is not a certified safe width. It
+  is the widest fan-out measured working here, against seven as the width that broke,
+  and the threshold exists to force the decision into the open rather than to bless
+  anything under it. This is a separate budget from the CPU one in
+  [Build Concurrency And Process Hygiene](#build-concurrency-and-process-hygiene): a
+  fan-out the workstation can schedule comfortably can still exhaust a usage window in
+  minutes.
+- Every spawn names the model tier it runs on and says in one clause why that tier
+  fits the work. Reserve the expensive tier for judgement whose errors are costly to
+  detect, and give mechanical work the cheap tier: waiting on CI, polling, mirroring
+  bytes between files, transcribing a result. A standing instruction to economize is
+  not a substitute. The tier is named per spawn, or it was never chosen.
+- Every brief states a context budget and a report-length budget, both as numbers. An
+  agent that will exceed its context budget says so and returns what it has rather
+  than continuing silently, and a report over its length budget is a defect in the
+  report rather than evidence that the budget was too small.
+- An orchestrator states its own context size in the message that announces a spawn,
+  so the fleet's live total is visible to the user without anyone having to ask for
+  it.
+
+### Briefs
+
+- A brief that carries facts the orchestrator has already established says so: that
+  they are verified, what head or artifact they were verified against, and that the
+  agent must not re-derive them. It also names what the agent still has to establish
+  for itself, so "trust the brief" does not read as "trust everything". Without those
+  two lines an agent re-reads the sources behind the brief, and the orchestrator never
+  sees that it happened. Re-spawning is where this bites hardest: a brief reissued
+  byte-identically to a replacement agent has usually lost the exploration the
+  original spawn was built on, and the replacement pays for it again.
+- A brief longer than a few paragraphs is written to a file and passed as a pointer.
+  The prompt itself stays short enough to read: the pointer, the task, and the
+  delivery channel. Three properties follow, and the third is not obvious. A brief
+  that outlives the turn can be re-sent verbatim when an agent is killed or cut off,
+  so the work resumes without being re-authored from memory. A shared common-rules
+  file lets one set of verified facts serve every brief in a fleet without being
+  retyped into each. And inter-agent messages truncate at roughly four kilobytes,
+  silently, so a brief or a report pasted inline costs one round trip to discover the
+  truncation and another to resend. Where this contract calls a brief "inline" it means
+  self-contained, the opposite of "read `AGENTS.md`", and not that the text must sit in
+  the spawn message; a pointer to a self-contained file satisfies it.
+- The brief file outlives both the agent that reads it and the session that wrote it,
+  or the resume property above is imaginary. Put it where both parties can still read
+  it after either one restarts, and pass an absolute path. A brief parked in a
+  per-session scratchpad leaves its reader holding a pointer to nothing the moment the
+  author is killed, which is the failure the file was supposed to survive.
+- Reports come back the same way, and "the same way" is specific: the agent writes the
+  report to a file and replies with the absolute path and a one-line summary, and that
+  reply is the delivery. Writing the file and saying nothing is not delivery, as the
+  first rule in this section already says.
+
+[`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §4 has the measured cost of
+re-derivation, and the kills and cut-offs that file-based briefs were resumed from.
 
 ## Style Gate
 

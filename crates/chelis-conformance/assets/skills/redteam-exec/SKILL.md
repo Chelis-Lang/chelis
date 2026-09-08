@@ -71,9 +71,18 @@ validation pass, or verification of a fix that a red team reported.
 - Prefer an existing worktree and warm target artifacts when it is pinned to the exact
   review head, its baseline status is known and clean, and no concurrent agent or build
   owns it. Otherwise create an isolated worktree or target.
-- The brief saying the target is free is the heavyweight-command handshake for that
-  target. The reviewer uses it without a cold rebuild and asks before starting any
-  other heavyweight build.
+- The brief pastes the busy signal for that target instead of asserting it:
+  `.venv/bin/python scripts/worktree_status.py [--path PATH] [--json] [--quiet]`.
+  That pasted output is the heavyweight-command handshake for that target. It answers
+  free, busy, unknown, or not clean, withholds free when evidence is missing, and prints
+  a finished gate report under a history label rather than as current state, so treat
+  unknown as busy. Free is its best answer rather than a proof; the probe documents the
+  residual case its fail-safe does not reach. The reviewer uses a free target without a cold rebuild and asks
+  before starting any other heavyweight build.
+- A reviewer whose probes mutate tracked source gets its own worktree, whatever the
+  signal reports. This is an exception to reuse, not a caveat on it: sequencing narrows
+  the window in which an inserted variant reaches someone else's compile, and a
+  separate worktree removes it.
 - Reusing a worktree must not relax exact-head verification, adversarial execution, or
   restoration proof. Restore temporary tests, fixtures, and mutations after the pass
   and report the final worktree status unless the user explicitly asks to retain them.
@@ -91,8 +100,11 @@ In-scope claims: <the pull request's stated claims, one per line>. A finding is 
 scope only when this pull request introduces it, worsens it, or claims to correct it;
 anything else is out of scope and gets an issue link or "untracked", not a repair.
 Worktree: <absolute path>, at the head above, baseline <clean | describe>.
-Target: <absolute path>, warm, <free: no other build owns it | busy until HH:MM>. Use
-it as is; do not rebuild cold, and ask before starting any other heavyweight build.
+Target: <absolute path>, warm. Busy signal, taken <HH:MM local>, pasted verbatim from
+`.venv/bin/python scripts/worktree_status.py --path <target>`:
+<paste the command's output here; do not summarise it>
+Use it as is; do not rebuild cold, and ask before starting any other heavyweight build.
+Budgets: context <N> tokens; report <N> characters.
 Deadline: <HH:MM local>, <15> minutes from now. Report what you have when it arrives;
 an unfinished check is "unvalidated", not a finding.
 Deliver by: <SendMessage to <name> | final report>. Nothing else counts as delivery.
@@ -153,9 +165,12 @@ Deliver by: <SendMessage to <name> | final report>.
   patching witnesses: change the representation, the oracle, the claim, or the brief
   before another round. Do not keep expanding the pull request to satisfy a moving
   brief.
-- Keep a pull request under about 1,000 hand-written changed lines; regenerated
-  artifacts do not count. Slices that ship together are commits inside one pull
-  request, and slices that ship apart are separate pull requests.
+- Separability sizes a pull request. Slices that must ship together are commits
+  inside one pull request, and slices that can ship apart are separate pull requests.
+  About 1,000 hand-written changed lines, regenerated artifacts excluded, is the point
+  at which the author owes a sentence justifying one shippable slice, not a threshold.
+  Size is in scope for the round: the ratio of cases a claim covers to cases its tests
+  prove is the reportable signal, and a low one is a finding whatever the line count.
 
 ## Minimum Deliverable
 
