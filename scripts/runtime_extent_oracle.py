@@ -943,6 +943,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
                 "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
                 "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
+                "two_expands_over_one_operand_axis_share_one_guard",
             ),
         ),
         # A CLI-rooted program is not the exported kernel: `def main() =

@@ -117,8 +117,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // axis, or is the negative row that refuses a non-unit one.
     (
         "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
-        7,
-        "the same-rank broadcast fixture, the zero-extent fixture, the static and runtime non-unit refusals, the unit-extent control, and the two locally placed claims over a runtime `shrink` extent",
+        11,
+        "the same-rank broadcast fixture, the zero-extent fixture, the static and runtime non-unit refusals, the unit-extent control, the two locally placed claims over a runtime `shrink` extent, and the two-`expand`-over-one-operand pair with its refuted twin",
     ),
     // `expand`'s own runtime behaviour suite. It exists because the previous
     // `expand.ch` was entirely rank-increasing and moved to `insert.ch`

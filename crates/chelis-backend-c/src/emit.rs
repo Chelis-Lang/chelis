@@ -257,33 +257,50 @@ impl CEmitter {
         // chelis#665; it is not this change.
         // Two claim KINDS reach this list: the equality classes and, since
         // chelis#1277 S2b, the unit-extent claims (C2.9). They are keyed the
-        // same way, on the axis whose extent the guard reads, and collecting
-        // into a map would let a duplicate key REPLACE silently. A dropped
-        // guard is the wrong answer, not a missing optimization, so the
-        // collision is a hard failure naming both sites rather than a
-        // `debug_assert` that ships as nothing.
+        // same way, on the axis whose extent the guard reads, so two sites can
+        // land on one key. Collecting into a map would let the second REPLACE
+        // the first silently, and what would be lost is a guard.
         //
-        // It should be impossible. A class member and a unit claim on the same
-        // (node, axis) would need that axis to be simultaneously an output
-        // axis some operation SETS under a stamped claim and the operand axis
-        // an `expand` claims is 1, with the unit claim placed Local, which
-        // requires its source not to resolve to a `Load`. Nobody has
-        // constructed it, and this check is here because "nobody constructed
-        // it" is not the same as "it cannot happen", and the failure mode if
-        // it does is silent.
+        // Whether that is a defect depends on whether the two AGREE, and the
+        // first cut of this check did not ask:
+        //
+        // - EQUAL sites coalesce. One locally computed unit axis feeding two
+        //   `expand` nodes produces the same claim, canonical and operation
+        //   twice, and one emitted guard satisfies both, so a second is
+        //   redundant rather than lost. Refusing there refused a program that
+        //   checks clean and evaluates exactly, which is what round 2 found.
+        // - DISAGREEING sites are still refused. Two different claims or two
+        //   different canonicals on one key cannot both be emitted from one
+        //   comparison, so emitting either would drop a real obligation.
+        //
+        // The disagreeing case is not constructible today, and the reason is
+        // structural rather than lucky: a unit claim's canonical is always the
+        // literal `1`, and a class member reaching this list is always an
+        // `InputAxis`-sourced member of a `Name` class, whose canonical is that
+        // binder. For the two to share a key the same axis would have to be
+        // both, which needs a `Name` claim whose load walk finds no `Load`
+        // while the axis is also an `expand` operand. The check stays because
+        // that is an argument about today's derivation, not an invariant the
+        // type system holds.
         let mut local_dim_guard_sites: chelis_unord::UnordMap<
             chelis_ir::ownership::LocalGuardSite,
             chelis_ir::ownership::LocalGuardClaim,
         > = chelis_unord::UnordMap::new();
         for (site, claim) in dag.local_dim_guard_sites() {
             if let Some(existing) = local_dim_guard_sites.get(&site) {
+                if *existing == claim {
+                    continue;
+                }
                 let (node, axis) = site;
                 return Err(Unsupported::new(
-                    UnsupportedKind::Construct("two local extent guards on one axis".to_string()),
+                    UnsupportedKind::Construct(
+                        "two disagreeing local extent guards on one axis".to_string(),
+                    ),
                     format!(
-                        "node {node} axis {axis} carries two local guard sites: claim \
-                         `{}` against `{}` under `{}`, and claim `{}` against `{}` under \
-                         `{}`. Emitting one would drop the other",
+                        "node {node} axis {axis} carries two local guard sites that do \
+                         not agree: claim `{}` against `{}` under `{}`, and claim `{}` \
+                         against `{}` under `{}`. One comparison cannot satisfy both, \
+                         so emitting either would drop the other",
                         existing.claim,
                         existing.operand,
                         existing.op,
@@ -294,9 +311,9 @@ impl CEmitter {
                     Stage::Codegen("c"),
                     chelis_types::deliberate_rejection!(
                         "[04-NUM-9]",
-                        "every runtime extent guard section 4.7 places is emitted; a \
-                         site that would silently replace another is refused rather \
-                         than losing one of them"
+                        "every runtime extent guard section 4.7 places is emitted; two \
+                         sites on one key that disagree are refused rather than losing \
+                         one of them"
                     ),
                 ));
             }

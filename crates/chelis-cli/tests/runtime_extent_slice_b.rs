@@ -142,6 +142,31 @@ sig f: tensor[n, f32] -> tensor[3, f32]\n\
 def f(x) = expand(shrink(&x, [[0i64, sub(shape(&x, 0), 2i64)]]), 0, 3i64)\n\
 out = f(to_tensor([cast(7.0, f32), cast(9.0, f32), cast(11.0, f32)]))\n";
 
+/// One locally computed unit axis feeding TWO `expand` nodes.
+///
+/// Both claims land on the same (operand node, axis) key with the same claim,
+/// canonical and operation, so one emitted guard satisfies both.
+const TWO_EXPANDS_OVER_ONE_OPERAND: &str = "module Repro.TwoExpands\n\
+sig f: tensor[n, f32] -> tensor[f32]\n\
+def f(x) = {\n  \
+s = shrink(x, [[0i64, sub(shape(x, 0), 2i64)]])\n  \
+a = expand(s, 0, 5i64)\n  \
+b = expand(s, 0, 4i64)\n  \
+add(sum(a, 0), sum(b, 0))\n\
+}\n\
+out = f(to_tensor([7.0f32, 9.0f32, 11.0f32]))\n";
+
+/// The same program shrunk to two elements, which refutes the shared claim.
+const TWO_EXPANDS_REFUTED: &str = "module Repro.TwoExpandsRefuted\n\
+sig f: tensor[n, f32] -> tensor[f32]\n\
+def f(x) = {\n  \
+s = shrink(x, [[0i64, sub(shape(x, 0), 1i64)]])\n  \
+a = expand(s, 0, 5i64)\n  \
+b = expand(s, 0, 4i64)\n  \
+add(sum(a, 0), sum(b, 0))\n\
+}\n\
+out = f(to_tensor([7.0f32, 9.0f32, 11.0f32]))\n";
+
 /// A literal operand extent that refutes the claim statically.
 const STATIC_NON_UNIT_SOURCE: &str = "module Repro.ExpandStaticNonUnit\n\
 def bad(x: tensor[2, 4, f32]) -> tensor[2, 3, f32] = expand(&x, 1, 3i64)\n";
@@ -1374,5 +1399,78 @@ fn a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering() {
     assert!(
         emitted.contains("extent `1`: claimed = %lld"),
         "with section 4.7's context on its own line:\n{emitted}"
+    );
+}
+
+/// Two `expand` nodes over one locally computed unit axis share a guard site,
+/// and that is a coalesce rather than a collision.
+///
+/// EVIDENTIARY STATUS: regression test, for a defect this pull request created
+/// and round 2 found. The duplicate-key check added after round 1 refused any
+/// second site on a key, so this program, which checks at score 1.0 and
+/// evaluates to `63.0`, could not be built at all. The two sites carry the same
+/// claim, the same canonical and the same operation, so one emitted comparison
+/// discharges both; only a DISAGREEING pair loses an obligation, and only that
+/// is refused now.
+///
+/// Both halves are asserted because either alone would mislead. Without the
+/// trapping twin, coalescing could have been implemented by dropping the guard
+/// entirely and this row would still pass.
+#[test]
+fn two_expands_over_one_operand_axis_share_one_guard() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let path = fixture(&dir, "two_expands.ch", TWO_EXPANDS_OVER_ONE_OPERAND);
+    let out_dir = dir.path().join("two-expands-out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "two agreeing claims on one axis must not refuse codegen: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted =
+        std::fs::read_to_string(out_dir.join("two_expands.c")).expect("C source is written");
+    assert_eq!(
+        emitted.matches(&domain_trap_line("expand")).count(),
+        1,
+        "the two sites coalesce to one guard rather than emitting it twice:\n{emitted}"
+    );
+    assert!(
+        common::link_generated(&out_dir, "two_expands.c", "two_expands").success(),
+        "the agreeing program must link"
+    );
+    let ran = std::process::Command::new(out_dir.join("two_expands"))
+        .output()
+        .expect("compiled agreeing program");
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success() && stdout.contains("63"),
+        "and must produce the value eval produces: {stdout}{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(
+        stdout,
+        String::from_utf8_lossy(&eval(&path).stdout),
+        "compiled C and eval agree byte for byte"
+    );
+
+    // The coalesced guard is still a guard.
+    let bad = fixture(&dir, "two_expands_refuted.ch", TWO_EXPANDS_REFUTED);
+    let bad_dir = dir.path().join("two-expands-refuted-out");
+    assert!(
+        build_c(&bad, &bad_dir).status.success(),
+        "a refuted claim is a runtime failure, so the build still succeeds"
+    );
+    assert!(
+        common::link_generated(&bad_dir, "two_expands_refuted.c", "refuted").success(),
+        "the refuted program must link"
+    );
+    let ran = std::process::Command::new(bad_dir.join("refuted"))
+        .output()
+        .expect("compiled refuted program");
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        !ran.status.success() && stderr.contains(&domain_trap_line("expand")),
+        "the one coalesced guard still refuses a non-unit operand: {stderr}"
     );
 }
