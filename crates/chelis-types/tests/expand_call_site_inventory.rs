@@ -113,6 +113,21 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // carry a unit extent at the axis, which is what `expand` means under
     // `spec/04-type-system.md` section 4.7.2, so these are same-rank
     // broadcasts and not migration debt.
+    // The Slice B and S2b CLI receipts. Every `expand` here broadcasts a unit
+    // axis, or is the negative row that refuses a non-unit one.
+    (
+        "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
+        5,
+        "the same-rank broadcast fixture, the zero-extent fixture, the static and runtime non-unit refusals, and the unit-extent control",
+    ),
+    // `expand`'s own runtime behaviour suite. It exists because the previous
+    // `expand.ch` was entirely rank-increasing and moved to `insert.ch`
+    // (chelis#1277 S2a), leaving the operation with no suite of its own.
+    (
+        "packages/chelis-std/tests/runtime/expand.ch",
+        6,
+        "the chelis-std runtime suite for the same-rank broadcast",
+    ),
     (
         "crates/chelis-types/tests/issue5_cmp_broadcast_both_forms.rs",
         2,
