@@ -33,6 +33,7 @@ Not executed here: nothing takes the real workstation lease, reads the real
 through `reap_orphans.parse_ps_output`.
 """
 
+import contextlib
 import fcntl
 import importlib.util
 import io
@@ -415,22 +416,22 @@ class LsFilesDebugParserTests(unittest.TestCase):
 class ProcessMatchingTests(unittest.TestCase):
     def test_gate_process_matched_by_absolute_path(self):
         procs = [_proc(31, 1, f"/usr/bin/python3 {PROBED}/scripts/gate.py --local")]
-        found = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
+        found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual([p.pid for p in found], [31])
 
     def test_gate_process_in_another_worktree_is_not_matched(self):
         procs = [_proc(31, 1, f"/usr/bin/python3 {OTHER}/scripts/gate.py --local")]
-        found = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
+        found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual(found, [])
 
     def test_relative_gate_invocation_matched_by_cwd(self):
         procs = [_proc(32, 1, "python3 scripts/gate.py --local")]
-        found = status.match_gate_processes(procs, Path(PROBED), lambda pid: PROBED)
+        found, _undecided = status.match_gate_processes(procs, Path(PROBED), lambda pid: PROBED)
         self.assertEqual([p.pid for p in found], [32])
 
     def test_relative_gate_invocation_elsewhere_is_not_matched(self):
         procs = [_proc(32, 1, "python3 scripts/gate.py --local")]
-        found = status.match_gate_processes(procs, Path(PROBED), lambda pid: OTHER)
+        found, _undecided = status.match_gate_processes(procs, Path(PROBED), lambda pid: OTHER)
         self.assertEqual(found, [])
 
     def test_a_shell_that_merely_names_the_gate_script_is_not_a_gate(self):
@@ -443,7 +444,7 @@ class ProcessMatchingTests(unittest.TestCase):
             _proc(71, 1, f"/usr/bin/vim {PROBED}/scripts/gate.py"),
             _proc(72, 1, f"tail -f {PROBED}/scripts/gate.py"),
         ]
-        found = status.match_gate_processes(procs, Path(PROBED), lambda pid: PROBED)
+        found, _undecided = status.match_gate_processes(procs, Path(PROBED), lambda pid: PROBED)
         self.assertEqual(found, [])
 
     def test_every_interpreter_spelling_still_matches(self):
@@ -452,7 +453,7 @@ class ProcessMatchingTests(unittest.TestCase):
         for argv0 in ("python", "python3", "python3.11", f"{PROBED}/.venv/bin/python3"):
             with self.subTest(argv0=argv0):
                 procs = [_proc(80, 1, f"{argv0} {PROBED}/scripts/gate.py --local")]
-                found = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
+                found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
                 self.assertEqual([p.pid for p in found], [80])
 
     def test_the_launching_shell_is_no_longer_reported_as_a_second_gate(self):
@@ -462,14 +463,14 @@ class ProcessMatchingTests(unittest.TestCase):
             _proc(90, 1, f"/bin/bash -c cd {PROBED} && python3 scripts/gate.py --local"),
             _proc(91, 90, f"python3 {PROBED}/scripts/gate.py --local"),
         ]
-        found = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
+        found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual([p.pid for p in found], [91])
 
     def test_sibling_checkout_never_matches(self):
         """`<repo>-165` contains `<repo>`; the boundary matcher reused from
         reap_orphans is what stops it matching."""
         procs = [_proc(33, 1, f"python3 {PROBED}-165/scripts/gate.py --local")]
-        found = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
+        found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual(found, [])
 
     def test_a_gate_process_makes_the_worktree_busy(self):
@@ -1085,129 +1086,151 @@ def _gate_proc(pid, command):
     return _proc(pid, 1, command)
 
 
-def _lease_state(tmp, holder_worktree):
-    """A real flock plus a sidecar, the way a running gate leaves them."""
-    lease = _RealLease(Path(tmp), _holder(worktree=holder_worktree))
-    return lease, {gate.LEASE_DIR_ENV: tmp}
+@contextlib.contextmanager
+def _case(**kwargs):
+    """A table case that needs no setup."""
+    yield kwargs
 
 
-# One true positive and at least one NEAR MISS per busy signal.
+@contextlib.contextmanager
+def _lease_case(holder_worktree):
+    """A table case holding a real flock, the way a running gate does."""
+    with tempfile.TemporaryDirectory() as tmp:
+        lease = _RealLease(Path(tmp), _holder(worktree=holder_worktree))
+        try:
+            yield {"environ": {gate.LEASE_DIR_ENV: tmp}}
+        finally:
+            lease.close()
+
+
+def _running(command, worktree=PROBED, cwd=None):
+    """One process, with the git facts pointed at `worktree`.
+
+    `cwd` defaults to unknown rather than to the worktree: claiming a working
+    directory the case does not need makes `match_repo_processes` match a
+    build tool through its cwd fallback and quietly turns a near miss into a
+    positive.
+    """
+    return _case(
+        worktree=Path(worktree),
+        query=FakeGit(rev_parse=_rev_parse_output(worktree=worktree)),
+        snapshot=lambda: [_gate_proc(60, command)],
+        cwd_lookup=lambda pid: cwd,
+    )
+
+
+SPACED = "/wt/my checkout"
+
+# Three columns per busy signal.
 #
-# A near miss is an input that looks like the signal and must not fire it. The
-# rows exist because near-miss coverage previously appeared only where somebody
-# had already attacked a signal by hand, which is how a signal ships with a
-# boundary nobody probed. Making the table exhaustive over `BUSY_SIGNALS` moves
-# the missing cell from review time to authoring time: add a signal without a
-# near miss and `test_every_busy_signal_has_a_near_miss` fails.
+#   positive   fires this signal and no other
+#   near_miss  looks like the signal and must NOT fire it
+#   hard       a REAL gate run in an awkward spelling; the requirement is
+#              weaker than "fires", because the fail-safe may legitimately
+#              answer UNKNOWN, but it must never be FREE
 #
-# Each entry is (description, kwargs for `_collect`). The lease rows need a
-# real lock, so they are built inside the test rather than declared here.
+# The third column exists because a near-miss table defends only against false
+# positives. The first two columns caught two false positives and missed two
+# false negatives, which is the more dangerous direction: reporting FREE while
+# a gate runs is the collision this tool exists to prevent. Every row here was
+# a measured defect or a spelling Python actually accepts.
 NEAR_MISS_TABLE = {
+    status.SIGNAL_GATE_LEASE: {
+        "positive": [("held by this worktree", lambda: _lease_case(PROBED))],
+        "near_miss": [("held by another worktree", lambda: _lease_case(OTHER))],
+        "hard": [],
+    },
     status.SIGNAL_GATE_PROCESS: {
         "positive": [
-            (
-                "an absolute gate invocation",
-                {"snapshot": lambda: [
-                    _gate_proc(31, f"python3 {PROBED}/scripts/gate.py --local")]},
-            ),
-            (
-                "a relative gate invocation resolved by cwd",
-                {"snapshot": lambda: [_gate_proc(32, "python3 scripts/gate.py --fast")],
-                 "cwd_lookup": lambda pid: PROBED},
-            ),
-            (
-                "an interpreter option before the script",
-                {"snapshot": lambda: [
-                    _gate_proc(33, f"python3 -X faulthandler {PROBED}/scripts/gate.py")]},
-            ),
+            ("an absolute invocation",
+             lambda: _running(f"python3 {PROBED}/scripts/gate.py --local")),
+            ("a relative invocation resolved by cwd",
+             lambda: _running("python3 scripts/gate.py --fast", cwd=PROBED)),
+            ("an option before the script",
+             lambda: _running(f"python3 -X faulthandler {PROBED}/scripts/gate.py")),
         ],
         "near_miss": [
-            (
-                "a shell whose command line names the script",
-                {"snapshot": lambda: [
-                    _gate_proc(40, f"/bin/bash -c cd {PROBED} && echo scripts/gate.py")]},
-            ),
-            (
-                "an editor open on the script",
-                {"snapshot": lambda: [_gate_proc(41, f"vim {PROBED}/scripts/gate.py")]},
-            ),
-            (
-                "a Python process that merely names the script",
-                {"snapshot": lambda: [_gate_proc(
-                    42, f"python3 -c import time; time.sleep(60) {PROBED}/scripts/gate.py")]},
-            ),
-            (
-                "a linter run on the script through -m",
-                {"snapshot": lambda: [_gate_proc(
-                    43, f"python3 -m ruff check {PROBED}/scripts/gate.py")]},
-            ),
-            (
-                "a sibling checkout's gate",
-                {"snapshot": lambda: [_gate_proc(
-                    44, f"python3 {PROBED}-165/scripts/gate.py --local")]},
-            ),
-            (
-                "another worktree's gate entirely",
-                {"snapshot": lambda: [_gate_proc(
-                    45, f"python3 {OTHER}/scripts/gate.py --local")]},
-            ),
+            ("a shell naming the script",
+             lambda: _running(f"/bin/bash -c cd {PROBED} && echo scripts/gate.py")),
+            ("an editor open on the script",
+             lambda: _running(f"vim {PROBED}/scripts/gate.py")),
+            ("a -c one-liner naming the script",
+             lambda: _running(
+                 f"python3 -c import time; time.sleep(60) {PROBED}/scripts/gate.py")),
+            ("a linter run through -m",
+             lambda: _running(f"python3 -m ruff check {PROBED}/scripts/gate.py")),
+            ("a prefix-matching sibling checkout",
+             lambda: _running(f"python3 {PROBED}-165/scripts/gate.py --local")),
+            ("another worktree's gate, absolute",
+             lambda: _running(f"python3 {OTHER}/scripts/gate.py --local")),
+            ("another worktree's gate, relative, resolved elsewhere",
+             lambda: _running("python3 scripts/gate.py --local", cwd=OTHER)),
+        ],
+        "hard": [
+            ("a value option clustered onto another, -uX",
+             lambda: _running(f"python3 -uX importtime {PROBED}/scripts/gate.py")),
+            ("a value option clustered onto another, -uW",
+             lambda: _running(f"python3 -uW ignore {PROBED}/scripts/gate.py")),
+            ("an attached option value",
+             lambda: _running(f"python3 -Xutf8 {PROBED}/scripts/gate.py")),
+            ("several short options combined",
+             lambda: _running(f"python3 -EsuB {PROBED}/scripts/gate.py")),
+            ("isolated mode",
+             lambda: _running(f"python3 -I {PROBED}/scripts/gate.py --local")),
+            ("a checkout path containing a space",
+             lambda: _running(f"python3 {SPACED}/scripts/gate.py", worktree=SPACED)),
+            ("the uv re-exec child shape",
+             lambda: _running(
+                 f"{PROBED}/.venv/bin/python3 {PROBED}/scripts/gate.py --local")),
         ],
     },
     status.SIGNAL_BUILD_PROCESS: {
         "positive": [
-            (
-                "cargo scoped to this checkout",
-                {"snapshot": lambda: [_gate_proc(
-                    50, f"cargo nextest run --manifest-path {PROBED}/Cargo.toml")]},
-            ),
+            ("cargo scoped to this checkout",
+             lambda: _running(
+                 f"cargo nextest run --manifest-path {PROBED}/Cargo.toml")),
         ],
         "near_miss": [
-            (
-                "cargo in a sibling checkout whose path is a prefix match",
-                {"snapshot": lambda: [_gate_proc(
-                    51, f"cargo nextest run --manifest-path {PROBED}-165/Cargo.toml")]},
-            ),
-            (
-                "cargo somewhere else entirely",
-                {"snapshot": lambda: [_gate_proc(
-                    52, f"cargo build --manifest-path {OTHER}/Cargo.toml")]},
-            ),
+            ("cargo in a prefix-matching sibling checkout",
+             lambda: _running(
+                 f"cargo nextest run --manifest-path {PROBED}-165/Cargo.toml")),
+            ("cargo somewhere else entirely",
+             lambda: _running(f"cargo build --manifest-path {OTHER}/Cargo.toml")),
         ],
+        "hard": [],
     },
     status.SIGNAL_GIT_OPERATION: {
         "positive": [
-            (name, {"exists": (lambda m: lambda path: path.name == m)(name)})
+            (name, (lambda m: lambda: _case(
+                exists=lambda path: path.name == m))(name))
             for name, _description in status.GIT_OPERATION_MARKERS
         ],
         "near_miss": [
-            (
-                "a stale index.lock, which proves nothing is running",
-                {"exists": lambda path: path.name == status.INDEX_LOCK_NAME},
-            ),
-            (
-                "a marker-shaped name in the wrong place",
-                {"exists": lambda path: path.name == "MERGE_HEAD.bak"},
-            ),
+            ("a stale index.lock, which proves nothing is running",
+             lambda: _case(exists=lambda path: path.name == status.INDEX_LOCK_NAME)),
+            ("a marker-shaped name that is not a marker",
+             lambda: _case(exists=lambda path: path.name == "MERGE_HEAD.bak")),
         ],
+        "hard": [],
     },
 }
 
 
 class NearMissTableTests(unittest.TestCase):
-    """One true positive and one near miss per busy signal.
+    """One true positive, one near miss, and where it applies one awkward-but-
+    real spelling, per busy signal.
 
-    The point is not the individual rows, which are cheap. It is that the
-    table must cover every signal, so a new signal cannot ship without someone
-    stating what would look like it and must not fire it.
+    The point is not the individual rows. It is that the table must cover every
+    signal, so a signal cannot ship without someone stating what would look
+    like it and must not fire it.
     """
 
-    def test_every_busy_signal_has_a_near_miss(self):
-        self.assertEqual(
-            set(NEAR_MISS_TABLE) | {status.SIGNAL_GATE_LEASE},
-            set(status.BUSY_SIGNALS),
-            "every signal in BUSY_SIGNALS needs a row here; the lease rows are "
-            "built in the lease tests because they need a real lock",
-        )
+    def test_the_table_covers_every_busy_signal(self):
+        """No exemption mechanism, deliberately. An earlier version compared
+        against the table's keys UNION a hard-coded exemption, which let a
+        signal be excused by editing the guard, in a guard whose whole job is
+        to make omissions visible."""
+        self.assertEqual(set(NEAR_MISS_TABLE), set(status.BUSY_SIGNALS))
         for signal, rows in NEAR_MISS_TABLE.items():
             with self.subTest(signal=signal):
                 self.assertTrue(rows["positive"], f"{signal} has no true positive")
@@ -1215,43 +1238,56 @@ class NearMissTableTests(unittest.TestCase):
 
     def test_each_positive_fires_exactly_its_own_signal(self):
         for signal, rows in NEAR_MISS_TABLE.items():
-            for description, kwargs in rows["positive"]:
+            for description, factory in rows["positive"]:
                 with self.subTest(signal=signal, case=description):
-                    state = _collect(**kwargs)
-                    fired = {name for name, _reason in status.busy_signals(state)}
+                    with factory() as kwargs:
+                        state = _collect(**kwargs)
+                    fired = {name for name, _r in status.busy_signals(state)}
                     self.assertEqual(fired, {signal})
                     self.assertEqual(state["verdict"], status.VERDICT_BUSY)
 
     def test_no_near_miss_fires_any_signal(self):
         for signal, rows in NEAR_MISS_TABLE.items():
-            for description, kwargs in rows["near_miss"]:
+            for description, factory in rows["near_miss"]:
                 with self.subTest(signal=signal, case=description):
-                    state = _collect(**kwargs)
+                    with factory() as kwargs:
+                        state = _collect(**kwargs)
                     self.assertEqual(
-                        status.busy_signals(state),
-                        [],
-                        f"{description} must not fire {signal}",
-                    )
+                        status.busy_signals(state), [],
+                        f"{description} must not fire {signal}")
                     self.assertNotEqual(state["verdict"], status.VERDICT_BUSY)
 
-    def test_the_lease_signal_positive_and_near_miss(self):
-        """Built here rather than in the table because it needs a real flock."""
-        with tempfile.TemporaryDirectory() as tmp:
-            lease, environ = _lease_state(tmp, PROBED)
-            try:
-                state = _collect(environ=environ)
-            finally:
-                lease.close()
-            fired = {name for name, _reason in status.busy_signals(state)}
-            self.assertEqual(fired, {status.SIGNAL_GATE_LEASE})
-        with tempfile.TemporaryDirectory() as tmp:
-            lease, environ = _lease_state(tmp, OTHER)
-            try:
-                state = _collect(environ=environ)
-            finally:
-                lease.close()
-            self.assertEqual(status.busy_signals(state), [])
-            self.assertTrue(state["lease"]["held_elsewhere"])
+    def test_no_awkward_spelling_of_a_real_gate_reports_free(self):
+        """The direction that causes the collision. Each row is a gate that is
+        genuinely running, in a spelling the option walk may or may not parse.
+        BUSY is the good answer and UNKNOWN is the acceptable one; FREE is the
+        failure, because it sends a reviewer into a worktree that is in use."""
+        for signal, rows in NEAR_MISS_TABLE.items():
+            for description, factory in rows["hard"]:
+                with self.subTest(signal=signal, case=description):
+                    with factory() as kwargs:
+                        state = _collect(**kwargs)
+                    self.assertIn(
+                        state["verdict"],
+                        (status.VERDICT_BUSY, status.VERDICT_UNKNOWN),
+                        f"{description} reported {state['verdict']} while a gate "
+                        "was running")
+
+    def test_the_clustered_option_cases_are_the_measured_regression(self):
+        """Named separately because these two were a P1: both were caught by
+        the substring predicate this pull request replaced, and Python really
+        does accept a value-taking short option clustered onto another."""
+        for command in (
+            f"python3 -uX importtime {PROBED}/scripts/gate.py",
+            f"python3 -uW ignore {PROBED}/scripts/gate.py",
+        ):
+            with self.subTest(command=command):
+                with _running(command) as kwargs:
+                    state = _collect(**kwargs)
+                self.assertEqual(state["verdict"], status.VERDICT_UNKNOWN)
+                self.assertIn(
+                    "gate-process-identity",
+                    [item["source"] for item in state["unknown"]])
 
 
 class StaleIndexLockTests(unittest.TestCase):

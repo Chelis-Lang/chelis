@@ -222,9 +222,7 @@ PYTHON_BASENAME_PREFIX = "python"
 # option argument rather than the script. `-c` and `-m` are absent on purpose:
 # both mean there is NO script argument at all, and every later token belongs
 # to the command or the module, so they end the search rather than skip one.
-PYTHON_OPTIONS_WITH_ARGUMENT = frozenset(
-    {"-W", "-X", "-Q", "--check-hash-based-pycs"}
-)
+PYTHON_OPTIONS_WITH_ARGUMENT = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 PYTHON_OPTIONS_WITHOUT_A_SCRIPT = frozenset({"-c", "-m"})
 
 
@@ -243,8 +241,18 @@ def script_argument(command: str) -> str | None:
     whitespace and walks it the way Python's own launcher does: skip an
     option, consume the argument of an option that takes one, stop outright at
     `-c` or `-m` because neither has a script, and return the first remaining
-    token. A path containing whitespace defeats the split, which is a false
-    negative on a construct nobody uses for a checkout path.
+    token.
+
+    This walk is a MODEL of Python's option grammar and models are incomplete.
+    Python accepts a value-taking short option clustered onto others, so
+    `-uX importtime` is one token this exact-spelling table does not know, and
+    the walk then returns the option's value as the script. A path containing
+    whitespace defeats the split the same way. Chasing the grammar is
+    unbounded: attachment, clustering, `=` forms, and whatever a future
+    release adds. So the caller does not trust a negative answer from this
+    function on its own; see `match_gate_processes`, which degrades to UNKNOWN
+    rather than to FREE when the walk disagrees with a line that names the
+    gate. That converts an unbounded parsing problem into a bounded one.
     """
     tokens = command.split()
     index = 1
@@ -676,23 +684,68 @@ def lease_state(
     return state, unknown
 
 
+def _is_undecided(
+    proc: reap.ProcInfo,
+    script: str,
+    worktree: Path,
+    expected: Path,
+    cwd_lookup: Callable[[int], str | None],
+) -> bool:
+    """Whether a non-match might be the option grammar rather than the truth.
+
+    Only reached when the walk DID return a script token that is not this
+    worktree's gate. A walk that returned nothing is a definite answer, since
+    `-c` and `-m` mean Python runs no script at all, so a linter or a `-c`
+    one-liner naming the gate stays a clean FREE rather than becoming noise.
+
+    The substring test below is used deliberately, and only here. Everywhere
+    else in this file containment was the wrong tool because it was asked to
+    PROVE identity; here it is asked whether identity is still POSSIBLE after
+    a structural match failed, and for that question over-answering costs an
+    UNKNOWN rather than a wrong BUSY.
+    """
+    if Path(script).is_absolute():
+        # An absolute token that resolved elsewhere is a definite other
+        # script, unless the line ALSO names this gate absolutely, which means
+        # the token picked was more likely an option's value.
+        return reap.command_mentions_path(proc.command, str(expected))
+    cwd = cwd_lookup(proc.pid)
+    if cwd is None:
+        return GATE_SCRIPT_RELATIVE in proc.command
+    if not reap.path_is_under(cwd, worktree):
+        # A relative invocation resolved against another checkout's working
+        # directory is that checkout's gate, decisively not this one's.
+        return False
+    return GATE_SCRIPT_RELATIVE in proc.command or reap.command_mentions_path(
+        proc.command, str(expected)
+    )
+
+
 def match_gate_processes(
     procs: Sequence[reap.ProcInfo],
     worktree: Path,
     cwd_lookup: Callable[[int], str | None] = reap.proc_cwd,
-) -> list[reap.ProcInfo]:
-    """Live gate runs scoped to this worktree.
+) -> tuple[list[reap.ProcInfo], list[reap.ProcInfo]]:
+    """Live gate runs scoped to this worktree, and the ones it cannot decide.
 
-    A match is a Python interpreter whose SCRIPT ARGUMENT resolves to this
-    worktree's `scripts/gate.py`. Both halves are structural: `script_argument`
-    explains why the position of the token is the property and containment is
-    not. An absolute script path is compared directly; a relative one is
-    resolved against the process's working directory, which is how
-    `python3 scripts/gate.py --local` is matched.
+    Returns `(matched, undecided)`. A match is a Python interpreter whose
+    SCRIPT ARGUMENT resolves to this worktree's `scripts/gate.py`; both halves
+    are structural, and `script_argument` explains why the token's position is
+    the property rather than its presence.
+
+    `undecided` is the fail-safe, and it is the half that matters. When the
+    walk returned a script that is not this gate, but the command line still
+    names this gate, the walk has probably met a spelling its model of
+    Python's option grammar does not cover, so absence of a match is not
+    evidence of absence. The caller records it as a failed source and the
+    verdict degrades to UNKNOWN. Reporting FREE while a gate runs is the
+    collision this tool exists to prevent, so every gap in the model has to
+    land on the safe side of it, including the gaps nobody has found yet.
     """
     expected = (worktree / GATE_SCRIPT_RELATIVE).resolve()
     own_pid = os.getpid()
-    found: list[reap.ProcInfo] = []
+    matched: list[reap.ProcInfo] = []
+    undecided: list[reap.ProcInfo] = []
     for proc in procs:
         if proc.pid == own_pid:
             continue
@@ -702,22 +755,24 @@ def match_gate_processes(
         if script is None:
             continue
         candidate = Path(script)
+        resolved: Path | None = None
         if candidate.is_absolute():
             try:
                 resolved = candidate.resolve()
             except OSError:
-                continue
+                resolved = None
         else:
             cwd = cwd_lookup(proc.pid)
-            if cwd is None:
-                continue
-            try:
-                resolved = (Path(cwd) / candidate).resolve()
-            except OSError:
-                continue
-        if resolved == expected:
-            found.append(proc)
-    return found
+            if cwd is not None:
+                try:
+                    resolved = (Path(cwd) / candidate).resolve()
+                except OSError:
+                    resolved = None
+        if resolved is not None and resolved == expected:
+            matched.append(proc)
+        elif _is_undecided(proc, script, worktree, expected, cwd_lookup):
+            undecided.append(proc)
+    return matched, undecided
 
 
 def _describe_proc(proc: reap.ProcInfo, orphaned: bool = False) -> dict:
@@ -747,7 +802,19 @@ def process_state(
         return state, unknown
     matched = reap.match_repo_processes(procs, worktree, cwd_lookup)
     orphaned = reap.classify_orphans(matched, procs)
-    gate_procs = match_gate_processes(procs, worktree, cwd_lookup)
+    gate_procs, undecided = match_gate_processes(procs, worktree, cwd_lookup)
+    for proc in undecided:
+        unknown.append(
+            {
+                "source": "gate-process-identity",
+                "error": (
+                    f"pid {proc.pid} is a Python process whose command line "
+                    "names this worktree's gate, but its script argument could "
+                    "not be read from the flattened command line, so whether a "
+                    f"gate is running here cannot be decided: {proc.command[:120]}"
+                ),
+            }
+        )
     matched_pids = {proc.pid for proc in matched}
     state["matched"] = [
         _describe_proc(proc, proc.pid in orphaned) for proc in matched
