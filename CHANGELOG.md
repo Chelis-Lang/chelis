@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.7] — 2026-09-08
+
 ### Changed
 
 - **ReLU now retains its dedicated [05-OP-43] identity and adjoint
@@ -59,6 +61,42 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   and Reef prepared-graph cache v2 → v3; stale entries rebuild
   automatically.
 
+- **BREAKING (runtime/C ABI): compiled values move to a unified atomic heap
+  (chelis#1286 phase 1).** The public ABI cuts over to an opaque `Tensor`
+  descriptor and storage, heap `Option` nodes, and a common atomic heap
+  lifetime covering mapped files. Header, emitter and binding consumers
+  migrate with it, and the generated-C and header consumer surfaces change
+  shape.
+
+- **BREAKING (checker): a literal pattern now constrains the scrutinee type
+  (chelis#1494, part of chelis#731).** `pattern_bindings` did nothing at
+  `pat-lit`, so seven spellings scored a clean 1.0 with an empty error list
+  while carrying an arm that can never match. Those programs now report.
+
+- **BREAKING (stdlib): `linspace` enforces [05-OP-35]'s count domain
+  (chelis#1422).** `linspace(count=0)` is no longer accepted, and the
+  published `int64` count contract applies at constructor fixtures.
+
+- **`Std.Sort` migrates to the canonical rank-polymorphic `sort` export.**
+  The stale self-tests and public docs move with it, and generic precision
+  cast targets are specialized from checker-owned call, result, container,
+  accumulator and callback types.
+
+- **Top-level eager values are sequential at both checker ingresses.** An
+  earlier declaration cannot see a later value, even when the later value has
+  a `defsig`, and that scope is decided from source position rather than from
+  a binding timeline the inference schedule advances.
+
+- **Module scope is exact across check and test batches.** Checker value
+  lookup is exact after Reef rewriting, and unresolved value and constructor
+  identifiers travel as structured checker data, so machine-facing diagnostic
+  kinds stay stable across unrelated-module changes.
+
+- **Deferred shape settlement is source-ordered.** Expand and reshape
+  obligations carry canonical Deep source ordinals and settle through ordered
+  APIs, preserving composed-library order and the minimum downstream source
+  reference.
+
 ### Fixed
 
 - **Tier B no longer reports cvc5 counterexamples produced by an
@@ -68,6 +106,40 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   of adding a domain assumption, while guarded and algebraically non-negative
   arguments retain SMT discharge. Domain authorization and the main query
   share the caller's timeout instead of each consuming a full timeout.
+
+- **`then` and `else` are admitted as newline continuations (chelis#849).** An
+  `if` whose `then` or `else` began the next line was rejected with
+  `expected Else, found Eof`.
+
+- **`diagonal` declares [05-OP-33]'s smaller selected extent (chelis#1355,
+  part of chelis#731).** It previously widened every unequal pair of literal
+  extents to a wildcard.
+
+- **Cast literals bind at bounded dtype binders (chelis#1544).** A literal
+  cast to a dtype-family-bounded binder adopts the binder only at the exact
+  spec-defined literal source and computes at the instantiated width, across
+  `chelis eval` and compiled C.
+
+- **Linked aliases expand at host boundaries.** Checker-validated aliases are
+  expanded when top-level declared types enter host lowering, exact ADT
+  identities survive an unrelated alias with the same terminal spelling, and
+  ambiguous terminal matches are refused rather than resolved arbitrarily.
+
+- **The host-lane elementwise emitter guards operands against rank
+  disagreement (chelis#1484, part of chelis#668).** It allocated the result at
+  the LHS rank and read every operand through the target's index vector,
+  comparing nothing; an elementwise call carrying an `IO` effect is lowered
+  there and so reached codegen unchecked.
+
+- **The stamped carrier is read at every divergence site (chelis#1125, part of
+  chelis#731).** Readers destructured `Expr::List` and observed nothing when a
+  stamped `Expr::Node` or `Expr::BareList` arrived, so the typed ingress and
+  the serialized-IR ingress returned different verdicts for one program, and a
+  `.dp` file behaved differently from its `.ch` twin.
+
+- **Declared type and dim parameter names appear in rigidity and borrow
+  diagnostics (chelis#260 Sites 1 and 2).** `?344`, `d44` and `d45` are
+  replaced by the authored spellings `t`, `n` and `m`.
 
 ## [0.18.6] — 2026-08-28
 

@@ -188,12 +188,32 @@ PINNED_FIXTURE_JSON_FILES: list[Path] = [
 # Each is its own one-crate workspace depending on the real crates by path,
 # so its committed sibling `Cargo.lock` records them at the workspace
 # version. Their gate steps compile them with `cargo check --locked`, which
-# refuses to update a stale lock. Keep in sync with the `MANIFEST` constant
-# in the matching `scripts/check_*_compile_fail.py`.
-COMPILE_FAIL_FIXTURE_MANIFESTS: list[Path] = [
-    REPO_ROOT / "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
-    REPO_ROOT / "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
-]
+# refuses to update a stale lock.
+#
+# DISCOVERED, not enumerated. This list was two hardcoded paths and a comment
+# asking the next author to keep it in sync with the matching
+# `scripts/check_*_compile_fail.py`. Three fixtures were added after 0.18.6
+# without that sync -- `hash_order_raw_access`, `disallowed_hash_types` and
+# `order_escape` -- so the 0.18.7 bump left their locks at 0.18.6 and
+# `check_hash_order_compile_fail.py` failed with a `--locked` refusal rather
+# than the diagnostics it asserts. Discovery makes that drift impossible: a
+# fixture is any directory under a crate's `tests/compile_fail/` that owns
+# both a `Cargo.toml` and a committed `Cargo.lock`.
+def _discover_compile_fail_fixture_manifests() -> list[Path]:
+    manifests = [
+        lock.with_name("Cargo.toml")
+        for lock in sorted(REPO_ROOT.glob("crates/*/tests/compile_fail/*/Cargo.lock"))
+        if lock.with_name("Cargo.toml").is_file()
+    ]
+    if not manifests:
+        raise SystemExit(
+            "no out-of-workspace compile-fail fixtures found; the layout moved "
+            "and this discovery needs updating"
+        )
+    return manifests
+
+
+COMPILE_FAIL_FIXTURE_MANIFESTS: list[Path] = _discover_compile_fail_fixture_manifests()
 
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$")

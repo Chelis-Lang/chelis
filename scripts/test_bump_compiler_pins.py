@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from pathlib import Path as pathlib_Path
 from unittest import mock
 
 
@@ -81,6 +82,37 @@ def _workspace_version() -> str:
     m = re.search(r'^\s*version\s*=\s*"([^"]+)"', section, re.MULTILINE)
     assert m is not None, "root Cargo.toml has no [workspace.package] version"
     return m.group(1)
+
+
+class CompileFailFixtureDiscoveryTests(unittest.TestCase):
+    """The fixture list is discovered, not enumerated.
+
+    It used to be two hardcoded paths plus a comment asking the next author to
+    keep them in sync. Three fixtures were added after 0.18.6 without that
+    sync, so the 0.18.7 bump left their `Cargo.lock` files at the old version
+    and `check_hash_order_compile_fail.py` failed with a `--locked` refusal
+    instead of the diagnostics it asserts.
+    """
+
+    def test_discovers_every_fixture_that_owns_a_committed_lock(self):
+        expected = {
+            lock.parent
+            for lock in bump_mod.REPO_ROOT.glob(
+                "crates/*/tests/compile_fail/*/Cargo.lock"
+            )
+            if lock.with_name("Cargo.toml").is_file()
+        }
+        found = {m.parent for m in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS}
+        self.assertEqual(found, expected)
+
+    def test_finds_the_fixtures_that_regressed_the_0_18_7_bump(self):
+        names = {m.parent.name for m in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS}
+        for missed in ("hash_order_raw_access", "disallowed_hash_types", "order_escape"):
+            self.assertIn(missed, names)
+
+    def test_every_discovered_manifest_exists(self):
+        for manifest in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS:
+            self.assertTrue(manifest.is_file(), manifest)
 
 
 class BumpWorkspaceVersionTests(unittest.TestCase):
@@ -382,30 +414,40 @@ class CompileFailFixtureLockTests(unittest.TestCase):
     regression rather than a stale lock (chelis#1128, hit cutting 0.18.2).
     """
 
-    GATE_SCRIPTS = (
-        "check_checkpoint_compile_fail",
-        "check_pipeline_core_compile_fail",
-    )
+    @staticmethod
+    def _gated_fixture_dirs() -> set[pathlib_Path]:
+        """Fixture directories any `check_*_compile_fail.py` compiles.
 
-    def test_inventory_covers_both_gated_fixtures(self):
-        relative = {
-            path.relative_to(bump_mod.REPO_ROOT).as_posix()
-            for path in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS
-        }
+        Derived, not listed. This was a two-name tuple plus a `MANIFEST`
+        import, which could not see `check_hash_order_phase_b_compile_fail.py`
+        at all: that script names `disallowed_hash_types` and `order_escape`
+        inline off a `FIXTURE_ROOT` instead of exporting one `MANIFEST`. The
+        three fixtures it and `check_hash_order_compile_fail.py` own were
+        therefore absent from the bump inventory, and cutting 0.18.7 failed on
+        a stale lock -- the same class as chelis#1128 at 0.18.2.
+        """
+        dirs: set[pathlib_Path] = set()
+        for script in sorted((bump_mod.REPO_ROOT / "scripts").glob("check_*compile_fail.py")):
+            for name in re.findall(r'compile_fail[/"\s]+[/"\s]*"?([a-z0-9_]+)"?', script.read_text()):
+                if name in {"Cargo", "toml", "rs"}:
+                    continue
+                dirs.add(name)
+        return dirs
+
+    def test_inventory_covers_every_gated_fixture(self):
+        inventory = {m.parent.name for m in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS}
+        missing = self._gated_fixture_dirs() - inventory
         self.assertEqual(
-            relative,
-            {
-                "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
-                "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
-            },
+            missing,
+            set(),
+            f"gate scripts compile these with --locked but the bump does not "
+            f"regenerate their locks: {sorted(missing)}",
         )
 
-    def test_inventory_matches_the_gate_scripts_manifest_constants(self):
-        # The parity lock the "keep in sync" comment asks for: a fixture that
-        # moves must move in both places, or the bump silently stops
-        # regenerating the lock its gate step is about to reject.
-        gated = {_load_sibling(name).MANIFEST for name in self.GATE_SCRIPTS}
-        self.assertEqual(set(bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS), gated)
+    def test_inventory_includes_the_fixtures_that_broke_0_18_7(self):
+        inventory = {m.parent.name for m in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS}
+        for name in ("hash_order_raw_access", "disallowed_hash_types", "order_escape"):
+            self.assertIn(name, inventory)
 
     def test_each_manifest_ships_a_committed_lock(self):
         # The regeneration target must be real, not aspirational.
@@ -434,9 +476,11 @@ class CompileFailFixtureLockTests(unittest.TestCase):
                 if name != fixture_crate
             }
             rel = lock.relative_to(bump_mod.REPO_ROOT)
-            self.assertTrue(
-                pinned, f"{rel} records no workspace path packages to check"
-            )
+            # A fixture may legitimately depend on no workspace crate --
+            # `disallowed_hash_types` does -- so there is nothing to pin
+            # there. Skip it rather than assert a package set it never had.
+            if not pinned:
+                continue
             stale = sorted(
                 f"{name} @ {found}" for name, found in pinned.items() if found != version
             )
