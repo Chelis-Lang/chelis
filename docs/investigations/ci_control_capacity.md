@@ -75,9 +75,13 @@ administration and support submission require the corresponding account access.
 .venv/bin/python scripts/ci_status.py 1638 --head FULL_HEAD_SHA --watch
 ```
 
+The newest check run for each context and app supersedes earlier workflow suites,
+including canceled runs caused by PR edits. Legacy commit statuses are still
+checked independently when the requirement permits any app.
+
 The tool reads classic branch protection and effective branch rules, paginates
 all current check runs and commit statuses, and separates required checks from
-other work. It rechecks the head, base branch, and open state after each snapshot.
+other work. It rechecks the head, base commit and branch, and open state after each snapshot.
 Use `--watch` as a background process, as required by the agent contract.
 
 `required_passed` means only that the observed required status checks pass on

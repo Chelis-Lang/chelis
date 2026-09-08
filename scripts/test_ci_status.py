@@ -51,11 +51,11 @@ class StatusTests(unittest.TestCase):
                               check("macOS Smoke", ident=1)])
         self.assertFalse(result["required_passed"])
 
-    def test_same_name_checks_from_separate_suites_must_both_pass(self):
-        first = {**check("macOS Smoke"), "check_suite": {"id": 10}}
-        second = {**check("macOS Smoke", ident=2, conclusion="failure"),
+    def test_new_workflow_run_supersedes_canceled_suite_for_the_same_context(self):
+        first = {**check("macOS Smoke", conclusion="cancelled"), "check_suite": {"id": 10}}
+        second = {**check("macOS Smoke", ident=2),
                   "check_suite": {"id": 20}}
-        self.assertFalse(self.report([first, second])["required_passed"])
+        self.assertTrue(self.report([first, second])["required_passed"])
 
     def test_failures_and_cancelled_checks_do_not_pass(self):
         for conclusion in ("failure", "cancelled", "timed_out", "action_required", "stale", None):
@@ -102,15 +102,15 @@ class StatusTests(unittest.TestCase):
                          [{"context": "Linux", "app_id": None}])
 
     def test_head_base_or_state_change_aborts_watch(self):
-        original = {"headRefOid": "a" * 40, "baseRefName": "main", "state": "OPEN"}
+        original = {"headRefOid": "a" * 40, "baseRefOid": "c" * 40, "baseRefName": "main", "state": "OPEN"}
         ci_status.check_identity(original, original)
-        for key, value in (("headRefOid", "b" * 40), ("baseRefName", "other"), ("state", "MERGED")):
+        for key, value in (("headRefOid", "b" * 40), ("baseRefOid", "d" * 40), ("baseRefName", "other"), ("state", "MERGED")):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 ci_status.check_identity(original, {**original, key: value})
 
 
 class CommandTests(unittest.TestCase):
-    identity = {"headRefOid": "a" * 40, "baseRefName": "main", "state": "OPEN"}
+    identity = {"headRefOid": "a" * 40, "baseRefOid": "c" * 40, "baseRefName": "main", "state": "OPEN"}
 
     def replies(self, *, optional=None):
         checks = [check("macOS Smoke")]

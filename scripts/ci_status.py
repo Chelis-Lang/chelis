@@ -33,12 +33,11 @@ def classify(required: list[dict], checks: list[dict], statuses: list[dict]) -> 
         raise ValueError("No required status checks found; refusing to report readiness")
     latest = {}
     for check in checks:
-        key = ("check", check["name"], check["app"]["id"],
-               check.get("check_suite", {}).get("id"))
+        key = ("check", check["name"], check["app"]["id"])
         if key not in latest or check["id"] > latest[key]["id"]:
             latest[key] = check
     for status in statuses:
-        key = ("status", status["context"], None, None)
+        key = ("status", status["context"], None)
         if key not in latest or status["id"] > latest[key]["id"]:
             latest[key] = status
 
@@ -77,7 +76,7 @@ def classify(required: list[dict], checks: list[dict], statuses: list[dict]) -> 
 
 def check_identity(original: dict, current: dict) -> None:
     if original["state"] != "OPEN" or any(original[key] != current[key] for key in
-                                            ("headRefOid", "baseRefName", "state")):
+                                            ("headRefOid", "baseRefOid", "baseRefName", "state")):
         raise ValueError("PR head, base, or open state changed; restart with the intended head")
 
 
@@ -102,7 +101,7 @@ def snapshot(repo: str, pr: int, original: dict) -> dict:
                       [check for page in check_pages for check in page["check_runs"]],
                       [status for page in status_pages for status in page])
     check_identity(original, gh("pr", "view", str(pr), "--repo", repo, "--json",
-                                "headRefOid,baseRefName,state"))
+                                "headRefOid,baseRefOid,baseRefName,state"))
     return {"repo": repo, "pr": pr, "head": head, **result}
 
 
@@ -118,7 +117,7 @@ def main(argv=None) -> int:
         parser.error("--interval must be at least 5 seconds")
     try:
         original = gh("pr", "view", str(args.pr), "--repo", args.repo, "--json",
-                      "headRefOid,baseRefName,state")
+                      "headRefOid,baseRefOid,baseRefName,state")
         check_identity(original, original)
         if args.head and args.head != original["headRefOid"]:
             raise ValueError("PR head does not match --head")
