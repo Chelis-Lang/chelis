@@ -56,11 +56,22 @@ def commits(lo: str, hi: str) -> list[tuple[str, str]]:
 
 
 def section_text(changelog: Path, version: str) -> str:
+    """The part of a release section that counts as coverage.
+
+    Only the entry subsections. A "### Completeness" note that names an issue
+    in order to say it is NOT written up must not read as a citation of it --
+    the note added for 0.18.7 mentions chelis#1224 as a known omission, and
+    before this the substring check counted that commit as reported.
+    """
     text = changelog.read_text()
     start = text.index(f"## [{version}]")
     rest = text[start + 1 :]
     end = rest.index("\n## [")
-    return rest[:end]
+    body = rest[:end]
+    first_entry_heading = body.find("\n### Changed")
+    if first_entry_heading == -1:
+        first_entry_heading = body.find("\n### Fixed")
+    return body[first_entry_heading:] if first_entry_heading != -1 else body
 
 
 def triage(lo: str, hi: str, version: str, cache: Path) -> int:

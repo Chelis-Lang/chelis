@@ -8,6 +8,40 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.18.7] — 2026-09-08
 
+### Completeness of this section
+
+**Curated, not exhaustive. The commit log is the inventory.**
+
+```
+git log v0.18.6..v0.18.7
+```
+
+84 commits landed between 0.18.6 and this release, and the entries below were
+reconstructed after the fact rather than written as each change merged. That
+reconstruction was attempted three times and missed user-visible work every
+time: a conventional-commit-prefix filter was blind to the 32 commits carrying
+no prefix; reading PR bodies for phrasing dismissed two PRs that between them
+closed three `release blocking` soundness issues; and a script harvesting
+`Closes`/`Fixes`/`Resolves` can fire on only 21 of the 84, because this
+repository closes issues manually and prefers `Part of #N`.
+
+At least one omission is known and unfixed: **`6adc013a`** rejects a cvc5
+counterexample that violates its own preconditions (chelis#1224, `soundness` +
+`release blocking`) — a model with `d = -4.0` was reported as a disproof of a
+property whose `where` clause requires `d > 0.5`, so a `chelis prove` verdict
+moves from disproved to `Unsupported`. It is not written up below. Others may
+exist; nothing here establishes that they do not.
+
+Every entry below that carries an issue citation was written from that issue's
+own pull request body and diff, and each was checked against its source by
+review. Treat the individual entries as reliable and **the set as incomplete**.
+
+If you are bumping a pinned toolchain, read the commit log rather than this
+section, and start with the BREAKING entries — particularly
+`SHELL_FORMAT_VERSION` 2 → 3, which invalidates every `.shell` published by
+0.18.6.
+
+
 ### Changed
 
 - **BREAKING (checker/runtime): runtime extents travel as a typed value edge
