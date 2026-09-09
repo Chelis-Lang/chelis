@@ -709,22 +709,25 @@ jobs:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: python3 scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2
 
-      # Shard 2 already has the feature-complete workspace build warm. Run
-      # each non-test integration oracle exactly once here instead of paying
-      # for a third independently compiled worker.
-      - name: Gate (integration support subset)
-        if: matrix.shard == 2
-        run: python3 scripts/gate.py integration --support-only
-
       # This structural oracle needs cargo-nextest. Execute it exactly once on
-      # shard 1, balancing its hosted cost against shard 2's exact-once
-      # integration support subset. It lists only the default feature
+      # shard 1, before lowering-trace changes its warm feature set.
+      # It lists only the default feature
       # configuration this shard has already built; the generalization lane's
       # feature-enabled listing runs on generalization shard 1 for the same
       # reason.
       - name: Verify nextest profile coverage
         if: matrix.shard == 1
         run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
+
+      # Both workers have the workspace build warm. Split the existing support
+      # commands so shard 2 no longer owns their entire serial tail.
+      - name: Gate (frontend support subset)
+        if: matrix.shard == 1
+        run: python3 scripts/gate.py integration --support-only --support-slice frontend
+
+      - name: Gate (domain support subset)
+        if: matrix.shard == 2
+        run: python3 scripts/gate.py integration --support-only --support-slice domain
 
       - name: Upload workspace JUnit shard
         if: always()

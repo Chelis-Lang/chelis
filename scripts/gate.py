@@ -2438,6 +2438,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Run only the integration stage's non-nextest support oracles.",
     )
     p.add_argument(
+        "--support-slice", choices=("frontend", "domain"),
+        help="Run one integration support subset on its existing workspace worker.",
+    )
+    p.add_argument(
         "--partition",
         metavar="HASH:N/M",
         help=(
@@ -2574,6 +2578,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--no-lease cannot be combined with --no-wait/--lease-timeout")
     if args.lease_timeout is not None and args.lease_timeout <= 0:
         p.error("--lease-timeout must be a positive number of seconds")
+    if args.support_slice is not None and not args.support_only:
+        p.error("--support-slice requires integration --support-only")
     if args.tests_only and args.support_only:
         p.error("--tests-only and --support-only are mutually exclusive")
     if (args.tests_only or args.support_only) and args.stage != "integration":
@@ -2601,6 +2607,7 @@ def selected_stage_commands(
     tests_only: bool,
     support_only: bool,
     partition: str | None,
+    support_slice: str | None = None,
 ) -> list[list[str]]:
     """Return one CI stage slice without duplicating canonical commands."""
     commands = STAGES[stage]
@@ -2610,6 +2617,8 @@ def selected_stage_commands(
         selected = [list(command) for command in commands[1:]]
     else:
         selected = [list(command) for command in commands]
+    if support_slice is not None:
+        selected = selected[:2] if support_slice == "frontend" else selected[2:]
     if partition is not None:
         selected[0].extend(["--partition", partition])
     return selected
@@ -2966,6 +2975,7 @@ def main(
                 tests_only=args.tests_only,
                 support_only=args.support_only,
                 partition=args.partition,
+                support_slice=args.support_slice,
             )
             exit_code = run_commands(
                 commands,
