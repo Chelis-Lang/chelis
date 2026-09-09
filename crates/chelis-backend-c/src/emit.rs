@@ -6944,7 +6944,12 @@ impl CEmitter {
             let value = fill.as_i64_exact().expect("verified int64 pad fill");
             self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));", Self::i64_c_literal(value)));
         } else {
-            self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits({dtype}, UINT64_C({bits})));"));
+            let literal = match ty.precision {
+                Prim::F32 => format!("UINT32_C(0x{bits:08x})"),
+                Prim::F64 => format!("UINT64_C(0x{bits:016x})"),
+                _ => format!("UINT64_C({bits})"),
+            };
+            self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits({dtype}, {literal}));"));
         }
         self.line(&format!("for (int64_t i = 0; i < t{a}_size; i++) {{"));
         self.indent += 1;
