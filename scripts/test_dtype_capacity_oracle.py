@@ -212,6 +212,39 @@ class ExecutionTests(unittest.TestCase):
                 with self.assertRaises(oracle.CapacityOracleError):
                     oracle._required_environment(root)
 
+    def test_main_places_fresh_group_evidence_beside_framework_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            receipt = root / "target" / "receipts" / "execution.json"
+            receipt.parent.mkdir(parents=True)
+            identity = composite.SourceIdentity("a" * 40, "b" * 64)
+            environment = {
+                "CHELIS_ORACLE_HEAD": identity.head,
+                "CHELIS_ORACLE_SOURCE_DIGEST": identity.digest,
+                "CHELIS_ORACLE_RUN_ID": "fresh",
+                "CHELIS_ORACLE_RECEIPT": str(receipt),
+            }
+            seen = []
+
+            def execute(_root, _target, group, evidence):
+                seen.append((group.name, evidence))
+                return group.selected
+
+            with mock.patch.dict(os.environ, environment), \
+                    mock.patch("dtype_capacity_oracle.REPO_ROOT", root), \
+                    mock.patch("dtype_capacity_oracle.source_identity", return_value=identity), \
+                    mock.patch("dtype_capacity_oracle.execute_group", side_effect=execute):
+                self.assertEqual(oracle.main(), 0)
+            evidence_root = receipt.parent / "capacity"
+            self.assertEqual([path for _, path in seen], [
+                evidence_root / "bindings", evidence_root / "primary",
+                evidence_root / "stdlib", evidence_root / "wire",
+            ])
+            self.assertTrue(receipt.is_file())
+            evidence_root.mkdir()
+            with self.assertRaises(oracle.CapacityOracleError):
+                oracle._receipt_evidence_dir(root, receipt)
+
     def test_real_pinned_libtest_json_executes_one_selected_case(self):
         Path("target").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="capacity-libtest-", dir="target") as tmp:

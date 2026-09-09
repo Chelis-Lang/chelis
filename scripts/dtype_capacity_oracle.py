@@ -2,9 +2,10 @@
 """Issue the structural #1288 receipt consumed by the pre-Phase-4C framework.
 
 This adapter has no saved-result input. It builds each exact current test
-artifact and checks libtest's lifecycle JSON for every selected control. The
-binding selection deliberately requires the final zero-legacy gate; until that
-gate exists and passes, this command fails without producing a receipt.
+artifact and checks libtest's lifecycle JSON for every selected control. It
+retains each nested process's framework output beside the framework receipt.
+The binding selection deliberately requires the final zero-legacy gate; until
+that gate exists and passes, this command fails without producing a receipt.
 """
 
 from __future__ import annotations
@@ -201,8 +202,8 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _prepare_evidence_dir(target: Path, evidence: Path) -> Path:
-    target = target.resolve()
+def _prepare_evidence_dir(root: Path, evidence: Path) -> Path:
+    target = (root / "target").resolve()
     evidence = evidence.resolve()
     if not evidence.is_relative_to(target):
         raise CapacityOracleError("group evidence must be under the framework target directory")
@@ -312,7 +313,7 @@ def run_libtest(root: Path, binary: Path, selected: Sequence[str], evidence: Pat
 
 
 def execute_group(root: Path, target: Path, group: Group, evidence: Path) -> tuple[str, ...]:
-    evidence = _prepare_evidence_dir(target, evidence)
+    evidence = _prepare_evidence_dir(root, evidence)
     source = _source_path(root, group)
     if not source.is_file():
         raise CapacityOracleError(f"{group.name}: required current test source is absent")
@@ -388,9 +389,13 @@ def _required_environment(root: Path) -> SourceIdentity:
     return actual
 
 
-def _evidence_root(target: Path, run_id: str) -> Path:
-    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
-    return target / "evidence" / digest
+def _receipt_evidence_dir(root: Path, receipt: Path) -> Path:
+    evidence = receipt.parent / "capacity"
+    if not evidence.is_relative_to((root / "target").resolve()):
+        raise CapacityOracleError("framework evidence must be beside a target receipt")
+    if evidence.exists():
+        raise CapacityOracleError("framework evidence directory already exists for this receipt")
+    return evidence
 
 
 def main() -> int:
@@ -401,9 +406,8 @@ def main() -> int:
         # integration blocker and must not be bypassed with other green legs.
         order = (GROUPS[-1], *GROUPS[:-1])
         target = REPO_ROOT / "target/dtype-capacity"
-        evidence = _evidence_root(target, os.environ["CHELIS_ORACLE_RUN_ID"])
-        if evidence.exists():
-            raise CapacityOracleError("framework evidence directory already exists for this run")
+        receipt = Path(os.environ["CHELIS_ORACLE_RECEIPT"]).resolve()
+        evidence = _receipt_evidence_dir(REPO_ROOT, receipt)
         executions = {
             group.name: execute_group(REPO_ROOT, target, group, evidence / group.name)
             for group in order
