@@ -1405,10 +1405,26 @@ legality.
 > links are not entries. The result is ordered by the byte sequence of the
 > entry name the host reports, which for a name that is valid UTF-8 is
 > lexicographically by Unicode scalar value. That order is fixed on the host's
-> names before any conversion to `string`, so it does not depend on how a name
-> that is not valid UTF-8 converts. A directory with no entries yields the
-> empty `List`. The operation is outside AD: it has no adjoint, no cotangent,
-> and no accumulator.
+> names before any conversion to `string`. Conversion SHALL be strict: a
+> name not representable as UTF-8 fails the complete call with an `IO` trap
+> tagged `list_dir`; no replacement characters, skipped entries, or partial
+> successful list may substitute for that failure. The offending entry is
+> the first invalid name in the host-name order above. Valid names retain
+> their exact UTF-8 bytes, without Unicode normalization. A directory with
+> no entries yields the empty `List`.
+>
+> The conversion diagnostic SHALL be
+> `IO trap in list_dir: directory <directory>, entry <entry>: name is not valid UTF-8`.
+> Both placeholders are reversible escaped host-byte representations,
+> delimited by `b"` and `"`. Tab, carriage return, newline, backslash,
+> single quote, and double quote use `\t`, `\r`, `\n`, `\\`, `\'`, and
+> `\"`, respectively; other printable ASCII bytes are literal, and every
+> remaining byte uses `\xhh` with two lowercase hexadecimal digits.
+> On Unix the bytes are the host's filename bytes. String-valued path APIs
+> cannot directly spell a name that is not representable as UTF-8; this
+> contract does not introduce a byte-preserving path or listing API.
+> The operation is outside AD: it has no adjoint, no cotangent, and no
+> accumulator.
 
 ### 3.6.1 The `test_*` assertion family
 

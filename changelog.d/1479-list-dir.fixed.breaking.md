@@ -1,0 +1,1 @@
+`list_dir` rejects directory names that cannot be represented as UTF-8 instead of replacing invalid bytes. Both execution lanes report the first invalid entry in host-name order with a reversible escaped diagnostic; valid names and their ordering are preserved.
