@@ -602,9 +602,10 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/ci_setup_uv_python.py",
         "python3 scripts/gate.py integration --tests-only "
         "--partition hash:${{ matrix.shard }}/2",
-        "python3 scripts/gate.py integration --support-only",
         ".venv/bin/python -m unittest "
         "scripts.test_nextest_profile_partition.ProfilePartitionTests",
+        "python3 scripts/gate.py integration --support-only --support-slice frontend",
+        "python3 scripts/gate.py integration --support-only --support-slice domain",
     ),
     # Rule-id: GATE-STAGE-RUNTIME-REPRESENTATION -- chelis#893 Phase 0's oracle
     # is its own gate stage because its release-profile reproducers and serial
@@ -773,6 +774,20 @@ NON_GATE_WORKFLOWS = {
     # It runs no cargo or Chelis command that the developer gate owns.
     # It stays outside gate.py by design.
     "openspec-validate.yml",
+    # OpenSpec autoland classifies an OpenSpec document change and asks
+    # GitHub to merge it. It runs the stdlib-only boundary classifier and
+    # the pinned central OpenSpec action, no cargo or Chelis command the
+    # developer gate owns. It is an actor rather than a gate and must not
+    # become a required check, so it stays outside gate.py by design.
+    "openspec-autoland.yml",
+    # Strict OpenSpec validation for the autoland path. Runs the pinned
+    # central OpenSpec action, no cargo or Chelis command the developer
+    # gate owns. Out of gate.py scope by design.
+    "openspec-autoland-validate.yml",
+    # The push signal and the trusted controller that reacts to it. Neither
+    # runs a cargo or Chelis command the developer gate owns.
+    "openspec-autoland-signal.yml",
+    "openspec-autoland-controller.yml",
 }
 
 
@@ -842,6 +857,26 @@ class StageUnionTests(unittest.TestCase):
             "integration", tests_only=False, support_only=True, partition=None,
         )
         self.assertEqual(commands.count(command), 1)
+
+    def test_support_slices_preserve_every_canonical_command_once(self):
+        slices = [gate.selected_stage_commands(
+            "integration", tests_only=False, support_only=True,
+            partition=None, support_slice=name,
+        ) for name in ("frontend", "domain")]
+        self.assertEqual(slices[0], [gate.LOWERING_TRACE_TESTS,
+                                    gate.COMPILER_FRONT_END_PERFORMANCE_ORACLE])
+        self.assertEqual(slices[1], [gate.UNREPRESENTABLE_DOMAIN_ORACLE])
+        self.assertEqual(slices[0] + slices[1], gate.STAGES["integration"][1:])
+
+    def test_support_slice_is_rejected_outside_support_only_integration(self):
+        for argv in (
+            ["integration", "--support-slice", "frontend"],
+            ["integration", "--tests-only", "--support-slice", "frontend"],
+            ["lint-and-unit", "--support-only", "--support-slice", "frontend"],
+            ["integration", "--support-only", "--support-slice", "missing"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                gate.parse_args(argv)
 
     def test_partition_is_rejected_outside_tests_only_integration(self):
         for argv in (
@@ -1775,6 +1810,19 @@ def _ci_step_block(job_block: str, step_name: str) -> str:
     return tail[: end.start()] if end else tail
 
 
+def _assert_support_slice_contract(block: str) -> None:
+    for name, shard in (("frontend", 1), ("domain", 2)):
+        step = _ci_step_block(block, f"Gate ({name} support subset)")
+        assert f"        if: matrix.shard == {shard}\n" in step, "each support slice must have one distinct worker"
+        _assert_executable_run_once(
+            step, f"python3 scripts/gate.py integration --support-only --support-slice {name}",
+        )
+    assert block.count("--support-only") == 2, "each support slice must run exactly once"
+    assert block.index("- name: Verify nextest profile coverage") < block.index(
+        "- name: Gate (frontend support subset)"
+    ), "list the default configuration before lowering-trace changes the warm build"
+
+
 def _workflow_job_block(path: Path, job: str) -> str:
     """Return the raw workflow text block for one job."""
     block = _workflow_job_blocks(path.read_text()).get(job)
@@ -2227,7 +2275,7 @@ class CiParityTests(unittest.TestCase):
         ):
             _assert_generalize_sweep_partition_contract(mutated)
 
-    def test_workspace_suite_is_two_disjoint_shards_plus_one_support_job(self):
+    def test_workspace_suite_is_two_disjoint_shards_with_balanced_support(self):
         shard_block = _ci_job_block("workspace-tests-shard")
         aggregate_block = _ci_job_block("workspace-tests")
         _assert_hash_partition_contract(shard_block, expected_count=2)
@@ -2238,22 +2286,35 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("fail-fast: false", shard_block)
         self.assertIn("scripts/gate.py integration --tests-only", shard_block)
         self.assertIn("scripts/gate.py integration --support-only", shard_block)
-        self.assertIn(
-            "- name: Gate (integration support subset)\n"
-            "        if: matrix.shard == 2",
-            shard_block,
-        )
+        _assert_support_slice_contract(shard_block)
         self.assertIn(
             "- name: Verify nextest profile coverage\n"
             "        if: matrix.shard == 1",
             shard_block,
         )
-        self.assertEqual(shard_block.count("--support-only"), 1)
         self.assertIn(
             "needs: [changes, workspace-tests-shard]",
             aggregate_block,
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_support_slice_contract_rejects_missing_repeated_or_misplaced_work(self):
+        block = _ci_job_block("workspace-tests-shard")
+        frontend = _ci_step_block(block, "Gate (frontend support subset)")
+        mutations = (
+            block.replace("--support-slice domain", "--support-slice frontend"),
+            block.replace("Gate (domain support subset)\n        if: matrix.shard == 2",
+                          "Gate (domain support subset)\n        if: matrix.shard == 1"),
+            block.replace("--support-only --support-slice domain", "--support-only"),
+            block.replace("- name: Verify nextest profile coverage", "- name: Removed census"),
+            block.replace(frontend, "", 1).replace(
+                "      - name: Verify nextest profile coverage",
+                frontend + "      - name: Verify nextest profile coverage", 1,
+            ),
+        )
+        for changed in mutations:
+            with self.subTest(workflow=changed), self.assertRaises((AssertionError, ValueError)):
+                _assert_support_slice_contract(changed)
 
     def test_workspace_junit_shards_merge_before_one_validated_timing_report(self):
         shard_block = _ci_job_block("workspace-tests-shard")

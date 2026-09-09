@@ -130,6 +130,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         11,
         "the same-rank broadcast fixture, the zero-extent fixture, the static and runtime non-unit refusals, the unit-extent control, the two locally placed claims over a runtime `shrink` extent, and the two-`expand`-over-one-operand pair with its refuted twin",
     ),
+    (
+        "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+        7,
+        "same-rank singleton broadcasts for record projection, literal/symbolic/folded sizes and sum validation, plus the non-unit rejection; rank-raising claim fixtures use insert",
+    ),
     // `expand`'s own runtime behaviour suite. It exists because the previous
     // `expand.ch` was entirely rank-increasing and moved to `insert.ch`
     // (chelis#1277 S2a), leaving the operation with no suite of its own.
