@@ -796,6 +796,25 @@ impl CEmitter {
             RiscOp::Const { value } => self.emit_const(id, value, &node.output_type)?,
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
+            RiscOp::ExtentWitness {
+                parameter,
+                axis: RtAxis::Lit(axis),
+                requirements,
+            } => {
+                let input = node.inputs[0].0;
+                let parameter =
+                    chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string();
+                for required in requirements {
+                    let required = required.as_i64_exact().expect("verified int64 requirement");
+                    self.line(&format!("if (t{input}_shape[{axis}] != {required}) {{"));
+                    self.indent += 1;
+                    self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = {required}, {parameter} axis {axis} = %lld\\n\", (long long)t{input}_shape[{axis}]);"));
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                self.emit_shape(id, *axis as usize, &node.inputs, &node.output_type);
+            }
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Sub => self.emit_binary(id, "-", &node.inputs, &node.output_type),

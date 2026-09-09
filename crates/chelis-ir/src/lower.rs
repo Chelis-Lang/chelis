@@ -5040,6 +5040,10 @@ struct LowerCtx {
     /// non-static value drops its stale entry (shadowing symmetry, mirroring
     /// `shape_bindings`). Saved/restored across binding scopes.
     static_size_bindings: UnordMap<String, i64>,
+    /// Lexical parameter binding plus its fresh shape witnesses. The bound
+    /// node comparison prevents a shadowed variable reusing an outer witness.
+    parameter_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    invocation_witnesses: Vec<NodeId>,
     local_callables: UnordMap<String, Expr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
@@ -5164,6 +5168,8 @@ impl LowerCtx {
             list_bindings: UnordMap::new(),
             shape_bindings: UnordMap::new(),
             static_size_bindings: UnordMap::new(),
+            parameter_witnesses: UnordMap::new(),
+            invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
             program_defs: program_defs.into(),
@@ -6114,6 +6120,7 @@ impl LowerCtx {
     /// dead DAG nodes and are removed by DCE; a childless block has no
     /// value and raises.
     fn lower_block(&mut self, elems: &[Expr], span: Span) -> LoweredValue {
+        let witness_start = self.invocation_witnesses.len();
         if elems.len() <= 2 {
             raise_malformed_deep(
                 "a childless `block` node (the value is the last child, so at least one \
@@ -6131,6 +6138,7 @@ impl LowerCtx {
         for elem in &elems[2..] {
             last = self.lower_expr(elem);
         }
+        self.retain_invocation_witnesses(&last, witness_start);
         last
     }
 
@@ -6198,6 +6206,7 @@ impl LowerCtx {
 
     /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
     fn lower_let(&mut self, elems: &[Expr]) -> LoweredValue {
+        let witness_start = self.invocation_witnesses.len();
         if elems.len() < 4 {
             raise_malformed_deep(
                 "a `let` form with fewer than 4 elements",
@@ -6281,6 +6290,7 @@ impl LowerCtx {
         }
 
         let result = self.lower_expr(&elems[3]);
+        self.retain_invocation_witnesses(&result, witness_start);
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
@@ -7475,6 +7485,9 @@ impl LowerCtx {
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
         };
         let saved = self.bindings.clone();
+        let witness_start = self.invocation_witnesses.len();
+        let saved_witnesses = self.parameter_witnesses.clone();
+        let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
@@ -7680,6 +7693,16 @@ impl LowerCtx {
                 ),
             );
         }
+        let declared_result = extract_fn_return_type(fn_expr)
+            .map(|expr| {
+                Self::type_from_type_expr_with_subst(
+                    expr,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                )
+            })
+            .unwrap_or_else(|| expected_return_ty.clone());
+        self.prepare_parameter_witnesses(&param_names, &declared_result, call_span);
         // Each unroll level costs multiple large lowering frames (debug
         // builds overflow the default 8 MB main-thread stack well before the
         // 512-level cap without this). `maybe_grow` at THIS site works where
@@ -7701,6 +7724,9 @@ impl LowerCtx {
             // the inlined body ends in an untyped default node.
             self.repair_output_type_if_default(&result, expected_return_ty);
         }
+        self.preserve_literal_result(&result, &declared_result);
+        self.retain_invocation_witnesses(&result, witness_start);
+        self.parameter_witnesses = saved_witnesses;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -9520,7 +9546,11 @@ impl LowerCtx {
                     //     followed by `cast(len, int32)` — no longer falls
                     //     through to the size-1 default (a silent
                     //     eval-`[3, 3]`-vs-C-`[1, 3]` miscompile pre-fix).
-                    if let Some(v) = self
+                    if let Some(witness) = self.parameter_witness_from_shape_arg(size_arg) {
+                        let slot = inputs.len();
+                        inputs.push(witness);
+                        RtDim::Node(slot)
+                    } else if let Some(v) = self
                         .fold_static_size(size_arg)
                         .and_then(|n| usize::try_from(n).ok())
                     {
@@ -11770,6 +11800,127 @@ impl LowerCtx {
     /// DCE — otherwise a `shape(x, ...)`-only-referenced `x` is eliminated and
     /// the symbolic dim it declares loses its source (silent wrong shape in
     /// the backend).
+    fn prepare_parameter_witnesses(
+        &mut self,
+        params: &[String],
+        result: &TensorType,
+        span: Option<String>,
+    ) {
+        self.parameter_witnesses.clear();
+        if !result.dims.iter().any(|dim| matches!(dim, DimInfo::Lit(_))) {
+            return;
+        }
+        for name in params {
+            let Some(input) = self
+                .bindings
+                .get(name)
+                .and_then(LoweredValue::as_single_node)
+            else {
+                continue;
+            };
+            let rank = self
+                .dag
+                .get(input)
+                .expect("bound parameter")
+                .output_type
+                .dims
+                .len();
+            let mut witnesses = Vec::new();
+            for axis in 0..rank {
+                let witness = self.dag.add_node(
+                    RiscOp::ExtentWitness {
+                        parameter: name.clone(),
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits int32")),
+                        requirements: Vec::new(),
+                    },
+                    vec![input],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Int64,
+                    },
+                    span.clone(),
+                );
+                witnesses.push(witness);
+                self.invocation_witnesses.push(witness);
+            }
+            self.parameter_witnesses
+                .insert(name.clone(), (input, witnesses));
+        }
+    }
+
+    fn parameter_witness_from_shape_arg(&self, expr: &Expr) -> Option<NodeId> {
+        let (operand, axis) = self.shape_app_operand_axis_resolved(expr)?;
+        let name = bare_var_name(&operand)?;
+        let (input, witnesses) = self.parameter_witnesses.get(&name)?;
+        (self.bindings.get(&name)?.as_single_node()? == *input)
+            .then(|| witnesses.get(axis).copied())
+            .flatten()
+    }
+
+    fn axis_literal_witness(&self, id: NodeId, axis: usize) -> Option<NodeId> {
+        use crate::axis_sources::AxisSource;
+        let node = self.dag.get(id)?;
+        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
+            AxisSource::ScalarInput { input } => {
+                let source = *node.inputs.get(*input)?;
+                matches!(self.dag.get(source)?.op, RiscOp::ExtentWitness { .. }).then_some(source)
+            }
+            AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(axis),
+            } => self.axis_literal_witness(*node.inputs.get(*input)?, usize::try_from(*axis).ok()?),
+            _ => None,
+        }
+    }
+
+    fn preserve_literal_result(&mut self, result: &LoweredValue, declared: &TensorType) {
+        let Some(id) = result.as_single_node() else {
+            return;
+        };
+        for (axis, dim) in declared.dims.iter().enumerate() {
+            let DimInfo::Lit(required) = dim else {
+                continue;
+            };
+            let Some(witness) = self.axis_literal_witness(id, axis) else {
+                continue;
+            };
+            let required_value = chelis_types::scalar_from_i64(
+                "load",
+                Prim::Int64,
+                i64::try_from(*required).expect("checked extent fits int64"),
+            )
+            .expect("int64 extent literal");
+            if let RiscOp::ExtentWitness { requirements, .. } =
+                &mut self.dag.node_mut(witness).expect("witness").op
+            {
+                if !requirements.contains(&required_value) {
+                    requirements.push(required_value);
+                }
+            }
+            self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
+        }
+    }
+
+    fn retain_invocation_witnesses(&mut self, result: &LoweredValue, start: usize) {
+        let Some(id) = result.as_single_node() else {
+            return;
+        };
+        let required = self.invocation_witnesses[start..]
+            .iter()
+            .copied()
+            .filter(|witness| {
+                matches!(&self.dag.get(*witness).expect("witness").op,
+                RiscOp::ExtentWitness { requirements, .. } if !requirements.is_empty())
+            })
+            .collect::<Vec<_>>();
+        let node = self.dag.node_mut(id).expect("result");
+        for witness in required {
+            if witness != id && !node.shape_deps.contains(&witness) {
+                node.shape_deps.push(witness);
+            }
+        }
+    }
+
     fn input_axis_source_from_shape_arg(
         &mut self,
         expr: &Expr,
@@ -12526,6 +12677,9 @@ impl LowerCtx {
             );
         }
         let saved = self.bindings.clone();
+        let witness_start = self.invocation_witnesses.len();
+        let saved_witnesses = self.parameter_witnesses.clone();
+        let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
@@ -12574,7 +12728,39 @@ impl LowerCtx {
             }
         }
 
+        let declared_result = elems
+            .get(1)
+            .and_then(|expr| match expr {
+                Expr::Map(meta, _) => meta.ty().map(|value| value.expression()),
+                _ => None,
+            })
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
+            .map(|expr| {
+                Self::type_from_type_expr_with_subst(
+                    expr,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                )
+            });
+        let params = stamped_parts(&elems[2])
+            .map(|(_, _, params)| {
+                params
+                    .iter()
+                    .filter_map(param_name_and_type_expr)
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(ty) = &declared_result {
+            self.prepare_parameter_witnesses(&params, ty, call_span);
+        }
         let result = self.lower_expr(&elems[3]);
+        if let Some(ty) = &declared_result {
+            self.preserve_literal_result(&result, ty);
+        }
+        self.retain_invocation_witnesses(&result, witness_start);
+        self.parameter_witnesses = saved_witnesses;
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;

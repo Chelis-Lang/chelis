@@ -16,6 +16,9 @@ fn ty(dims: &[usize], precision: &str) -> WireTensorType {
 
 fn load(id: usize, name: &str, dims: &[usize], precision: &str) -> WireDagNode {
     WireDagNode {
+        shape_deps: vec![],
+        span_id: None,
+        merged_spans: vec![],
         id,
         op: WireRiscOp::Load {
             name: name.to_string(),
@@ -32,6 +35,9 @@ fn expand_dag(size: WireRtDim, bound: WireDagNode) -> WireDag {
             load(0, "value", &[], "f32"),
             bound,
             WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 2,
                 op: WireRiscOp::Expand { axis: 0, size },
                 inputs: vec![0, 1],
@@ -60,7 +66,7 @@ fn assert_contract_rejects(dag: &WireDag, expected: &str) {
 
 #[test]
 fn v7_input_axis_round_trips_as_typed_structure() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 7);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 8);
     let dag = expand_dag(
         WireRtDim::InputAxis {
             tensor: 1,
@@ -70,7 +76,7 @@ fn v7_input_axis_round_trips_as_typed_structure() {
     );
 
     let json = serde_json::to_string(&dag).expect("valid InputAxis must encode");
-    assert!(json.contains(r#""schema_version":7"#), "{json}");
+    assert!(json.contains(r#""schema_version":8"#), "{json}");
     assert!(
         json.contains(
             r#""size":{"bound":"input_axis","tensor":1,"axis":{"axis":"lit","value":0}}"#
@@ -158,6 +164,9 @@ fn v7_movement_ops_reject_unowned_runtime_extent_inputs() {
             load(1, "extent", &[], "int64"),
             load(2, "unowned", &[], "int64"),
             WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 3,
                 op: WireRiscOp::Reshape {
                     new_shape: vec![WireRtDim::Node { input: 1 }],
@@ -197,6 +206,9 @@ fn v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners() {
             load(0, "value", &[4], "f32"),
             load(1, "witness", &[4], "f32"),
             WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 2,
                 op: WireRiscOp::Pad {
                     padding: vec![(
@@ -230,12 +242,12 @@ fn v6_display_string_expand_payload_is_rejected_before_op_decode() {
         Err(WireDagDecodeError::Schema(
             WireDagSchemaError::UnsupportedSchemaVersion {
                 found: 6,
-                supported: 7,
+                supported: WIRE_DAG_SCHEMA_VERSION,
             }
         ))
     ));
 
-    let stale_spelling = old.replace("\"schema_version\":6", "\"schema_version\":7");
+    let stale_spelling = old.replace("\"schema_version\":6", "\"schema_version\":8");
     assert!(matches!(
         WireDag::from_validated_json(&stale_spelling),
         Err(WireDagDecodeError::Parse(_))
@@ -254,6 +266,9 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
         nodes: vec![
             load(0, "value", &[4], "f32"),
             WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 1,
                 op: WireRiscOp::Shrink {
                     bounds: vec![(start, WireRtDim::ToEnd)],
@@ -283,6 +298,9 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
             nodes: vec![
                 load(0, "value", &[4], "f32"),
                 WireDagNode {
+                    shape_deps: vec![],
+                    span_id: None,
+                    merged_spans: vec![],
                     id: 1,
                     op: WireRiscOp::Shrink {
                         bounds: vec![(WireRtDim::ToEnd, WireRtDim::Lit { value: 4 })],

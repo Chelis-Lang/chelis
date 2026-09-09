@@ -239,6 +239,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Shrink { .. }
             | WireRiscOp::Stride { .. }
             | WireRiscOp::Shape { .. }
+            | WireRiscOp::ExtentWitness { .. }
             | WireRiscOp::Load { .. }
             | WireRiscOp::Store { .. }
             | WireRiscOp::Copy
@@ -519,7 +520,9 @@ const _: () = {
     // Moved to `7` for chelis#1277 Slice A: Expand's display-string size
     // became the existing typed WireRtDim carrier, which gained InputAxis.
     // Both remain in the f64-free operation group above.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 7);
+    // v8 transports tagged literal witness requirements. They are discrete
+    // shape checks outside the float-envelope extraction above.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 8);
 };
 
 #[cfg(test)]

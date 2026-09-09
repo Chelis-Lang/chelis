@@ -434,7 +434,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             .collect(),
 
         // --- Shape query: a rank-0 scalar has no output axis ---
-        RiscOp::Shape { .. } => Vec::new(),
+        RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => Vec::new(),
 
         // --- Memory ---
         RiscOp::Const { .. } | RiscOp::ConstTensor { .. } => declared_shape_sources(dag, node),

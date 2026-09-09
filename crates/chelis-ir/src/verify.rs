@@ -423,6 +423,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Permute { .. }
             | RiscOp::OneHot { .. }
             | RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
             | RiscOp::Cast { .. }
             | RiscOp::CastTrunc { .. } => {
                 if arity != 1 {
@@ -569,6 +570,37 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     "shape read at node {} must produce an exact int64 scalar, got precision `{}`",
                     node.id.0,
                     node.output_type.precision.name()
+                ));
+            }
+        }
+
+        if let RiscOp::ExtentWitness {
+            axis: crate::dag::RtAxis::Lit(axis),
+            requirements,
+            ..
+        } = &node.op
+        {
+            if arity == 1
+                && let Some(input) = dag.get(node.inputs[0])
+                && usize::try_from(*axis).map_or(true, |axis| axis >= input.output_type.dims.len())
+            {
+                errors.push(format!(
+                    "extent witness at node {} has an invalid input axis",
+                    node.id.0
+                ));
+            }
+            if !node.output_type.dims.is_empty() || node.output_type.precision != Prim::Int64 {
+                errors.push(format!(
+                    "extent witness at node {} must produce a rank-0 int64 scalar",
+                    node.id.0
+                ));
+            }
+            if requirements.iter().any(|value| {
+                value.prim() != Prim::Int64 || value.as_i64_exact().is_none_or(|value| value < 0)
+            }) {
+                errors.push(format!(
+                    "extent witness at node {} requires nonnegative int64 literals",
+                    node.id.0
                 ));
             }
         }

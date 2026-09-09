@@ -140,6 +140,12 @@ pub(super) fn annotate_expr_with_scope(
                                     annotation_context,
                                     errors,
                                 );
+                                // The declaration owner's completed type retains the
+                                // authored result claim; the body owner remains the
+                                // independent inferred type used to check that claim.
+                                let fn_ty = product
+                                    .owner_type(expr, "declared function", errors)
+                                    .unwrap_or(fn_ty);
                                 let mut elements = vec![
                                     fn_list.elements[0].clone(),
                                     annotated_meta_map_with_override(

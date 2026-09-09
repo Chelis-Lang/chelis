@@ -29,6 +29,19 @@ versions 1 through 7, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
+`WireRiscOp::ExtentWitness { parameter, axis, requirements }` preserves a
+call's shape observation and its literal requirements separately. It has one
+tensor input and a rank-zero `int64` output. The normalized `int32` axis must
+be within that input's rank. Every requirement is an explicit nonnegative
+`int64` `ScalarValue`; an absent vector, wrong tag, negative requirement,
+invalid axis, arity, or output type is an encoding and decoding error.
+`parameter` is diagnostic text, not dimension identity. The node's source
+provenance and invocation dependencies survive transport as ordinary node
+fields and edges. `WireDagNode.shape_deps` contains nonnegative exact `int64`
+`ScalarValue` node references to strictly earlier nodes. It does not carry
+shape numbers. `shape_deps`, `span_id` (explicitly null when absent), and
+`merged_spans` are mandatory fields, including when their lists are empty.
+
 `WireRiscOp::Count { axes }` carries the complete
 non-empty vector of unique normalized original-axis positions in strictly
 descending order under [05-OP-29]. An encoder rejects any empty, duplicate,
