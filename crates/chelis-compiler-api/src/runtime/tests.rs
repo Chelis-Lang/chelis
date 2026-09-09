@@ -1549,23 +1549,12 @@ fn host_runtime_reduce_window_max_min_drop_nan() {
     );
 }
 
-/// #170 DECISION-LOCK: f32 `matmul` deliberately keeps an f64 eval
-/// accumulator and does NOT take the #163 `sum` cascade nor downcast to
-/// strict f32. torch's CPU f32 matmul is a BLAS GEMM (strict-f32-left-fold
-/// order, NOT the cascade), and the eval reference intentionally stays at
-/// HIGHER precision (f64): it is the reference, the shipped C backend uses
-/// `cblas_sgemm`, and the matmul eval-vs-C parity oracle uses a TOLERANCE,
-/// not bit-identity, for exactly this expected gap. Downcasting eval to
-/// strict f32 would lower precision, couple the reference to torch's BLAS
-/// version, and still not win bit-identity — so it is rejected.
-///
-/// The absorption probe `[2^24, 1×40, -2^24] · [1×42]` pins this: under the
-/// retained f64 accumulator the forty `1.0`s are preserved (`-> 40.0`);
-/// under a strict-f32 fold they would be absorbed by `2^24` (`-> 0.0`).
-/// This test FAILS if someone "fixes" matmul into strict f32 (or the
-/// cascade), guarding the documented decision.
+/// [05-OP-30] and section 4.1 require the f32 adjacent-pair tree.
+/// For [2^24, forty ones, -2^24], only the first pair loses its unit:
+/// the final two subtrees are 2^24 + 30 and -2^24 + 9, giving 39.
+/// An f64 reference (40) and a left fold (0) both implement different graphs.
 #[test]
-fn host_runtime_matmul_f32_keeps_f64_accumulator_not_strict_f32() {
+fn host_runtime_matmul_f32_preserves_canonical_accumulator_tree() {
     let mut lhs_row = vec![16_777_216.0_f64];
     lhs_row.extend(std::iter::repeat_n(1.0_f64, 40));
     lhs_row.push(-16_777_216.0_f64);
@@ -1581,9 +1570,8 @@ fn host_runtime_matmul_f32_keeps_f64_accumulator_not_strict_f32() {
     let out = tensor_matmul_host(&lhs, &rhs).expect("matmul must evaluate");
     assert_eq!(
         out.value.to_f64_lossy_vec(),
-        vec![40.0_f64],
-        "f32 matmul keeps the higher-precision f64 eval accumulator (#170 decision): \
-         the forty 1.0s survive (=> 40.0); a strict-f32 fold would absorb them (=> 0.0)"
+        vec![39.0_f64],
+        "f32 matmul must execute its canonical accumulator tree"
     );
 }
 

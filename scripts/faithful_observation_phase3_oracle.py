@@ -60,6 +60,7 @@ REQUIRED_TESTS = {
         "parity_checked_reshape",
         "parity_dict_foundation",
         "parity_count_bool_axes",
+        "parity_explicit_normalization",
         "parity_generic_explicit_shape",
         "parity_hash_order_determinism",
         "parity_constraint_directed_risk_guards_library_only",
@@ -156,6 +157,10 @@ REQUIRED_EVAL_RECEIPTS = {
 # chelis#889/#893 add checked_reshape.ch and its executable parity row.
 # Independent runtime and generated host/DAG UBSan controls cover exact stored
 # bits, empty domains, metadata rejection, and owned reshape independence.
+# chelis#1294 adds explicit_normalization.ch and its executable parity row.
+# The independently reviewed issue_1294_normalize suite pins its exact eval
+# result and the undeclared-name rejection; the parity row also runs generated C.
+
 # chelis#1377 adds literal_extent_claim.ch and its executable parity row.
 # runtime_extent_claim_preparation independently asserts the example's declared
 # signature, exact shape/value, and the required failure with five input elements.
@@ -170,7 +175,8 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "0e0f4a60820edc8b2cbaee0c3691398a107b5a899479643868e6a3e4a51d1728",
+        "parity_corpus_is_complete": "36977e157f2fc6928264f1e0f94b8ddd327e88f825b5301cb59e34b0a768df05",
+        "parity_explicit_normalization": "d09c17ffa744ee21214877d59476ce58441480e4f6f8a29d6eb5edf3ad1417cb",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",
         "parity_hash_order_determinism": "148c637280b238c9a119e22196960703873e291f1f0df59323c33ddb96b47170",

@@ -197,7 +197,7 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
 /// Categories:
 /// * TypeMismatch (def body vs declared sig)
 /// * DimensionMismatch (concrete dim literal vs sig)
-/// * Validator rejection (conv2d stride 0; same shape RT-205 F7 used,
+/// * Validator rejection (conv stride 0; same shape RT-205 F7 used,
 ///   but now exits non-zero per the inverted contract)
 #[test]
 fn issue_207_invariant_holds_across_error_categories() {
@@ -218,7 +218,7 @@ fn issue_207_invariant_holds_across_error_categories() {
         (
             "validator",
             "module Probe.Validator\n\
-             def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv2d(&x, &k, 0, 0)\n",
+             def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])\n",
             "",
         ),
     ];

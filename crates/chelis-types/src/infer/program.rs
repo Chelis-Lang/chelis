@@ -2314,6 +2314,15 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
 }
 
 #[cfg(test)]
+pub(crate) fn builtin_selection_probe(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<crate::builtin_discovery::BuiltinCaseSelection> {
+    let normalized = normalize_nodes_to_lists(exprs);
+    infer_program_with_product_in_session(&normalized, errors).builtin_selections
+}
+
+#[cfg(test)]
 mod component_level_scope_tests {
     use super::*;
 

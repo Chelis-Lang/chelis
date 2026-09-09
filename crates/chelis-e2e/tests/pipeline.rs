@@ -58,7 +58,7 @@ def forward(
     scores = matmul(q, permute(k, 1, 0))
     probs = softmax(scores, 1)
     attn = matmul(matmul(probs, v), wo)
-    out = layer_norm(add(x, attn), gamma, beta)
+    out = layer_norm(add(x, attn), gamma, beta, 0.00001f32)
     _ = drop(q)
     _ = drop(k)
     _ = drop(v)

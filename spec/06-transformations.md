@@ -301,8 +301,10 @@ Every execution mode applies `grad`/`vmap` through the same semantic transform
 rules. Host lists are ordinary differentiable carriers under §2.1, not a
 target-specific boundary subset. In particular:
 
-- `to_tensor(to_list(x))`, which is the identity boundary and whose adjoint is
-  the identity cotangent
+- `to_tensor(to_list(x))` for positive-rank tensors, with any trailing
+  extents hidden by empty Lists supplied by the expected tensor type per
+  [05-OP-57], is the identity boundary; its adjoint is the identity cotangent
+  and uses the saved full forward shape
 - `map(f, xs)` differentiates each executed application of `f` in list order
   and returns the same-length positional cotangent list
 - `filter(p, xs)` treats the exact forward predicate mask as constant,

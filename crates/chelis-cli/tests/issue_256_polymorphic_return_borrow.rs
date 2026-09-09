@@ -11,7 +11,7 @@
 //!
 //! depending on which classifier reached the unresolved `Type::Var(_)`
 //! first. The school-style reproducer was a `pool → relu → &result →
-//! conv2d` chain in a forward body whose intermediate had no declared
+//! conv` chain in a forward body whose intermediate had no declared
 //! type and whose RHS sub-expressions (`reshape(...)`, `mean(...)`)
 //! left their output type as a free variable until the surrounding
 //! call's `&tensor[..]` parameter pinned it via unification.

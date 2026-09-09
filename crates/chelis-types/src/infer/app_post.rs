@@ -86,7 +86,7 @@ pub(super) fn finish_unified_app(
     // `Var` as the call's result type. That bare `Var` would be
     // degraded to a rank-0 default `TensorType` during writeback and
     // CLOBBER the node's concrete type annotation, ICEing the IR
-    // lowering (`conv2d output height axis requires a statically known
+    // lowering (`conv output height axis requires a statically known
     // axis`; #778's short-circuit removal exposed this). Returning
     // `Type::Error` instead restores the pre-#778 downstream shape
     // WITHOUT re-adding the arg-`Error` short-circuit: the per-slot
@@ -107,7 +107,7 @@ pub(super) fn finish_unified_app(
                 | "mean"
                 | "expand"
                 | "layer_norm"
-                | "conv2d"
+                | "conv"
                 | "scatter_elements"
         ) && arg_tys
             .iter()
@@ -228,11 +228,11 @@ pub(super) fn finish_unified_app(
                 }
                 result_ty = check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
             }
-            "conv2d" => {
+            "conv" => {
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::Conv2d,
+                        DeferredShapeRule::Conv,
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
@@ -240,7 +240,7 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty =
-                    check_conv2d_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
+                    check_conv_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
             }
             "scatter_elements" if owes_shape_replay => {
                 checked_route_observed = true;

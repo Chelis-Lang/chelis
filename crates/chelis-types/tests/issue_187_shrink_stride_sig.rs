@@ -746,7 +746,7 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 1, f32] = shrink(&x, [[cast(cast(-1, in
 // Sibling-sweep targets within the spec section 2.4 movement family.
 // `permute` and `expand` are the other parameterized builtins that take
 // int literals from `kids[2..]` via `extract_int_literal`; the same
-// cast-bypass surfaces there too. Reductions, conv2d, gather/scatter
+// cast-bypass surfaces there too. Reductions, conv, gather/scatter
 // axis extractors are flagged in the commit body as follow-up domain
 // scope -- not fixed in this PR.
 // ---------------------------------------------------------------------------

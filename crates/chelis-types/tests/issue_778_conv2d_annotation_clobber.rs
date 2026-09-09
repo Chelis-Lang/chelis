@@ -4,13 +4,13 @@
 //! short-circuit then let the shape override return `subst.apply(ret_tv)` — an
 //! unbound `Var` — which the writeback degraded to a rank-0 default
 //! `(t-tensor {} (t-prim {} f32))` (no spatial dims), CLOBBERING the node's
-//! explicit concrete annotation. The IR lowering then ICEd with "conv2d output
+//! explicit concrete annotation. The IR lowering then ICEd with "conv output
 //! height axis requires a statically known axis". The fix makes the override
 //! return `Type::Error` when an operand is `Error`, so the writeback preserves
 //! the concrete annotation.
 //!
 //! This test pins the checker-level mechanism directly (independent of
-//! lowering): after `check_ir_program`, the `conv2d` app node's written-back
+//! lowering): after `check_ir_program`, the `conv` app node's written-back
 //! `type:` must still be the concrete rank-4 `t-tensor`, never a rank-0
 //! `t-tensor` or a bare `t-var`.
 
@@ -18,7 +18,7 @@ use chelis_deep::parser::parse_str;
 use chelis_deep::{Atom, Expr};
 use chelis_types::check_ir_program;
 
-/// conv2d 1x1: three top-level defs. `x`/`k` are separate defs, so in the
+/// conv 1x1: three top-level defs. `x`/`k` are separate defs, so in the
 /// `def y` body-annotation scope the `(var x)`/`(var k)` operands are unbound
 /// and infer to `Error` — the exact trigger for the writeback clobber.
 const CONV2D_SRC: &str = r#"
@@ -26,7 +26,7 @@ const CONV2D_SRC: &str = r#"
     (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))} k))
     (def {} y
       (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-           (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+           (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
 "#;
 
 fn list_tag(expr: &Expr) -> Option<&str> {
@@ -133,37 +133,37 @@ fn tensor_type_dim_count(ty: &Expr) -> Option<usize> {
 }
 
 #[test]
-fn conv2d_error_operand_does_not_clobber_concrete_annotation() {
+fn conv_error_operand_does_not_clobber_concrete_annotation() {
     let exprs = parse_str(CONV2D_SRC).expect("parse deep");
     // Program is well-typed: the clobber was a SILENT writeback degradation,
     // not a surfaced type error, so `check_ir_program` must succeed.
-    let checked = check_ir_program(&exprs).expect("conv2d program should check clean");
+    let checked = check_ir_program(&exprs).expect("conv program should check clean");
 
-    let mut conv2d_types: Vec<Expr> = Vec::new();
+    let mut conv_types: Vec<Expr> = Vec::new();
     for expr in checked.exprs() {
         visit(expr, &mut |node| {
-            if app_callee_name(node) == Some("conv2d")
+            if app_callee_name(node) == Some("conv")
                 && let Some(ty) = node_type_meta(node)
             {
-                conv2d_types.push(ty.clone());
+                conv_types.push(ty.clone());
             }
         });
     }
 
     assert!(
-        !conv2d_types.is_empty(),
-        "expected a conv2d app node with a written-back type annotation"
+        !conv_types.is_empty(),
+        "expected a conv app node with a written-back type annotation"
     );
-    for ty in &conv2d_types {
+    for ty in &conv_types {
         assert_eq!(
             list_tag(ty),
             Some("t-tensor"),
-            "conv2d written-back type must stay a concrete t-tensor (not a bare t-var), got {ty:?}"
+            "conv written-back type must stay a concrete t-tensor (not a bare t-var), got {ty:?}"
         );
         assert_eq!(
             tensor_type_dim_count(ty),
             Some(4),
-            "conv2d output type must keep its 4 concrete dims; a rank-0 (dims=[]) \
+            "conv output type must keep its 4 concrete dims; a rank-0 (dims=[]) \
              writeback is the #778 clobber that ICEs IR lowering; got {ty:?}"
         );
     }

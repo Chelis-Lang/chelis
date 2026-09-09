@@ -629,12 +629,11 @@ out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
     // f32 and the C output was [1.0, 2.0] (the captured 1.1 dropped to ~0).
     let build = chelis_build_c(source, "s2t_capture");
     let kernel_c = build.path().join("s2t_capture.c");
-    // Emit-shape: the captured f64 scalar packs into a CHELIS_DTYPE_F64 rank-0
-    // tensor through a double*, not CHELIS_DTYPE_F32.
+    // The captured scalar crosses the tagged f64 boundary with exact bits.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F64)")
-            && c_source.contains("((double*)"),
+        c_source.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F64,")
+            && c_source.contains("chelis_host_f64_bits(__tensor_scalar"),
         "captured f64 scalar must pack into a CHELIS_DTYPE_F64 rank-0 tensor (#381); \
          emitted C=\n{c_source}",
     );

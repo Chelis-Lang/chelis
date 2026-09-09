@@ -148,17 +148,10 @@ fn c_fused_reduce_sum_no_intermediate() {
         src.contains("float v0"),
         "Fused reduce should contain step variable 'float v0'"
     );
-    // Stride-4 ILP cascade (issue #163): four accumulator lanes,
-    // each updated from the fused step variable inside the
-    // `switch (__reduce_i & 3)` dispatch.
-    assert!(
-        src.contains("acc0 += v"),
-        "Fused reduce should accumulate into stride-4 lane 0 from a step variable"
-    );
-    assert!(
-        src.contains("(acc0 + acc1) + (acc2 + acc3)"),
-        "Fused reduce should combine four stride-4 lanes pairwise"
-    );
+    // Fused leaves enter the same canonical tree as materialized Sum.
+    assert!(src.contains("__sum_level_"));
+    assert!(src.contains("] = v"));
+    assert!(!src.contains("acc0 +="));
 
     // There should be NO separate allocation for the FusedElem output.
     // With fusion: 1 const alloc + 1 reduction alloc = 2 chelis_alloc calls.

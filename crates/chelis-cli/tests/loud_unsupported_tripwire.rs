@@ -442,7 +442,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/lower.rs",
-        12,
+        10,
         "structural at the P1 baseline: recursion-depth counter and \
          desync-guarded rank/extent reads. The uniform-ConstTensor \
          first-element read LEFT this census at chelis#856 (13 -> 12, per \
@@ -451,10 +451,11 @@ const BASELINE: &[Entry] = &[
          raw f64 buffer into `unwrap_or(RawScalar::Int(0))` on a buffer \
          the `windows(2)` guard already proved non-empty, and the value \
          now finalizes at the node's dtype or raises a cited lowering \
-         diagnostic, so no numeric default survives the site. FLAGGED, \
-         not proven: conv2d's present-but-non-literal stride unwrap_or(1) \
-         / padding unwrap_or(0) - the chelis#776 shape (census row 23) - \
-         and the with-seed defaults, whose effects-checker cover the \
+         diagnostic, so no numeric default survives the site. Chelis#1299 \
+         removed both convolution metadata defaults (12 -> 10): canonical \
+         conv requires exact per-axis metadata, with no absent-argument \
+         fallback. FLAGGED, not proven: the with-seed defaults, whose \
+         effects-checker cover the \
          chelis#793 red team pierced (a negative .dp int64 seed extracts \
          to None and falls to seed 0) - that .dp repro is now rejected at \
          CHECK time by chelis#793's negative-seed checker case, so the \
@@ -706,7 +707,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        37,
+        35,
         "declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
          SHAPE debug in render_tensor (elements route through \
@@ -714,7 +715,8 @@ const BASELINE: &[Entry] = &[
          deleted the to_list mismatch site and consolidated the duplicate \
          pad_sequences_to diagnostics; Phase 2 deleted eleven more \
          closure-dispatch mismatch/debug paths when host arithmetic moved \
-         to typed kernel errors",
+         to typed kernel errors; chelis#1299 removed two obsolete 2D \
+         shape-debug diagnostics when convolution became rank-generic",
     ),
     (
         Pat::RustDebugNumericFormat,

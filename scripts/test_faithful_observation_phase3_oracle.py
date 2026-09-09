@@ -289,6 +289,40 @@ fn hidden_value_row() {}
         )
         self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
 
+    def test_normalization_parity_remains_a_required_executable_row(self) -> None:
+        name = "parity_explicit_normalization"
+        for replacement in (
+            "{}",
+            '{ drive_parity(&examples_root().join("explicit_normalization.ch"), false); }',
+        ):
+            with self.subTest(replacement=replacement):
+                sources = oracle.shipped_sources()
+                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+                    sources[oracle.PARITY_SOURCE], name, replacement
+                )
+                self.assertTrue(
+                    any(name in item for item in oracle.definition_digest_violations(sources))
+                )
+        sources = oracle.shipped_sources()
+        sources[oracle.PARITY_SOURCE] = sources[oracle.PARITY_SOURCE].replace(
+            f"fn {name}()", "fn deleted_normalization_row()"
+        )
+        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
+
+    def test_normalization_cannot_leave_the_frozen_corpus_inventory(self) -> None:
+        sources = oracle.shipped_sources()
+        source = sources[oracle.PARITY_SOURCE]
+        _, _, start, end = oracle.test_definition_spans(source)["parity_corpus_is_complete"]
+        body = source[start:end].replace('        "explicit_normalization.ch",\n', "")
+        self.assertNotEqual(body, source[start:end])
+        sources[oracle.PARITY_SOURCE] = source[:start] + body + source[end:]
+        self.assertTrue(
+            any(
+                "parity_corpus_is_complete" in item
+                for item in oracle.definition_digest_violations(sources)
+            )
+        )
+
     def test_generic_shape_cannot_leave_the_frozen_corpus_inventory(self) -> None:
         sources = oracle.shipped_sources()
         source = sources[oracle.PARITY_SOURCE]

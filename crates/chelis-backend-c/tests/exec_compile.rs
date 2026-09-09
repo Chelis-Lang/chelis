@@ -1287,13 +1287,12 @@ int main() {{
     );
 }
 
-// ---- Test 10: ReduceSum calls chelis_sum_f32 and produces correct result ----
+// ---- Test 10: Scalar ReduceSum preserves the canonical tree ----
 
 #[test]
 fn exec_reduce_sum_correct_output() {
     // Use TensorType::scalar_f32() (dims=[]) for the output — that is the correct
     // output type for a full-axis reduction producing a scalar.
-    // Using vec_f32(1) (dims=[Lit(1)]) is wrong and bypasses the chelis_sum_f32 fast path.
     let scalar_ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -1317,8 +1316,8 @@ fn exec_reduce_sum_correct_output() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("chelis_sum_f32("),
-        "ReduceSum must call chelis_sum_f32 for contiguous n=100 tensor:\n{src}"
+        !src.contains("chelis_sum_f32("),
+        "Scalar Sum must preserve the canonical tree, including contiguous input:\n{src}"
     );
 
     let harness = format!(
@@ -2683,17 +2682,15 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
         "f64 reduce_sum must allocate an f64 output tensor:\n{src}"
     );
     assert!(
-        src.contains(
-            "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"
-        ),
-        "f64 reduce_sum must zero through an exact tagged f64 scalar:\n{src}"
+        src.contains("__sum_level_"),
+        "f64 sum needs a tree at its accumulator width: {src}"
     );
     assert!(
         !src.contains("chelis_fill_f32(") && !src.contains("chelis_fill_f64("),
         "f64 reduce_sum must not retain dtype-specific compatibility fills:\n{src}"
     );
     assert!(
-        src.contains("double acc"),
+        src.contains("double *__sum_level_"),
         "f64 reduce_sum accumulator must be a double, not float:\n{src}"
     );
     assert!(
@@ -2774,11 +2771,11 @@ fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
         "i32 reduce_sum must allocate an i32 output tensor:\n{src}"
     );
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i32 reduce_sum accumulator must be int32_t (integer-exact), not float:\n{src}"
     );
     assert!(
-        !src.contains("float acc"),
+        !src.contains("float *__sum_level_"),
         "i32 reduce_sum must NOT use a float accumulator (silent precision change):\n{src}"
     );
     assert!(
@@ -3057,11 +3054,11 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         "mixed-dtype program must use CHELIS_DTYPE_I32 for i32 tensors:\n{src}"
     );
     assert!(
-        src.contains("double acc"),
+        src.contains("double *__sum_level_"),
         "mixed-dtype program must use a double accumulator for the f64 sum:\n{src}"
     );
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "mixed-dtype program must use an int32_t accumulator for the i32 sum:\n{src}"
     );
 
@@ -3482,7 +3479,7 @@ fn exec_i8_reduce_sum_promotes_to_i32() {
     // this catches a regression where the codegen silently picks the
     // operand precision (the F1 footgun class for reductions).
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i8 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
     assert!(
@@ -3541,7 +3538,7 @@ fn exec_i16_reduce_sum_promotes_to_i32() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i16 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
 

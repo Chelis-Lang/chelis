@@ -681,14 +681,38 @@ pub fn lower_matmul(
         parent_span,
     );
 
-    add_synth(
+    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
+        .expect("lower_matmul requires an admitted floating operand precision");
+    let sum_ty = TensorType {
+        dims: result_ty.dims.clone(),
+        precision: accumulator,
+    };
+    let sum = add_synth(
         dag,
-        RiscOp::sum_default(lead_len + 1, a_ty.precision)
-            .expect("lower_matmul operand precision should accept reduce_sum"),
+        RiscOp::Sum {
+            axis: lead_len + 1,
+            accumulator,
+        },
         vec![product],
-        result_ty,
+        sum_ty,
         parent_span,
-    )
+    );
+    // [04-NUM-8] / section 5.7.1: the reduction produces the accumulator
+    // dtype. Matmul finalizes that value into the operand dtype explicitly,
+    // including when an empty contraction stays in the primitive graph.
+    if accumulator == a_ty.precision {
+        sum
+    } else {
+        add_synth(
+            dag,
+            RiscOp::Cast {
+                new_precision: a_ty.precision,
+            },
+            vec![sum],
+            result_ty,
+            parent_span,
+        )
+    }
 }
 
 fn broadcast_leading_dims(lhs: &[DimInfo], rhs: &[DimInfo]) -> Vec<DimInfo> {
@@ -831,6 +855,42 @@ fn checked_dim_compatible(current: &DimInfo, target: &DimInfo) -> bool {
     }
 }
 
+/// Keep the reduction result at its accumulator dtype, then explicitly
+/// finalize into the enclosing float composition's storage dtype (§5.7.1).
+fn lower_sum_to_storage(
+    dag: &mut Dag,
+    x: NodeId,
+    axis: usize,
+    result_ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    let accumulator = RiscOp::default_reduce_sum_accumulator(result_ty.precision)
+        .expect("checked reduction dtype");
+    let sum = add_synth(
+        dag,
+        RiscOp::Sum { axis, accumulator },
+        vec![x],
+        TensorType {
+            dims: result_ty.dims.clone(),
+            precision: accumulator,
+        },
+        parent_span,
+    );
+    if accumulator == result_ty.precision {
+        sum
+    } else {
+        add_synth(
+            dag,
+            RiscOp::Cast {
+                new_precision: result_ty.precision,
+            },
+            vec![sum],
+            result_ty.clone(),
+            parent_span,
+        )
+    }
+}
+
 /// softmax(x, axis) = exp(x - max_reduce(x, axis)) / sum(exp(x - max_reduce(x, axis)), axis)
 ///
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
@@ -883,14 +943,7 @@ pub fn lower_softmax(
     let exp_shifted = add_synth(dag, RiscOp::Exp, vec![shifted], ty.clone(), parent_span);
 
     // 5. sum(exp, axis)
-    let sum_exp = add_synth(
-        dag,
-        RiscOp::sum_default(axis, ty.precision)
-            .expect("softmax operand precision should accept reduce_sum"),
-        vec![exp_shifted],
-        red_ty,
-        parent_span,
-    );
+    let sum_exp = lower_sum_to_storage(dag, exp_shifted, axis, &red_ty, parent_span);
 
     // 6. expand sum back to original shape
     let sum_expanded = add_synth(
@@ -925,14 +978,7 @@ pub fn lower_mean(
     let red_ty = reduced_type(ty, axis);
 
     // sum(x, axis)
-    let sum_node = add_synth(
-        dag,
-        RiscOp::sum_default(axis, ty.precision)
-            .expect("mean operand precision should accept reduce_sum"),
-        vec![x],
-        red_ty.clone(),
-        parent_span,
-    );
+    let sum_node = lower_sum_to_storage(dag, x, axis, &red_ty, parent_span);
 
     // The divisor is the reduced-axis extent. When that extent is a
     // concrete literal the divisor is a compile-time `Const` (the simple
@@ -974,14 +1020,7 @@ pub fn lower_mean(
             );
             dag.add_shape_dep(ones, x);
             // sum the ones over `axis` -> the runtime extent, reduced shape.
-            add_synth(
-                dag,
-                RiscOp::sum_default(axis, ty.precision)
-                    .expect("mean count precision should accept reduce_sum"),
-                vec![ones],
-                red_ty.clone(),
-                parent_span,
-            )
+            lower_sum_to_storage(dag, ones, axis, &red_ty, parent_span)
         }
     };
 
@@ -989,7 +1028,7 @@ pub fn lower_mean(
     lower_div(dag, sum_node, divisor, &red_ty, parent_span)
 }
 
-/// layer_norm(x, gamma, beta) over the last axis.
+/// layer_norm(x, gamma, beta, epsilon) over the last axis.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_layer_norm(
     dag: &mut Dag,
@@ -999,7 +1038,7 @@ pub fn lower_layer_norm(
     x_ty: &TensorType,
     gamma_ty: &TensorType,
     beta_ty: &TensorType,
-    eps: f64,
+    epsilon: NodeId,
     parent_span: Option<&str>,
 ) -> NodeId {
     let axis = x_ty.dims.len().saturating_sub(1);
@@ -1034,17 +1073,15 @@ pub fn lower_layer_norm(
         x_ty.clone(),
         parent_span,
     );
-    let eps_const = add_synth(
-        dag,
-        RiscOp::synth_const(x_ty.precision, eps),
-        vec![],
-        x_ty.clone(),
-        parent_span,
-    );
+    let epsilon_ty = TensorType {
+        dims: vec![],
+        precision: x_ty.precision,
+    };
+    let epsilon_expanded = expand_to_match(dag, epsilon, epsilon_ty, x, &x_ty.dims, parent_span);
     let denom_sq = add_synth(
         dag,
         RiscOp::Add,
-        vec![var_expanded, eps_const],
+        vec![var_expanded, epsilon_expanded],
         x_ty.clone(),
         parent_span,
     );
@@ -1069,392 +1106,207 @@ pub fn lower_layer_norm(
     )
 }
 
-/// conv2d(input, kernel, stride, padding) via a coarse im2col-style decomposition.
+/// [05-OP-51] cross-correlation for any positive spatial rank. The gathered
+/// window matrix orders its contraction axis as (channel, kernel axes...).
+/// One matrix contraction owns accumulation across that entire axis.
 #[allow(clippy::too_many_arguments)]
-pub fn lower_conv2d(
+pub fn lower_conv(
     dag: &mut Dag,
     input: NodeId,
     kernel: NodeId,
     input_ty: &TensorType,
     kernel_ty: &TensorType,
     output_ty: &TensorType,
-    stride: usize,
-    padding: usize,
+    strides: &[usize],
+    padding: &[(usize, usize)],
     parent_span: Option<&str>,
 ) -> NodeId {
-    let batch = require_dim(input_ty.dims.first(), "conv2d batch axis");
-    let in_c = require_dim(input_ty.dims.get(1), "conv2d input channel axis");
-    let h_in = require_dim(input_ty.dims.get(2), "conv2d input height axis");
-    let w_in = require_dim(input_ty.dims.get(3), "conv2d input width axis");
-    let out_c = require_dim(
-        output_ty.dims.get(1).or_else(|| kernel_ty.dims.first()),
-        "conv2d output channel axis",
+    let input_shape: Vec<_> = input_ty
+        .dims
+        .iter()
+        .map(|d| require_dim_extent(d, "conv input axis"))
+        .collect();
+    let kernel_shape: Vec<_> = kernel_ty
+        .dims
+        .iter()
+        .map(|d| require_dim_extent(d, "conv kernel axis"))
+        .collect();
+    assert!(
+        input_shape.len() >= 3 && input_shape.len() == kernel_shape.len(),
+        "conv requires equal ranks of at least 3"
     );
-    let kh = require_dim(kernel_ty.dims.get(2), "conv2d kernel height axis");
-    let kw = require_dim(kernel_ty.dims.get(3), "conv2d kernel width axis");
-    let kh_size = require_dim_extent(&kh, "conv2d kernel height axis");
-    let kw_size = require_dim_extent(&kw, "conv2d kernel width axis");
-
-    let batch_size = require_dim_extent(&batch, "conv2d batch axis");
-    let in_c_size = require_dim_extent(&in_c, "conv2d input channel axis");
-    let h_in_size = require_dim_extent(&h_in, "conv2d input height axis");
-    let w_in_size = require_dim_extent(&w_in, "conv2d input width axis");
-    let stride = stride.max(1);
-    let padded_h = h_in_size + (2 * padding);
-    let padded_w = w_in_size + (2 * padding);
-    if padded_h < kh_size || padded_w < kw_size {
-        panic!(
-            "IR conv2d kernel dims ({kh_size}, {kw_size}) exceed padded input dims ({padded_h}, {padded_w})"
-        );
-    }
-    let strided_h = ((padded_h - kh_size) / stride) + 1;
-    let strided_w = ((padded_w - kw_size) / stride) + 1;
-
-    // Prefer the inferred `output_ty` spatial extents when concrete, but
-    // fall back to the `(strided_h, strided_w)` arithmetic derived from
-    // the input/kernel/stride/padding above. The fallback exists because
-    // the type-annotation writeback is bottom-up: the inner `conv2d`
-    // app's result-type metadata can remain as fresh non-concrete d-vars
-    // even when the enclosing def's return-type ascription already pins
-    // the spatial dims. See Phase 3j-pre Batch 3b notes in
-    // `spec/design/chelis_phase3_plan.md`. The relaxation is strictly
-    // concrete: we rebind `h_out`/`w_out` as `DimInfo::Lit` values.
-    let raw_h_out = require_dim(output_ty.dims.get(2), "conv2d output height axis");
-    let raw_w_out = require_dim(output_ty.dims.get(3), "conv2d output width axis");
-    let h_out_size = match &raw_h_out {
-        DimInfo::Lit(n) => *n,
-        DimInfo::Named(_, Some(n)) => *n,
-        DimInfo::Named(_, None) => strided_h,
-    };
-    let w_out_size = match &raw_w_out {
-        DimInfo::Lit(n) => *n,
-        DimInfo::Named(_, Some(n)) => *n,
-        DimInfo::Named(_, None) => strided_w,
-    };
-    let h_out = DimInfo::Lit(h_out_size);
-    let w_out = DimInfo::Lit(w_out_size);
-    if h_out_size != strided_h || w_out_size != strided_w {
-        panic!(
-            "IR conv2d output shape mismatch: expected spatial dims ({strided_h}, {strided_w}), got ({h_out_size}, {w_out_size})"
-        );
-    }
-
-    let padded_ty = TensorType {
-        dims: vec![
-            batch.clone(),
-            in_c.clone(),
-            DimInfo::Lit(padded_h),
-            DimInfo::Lit(padded_w),
-        ],
-        precision: input_ty.precision,
-    };
-    let padded = add_synth(
-        dag,
-        RiscOp::zero_pad(
-            input_ty.precision,
-            vec![
-                (RtDim::Lit(0), RtDim::Lit(0)),
-                (RtDim::Lit(0), RtDim::Lit(0)),
-                (RtDim::Lit(padding), RtDim::Lit(padding)),
-                (RtDim::Lit(padding), RtDim::Lit(padding)),
-            ],
-        ),
-        vec![input],
-        padded_ty.clone(),
-        parent_span,
+    let rank = input_shape.len() - 2;
+    assert!(
+        strides.len() == rank && padding.len() == rank,
+        "conv requires one stride/padding entry per spatial axis"
     );
-
-    let sample_h = h_out_size.saturating_sub(1) * stride + 1;
-    let sample_w = w_out_size.saturating_sub(1) * stride + 1;
-
-    let mut acc: Option<NodeId> = None;
-    for kh_idx in 0..kh_size {
-        for kw_idx in 0..kw_size {
-            let sampled = lower_conv2d_sample(
-                dag,
-                padded,
-                &batch,
-                &in_c,
-                kh_idx,
-                kw_idx,
-                sample_h,
-                sample_w,
-                stride,
-                input_ty.precision,
-                parent_span,
-            );
-            let sampled_ty = TensorType {
-                dims: vec![batch.clone(), in_c.clone(), h_out.clone(), w_out.clone()],
-                precision: input_ty.precision,
-            };
-
-            let kernel_slice = lower_conv2d_kernel_slice(
-                dag,
-                kernel,
-                &out_c,
-                &in_c,
-                kh_idx,
-                kw_idx,
-                kernel_ty.precision,
-                parent_span,
-            );
-            let kernel_slice_ty = TensorType {
-                dims: vec![
-                    out_c.clone(),
-                    in_c.clone(),
-                    DimInfo::Lit(1),
-                    DimInfo::Lit(1),
-                ],
-                precision: kernel_ty.precision,
-            };
-
-            let term = lower_conv2d_pointwise(
-                dag,
-                sampled,
-                kernel_slice,
-                &sampled_ty,
-                &kernel_slice_ty,
-                output_ty,
-                batch_size,
-                in_c_size,
-                h_out.clone(),
-                w_out.clone(),
-                out_c.clone(),
-                parent_span,
-            );
-
-            acc = Some(match acc {
-                Some(prev) => add_synth(
-                    dag,
-                    RiscOp::Add,
-                    vec![prev, term],
-                    output_ty.clone(),
-                    parent_span,
-                ),
-                None => term,
-            });
+    assert_eq!(input_shape[1], kernel_shape[1], "conv channel mismatch");
+    assert_eq!(
+        input_ty.precision, kernel_ty.precision,
+        "conv dtype mismatch"
+    );
+    assert!(input_ty.precision.is_float(), "conv requires float data");
+    let checked = |n: Option<usize>| {
+        n.filter(|n| i64::try_from(*n).is_ok())
+            .expect("conv shape arithmetic exceeds int64")
+    };
+    // Products are typed dimension expressions. Their existing checked finite
+    // evaluator owns the machine projection; this operation additionally enforces
+    // the language's int64 extent domain. They are never capacity-equality keys.
+    let product = |dims: &[usize]| {
+        let expression = dims.iter().fold(DimExpr::Concrete(1), |lhs, &rhs| {
+            DimExpr::Mul(Box::new(lhs), Box::new(DimExpr::Concrete(rhs)))
+        });
+        checked(expression.as_concrete())
+    };
+    let mut padded_shape = input_shape.clone();
+    let mut output_shape = vec![input_shape[0], kernel_shape[0]];
+    for axis in 0..rank {
+        let (low, high) = padding[axis];
+        let padded = checked(
+            input_shape[axis + 2]
+                .checked_add(low)
+                .and_then(|n| n.checked_add(high)),
+        );
+        assert!(
+            strides[axis] > 0 && kernel_shape[axis + 2] > 0 && kernel_shape[axis + 2] <= padded,
+            "conv invalid kernel/stride/padding"
+        );
+        padded_shape[axis + 2] = padded;
+        output_shape.push(checked(
+            ((padded - kernel_shape[axis + 2]) / strides[axis]).checked_add(1),
+        ));
+    }
+    assert_eq!(
+        output_ty.dims.len(),
+        output_shape.len(),
+        "conv output rank mismatch"
+    );
+    for (expected, actual) in output_shape.iter().zip(&output_ty.dims) {
+        if let DimInfo::Lit(actual) | DimInfo::Named(_, Some(actual)) = actual {
+            assert_eq!(expected, actual, "conv output shape mismatch");
         }
     }
-
-    acc.expect("conv2d must emit at least one kernel contribution")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_conv2d_sample(
-    dag: &mut Dag,
-    padded: NodeId,
-    batch: &DimInfo,
-    in_c: &DimInfo,
-    kh_idx: usize,
-    kw_idx: usize,
-    sample_h: usize,
-    sample_w: usize,
-    stride: usize,
-    precision: Prim,
-    parent_span: Option<&str>,
-) -> NodeId {
-    let sampled_window_ty = TensorType {
-        dims: vec![
-            batch.clone(),
-            in_c.clone(),
-            DimInfo::Lit(sample_h),
-            DimInfo::Lit(sample_w),
-        ],
+    let precision = input_ty.precision;
+    let ty = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
         precision,
     };
-    let sampled_window = add_synth(
+    let mut pad = vec![(RtDim::Lit(0), RtDim::Lit(0)); 2];
+    pad.extend(
+        padding
+            .iter()
+            .map(|&(low, high)| (RtDim::Lit(low), RtDim::Lit(high))),
+    );
+    let padded = add_synth(
         dag,
-        RiscOp::Shrink {
-            bounds: vec![
-                (
-                    RtDim::Lit(0),
-                    RtDim::Lit(require_dim_extent(batch, "conv2d batch axis")),
-                ),
-                (
-                    RtDim::Lit(0),
-                    RtDim::Lit(require_dim_extent(in_c, "conv2d input channel axis")),
-                ),
-                (RtDim::Lit(kh_idx), RtDim::Lit(kh_idx + sample_h)),
-                (RtDim::Lit(kw_idx), RtDim::Lit(kw_idx + sample_w)),
-            ],
+        RiscOp::zero_pad(precision, pad),
+        vec![input],
+        ty(&padded_shape, precision),
+        parent_span,
+    );
+    let padded_len = product(&padded_shape);
+    let flat = add_synth(
+        dag,
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Lit(padded_len)],
         },
         vec![padded],
-        sampled_window_ty.clone(),
+        ty(&[padded_len], precision),
         parent_span,
     );
-
-    let sampled_ty = TensorType {
-        dims: vec![
-            batch.clone(),
-            in_c.clone(),
-            DimInfo::Lit(sample_h.div_ceil(stride)),
-            DimInfo::Lit(sample_w.div_ceil(stride)),
-        ],
-        precision,
-    };
-    add_synth(
+    let kernel_volume = product(&kernel_shape[2..]);
+    let contracted = product(&[input_shape[1], kernel_volume]);
+    let output_volume = product(&output_shape[2..]);
+    let columns = product(&[input_shape[0], output_volume]);
+    let index_count = product(&[contracted, columns]);
+    let mut indices = Vec::with_capacity(index_count);
+    for contraction in 0..contracted {
+        let channel = contraction / kernel_volume;
+        let mut kernel_position = contraction % kernel_volume;
+        let mut offsets = vec![0; rank];
+        for axis in (0..rank).rev() {
+            offsets[axis] = kernel_position % kernel_shape[axis + 2];
+            kernel_position /= kernel_shape[axis + 2];
+        }
+        for column in 0..columns {
+            let batch = column / output_volume;
+            let mut output_position = column % output_volume;
+            let mut coordinates = vec![0; rank];
+            for axis in (0..rank).rev() {
+                coordinates[axis] = output_position % output_shape[axis + 2];
+                output_position /= output_shape[axis + 2];
+            }
+            let mut index = checked(product(&[batch, input_shape[1]]).checked_add(channel));
+            for axis in 0..rank {
+                let coordinate = checked(
+                    product(&[coordinates[axis], strides[axis]]).checked_add(offsets[axis]),
+                );
+                index = checked(product(&[index, padded_shape[axis + 2]]).checked_add(coordinate));
+            }
+            indices.push(
+                chelis_types::scalar_from_i64(
+                    "conv index",
+                    Prim::Int64,
+                    i64::try_from(index).expect("checked index"),
+                )
+                .expect("int64 index"),
+            );
+        }
+    }
+    let matrix_shape = [contracted, columns];
+    let index_node = add_synth(
         dag,
-        RiscOp::Stride {
-            strides: vec![
-                RtDim::Lit(1),
-                RtDim::Lit(1),
-                RtDim::Lit(stride),
-                RtDim::Lit(stride),
-            ],
+        RiscOp::ConstTensor {
+            data: chelis_types::tensor_from_scalars(Prim::Int64, &indices),
         },
-        vec![sampled_window],
-        sampled_ty,
+        vec![],
+        ty(&matrix_shape, Prim::Int64),
         parent_span,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_conv2d_kernel_slice(
-    dag: &mut Dag,
-    kernel: NodeId,
-    out_c: &DimInfo,
-    in_c: &DimInfo,
-    kh_idx: usize,
-    kw_idx: usize,
-    precision: Prim,
-    parent_span: Option<&str>,
-) -> NodeId {
-    add_synth(
+    );
+    let windows = add_synth(
         dag,
-        RiscOp::Shrink {
-            bounds: vec![
-                (
-                    RtDim::Lit(0),
-                    RtDim::Lit(require_dim_extent(out_c, "conv2d output channel axis")),
-                ),
-                (
-                    RtDim::Lit(0),
-                    RtDim::Lit(require_dim_extent(in_c, "conv2d input channel axis")),
-                ),
-                (RtDim::Lit(kh_idx), RtDim::Lit(kh_idx + 1)),
-                (RtDim::Lit(kw_idx), RtDim::Lit(kw_idx + 1)),
-            ],
+        RiscOp::Gather { axis: 0 },
+        vec![flat, index_node],
+        ty(&matrix_shape, precision),
+        parent_span,
+    );
+    let kernel_matrix_shape = [kernel_shape[0], contracted];
+    let kernel_matrix = add_synth(
+        dag,
+        RiscOp::Reshape {
+            new_shape: kernel_matrix_shape.iter().map(|&n| RtDim::Lit(n)).collect(),
         },
         vec![kernel],
-        TensorType {
-            dims: vec![
-                out_c.clone(),
-                in_c.clone(),
-                DimInfo::Lit(1),
-                DimInfo::Lit(1),
-            ],
-            precision,
-        },
-        parent_span,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn lower_conv2d_pointwise(
-    dag: &mut Dag,
-    input: NodeId,
-    kernel: NodeId,
-    input_ty: &TensorType,
-    kernel_ty: &TensorType,
-    output_ty: &TensorType,
-    batch_size: usize,
-    in_c_size: usize,
-    h_out: DimInfo,
-    w_out: DimInfo,
-    out_c: DimInfo,
-    parent_span: Option<&str>,
-) -> NodeId {
-    let permuted_ty = TensorType {
-        dims: vec![
-            input_ty.dims[1].clone(),
-            input_ty.dims[0].clone(),
-            input_ty.dims[2].clone(),
-            input_ty.dims[3].clone(),
-        ],
-        precision: input_ty.precision,
-    };
-    let permuted = add_synth(
-        dag,
-        RiscOp::Permute {
-            axes: vec![1, 0, 2, 3],
-        },
-        vec![input],
-        permuted_ty.clone(),
+        ty(&kernel_matrix_shape, precision),
         parent_span,
     );
-
-    let h_out_size = require_dim_extent(&h_out, "conv2d output height axis");
-    let w_out_size = require_dim_extent(&w_out, "conv2d output width axis");
-    let col_dim = DimInfo::Lit(batch_size * h_out_size * w_out_size);
-    let cols_ty = TensorType {
-        dims: vec![input_ty.dims[1].clone(), col_dim.clone()],
-        precision: input_ty.precision,
-    };
-    let cols = add_synth(
+    let contracted_node = lower_matmul(
+        dag,
+        kernel_matrix,
+        windows,
+        &ty(&kernel_matrix_shape, precision),
+        &ty(&matrix_shape, precision),
+        parent_span,
+    );
+    let mut reshaped = vec![kernel_shape[0], input_shape[0]];
+    reshaped.extend(&output_shape[2..]);
+    let result = add_synth(
         dag,
         RiscOp::Reshape {
-            new_shape: cols_ty.dims.iter().map(RtDim::from_dim_info).collect(),
+            new_shape: reshaped.iter().map(|&n| RtDim::Lit(n)).collect(),
         },
-        vec![permuted],
-        cols_ty.clone(),
+        vec![contracted_node],
+        ty(&reshaped, precision),
         parent_span,
     );
-
-    let kernel_flat_ty = TensorType {
-        dims: vec![out_c.clone(), DimInfo::Lit(in_c_size)],
-        precision: kernel_ty.precision,
-    };
-    let kernel_flat = add_synth(
-        dag,
-        RiscOp::Reshape {
-            new_shape: kernel_flat_ty
-                .dims
-                .iter()
-                .map(RtDim::from_dim_info)
-                .collect(),
-        },
-        vec![kernel],
-        kernel_flat_ty.clone(),
-        parent_span,
-    );
-
-    let product = lower_matmul(
-        dag,
-        kernel_flat,
-        cols,
-        &kernel_flat_ty,
-        &cols_ty,
-        parent_span,
-    );
-    let product_4d_ty = TensorType {
-        dims: vec![
-            out_c.clone(),
-            input_ty.dims[0].clone(),
-            h_out.clone(),
-            w_out.clone(),
-        ],
-        precision: output_ty.precision,
-    };
-    let product_4d = add_synth(
-        dag,
-        RiscOp::Reshape {
-            new_shape: product_4d_ty
-                .dims
-                .iter()
-                .map(RtDim::from_dim_info)
-                .collect(),
-        },
-        vec![product],
-        product_4d_ty,
-        parent_span,
-    );
+    let mut axes: Vec<_> = (0..output_shape.len()).collect();
+    axes.swap(0, 1);
     add_synth(
         dag,
-        RiscOp::Permute {
-            axes: vec![1, 0, 2, 3],
-        },
-        vec![product_4d],
-        output_ty.clone(),
+        RiscOp::Permute { axes },
+        vec![result],
+        ty(&output_shape, precision),
         parent_span,
     )
 }
@@ -2045,8 +1897,14 @@ mod tests {
             scale_ty.clone(),
             None,
         );
+        let epsilon = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1e-5),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let result = lower_layer_norm(
-            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5, None,
+            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
 
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
@@ -2104,8 +1962,14 @@ mod tests {
             scale_ty.clone(),
             None,
         );
+        let epsilon = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1e-5),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let _ = lower_layer_norm(
-            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5, None,
+            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
         assert!(
             dag.nodes().iter().any(|node| {
@@ -2118,7 +1982,7 @@ mod tests {
     }
 
     #[test]
-    fn conv2d_produces_im2col_style_sequence() {
+    fn conv_produces_im2col_style_sequence() {
         let mut dag = Dag::new();
         let input_ty = TensorType {
             dims: vec![
@@ -2159,14 +2023,21 @@ mod tests {
             kernel_ty.clone(),
             None,
         );
-        let result = lower_conv2d(
-            &mut dag, input, kernel, &input_ty, &kernel_ty, &output_ty, 1, 0, None,
+        let result = lower_conv(
+            &mut dag,
+            input,
+            kernel,
+            &input_ty,
+            &kernel_ty,
+            &output_ty,
+            &[1, 1],
+            &[(0, 0), (0, 0)],
+            None,
         );
 
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
         assert!(ops.iter().any(|op| matches!(op, RiscOp::Pad { .. })));
-        assert!(ops.iter().any(|op| matches!(op, RiscOp::Stride { .. })));
-        assert!(ops.iter().any(|op| matches!(op, RiscOp::Shrink { .. })));
+        assert!(ops.iter().any(|op| matches!(op, RiscOp::Gather { .. })));
         assert!(ops.iter().any(|op| matches!(op, RiscOp::Permute { .. })));
         assert!(
             ops.iter()
@@ -2247,14 +2118,57 @@ mod tests {
             scale_ty.clone(),
             None,
         );
+        let epsilon = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1e-5),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let _ = lower_layer_norm(
-            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5, None,
+            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
     }
 
     #[test]
-    #[should_panic(expected = "conv2d output height axis requires a statically known axis")]
-    fn conv2d_rejects_missing_output_shape() {
+    #[should_panic(expected = "conv shape arithmetic exceeds int64")]
+    fn conv_rejects_extent_product_overflow_before_materializing_windows() {
+        let mut dag = Dag::new();
+        let extent = usize::try_from(i64::MAX).expect("64-bit target");
+        let ty = |dims: &[usize]| TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision: Prim::F32,
+        };
+        let input_ty = ty(&[1, 2, extent]);
+        let kernel_ty = ty(&[1, 2, 1]);
+        let output_ty = ty(&[1, 1, extent]);
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty.clone(),
+            None,
+        );
+        let kernel = dag.add_node(
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            kernel_ty.clone(),
+            None,
+        );
+        lower_conv(
+            &mut dag,
+            input,
+            kernel,
+            &input_ty,
+            &kernel_ty,
+            &output_ty,
+            &[1],
+            &[(0, 0)],
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "conv output rank mismatch")]
+    fn conv_rejects_missing_output_shape() {
         let mut dag = Dag::new();
         let input_ty = TensorType {
             dims: vec![
@@ -2290,8 +2204,16 @@ mod tests {
             kernel_ty.clone(),
             None,
         );
-        let _ = lower_conv2d(
-            &mut dag, input, kernel, &input_ty, &kernel_ty, &output_ty, 1, 1, None,
+        let _ = lower_conv(
+            &mut dag,
+            input,
+            kernel,
+            &input_ty,
+            &kernel_ty,
+            &output_ty,
+            &[1, 1],
+            &[(1, 1), (1, 1)],
+            None,
         );
     }
 }

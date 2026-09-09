@@ -669,6 +669,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stacker",
+ "syn 2.0.117",
  "thiserror 2.0.18",
 ]
 

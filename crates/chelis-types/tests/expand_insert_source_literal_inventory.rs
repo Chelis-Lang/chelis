@@ -145,9 +145,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/dag.rs",
-        2,
+        3,
         0,
-        "guidance naming the `expand`+`mul` lowering of an integer inner product, and a test reading an IR error; both are IR-level",
+        "guidance naming the `expand`+`mul` lowering of an integer inner product, a test reading an IR error, and the canonical semantic identity of the IR's single `RiscOp::Expand` node; both language spellings lower to that node, so it has no separate `insert` identity",
     ),
     (
         "crates/chelis-ir/src/eval.rs",

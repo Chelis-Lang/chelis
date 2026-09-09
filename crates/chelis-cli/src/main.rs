@@ -3288,7 +3288,7 @@ fn cmd_build(
                     ),
                 )?;
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
-                let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+                let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(
                     fused,
@@ -3628,7 +3628,7 @@ fn cmd_build_deep(
                     ),
                 )?;
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
-                let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+                let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(
                     fused,
