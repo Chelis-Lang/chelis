@@ -1075,6 +1075,51 @@ fn helper_signature_guard_order_contract() {
             expected,
         );
     }
+    for (z, a, q, expected) in [
+        (2, 3, 2, Expected::Tensor(vec![2, 3, 2], vec![7.0; 12])),
+        (
+            5,
+            6,
+            5,
+            Expected::Domain("load", &["claimed = 2", "z axis 0 = 5"]),
+        ),
+        (
+            2,
+            6,
+            5,
+            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+        ),
+        (
+            2,
+            6,
+            2,
+            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+        ),
+        (
+            2,
+            3,
+            5,
+            Expected::Domain("load", &["claimed = 2", "q axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("interleaved.{z}.{a}.{q}"),
+            1277,
+            "def f(b: tensor[f32], z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[depth, f32]) -> tensor[2, 3, 2, f32] = insert(insert(insert(b, 0i32, shape(q, 0i32)), 0i32, shape(a, 0i32)), 0i32, shape(z, 0i32))",
+            "(tensor[f32], tensor[rows, f32], tensor[cols, f32], tensor[depth, f32]) -> tensor[2, 3, 2, f32]",
+            vec![
+                Input {
+                    dims: vec![],
+                    values: vec![7.0],
+                },
+                vector(z),
+                vector(a),
+                vector(q),
+            ],
+            expected,
+        );
+    }
     let example = include_str!("../../../examples/ordered_extent_claims.ch");
     for (id, source, expected) in [
         (
@@ -1108,6 +1153,6 @@ fn helper_signature_guard_order_contract() {
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(case, &observed));
     }
-    assert_eq!(fixtures.len(), 29);
+    assert_eq!(fixtures.len(), 44);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

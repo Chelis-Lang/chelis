@@ -589,8 +589,10 @@ host callers continue mapping actual arguments by input label. A literal is
 its own canonical value: when its checked value is a folded input-axis read,
 class ordering uses the source input's signature slot and axis, not the later
 consumer node. Named classes retain their declaring canonical witnesses.
-The acceptance
-command is:
+The C prologue schedules individual checks across classes and claim kinds:
+a repeated literal cannot pull its later witness ahead of an intervening
+parameter. Canonical values and witness deduplication remain attached to their
+checks. The acceptance command is:
 
 ```sh
 cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation \
@@ -599,7 +601,8 @@ cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation \
 
 This covers signature `b,z,a` with satisfied, individually failing and
 simultaneously failing claims through exported C, bindings and inlined main,
-plus nested discarded calls, aliases and both executable-example variants. Internal tests cover signatureless
+plus repeated literal claims at nonadjacent parameters, nested discarded
+calls, aliases and both executable-example variants. Internal tests cover signatureless
 ABI order and reconstruction. These checks do not discharge the computed
 reshape or unit-precondition obligations.
 
