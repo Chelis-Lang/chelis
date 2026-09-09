@@ -63,13 +63,17 @@ Current failure boundaries:
   variables have other origins. The remaining early-return validation audit
   is open; neither the old census nor four `sum` probes closes it.
 
-B2b-0b's broadcast preparation repair addresses #1619: C's anonymous-axis
-rewrite uses `output_axis_sources` for `Expand`, filling only anonymous axes
-from their own size/kept-axis sources. It preserves explicit result claims;
-an anonymous resolved number remains a literal obligation. The previous
+B2b-0b's broadcast preparation repair addresses #1619: for `Expand` outputs
+without explicit named dimensions, C's anonymous-axis rewrite uses
+`output_axis_sources`, filling anonymous axes from their own size/kept-axis
+sources. Literal result claims survive, and an anonymous resolved number
+remains a literal obligation. The previous
 same-rank shortcut copied the operand's unit extent onto the output, creating
 a false result claim against the size-source tensor. The unit-precondition
-derivation already read the correct operand and is unchanged.
+derivation already read the correct operand and is unchanged. Outputs with
+explicit named dimensions retain their existing preparation path: preserving
+the name without its unread declaring witness can newly execute a wrong
+shape. B2b-1 owns preservation and enforcement of those scoped claims.
 
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
 Literal inlining guards, op-computed local guards, and scoped claim transport

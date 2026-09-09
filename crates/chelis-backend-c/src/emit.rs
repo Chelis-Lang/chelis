@@ -621,12 +621,20 @@ impl CEmitter {
                     continue;
                 }
                 let mut new_ty = node.output_type.clone();
-                if matches!(node.op, RiscOp::Expand { .. }) {
+                if matches!(node.op, RiscOp::Expand { .. })
+                    && !new_ty
+                        .dims
+                        .iter()
+                        .any(|dim| matches!(dim, DimInfo::Named(name, _) if !is_anon(name)))
+                {
                     // [05-MOV-1], #1619: the replaced/inserted axis reads
                     // the size carrier; kept axes read their own operand
                     // positions. Rank equality does not prove pass-through.
-                    // Only anonymous axes need completion: an explicit
-                    // result claim remains independent of its size source.
+                    // Numeric result claims remain independent of their
+                    // sources. Explicit named outputs stay on the existing
+                    // path: preserving one without its unread signature
+                    // witness can newly execute an unchecked wrong shape.
+                    // B2b-1 owns that scoped claim-transport repair.
                     let sources = chelis_ir::output_axis_sources(&out, id);
                     for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
                         if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {
