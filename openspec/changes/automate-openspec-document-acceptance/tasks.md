@@ -166,9 +166,17 @@
 - [x] 15.6 Rewrite the blocked diagnostic to name the App configuration and installation permission instead of demanding a PAT.
 - [x] 15.7 Update `README.md`, `AGENTS.md`, and `spec/design/spec_provenance.md`; state the installation permission as an unverified prerequisite.
 
+## 16. Deploy
+
+- [x] 16.1 Repair the pre-existing tree-wide validation failure in `harden-lint-traversal-edges`, whose MODIFIED block had renamed two scenarios. It reproduced on pristine `origin/main`, so it was not a regression from this change, and it would have refused every document submission at the validation step.
+- [x] 16.2 Land the four workflows and their scripts on `main`, which is what makes `workflow_run` and `pull_request_target` take effect. Pull request #1653 merged as `40266a0a` after every required check passed on its exact head `581955a1`, by an ordinary merge bound to that sha.
+- [x] 16.3 Give the mint a credential whose installation can actually open a pull request. The first hosted controller run failed with HTTP 422, `The permissions requested are not granted to this installation`, minting from the shared `CI_APP_*` App: its installation grants no pull-request write. Pull request #1660 merged as `59bf8bda`, switching to the dedicated `chelis-openspec` App rather than widening an App whose key several workflows already hold.
+- [x] 16.4 Confirm the fail-closed path on real infrastructure. The 422 run opened no pull request and never reached the classify step, which is the designed refusal rather than a fallback to `GITHUB_TOKEN`.
+- [ ] 16.5 Observe one hosted document push end to end: the signal run, the controller decision, the token mint, the pull request opened by `chelis-openspec[bot]`, and the merge worker's verdict. This is the same evidence task 6.5 requires, from the push entry point.
+
 ## Acceptance oracle
 
-The authoritative completion oracle is task 6.5: one document submission merges on the hosted repository with no human approval, and no code path becomes automatically mergeable.
+The authoritative completion oracle is task 6.5: one document submission merges on the hosted repository with no human approval, and no code path becomes automatically mergeable. Section 16 removed the three conditions that made it unreachable -- the workflows are on `main`, tree-wide validation is green, and the mint has a credential whose installation grants pull-request write -- but it did not satisfy it. The oracle stays open until a hosted push is observed.
 
 Until it runs, the local evidence is task 6.1's suites plus the live read-only verification in 9.10: required-context discovery returned all nine contexts from real branch protection, evaluation of a real head sha returned zero failures with `Changelog` correctly resolved to its latest run rather than an earlier cancellation, and a commit missing one context failed closed naming it. The merge call itself has not been executed.
 
