@@ -8,3 +8,6 @@ Callable discovery binds the actual PyO3 registration, Rust implementation,
 source span, and live descriptor kind. Renamed functions, methods and properties
 cannot inherit a same-named helper's authority; unsupported registration forms
 fail closed. Source JSON authority cannot admit unrelated sibling text results.
+
+The runtime representation source census includes the source-result adapter
+while preserving the existing foundation and active debt.
