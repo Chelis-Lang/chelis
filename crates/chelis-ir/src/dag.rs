@@ -700,6 +700,15 @@ pub enum RiscOp {
     Shape {
         axis: usize,
     },
+    /// A call's shape-only witness. Requirements are tagged int64 literals,
+    /// distinct from the actual input axis read by this scalar operation.
+    /// The node is created at call entry, before the callee body, and
+    /// its enclosing invocation retains required checks through `shape_deps`.
+    ExtentWitness {
+        parameter: String,
+        axis: RtAxis,
+        requirements: Vec<chelis_types::ScalarValue>,
+    },
 
     // --- Memory ---
     /// A scalar constant carried as a SEALED finalized value (the
@@ -1156,7 +1165,7 @@ impl RiscOp {
             // input's real-valued data (its output is constant w.r.t. the
             // element values). Like the arg-reductions it is outside the
             // real-valued forward-bound story (chelis#513 / chelis#558).
-            RiscOp::Shape { .. } => false,
+            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => false,
 
             // Sparse gather/scatter index data movement; no real-valued
             // transformer is pinned, and `Scatter` / `ScatterElements`

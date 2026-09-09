@@ -628,14 +628,14 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     let real = stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 14 (opaque extension data after the
-    // deferred-ledger removal); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 15 (declared
+    // results and extent-witness transport); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(14u32.to_le_bytes());
+        hasher.update(15u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());
