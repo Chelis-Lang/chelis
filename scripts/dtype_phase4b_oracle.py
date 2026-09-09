@@ -239,7 +239,11 @@ EXPECTED_OP_MANIFESTS = {
 | diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
 | trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
 | clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
-| contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |""".splitlines()
+| contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |
+| checked coordinate decoding | `void chelis_tensor_unravel_index(const chelis_tensor *tensor, chelis_scalar index, chelis_scalar *coordinates)` |
+| checked coordinate encoding | `int64_t chelis_tensor_flat_index(const chelis_tensor *tensor, const chelis_scalar *coordinates)` |
+| permutation target validation | `void chelis_tensor_check_permute(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *axes)` |
+| expansion target validation | `void chelis_tensor_check_expand(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, int32_t axis)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
@@ -449,7 +453,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "351ab8e6ef739ce3fee1db7b04b8299240c63598c79dbf20e92f2d9c94a38aab",
+    "05-OP-33": "577ade041962fcb15f27bad247e4ff3cfa70f8dcb8ca9557e15d8a9044de811d",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -2285,8 +2289,8 @@ def validate_normative_contract(
             "takes rank and every target extent as exact tagged int64 scalars",
             "changes no metadata, ownership, or payload",
             "preserves every stored element bit",
-            "exactly the twenty-eight final public C callable identities",
-            "axes and unboxed rank are `int32_t`",
+            "exactly the thirty-two final public C callable identities",
+            "unboxed axes and rank are `int32_t`",
             "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
             "handles, and every tensor result is a new owner",
             "alignment, live-owner state, and write-guard state, before reading "

@@ -1894,6 +1894,46 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
+            "chelis_runtime.h: void chelis_tensor_unravel_index ( const chelis_tensor * tensor , chelis_scalar index , chelis_scalar * coordinates ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_unravel_index` converts an exact tagged int64 linear index into",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_flat_index ( const chelis_tensor * tensor , const chelis_scalar * coordinates ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_flat_index` converts rank-many exact tagged int64 coordinates",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_check_permute ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * axes ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_check_permute` and `chelis_tensor_check_expand` validate a target",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_check_expand ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_check_permute` and `chelis_tensor_check_expand` validate a target",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
             "chelis_runtime.h: void chelis_tensor_check_reshape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;",
             &[],
         ),

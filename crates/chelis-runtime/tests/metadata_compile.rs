@@ -110,6 +110,31 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
         ),
         (
+            "self.normalize_axis(previous)? == axis",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "target.shape[out_axis] != self.shape[axis]",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "!inserted && self.shape[axis] != 1",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "extent != self.shape[input_axis]",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "write(axis, linear % extent)",
+            "write(axis, 0)",
+            "checked_movement_coordinates_preserve_exact_large_indices_without_storage",
+        ),
+        (
             "**extent < 0",
             "false",
             "zeros_do_not_hide_negative_extents_or_canonical_stride_overflow",

@@ -1849,10 +1849,10 @@ exact ADT identity by [05-OP-34].
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the twenty-eight final public C callable identities enumerated in
+> exactly the thirty-two final public C callable identities enumerated in
 > the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
 > incorporates by reference. These
-> signatures are canonical: axes and unboxed rank are `int32_t`; extents, sizes,
+> signatures are canonical: unboxed axes and rank are `int32_t`; extents, sizes,
 > offsets, counts, and element counts are `int64_t`; dtype arguments are
 > `chelis_dtype`; tensor arguments and results are [05-OP-44]'s opaque
 > `chelis_tensor` handles, and every tensor result is a new owner; and an
@@ -1884,7 +1884,7 @@ exact ADT identity by [05-OP-34].
 > own axis atom: [05-AXIS-1] governs the reduction, `expand`, and `insert`
 > family, while
 > [05-OP-7]/[05-SHAPE-1] admits a computed int32 axis for `shape`. C-family
-> axis parameters are runtime int32 values. Every signed axis accepted by this C family first
+> unboxed axis parameters are runtime int32 values. Every signed axis accepted by this C family first
 > applies §2.3's one-step negative normalization; an axis still out of range
 > then traps `Domain`.
 >
@@ -1936,6 +1936,38 @@ exact ADT identity by [05-OP-34].
 > the original input before repurposing its storage, uses the checked domain count
 > as its loop bound, and maps a domain index `i` to the input index `i * step`.
 > These internal scalar projections do not introduce language-level broadcasting.
+>
+> `chelis_tensor_unravel_index` converts an exact tagged int64 linear index into
+> rank-many canonical int64 scalars in row-major axis order.
+> `chelis_tensor_flat_index` converts rank-many exact tagged int64 coordinates
+> into an exact int64 linear index. Both use the tensor's checked shape, count,
+> and strides. The linear index must be in `[0, count)` and each coordinate in
+> `[0, extent)`; an empty tensor admits no index, while rank zero admits exactly
+> linear index zero and an empty coordinate tuple. Positive rank requires a
+> non-null coordinate pointer to rank-many scalars, writable for unraveling.
+> The caller supplies the complete array and preserves the tensor's borrowed
+> storage; unraveling writes only the coordinate array. Invalid indices, null
+> required pointers, and noncanonical or non-int64 scalar carriers trap `Domain`;
+> unrepresentable coordinate-buffer projections or offsets trap `Overflow`.
+>
+> `chelis_tensor_check_permute` and `chelis_tensor_check_expand` validate a target
+> shape supplied as exact tagged int64 rank and extents, including checked count,
+> contiguous strides, logical bytes at the input representation, and target
+> allocation projection. Rank must fit nonnegative int32; positive rank requires
+> a non-null shape pointer. Permutation additionally takes rank-many exact tagged int64 axes
+> (non-null at positive rank), normalizes each negative axis once, requires a
+> bijection of the input axes, and requires each target extent to equal its
+> selected input extent. Input and target ranks are equal. Expansion with equal
+> ranks replaces a unit input axis; expansion with target rank one greater inserts
+> an axis. The expansion axis normalizes against the target rank, its target
+> extent is any nonnegative int64, and every other extent equals its corresponding
+> input extent. No other rank relationship is admitted. Invalid axis, rank, or
+> extent relationships trap `Domain`, including on empty targets; unrepresentable
+> target metadata or scratch projections trap `Overflow`. Generated callers
+> perform these checks before allocation or repurpose, using the same target shape
+> at submission. These four operations access metadata only, remain valid during
+> an active write guard, change no tensor metadata, payload, or ownership, and
+> have no cotangent or accumulator. They preserve [05-MOV-1]'s movement semantics.
 >
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked

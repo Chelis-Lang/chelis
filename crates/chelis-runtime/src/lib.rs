@@ -2286,6 +2286,131 @@ pub unsafe extern "C" fn chelis_tensor_elementwise_index_step_for_shape(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_unravel_index(
+    tensor: *const chelis_tensor,
+    index: chelis_scalar,
+    coordinates: *mut chelis_scalar,
+) {
+    let context = "chelis_tensor_unravel_index";
+    tensor_metadata_dtype(tensor, context);
+    let count = metadata_or_fail(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        context,
+    );
+    let length = metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    if length > 0 && coordinates.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null coordinates");
+    }
+    let index = exact_i64_scalar(index, context);
+    metadata_or_fail(
+        (*tensor).metadata.unravel_into(index, |axis, value| {
+            coordinates
+                .add(axis)
+                .write(chelis_scalar_from_bits(CHELIS_DTYPE_I64, value as u64));
+        }),
+        context,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_flat_index(
+    tensor: *const chelis_tensor,
+    coordinates: *const chelis_scalar,
+) -> i64 {
+    let context = "chelis_tensor_flat_index";
+    tensor_metadata_dtype(tensor, context);
+    let count = metadata_or_fail(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        context,
+    );
+    let length = metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    if length > 0 && coordinates.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null coordinates");
+    }
+    let index = metadata_or_fail(
+        (*tensor)
+            .metadata
+            .flat_index_by(|axis| exact_i64_scalar(coordinates.add(axis).read(), context)),
+        context,
+    );
+    i64::try_from(index)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} index exceeds int64"))
+}
+
+unsafe fn checked_movement_target(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    context: &str,
+) -> ShapeMetadata {
+    let dtype = tensor_metadata_dtype(tensor, context);
+    let rank = exact_i64_scalar(rank, context);
+    if rank < 0 {
+        runtime_fail!("Domain: {context} negative rank {rank}");
+    }
+    let rank = i32::try_from(rank)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank exceeds int32"));
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null shape");
+    }
+    let count = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
+    metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(count.scratch_len::<i64>(), context);
+    let mut extents = Vec::with_capacity(length);
+    for axis in 0..length {
+        extents.push(exact_i64_scalar(shape.add(axis).read(), context));
+    }
+    let target = metadata_or_fail(ShapeMetadata::contiguous(&extents, dtype), context);
+    metadata_or_fail(target.bytes().allocation(), context);
+    target
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_permute(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    axes: *const chelis_scalar,
+) {
+    let context = "chelis_tensor_check_permute";
+    let target = checked_movement_target(tensor, rank, shape, context);
+    if target.rank() != (*tensor).rank() {
+        runtime_fail!("Domain: {context} permutation rank mismatch");
+    }
+    let count = metadata_or_fail(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        context,
+    );
+    metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(count.scratch_len::<i64>(), context);
+    if length > 0 && axes.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null axes");
+    }
+    let mut decoded_axes = Vec::with_capacity(length);
+    for axis in 0..length {
+        decoded_axes.push(exact_i64_scalar(axes.add(axis).read(), context));
+    }
+    metadata_or_fail(
+        (*tensor)
+            .metadata
+            .require_permutation(&target, &decoded_axes),
+        context,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_expand(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    axis: i32,
+) {
+    let context = "chelis_tensor_check_expand";
+    let target = checked_movement_target(tensor, rank, shape, context);
+    metadata_or_fail((*tensor).metadata.require_expansion(&target, axis), context);
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_check_reshape(
     tensor: *const chelis_tensor,
     rank: chelis_scalar,

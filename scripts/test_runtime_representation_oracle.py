@@ -392,7 +392,7 @@ class ManifestTests(unittest.TestCase):
         ])
         commands = [leg.argv for leg in oracle.phase0_legs()]
         for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "checked_c_metadata",
-                     "checked_c_indexing", "exact_tagged_c_abi",
+                     "checked_c_indexing", "checked_c_movement", "exact_tagged_c_abi",
                      "op33_empty_tensor_axis_decomposition", "op33_tensor_validation",
                      "op33_legal_domain_matrix", "dim_carrier_int64",
                      "tensor_repurpose", "tensor_write_guard"):
@@ -421,6 +421,11 @@ class ManifestTests(unittest.TestCase):
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_indexing" in command for command in commands))
         self.assertTrue(any("exec_compile" in command and "test(checked_c_indexing_)" in command for command in commands))
+
+    def test_checked_c_movement_has_delegation_mutations_and_native_execution(self) -> None:
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_movement" in command for command in commands))
+        self.assertTrue(any("exec_compile" in command and "test(checked_c_movement_)" in command for command in commands))
 
     def test_release_reproducers_and_landed_receipts_are_named(self) -> None:
         commands = [

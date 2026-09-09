@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "978f9fcdec0efb941fa778e66893c32a530f01765594d04dcf01c13c1ee78498"
+FREEZE_SHA256 = "25b27505000f86868a02247964d03a76b055d8329451774f1f80f3fa643a1555"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1668,7 +1668,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--features", "ownership-ledger",
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
-                "--test", "checked_c_indexing",
+                "--test", "checked_c_indexing", "--test", "checked_c_movement",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",
@@ -1688,6 +1688,15 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "checked C shared indexing optimized sanitizer execution",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
              "-E", "test(checked_c_indexing_)"),
+        ),
+        OracleLeg(
+            "checked C movement delegation and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_movement"),
+        ),
+        OracleLeg(
+            "checked C movement optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_movement_)"),
         ),
         OracleLeg(
             "checked C shared indexing dtype dispatch and storage reuse",

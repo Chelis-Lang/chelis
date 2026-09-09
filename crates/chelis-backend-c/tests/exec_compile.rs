@@ -63,6 +63,223 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
 }
 
 #[test]
+fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
+    use chelis_ir::dag::RtDim;
+    // Each expected map is explicit, independent of the production coordinate helpers.
+    let cases = [
+        (
+            vec![2, 3],
+            vec![3, 2],
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![0, 3, 1, 4, 2, 5],
+        ),
+        (
+            vec![2, 1],
+            vec![2, 3],
+            RiscOp::Expand {
+                axis: 1,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 0, 0, 1, 1, 1],
+        ),
+        (
+            vec![2],
+            vec![3, 2],
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 1, 0, 1, 0, 1],
+        ),
+        (vec![], vec![], RiscOp::Permute { axes: vec![] }, vec![0]),
+        (
+            vec![],
+            vec![3],
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 0, 0],
+        ),
+        (
+            vec![2, 0, 3],
+            vec![3, 2, 0],
+            RiscOp::Permute {
+                axes: vec![2, 0, 1],
+            },
+            vec![],
+        ),
+        (
+            vec![2, 1],
+            vec![2, 0],
+            RiscOp::Expand {
+                axis: 1,
+                size: RtDim::Lit(0),
+            },
+            vec![],
+        ),
+        (
+            vec![2, 1, 1, 1, 1, 1, 1, 1, 3],
+            vec![3, 1, 1, 1, 1, 1, 1, 1, 2],
+            RiscOp::Permute {
+                axes: (0..9).rev().collect(),
+            },
+            vec![0, 3, 1, 4, 2, 5],
+        ),
+    ];
+    for (prim, dtype, seed) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 0x3f80_0000_u64),
+        (Prim::F64, "CHELIS_DTYPE_F64", 0x3ff0_0000_0000_0000),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 100),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
+    ] {
+        for (input_shape, output_shape, op, expected) in &cases {
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: prim,
+            };
+            let mut dag = Dag::new();
+            let input = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(input_shape),
+                None,
+            );
+            let output = dag.add_node(op.clone(), vec![input], ty(output_shape), None);
+            dag.add_root(output);
+            let generated = codegen(&dag, "checked_movement").unwrap();
+            assert!(generated.c_source.contains("chelis_tensor_unravel_index("));
+            assert!(generated.c_source.contains("chelis_tensor_flat_index("));
+            let spell = |values: &[usize]| {
+                if values.is_empty() {
+                    "0".into()
+                } else {
+                    values
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            };
+            let input_dims = spell(input_shape);
+            let output_dims = spell(output_shape);
+            let map = spell(expected);
+            let rank_in = input_shape.len();
+            let rank_out = output_shape.len();
+            let count_in = input_shape.iter().product::<usize>();
+            let count_out = expected.len();
+            let bits = if prim == Prim::Bool {
+                "(uint64_t)(i % 2)".into()
+            } else {
+                format!("UINT64_C({seed}) + (uint64_t)i")
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void checked_movement(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t in_dims[] = {{ {input_dims} }}, out_dims[] = {{ {output_dims} }}, map[] = {{ {map} }};
+    chelis_tensor *x = chelis_alloc({rank_in}, in_dims, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    unsigned char *data = (unsigned char *)chelis_tensor_write_view(guard).data;
+    size_t width = (size_t)chelis_dtype_size({dtype});
+    for (int64_t i = 0; i < {count_in}; ++i) {{
+        uint64_t bits = {bits}; memcpy(data + (size_t)i * width, &bits, width);
+    }}
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x}}, *outputs[1] = {{NULL}};
+    checked_movement(inputs, 1, outputs, 1);
+    chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {count_out} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {rank_out}) return 2;
+    for (int32_t axis = 0; axis < {rank_out}; ++axis)
+        if (chelis_tensor_shape(outputs[0], axis) != out_dims[axis]) return 3;
+    for (int64_t i = 0; i < out.count; ++i)
+        if (memcmp((const unsigned char *)out.data + (size_t)i * width,
+            (const unsigned char *)in.data + (size_t)map[i] * width, width)) return 4;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("CHECKED MOVEMENT PASS"); return 0;
+}}
+"#
+            );
+            let run = checked_indexing_run(&generated.c_source, &harness);
+            assert!(
+                run.status.success(),
+                "{prim:?} {op:?}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&run.stdout),
+                "CHECKED MOVEMENT PASS\n"
+            );
+            if prim == Prim::Int64
+                && (input_shape == &[2, 3] || input_shape == &[2, 1] && count_out > 0)
+            {
+                let check = generated
+                    .c_source
+                    .lines()
+                    .find(|line| {
+                        line.contains("chelis_tensor_check_permute(")
+                            || line.contains("chelis_tensor_check_expand(")
+                    })
+                    .unwrap();
+                let allocation = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("chelis_tensor *t1 = chelis_alloc("))
+                    .unwrap();
+                assert!(
+                    generated.c_source.find(check).unwrap()
+                        < generated.c_source.find(allocation).unwrap()
+                );
+                let invalid = if input_shape == &[2, 3] {
+                    check.replace("(chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, 1), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0)}", "(chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0)}")
+                } else {
+                    check.strip_suffix("1);").unwrap().to_string() + "9);"
+                };
+                assert_ne!(invalid, check);
+                // Observe the real allocation site without allocating: malformed metadata
+                // must trap first. Removing or moving validation exposes that site.
+                let marker = format!("exit(78); /* allocation reached */\n{allocation}");
+                let instrumented = generated.c_source.replace(allocation, &marker);
+                let rejected =
+                    checked_indexing_run(&instrumented.replace(check, &invalid), &harness);
+                assert!(!rejected.status.success());
+                assert!(String::from_utf8_lossy(&rejected.stderr).contains("Domain"));
+                for replacement in [String::new(), invalid.clone()] {
+                    let bypass = instrumented.replace(check, "");
+                    let bypass = bypass.replace(&marker, &format!("{marker}\n{replacement}"));
+                    let run = checked_indexing_run(&bypass, &harness);
+                    assert_eq!(
+                        run.status.code(),
+                        Some(78),
+                        "missing or late validation reached allocation"
+                    );
+                }
+            }
+            if prim == Prim::Int64 && input_shape == &[2, 3] {
+                let anchor = "chelis_tensor_flat_index(t0, in_indices)";
+                assert!(generated.c_source.contains(anchor));
+                let mutant = generated
+                    .c_source
+                    .replace(anchor, "0 /* unchecked coordinate bypass */");
+                let run = checked_indexing_run(&mutant, &harness);
+                assert_eq!(
+                    run.status.code(),
+                    Some(4),
+                    "coordinate bypass must corrupt the exact result"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn checked_c_indexing_dag_scalar_fused_reuse_and_empty_execute_under_sanitizers() {
     use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
     for prim in [Prim::F32, Prim::F64] {
