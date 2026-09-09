@@ -84,6 +84,20 @@ fn spatial_ranks_and_float_dtypes_execute_with_exact_results() {
 }
 
 #[test]
+fn batches_and_channels_preserve_the_declared_output_order() {
+    // Each batch has two input channels. The first output channel selects
+    // x[channel 0, position] + x[channel 1, position + 1]; the second uses
+    // weights [[2,1],[1,2]]. Expected values are in batch/output-channel order.
+    let source = "def convolve(x: tensor[2,2,3,f32], k: tensor[2,2,2,f32]) -> tensor[2,2,2,f32] = conv(x,k,[1i64],[(0i64,0i64)])\nx: tensor[2,2,3,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32,7.0f32,8.0f32,9.0f32,10.0f32,11.0f32,12.0f32]),[2i64,2i64,3i64])\nk: tensor[2,2,2,f32] = reshape(to_tensor([1.0f32,0.0f32,0.0f32,1.0f32,2.0f32,1.0f32,1.0f32,2.0f32]),[2i64,2i64,2i64])\nresult = convolve(x,k)\n";
+    let expected = vec![6., 8., 18., 24., 18., 20., 54., 60.];
+    assert_eq!(parse_tensor_data(&evaluate(source), "result"), expected);
+    assert_eq!(
+        parse_tensor_data(&build_and_run(source, "conv_batch_channels"), "result"),
+        expected
+    );
+}
+
+#[test]
 fn input_adjoint_reverses_overlapping_windows() {
     let source = "def convolve(x: tensor[1,1,4,f32], k: tensor[1,1,2,f32]) -> tensor[1,1,3,f32] = conv(x,k,[1i64],[(0i64,0i64)])\nk: tensor[1,1,2,f32] = reshape(to_tensor([10.0f32,1.0f32]), [1i64,1i64,2i64])\ndef loss(x: tensor[1,1,4,f32]) -> f32 = tensor_to_scalar(sum(reshape(convolve(x,k),[3i64]),0))\nx: tensor[1,1,4,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32]),[1i64,1i64,4i64])\nresult = grad(loss)(x)\n";
     let expected = vec![10., 11., 11., 1.];
