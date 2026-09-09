@@ -1170,10 +1170,11 @@ digest change; foundation rows, active debt, and mutation implementations stay
 unchanged. The existing `unregistered-inventory-source` mutation covers this
 source-list-only move. No numbered representation semantics change.
 
-The Python source-result adapter registers `chelis-python/src/source_json.rs`
+The Python result adapters register `chelis-python/src/source_json.rs` and
+`chelis-python/src/compiler_json.rs`
 in the same source universe. Its typed JSON conversion adds no representation
 seam: foundation rows, active debt, and mutation implementations remain unchanged.
-The source count and integrity digest include this file, with the existing
+The source count and integrity digest include these files, with the existing
 `unregistered-inventory-source` mutation covering the source-list-only move.
 
 ## B2. Invariants at every phase boundary

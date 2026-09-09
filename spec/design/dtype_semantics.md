@@ -1637,6 +1637,19 @@ Rust implementation and callable kind. Source JSON
 authority applies only to its typed payload subtree, including through aliases
 and generic containers; sibling text results require their own contract.
 
+For the four CompilerJson functions, concrete `CheckJson`, `CompileJson`,
+`DesugarJson` and `EvalJson` adapters retain their exact compiler result until
+the actual PyO3 `IntoPyObject` implementation serializes it. `EvalBindingsJson`
+owns the `FromPyObject` extraction into `BTreeMap<String, TensorValue>` before
+either eval route. A private execution factory joins each compiled trait owner,
+its concrete serde payload and direction, the registered function's Rustdoc
+signature, and the current wire witness. It executes native Python calls,
+constructor rejection controls and compiled MIR ownership controls. Static
+descriptors and baseline graph hashes cannot construct this witness. The
+adapter source, execution evidence and census integration form one slice:
+changing a Rust signature alone cannot retire a numeric binding row. This
+proof confers no authority on the four native tensor methods.
+
 The binding baseline retains eight unchanged legacy rows: the four numeric
 compiler JSON functions and four tensor methods. Discovery records both input
 and return capacity, alias/container/nominal closure and unsupported dynamic

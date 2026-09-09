@@ -144,6 +144,22 @@ fn native_desugar_json_preserves_source_numbers_and_rejects_invalid_source() {
 fn native_eval_json_preserves_exact_execution_values() {
     Python::with_gil(|py| {
         let module = native(py);
+        let signature = PyModule::import(py, "inspect")
+            .unwrap()
+            .getattr("signature")
+            .unwrap()
+            .call1((module.getattr("eval_json").unwrap(),))
+            .unwrap();
+        let default = signature
+            .getattr("parameters")
+            .unwrap()
+            .get_item("bindings_json")
+            .unwrap()
+            .getattr("default")
+            .unwrap()
+            .extract::<String>()
+            .unwrap();
+        assert_eq!(default, "{}");
         let source = "wide = 9007199254740993i64\nzero = -0.0f64\n";
         let value = decode(
             module
@@ -182,18 +198,32 @@ fn native_eval_json_preserves_exact_execution_values() {
 fn native_eval_bindings_reject_invalid_payloads_before_either_route() {
     Python::with_gil(|py| {
         let module = native(py);
-        let valid =
-            json!({"x":{"shape":[1],"data":{"dtype":"int64","values":[9007199254740993_i64]}}})
-                .to_string();
-        let source = "x = (x : tensor[1, int64])\n";
-        let actual = decode(
-            module
-                .getattr("eval_json")
+        for (dtype, data) in [
+            (
+                "int64",
+                json!({"dtype":"int64","values":[9007199254740993_i64]}),
+            ),
+            ("f64", json!({"dtype":"f64","bits":["8000000000000000"]})),
+            ("f64", json!({"dtype":"f64","bits":["7ff8000000000001"]})),
+        ] {
+            let tensor = json!({"shape":[1],"data":data});
+            let source = format!("x = (x : tensor[1, {dtype}])\n");
+            let actual = decode(
+                module
+                    .getattr("eval_json")
+                    .unwrap()
+                    .call1((source, json!({"x":tensor.clone()}).to_string()))
+                    .unwrap(),
+            );
+            let root = actual["roots"]
+                .as_array()
                 .unwrap()
-                .call1((source, valid.as_str()))
-                .unwrap(),
-        );
-        assert!(actual.to_string().contains("9007199254740993"));
+                .iter()
+                .find(|root| root["name"] == "x")
+                .unwrap();
+            assert_eq!(root["value"], json!({"type":"tensor","value":tensor}));
+        }
+        let source = "x = (x : tensor[1, int64])\n";
         let invalid = [
             "not json".to_string(),
             json!({"x":{"shape":[1],"data":{"dtype":"int8","values":[128]}}}).to_string(),
@@ -258,15 +288,171 @@ fn compiler_json_conversion_rejects_invalid_typed_execution_envelopes() {
 
 #[test]
 fn native_context_eval_json_uses_the_same_execution_codec() {
-    // Test-first stub: fill with a real temporary Reef project and a native
-    // call, plus invalid context/source-kind/bindings controls. Routing-only
-    // helpers or a mocked context are not this acceptance requirement.
-    panic!("spec/11 §1.1 requires actual context eval JSON success and rejection");
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("reef.toml"),
+        format!(
+            "[package]\nname = \"json_control\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"JsonControl\"\n",
+            chelis_compiler_api::COMPILER_VERSION
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("reef.lock"),
+        "[package]\nname = \"json_control\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.ch"),
+        "module JsonControl.Lib\nexport (keep)\ndef keep(x: tensor[1, int64]) -> tensor[1, int64] = x\n",
+    )
+    .unwrap();
+    Python::with_gil(|py| {
+        let module = native(py);
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs
+            .set_item("project_root", root.to_str().unwrap())
+            .unwrap();
+        let bindings =
+            json!({"x":{"shape":[1],"data":{"dtype":"int64","values":[9007199254740993_i64]}}});
+        let source = "module JsonControl.Entry\nimport JsonControl.Lib (keep)\ny = keep((x : tensor[1, int64]))\nzero = -0.0f64\n";
+        let value = decode(
+            module
+                .getattr("eval_json")
+                .unwrap()
+                .call((source, bindings.to_string()), Some(&kwargs))
+                .unwrap(),
+        );
+        assert_eq!(
+            value["schema_version"],
+            json!(EXECUTION_VALUE_SCHEMA_VERSION)
+        );
+        let roots = value["roots"].as_array().unwrap();
+        let root = |name| &roots.iter().find(|root| root["name"] == name).unwrap()["value"];
+        assert_eq!(
+            root("y"),
+            &json!({"type":"tensor","value":{"shape":[1],"data":{"dtype":"int64","values":[9007199254740993_i64]}}})
+        );
+        assert_eq!(
+            root("zero"),
+            &json!({"type":"scalar","value":{"dtype":"f64","bits":"8000000000000000"}})
+        );
+        let _: EvalResult = serde_json::from_value(value).unwrap();
+        assert!(
+            module
+                .getattr("eval_json")
+                .unwrap()
+                .call(("def broken(",), Some(&kwargs))
+                .unwrap_err()
+                .is_instance_of::<ChelisError>(py)
+        );
+        kwargs.set_item("source_kind", "deep").unwrap();
+        let error = module
+            .getattr("eval_json")
+            .unwrap()
+            .call(("(int {} 1)",), Some(&kwargs))
+            .unwrap_err();
+        assert!(error.is_instance_of::<PyValueError>(py));
+        assert!(error.to_string().contains("Surf source only"));
+        kwargs.set_item("source_kind", "surf").unwrap();
+        kwargs.set_item("project_root", " ").unwrap();
+        let error = module
+            .getattr("eval_json")
+            .unwrap()
+            .call(("x = 1i64",), Some(&kwargs))
+            .unwrap_err();
+        assert!(error.is_instance_of::<ChelisError>(py));
+        assert!(error.to_string().contains("project_root= is empty"));
+    });
 }
 
 #[test]
 fn compiler_json_construction_accepts_only_its_exact_result_type() {
-    // Test-first stub: compile the four production adapters with their exact
-    // roots; independently reject String, Value, wrong roots and field access.
-    panic!("spec/11 §1.1 requires positive and negative construction controls");
+    // These calls compile and execute each production constructor/converter.
+    // The same acceptance runner also compiles the separate String/Value/
+    // wrong-root/private-field controls against this production module.
+    Python::with_gil(|py| {
+        let check = compiler::check(CheckRequest {
+            source_kind: SourceKind::Surf,
+            source: "x = 1i64".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            decode(
+                compiler_json::CheckJson::new(check)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+            )["score"],
+            json!(1.0)
+        );
+        let compile = CompileResult {
+            target: CompileTarget::C,
+            entry_name: "fixture".into(),
+            files: vec![],
+            compile_flags: vec![],
+            link_flags: vec![],
+            peak_device_bytes_estimate: Some(
+                numbers::NonnegativeCount::new(9007199254740993).unwrap(),
+            ),
+            manifest: RootManifestResult::default(),
+        };
+        assert_eq!(
+            decode(
+                compiler_json::CompileJson::new(compile)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+            )["peak_device_bytes_estimate"],
+            json!(9007199254740993_i64)
+        );
+        let desugar = compiler::desugar(DesugarRequest {
+            source: "x = 9007199254740993i64".into(),
+        })
+        .unwrap();
+        assert!(
+            decode(
+                compiler_json::DesugarJson::new(desugar)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+            )
+            .to_string()
+            .contains("9007199254740993")
+        );
+        let eval = EvalResult {
+            schema_version: EXECUTION_VALUE_SCHEMA_VERSION,
+            roots: vec![],
+            manifest: RootManifestResult::default(),
+            transcript: vec![],
+        };
+        assert_eq!(
+            decode(
+                compiler_json::EvalJson::new(eval)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+            )["roots"],
+            json!([])
+        );
+        assert!(
+            compiler_json::EvalBindingsJson::empty()
+                .into_bindings()
+                .is_empty()
+        );
+        let text = pyo3::types::PyString::new(py, "{}");
+        assert!(
+            text.extract::<compiler_json::EvalBindingsJson>()
+                .unwrap()
+                .into_bindings()
+                .is_empty()
+        );
+        assert!(
+            pyo3::types::PyString::new(py, "not json")
+                .extract::<compiler_json::EvalBindingsJson>()
+                .is_err()
+        );
+    });
 }

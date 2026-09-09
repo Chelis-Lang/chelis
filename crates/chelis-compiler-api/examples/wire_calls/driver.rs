@@ -133,6 +133,8 @@ struct Identities {
     dynamic: DefSet,
     decoder_traits: DefSet,
     schema_trait: Option<DefId>,
+    deserialize: Option<DefId>,
+    conversion_traits: Vec<DefId>,
 }
 fn external(
     tcx: TyCtxt<'_>,
@@ -228,12 +230,31 @@ impl Identities {
                 }
             }
         }
+        let compiler_json = std::env::var("WIRE_CALL_SCOPE").as_deref() == Ok("compiler-json");
+        let mut conversion_traits = Vec::new();
+        if compiler_json {
+            for name in ["IntoPyObject", "FromPyObject"] {
+                conversion_traits.push(
+                    external(tcx, "pyo3", &[name], DefKind::Trait)?
+                        .ok_or("missing defining PyO3 conversion trait")?,
+                );
+            }
+        }
         Ok(Self {
             serialize,
             serializer,
             dynamic,
             decoder_traits,
             schema_trait: external(tcx, "schemars", &["JsonSchema"], DefKind::Trait)?,
+            deserialize: if compiler_json {
+                Some(
+                    external(tcx, "serde_core", &["de", "Deserialize"], DefKind::Trait)?
+                        .ok_or("missing defining Deserialize trait")?,
+                )
+            } else {
+                None
+            },
+            conversion_traits,
         })
     }
 }
@@ -417,6 +438,7 @@ struct Discovery<'tcx> {
     concrete: DefSet,
     owners: DefSet,
     unresolved: DefSet,
+    readers: BTreeSet<String>,
 }
 impl<'tcx> Discovery<'tcx> {
     fn returned_dynamic(&mut self, owner: DefId, root: Ty<'tcx>) -> bool {
@@ -711,6 +733,7 @@ impl<'tcx> Discovery<'tcx> {
             let obligations = traits(tcx, *def, generics);
             let mut payloads = Vec::new();
             let mut serializers = Vec::new();
+            let mut read_payloads = Vec::new();
             for predicate in obligations {
                 if predicate.def_id() == self.identities.serialize {
                     payloads.push(predicate.self_ty());
@@ -718,6 +741,37 @@ impl<'tcx> Discovery<'tcx> {
                 if predicate.def_id() == self.identities.serializer {
                     serializers.push(predicate.self_ty());
                 }
+                if Some(predicate.def_id()) == self.identities.deserialize {
+                    read_payloads.push(predicate.self_ty());
+                }
+            }
+            if !read_payloads.is_empty() {
+                read_payloads.sort_by_key(|t| t.to_string());
+                read_payloads.dedup();
+                if read_payloads.iter().any(|t| t.has_non_region_param()) {
+                    self.errors.insert(format!(
+                        "open compiler JSON reader in {}",
+                        tcx.def_path_str(owner)
+                    ));
+                }
+                self.readers.insert(object(&[
+                    ("caller", caller.clone()),
+                    ("callee", definition(tcx, *def)),
+                    ("source", source.clone()),
+                    (
+                        "payloads",
+                        array(read_payloads.iter().map(|t| typ(tcx, *t, &self.identities))),
+                    ),
+                    (
+                        "arguments",
+                        array(
+                            argument_types
+                                .iter()
+                                .map(|t| typ(tcx, *t, &self.identities)),
+                        ),
+                    ),
+                    ("result", typ(tcx, result, &self.identities)),
+                ]));
             }
             if payloads.is_empty() && serializers.is_empty() {
                 continue;
@@ -829,8 +883,9 @@ impl<'tcx> Discovery<'tcx> {
                 ));
             }
         }
-        object(&[
-            ("format", "1".into()),
+        let compiler_json = self.identities.deserialize.is_some();
+        let mut result = object(&[
+            ("format", if compiler_json { "2" } else { "1" }.into()),
             ("compiler", quoted(env!("WIRE_DRIVER_COMPILER"))),
             (
                 "crate",
@@ -881,7 +936,17 @@ impl<'tcx> Discovery<'tcx> {
             ("schema_calls", array(self.schemas)),
             ("dynamic_returns", array(self.returns)),
             ("errors", array(self.errors.iter().map(quoted))),
-        ])
+        ]);
+        if let Some(deserialize) = self.identities.deserialize {
+            assert_eq!(result.pop(), Some('}'));
+            result.push_str(&format!(
+                ",\"scope\":\"compiler-json\",\"deserialize_trait\":{},\"conversion_traits\":{},\"reader_calls\":{}}}",
+                definition(tcx, deserialize),
+                array(self.identities.conversion_traits.iter().map(|id| definition(tcx, *id))),
+                array(self.readers),
+            ));
+        }
+        result
     }
 }
 
@@ -892,6 +957,7 @@ impl Callbacks for Probe {
     fn after_analysis<'tcx>(&mut self, _: &interface::Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let identities =
             Identities::read(tcx).unwrap_or_else(|error| panic!("wire call identity: {error}"));
+        let compiler_json = identities.deserialize.is_some();
         let discovery = Discovery {
             tcx,
             identities,
@@ -905,9 +971,29 @@ impl Callbacks for Probe {
             relevant: DefSet::new(),
             concrete: DefSet::new(),
             unresolved: DefSet::new(),
+            readers: BTreeSet::new(),
             owners: tcx
                 .hir_body_owners()
                 .map(|owner| owner.to_def_id())
+                .filter(|owner| {
+                    if !compiler_json {
+                        return true;
+                    }
+                    let mut current = tcx.opt_parent(*owner);
+                    while let Some(id) = current {
+                        if tcx.def_kind(id) == DefKind::Mod
+                            && tcx.opt_parent(id)
+                                == Some(rustc_span::def_id::CRATE_DEF_ID.to_def_id())
+                            && tcx
+                                .opt_item_name(id)
+                                .is_some_and(|name| name.as_str() == "compiler_json")
+                        {
+                            return true;
+                        }
+                        current = tcx.opt_parent(id);
+                    }
+                    false
+                })
                 .collect(),
         };
         let path = std::env::var_os("WIRE_CALL_REPORT").expect("WIRE_CALL_REPORT is required");

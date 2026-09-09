@@ -18,7 +18,7 @@ from capacity_census_typed import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CENSUS_CALL_SITES = (
     REPO_ROOT / "tests/support/capacity_census_wire_verifier.rs",
-    REPO_ROOT / "crates/chelis-python/tests/capacity_census_bindings.rs",
+    REPO_ROOT / "tests/support/capacity_census_compiler_json.rs",
 )
 # Flags that let a call site decide what gets built or censused. Both exist
 # for ad-hoc local runs; neither belongs in a test that guards a frozen
@@ -145,6 +145,15 @@ class SharedRustdocTargetDir(unittest.TestCase):
         source = path.read_text()
         self.assertIn('tests/support/capacity_census_wire_verifier.rs', source)
         self.assertIn('capacity_census_wire_verifier::discover()', source)
+
+    def test_live_binding_guard_uses_the_private_execution_bridge(self) -> None:
+        path = REPO_ROOT / "crates/chelis-python/tests/capacity_census_bindings.rs"
+        source = path.read_text()
+        self.assertIn('tests/support/capacity_census_compiler_json.rs', source)
+        self.assertIn('capacity_census_compiler_json::discover(', source)
+        bridge = (REPO_ROOT / "tests/support/capacity_census_compiler_json.rs").read_text()
+        self.assertIn('"bindings-discovery"', bridge)
+        self.assertNotIn('pub fn from_', bridge)
 
     def test_call_site_guard_reads_the_real_files(self) -> None:
         # Guard the guard: a renamed or moved census test must fail loudly

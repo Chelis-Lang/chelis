@@ -101,6 +101,7 @@ fn attributes(
     let mut primary_count = 0;
     let mut kind_count = 0;
     let mut named = false;
+    let mut text_signature = false;
     for attr in attrs {
         if attr.path().is_ident("doc") || attr.path().is_ident("allow") {
             continue;
@@ -168,6 +169,15 @@ fn attributes(
                 if !matches!(option, Meta::List(_) | Meta::NameValue(_)) {
                     return Err("unsupported Python signature attribute".into());
                 }
+            } else if option.path().is_ident("text_signature") && primary == Some("pyfunction") {
+                // Documentation cannot rename the owner or erase Rust slots.
+                // PyO3 compiles the actual signature; this literal preserves
+                // introspection defaults for a typed extraction adapter.
+                if text_signature {
+                    return Err("duplicate Python text signature".into());
+                }
+                renamed(&option)?;
+                text_signature = true;
             } else if option.path().is_ident("unsendable") && primary == Some("pyclass") {
                 if !matches!(option, Meta::Path(_)) {
                     return Err("unsupported pyclass option".into());
@@ -405,6 +415,34 @@ mod tests {
             .replace("#[pymethods", "#[::pyo3::pymethods")
             .replace("#[pyclass", "#[::pyo3::pyclass")
             .replace("wrap_pyfunction!", "::pyo3::wrap_pyfunction!")
+    }
+
+    #[test]
+    fn literal_text_signature_cannot_change_registration_ownership() {
+        let items = r#"#[pyfunction(name = "public_name", text_signature = "(value='{}')")] fn numeric_owner(value: f64) -> f64 { value }"#;
+        let source = module(
+            items,
+            "module.add_function(wrap_pyfunction!(numeric_owner, module)?)?;",
+        );
+        let rows = registrations(&source).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rust_name, "numeric_owner");
+        assert_eq!(rows[0].python_name, "public_name");
+        assert_eq!(rows[0].kind, "function");
+        assert!(
+            registrations(&source.replace(
+                r#"text_signature = "(value='{}')""#,
+                "text_signature = arbitrary_helper()"
+            ))
+            .is_err()
+        );
+        assert!(
+            registrations(&source.replace(
+                "text_signature =",
+                r#"text_signature = "()", text_signature ="#
+            ))
+            .is_err()
+        );
     }
 
     #[test]

@@ -32,7 +32,22 @@ COMPILER = "88d9e12ae178fab0fb5cc050a94da85685d449ea"
 DRIVER = "crates/chelis-compiler-api/examples/wire_calls/driver.rs"
 
 
-def _run(command, *, cwd, env=None):
+def record_process(prefix: Path, command, result) -> dict:
+    """Retain exact fresh process evidence beside the owning verifier target."""
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for name in ("stdout", "stderr"):
+        content = getattr(result, name)
+        content = content.encode() if isinstance(content, str) else content
+        path = prefix.with_suffix("." + name + ".log")
+        path.write_bytes(content)
+        files[name] = {"path": str(path), "sha256": hashlib.sha256(content).hexdigest()}
+    receipt = {"command": list(command), "returncode": result.returncode, **files}
+    prefix.with_suffix(".json").write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
+def _run(command, *, cwd, env=None, log_prefix=None):
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -41,6 +56,8 @@ def _run(command, *, cwd, env=None):
         env={**os.environ, "RUSTC_BOOTSTRAP": "1", **(env or {})},
         check=False,
     )
+    if log_prefix is not None:
+        record_process(log_prefix, command, result)
     if result.returncode:
         diagnostics = []
         for line in result.stdout.splitlines():
@@ -324,8 +341,19 @@ def read_evidence(raw: dict) -> InvocationEvidence:
         "rustc_command",
         "inputs",
     }
-    if not isinstance(raw, dict) or set(raw) != required or raw["format"] != 1:
+    compiler_json = isinstance(raw, dict) and raw.get("format") == 2
+    if compiler_json:
+        required |= {"scope", "deserialize_trait", "conversion_traits", "reader_calls"}
+    if not isinstance(raw, dict) or set(raw) != required or raw["format"] not in (1, 2):
         raise ValueError("incomplete compiler invocation evidence")
+    if compiler_json and (
+        raw["scope"] != "compiler-json"
+        or raw["deserialize_trait"].get("crate") != "serde_core"
+        or raw["deserialize_trait"].get("path") != "::de::Deserialize"
+        or not isinstance(raw["conversion_traits"], list)
+        or not isinstance(raw["reader_calls"], list)
+    ):
+        raise ValueError("invalid compiler JSON reader evidence")
     if raw["compiler"] != COMPILER:
         raise ValueError("unrecognized compiler evidence")
     for key in (
@@ -354,21 +382,21 @@ def read_evidence(raw: dict) -> InvocationEvidence:
 
 
 def analyze_fixture(
-    driver: Path, directory: Path, source: str, externs: dict, *, cfg=()
+    driver: Path, directory: Path, source: str, externs: dict, *, cfg=(), scope=None, log_prefix=None
 ):
     """Execute actual rustc fixtures using caller-supplied coherent artifacts."""
     with tempfile.TemporaryDirectory(prefix="fixture-", dir=directory) as tmp:
         tmp = Path(tmp)
         input_path, output_path = tmp / "lib.rs", tmp / "report.json"
-        input_path.write_text(
-            "extern crate serde; extern crate serde_json; extern crate bincode;\n"
-            + source
-        )
+        if scope not in (None, "compiler-json"):
+            raise ValueError("unknown compiler fixture scope")
+        prefix = "" if scope else "extern crate serde; extern crate serde_json; extern crate bincode;\n"
+        input_path.write_text(prefix + source)
         command = [
             str(driver),
             "--edition=2024",
             "--crate-type=lib",
-            "--crate-name=wire_fixture",
+            "--crate-name=chelis_python" if scope else "--crate-name=wire_fixture",
             "-Zmir-opt-level=0",
             "-Zsrc-hash-algorithm=sha256",
             "-Copt-level=0",
@@ -387,7 +415,11 @@ def analyze_fixture(
             env={
                 **_driver_runtime_environment(driver),
                 "WIRE_CALL_REPORT": str(output_path),
+                "WIRE_CALL_SCOPE": scope or "",
+                "PYO3_PYTHON": sys.executable,
+                "VIRTUAL_ENV": sys.prefix,
             },
+            log_prefix=log_prefix,
         )
         if not output_path.is_file():
             raise ValueError("compiler did not write invocation evidence")
@@ -472,7 +504,7 @@ def _locked_registry_package(root: Path, name: str, package_id: str) -> bool:
     )
 
 
-def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) -> dict:
+def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), scope=None) -> dict:
     """Requires the project build slot. Fresh output forces the target callback.
 
     Return evidence plus actual Cargo/artifact provenance. No final ownership
@@ -480,13 +512,15 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) ->
     call, codec implementation and dynamic-return obligation.
     """
     root, target = root.resolve(), target.resolve()
+    if scope not in (None, "compiler-json"):
+        raise ValueError("unknown compiled boundary scope")
     if not target.is_relative_to(root / "target"):
         raise ValueError("invocation target must belong to this worktree")
     # The driver must execute for the selected crate, bypassing compiler caches.
     # Keep its Cargo artifacts separate from the ordinary cache wrapper's
     # read-only outputs. This retained namespace uses the same source/config;
     # all provenance below comes from this invocation's own Cargo stream.
-    invocation_target = target / "wire-invocations/cargo"
+    invocation_target = target / ("compiler-json-invocations/cargo" if scope else "wire-invocations/cargo")
     if driver.resolve() != build_driver(root, driver.parent).resolve():
         raise ValueError("driver does not match the current source and compiler")
     binary_hash = hashlib.sha256(driver.read_bytes()).hexdigest()
@@ -503,7 +537,7 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) ->
             "--locked",
             "--lib",
             "-p",
-            "chelis-compiler-api",
+            "chelis-python" if scope else "chelis-compiler-api",
             "--message-format=json",
             "--",
             "-Zmir-opt-level=0",
@@ -522,9 +556,11 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) ->
                 "PYO3_PYTHON": sys.executable,
                 "VIRTUAL_ENV": sys.prefix,
                 "RUSTC_WRAPPER": str(driver),
-                "WIRE_CALL_CRATE": "chelis_compiler_api",
+                "WIRE_CALL_CRATE": "chelis_python" if scope else "chelis_compiler_api",
+                "WIRE_CALL_SCOPE": scope or "",
                 "WIRE_CALL_REPORT": str(output),
             },
+            log_prefix=invocation_target.parent / "compiler-json-cargo" if scope else None,
         )
         if hashlib.sha256(driver.read_bytes()).hexdigest() != binary_hash:
             raise ValueError("compiler driver executable changed during collection")
@@ -540,6 +576,8 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) ->
         if not output.is_file():
             raise ValueError("Cargo produced no fresh compiler invocation evidence")
         evidence = read_evidence(json.loads(output.read_text()))
+        if evidence.raw["format"] != (2 if scope else 1):
+            raise ValueError("compiler evidence does not match the requested scope")
         for source in evidence.raw["inputs"]:
             if source["path"] is not None:
                 path = root / source["path"]
@@ -555,6 +593,9 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) ->
             *evidence.raw["dynamic_carriers"],
             *evidence.raw["decoder_traits"],
         ]
+        if scope:
+            definitions += [evidence.raw["deserialize_trait"], *evidence.raw["conversion_traits"]]
+            definitions += [call["callee"] for call in evidence.raw["calls"] + evidence.raw["reader_calls"]]
         if evidence.raw["schema_trait"] is not None:
             definitions.append(evidence.raw["schema_trait"])
         definitions.extend(
@@ -591,7 +632,7 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) ->
                     "stable_crate_id": stable_id,
                 }
             )
-        return {
+        collected = {
             "evidence": evidence.raw,
             "identity": evidence.identity,
             "command": command,
@@ -601,3 +642,20 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=()) ->
             "driver_build": driver_build,
             "binary_sha256": binary_hash,
         }
+        if scope:
+            # Construction controls compile against the dependency artifacts
+            # emitted by this same Cargo invocation, never a filesystem glob.
+            externs = []
+            for name in ("chelis_compiler_api", "pyo3", "serde_json"):
+                artifacts = [item for line in stream.splitlines()
+                             if (item := json.loads(line)).get("reason") == "compiler-artifact"
+                             and item["target"]["name"] == name]
+                if len(artifacts) != 1:
+                    raise ValueError(f"missing exact construction dependency {name}")
+                paths = [Path(path) for path in artifacts[0]["filenames"] if path.endswith(".rlib")]
+                if len(paths) != 1 or not paths[0].is_relative_to(invocation_target):
+                    raise ValueError(f"missing owned construction artifact {name}")
+                externs.append({"name": name, "artifact": str(paths[0]), "sha256": _sha256(paths[0])})
+            collected["fixture_externs"] = externs
+            collected["process"] = json.loads((invocation_target.parent / "compiler-json-cargo.json").read_text())
+        return collected

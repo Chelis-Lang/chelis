@@ -73,6 +73,42 @@ class ExtractIssueRefs(unittest.TestCase):
 
 
 class LoadCensusRows(unittest.TestCase):
+    def test_binding_final_shape_keeps_execution_evidence_out_of_baseline(self) -> None:
+        transport = {"kind": "binding-pyfunction", "id": "chelis_python::eval_json(typed)",
+                     "flags": ["float-carrier", "numeric-param", "numeric-return"],
+                     "authority": "TaggedTransport", "contract": "compiler-json/chelis_python::eval_json",
+                     "graph_identity": "a" * 64}
+        nonnumeric = {"kind": "binding-pymethod", "id": "chelis_python::CompiledModel::path(typed)",
+                      "flags": [], "authority": "nonnumeric", "graph_identity": "b" * 64}
+        valid = {"version": 2, "rows": [nonnumeric, transport]}
+        capacity_census_liveness.validate_binding_baseline(valid)
+        for key in ("citation", "source_sha256", "evidence", "successor_overrides"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                capacity_census_liveness.validate_binding_baseline({**valid, key: "supplied"})
+            with self.assertRaises(ValueError):
+                capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [{**transport, key: "supplied"}]})
+
+    def test_binding_legacy_shape_cannot_be_copied_to_retired_json_rows(self) -> None:
+        disposition = next(iter(LEGACY_TRANSITION_DISPOSITIONS))
+        row = {"kind": "binding-pymethod", "id": "chelis_python::NativeTensor::shape(unchanged)",
+               "flags": [], "citation": disposition}
+        capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [row]})
+        for name in ("check_json", "compile_json", "desugar_json", "eval_json", "new_binding"):
+            changed = {**row, "kind": "binding-pyfunction", "id": f"chelis_python::{name}(old)"}
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [changed]})
+
+    def test_binding_shape_rejects_missing_contract_erased_capacity_and_duplicates(self) -> None:
+        row = {"kind": "binding-pyfunction", "id": "chelis_python::check_json(typed)",
+               "flags": ["float-carrier", "numeric-return"], "authority": "TaggedTransport",
+               "contract": "compiler-json/chelis_python::check_json", "graph_identity": "a" * 64}
+        for change in ({"flags": []}, {"contract": "other"}, {"authority": "permanent-disposition"},
+                       {"graph_identity": "stale"}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [{**row, **change}]})
+        with self.assertRaises(ValueError):
+            capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [row, row]})
+
     def test_wire_final_authorities_need_no_issue_lookup(self) -> None:
         for authority in ("TaggedTransport", "NumericOperation"):
             for primitive, flag in (("u64", "numeric-field"), ("f64", "float-carrier")):
