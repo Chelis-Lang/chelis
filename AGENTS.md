@@ -480,8 +480,10 @@ validates before you push and reports the outcome in your terminal. It is
 not required, and it is not how a change lands.
 
 Autoland opens the pull request with a short-lived installation token,
-minted per run from the GitHub App this repository already uses
-(`vars.CI_APP_ID`, `secrets.CI_APP_PRIVATE_KEY`), scoped to this repository
+minted per run from the `chelis-openspec` GitHub App, which exists for this
+mechanism alone (`vars.OPENSPEC_APP_ID`,
+`secrets.OPENSPEC_APP_PRIVATE_KEY` -- not the shared `CI_APP_*`
+credentials, whose installation grants no pull-request write), scoped to this repository
 and to `Pull requests: write` alone, and revoked when the job ends. The
 built-in `GITHUB_TOKEN` cannot be used, because a pull request opened with
 it starts none of the required checks. If the App is not configured, or its

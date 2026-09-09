@@ -33,12 +33,24 @@ name: OpenSpec autoland controller
 # go green.
 #
 # So the create call -- and only the create call -- uses a short-lived
-# installation token, minted here from the GitHub App this repository
-# already configures for its cross-repo work (`vars.CI_APP_ID` and
-# `secrets.CI_APP_PRIVATE_KEY`, as `conformance-nightly.yml` and
-# `ecosystem-drift.yml` use). Nothing is stored: the action revokes the
-# token when the job ends, which is its default and is why
+# installation token, minted here from a GitHub App dedicated to this
+# mechanism: `chelis-openspec` (`vars.OPENSPEC_APP_ID` and
+# `secrets.OPENSPEC_APP_PRIVATE_KEY`). Nothing is stored: the action revokes
+# the token when the job ends, which is its default and is why
 # `skip-token-revoke` is deliberately absent.
+#
+# WHY A DEDICATED APP RATHER THAN THE SHARED `CI_APP_*` ONE
+#
+# This was measured, not preferred. Minting from the shared App returned
+# HTTP 422, "The permissions requested are not granted to this
+# installation": its installation covers this repository but grants no
+# pull-request write, and it exists for cross-repo *reads*
+# (`conformance-nightly.yml`, `ecosystem-drift.yml`). Widening it would
+# hand pull-request write to every workflow that already holds its key, to
+# fix one call in this one. The dedicated App's installation grants exactly
+# `contents: read`, `metadata: read`, and `pull requests: write`, and only
+# this workflow holds its key. `scripts/test_openspec_controller.py`
+# asserts both Apps keep their own consumers.
 #
 # The token is scoped as narrowly as the action allows: this owner, this
 # repository, and `permission-pull-requests: write` alone. That is the
@@ -117,8 +129,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.OPENSPEC_APP_ID }}
+          private-key: ${{ secrets.OPENSPEC_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-pull-requests: write
