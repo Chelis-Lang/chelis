@@ -911,6 +911,19 @@ lowering-trace --lib --test lowering_trace`. It must cover:
 4. Actual library normalization snapshots before DCE, after DCE, after consuming
    fanout copies, and after drops, together with the two production remap tables.
    The last snapshot must match the returned library DAG exactly.
+5. Each successful ordinary-gradient observation has its actual call-site
+   application: formal/actual dimension-specialization types, the specialized
+   backward DAG, name-to-caller argument bindings, ordered actual differentiated
+   inputs, the production splice map, and caller snapshots immediately before
+   splicing, immediately after splicing, and after result packing/reuse hints.
+   The returned value retains tuple/ADT structure, field order and names, including
+   empty discrete cotangent slots. Missing raw gradients remain missing in the AD
+   observation; their subsequent shaped zeros appear only in the packing snapshot.
+   Nested applications use their gradient context's parent as the caller context.
+   This does not extend capture to host-classified structured/List applications;
+   those still have `UnloweredDefinitions` boundaries. Structural value copying
+   has a separate unit test, not a claim of host-entry coverage. Tensor result
+   packing alone is not evidence that host-visible List checks were preserved.
 
 The trace deliberately has no `Serialize`/`Deserialize` implementation and is not
 a new numeric wire transport: it retains the existing compiler `Dag` carrier
@@ -919,7 +932,8 @@ A later external evidence envelope must use exact tagged numeric carriers and
 extend the numeric-surface enumerators in that same change. Graph-local IDs are
 not cross-pass identities; consumers must check, not trust, the recorded maps.
 
-Remaining obligations include call-site splicing/result-packing correspondence,
+The application snapshots and maps are observations, not proofs of call-site
+splicing/result-packing correspondence. Remaining obligations include checking them,
 pre-erasure Random protocol and Resource metadata, the selected emission's
 `VerifiedDagProgram.emission()` ownership actions, external decoding and checking,
 and independent Hull numerical tests. This trace does not cover contextual/host
