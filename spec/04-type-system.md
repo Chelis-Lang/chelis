@@ -1013,7 +1013,7 @@ operand of a concretely inadmissible type. Deferral never admits an operand
 the operation would otherwise reject, and the verdict never depends on the
 order in which inference reaches the operand.
 
-(Not every operation implements this yet; the remaining ones are tracked on
+(A small number of operations do not implement this yet; they are tracked on
 [#1489](https://github.com/Chelis-Lang/chelis/issues/1489).)
 
 ---
