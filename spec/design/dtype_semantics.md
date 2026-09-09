@@ -893,9 +893,9 @@ Deliverables, with phase homes:
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
 
-   The primary baseline has completed that landing rule: its 247 discovered
+   The primary baseline has completed that landing rule: its 251 discovered
    rows have final authority as 66 exact nonnumeric rows, 16 exact tagged
-   carriers/transports, and 165 exact numeric-operation registrations. It has
+   carriers/transports, and 169 exact numeric-operation registrations. It has
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The 84 wire and eight binding
    baseline rows remain sealed legacy cohorts. Nine binding rows have final

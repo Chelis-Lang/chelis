@@ -332,9 +332,9 @@ numeric data, whether or not you have read that document:
   grandfather rows, three successor overrides, and 155 permanent plain rows; the
   executable primary census and guard retain none of those disposition lists or
   admission paths. The active primary baseline has completed
-  that migration: all 247 rows have final authority as 66 exact structurally
+  that migration: all 251 rows have final authority as 66 exact structurally
   nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
-  165 registered numeric operations (the [05-OP-35] stdlib registrations among
+  169 registered numeric operations (the [05-OP-35] stdlib registrations among
   them). It retains no grandfather, successor-override, permanent-disposition,
   integer-plumbing, or other transition rows. The
   84 typed-wire and eight registered-PyO3 baseline rows remain sealed legacy cohorts;
