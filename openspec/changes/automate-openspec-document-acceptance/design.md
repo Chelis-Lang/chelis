@@ -172,7 +172,9 @@ The job:
 
 Step 4's failure modes are the ones that bite: no checks reported yet, a context that exists but is `neutral`/`skipped`, a required context whose app id does not match, and a re-run that supersedes an earlier conclusion. Each must be an explicit refusal.
 
-**What is not proven locally.** The worker's read and decision paths were exercised against the live API read-only: required-context discovery returned all nine contexts, evaluation of a real head sha returned zero failures, and a commit missing one context failed closed naming it. The merge call itself has never run, and `pull_request_target` only takes effect once this file is on `main`.
+**What is not proven locally.** The worker's read and decision paths were exercised against the live API read-only: required-context discovery returned all nine contexts, evaluation of a real head sha returned zero failures, and a commit missing one context failed closed naming it. The merge call itself has never run under the Actions token.
+
+These files are on `main` (see Migration Plan), so `workflow_run` and `pull_request_target` take effect. Being live is not being proven: the merge call, the create call, and the check discovery under the Actions token stay unverified until a hosted document push is observed end to end.
 
 **No new credential or setting is needed.**
 
@@ -325,10 +327,22 @@ The change is additive. `openspec-validate` keeps running in advisory mode and i
 
 Ordering:
 
-1. Land the classifier, the submission command, their tests, and the workflow. Autoland does nothing until the repository settings below allow it, so this step is inert.
-2. Nothing else happens automatically. Automatic merging is a separate reviewed change with the prerequisites in D13, and it does not proceed by relaxing a review requirement that also covers code.
+1. Land the classifier, the controller, the merge worker, the submission command, their tests, and the four workflows.
+2. Give the mint a credential whose installation can open a pull request.
+3. Repair what the first hosted runs find.
+4. Observe one hosted document push end to end.
 
-Rollback is deleting the workflow file. It touches neither the submission command nor the document tree.
+**Step 1 landed.** Pull request #1653 merged as `40266a0a` after every required check passed on its exact head `581955a1`, by an ordinary merge bound to that sha: no administrative option, no auto-merge grant, no protection changed. It carried `a658d655`, repairing a pre-existing tree-wide validation failure in `harden-lint-traversal-edges` whose MODIFIED block had renamed two scenarios. That failure reproduced on pristine `origin/main`, and while it stood, strict validation would have refused every document submission.
+
+**Step 2 landed, because the first hosted run refused.** The controller as first deployed minted from the shared `CI_APP_*` App, and its first real run failed: HTTP 422, `The permissions requested are not granted to this installation`. The classify step never ran and no pull request was opened -- the designed fail-closed path, not a fallback to `GITHUB_TOKEN`. The remedy was a dedicated App, `chelis-openspec`, granting `contents: read`, `metadata: read`, and `pull requests: write`, rather than widening a shared App whose key several workflows already hold. Pull request #1660 merged as `59bf8bda`.
+
+**Step 3 landed, because the second hosted run refused.** With the credential working, the mint succeeded and the classifier failed: `cannot run Git: [Errno 2] No such file or directory: 'base'`. The workflow checks the default branch out to `base/` and passes `--repository-path base`; every command already runs with `cwd` set to that path, and the classifier was *additionally* told the path, so it resolved `base` a second time and looked for `base/base`. Pull request #1661 merged as `07a27c7c`, resolving the path once on entry.
+
+That bug is the more instructive of the two. Every local test passed `Path(".")`, where applying a relative path twice is invisible, so a full green suite proved nothing about the one shape the workflow actually uses. The lesson is narrow and worth keeping: a default that makes an operation idempotent will hide that the operation happens twice.
+
+**Step 4 is the open oracle.** Until a hosted push is observed producing a controller decision, an App-opened pull request, and a merge verdict, the create call, the check discovery under the Actions token, and the merge call remain unverified.
+
+Rollback is deleting the workflow files. It touches neither the submission command nor the document tree.
 
 ## Open Questions
 
