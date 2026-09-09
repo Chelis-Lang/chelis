@@ -346,7 +346,7 @@ fn the_document_layout_is_the_published_contract() {
 fn an_integral_score_is_not_respelled_as_a_double() {
     // The single highest-risk byte in this change. `serde_json` writes an
     // integral `f64` as `1.0`; the template it replaces used `format!`, so
-    // `1` is what shipped, and eighteen CLI test files assert the substring
+    // `1` is what shipped, and 17 CLI test files assert the substring
     // `"score": 1`. A stock formatter passes every structural assertion in
     // this file and fails here.
     let rendered =
@@ -357,13 +357,30 @@ fn an_integral_score_is_not_respelled_as_a_double() {
 
 #[test]
 fn a_failure_before_the_checker_emits_the_same_document() {
-    // [04-FIT-12]. A failure that short-circuits parsing or preparation is
-    // reported through the report type, not as a display string and not by
-    // a second producer that happens to agree with the first.
+    // The failures that short-circuit INSIDE the producer reach the report
+    // type, not a display string and not a second producer that happens to
+    // agree with the first.
+    //
+    // This is NOT [04-FIT-12] satisfied, and must not be read as it. Other
+    // failures bypass the report entirely and still emit a display string:
+    // an unreadable or non-UTF-8 `.ch`, a style-gate rejection, and
+    // directory mode, which puts the display string in the report's own
+    // place. §6.4 keeps its "not fully implemented" caveat for exactly that
+    // reason, and routing those paths through the report is chelis#886's
+    // remaining work rather than this test's claim.
+    //
+    // `check_output` sets `CHELIS_STYLE_GATE_DISABLE=1`, which makes one of
+    // the five fixtures below unrepresentative of default CLI behaviour: a
+    // whitespace-only `.ch` is rejected by the style gate first and never
+    // reaches the producer. It is kept because it shares its code site with
+    // the truly-empty case, which IS representative; four of the five hold
+    // with the gate on.
     //
     // The `.dp` cases matter on their own: the Deep arm has its own
     // short-circuit sites, and a fix applied only to the Surf arm would
-    // leave them outside the contract.
+    // leave them outside the contract. That arm is also stricter than the
+    // Surf one -- it routes an unreadable or non-UTF-8 `.dp` through the
+    // report where the Surf arm bypasses it.
     for (extension, source, label) in [
         (
             "ch",
@@ -528,6 +545,16 @@ fn the_cli_holds_no_second_producer_of_the_document() {
     // report type's field names, and their only renderer is
     // `CheckResult::to_report_json`.
     //
+    // It is a SPELLING HEURISTIC, not a proof, and should not be read as
+    // one. It catches the two forms a template is actually written in; a
+    // red-team pass got a byte-identical second producer past it using
+    // `concat!` on split fragments, and another using a `const` array of
+    // the keys with `{:?}`. A source grep cannot be complete, and chasing
+    // each new spelling would be filling gaps rather than fixing a class.
+    // What it buys is that the removed defect cannot come back by the route
+    // it left by; the byte pins above are what catch a producer that
+    // reappears some other way, by disagreeing with them.
+    //
     // If you are here because you added a report field: add it to
     // `CheckResult`. If you are here because you need a document the type
     // cannot express, that is a change to the type, not a second template.
@@ -552,8 +579,10 @@ fn the_cli_holds_no_second_producer_of_the_document() {
         // document, the envelope `{"files":[...],"errors":[]}`, whose own
         // `errors` key collides with the report's. Adding it here fails on
         // that envelope, which is not a second producer of the report. The
-        // six keys above are unique to the report, which is what makes them
-        // usable as a signature.
+        // seven keys above are unique to the report, which is what makes them
+        // usable as a signature. (The collision is with the two literal
+        // forms this checks; `\"errors\": [` with a space would not match
+        // the envelope. Excluded anyway -- the key is not distinctive.)
     ] {
         // BOTH quote forms. A red-team pass evaded the first version of this
         // check by writing the replacement template as a raw string literal

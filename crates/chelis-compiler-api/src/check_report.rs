@@ -24,7 +24,8 @@
 //! 2. **`f64` is written with `Display`, not `ryu`.** `Display` prints an
 //!    integral double as `1`; `serde_json` prints `1.0`. The templates used
 //!    `format!` for `score` and `components`, so `"score": 1` is the shipped
-//!    spelling and is asserted by substring across the CLI test corpus.
+//!    spelling and is asserted by substring in 17 files under
+//!    `crates/chelis-cli/tests/`.
 //!
 //!    This applies to EVERY `f64` in the document, which is a wider rule
 //!    than the templates had. A diagnostic's `severity` reached the wire
@@ -233,7 +234,7 @@ mod tests {
     ///
     /// `serde_json` writes an integral double as `1.0`. The templates this
     /// replaces used `format!`, so `1` is the shipped spelling, and the CLI
-    /// corpus asserts the substring `"score": 1` in eighteen files. A
+    /// corpus asserts the substring `"score": 1` in 17 files. A
     /// formatter swapped for a stock one passes every structural test and
     /// fails here.
     #[test]
