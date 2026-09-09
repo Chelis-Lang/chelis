@@ -914,6 +914,14 @@ it does not establish empty-list dtype preservation in eval, whose pre-existing
 fallback is tracked in #1650. The definition guard retains executable admission
 and the corpus entry.
 
+PR #1668 adds `literal_extent_claim.ch` and `parity_literal_extent_claim`
+to the frozen inventory. The independent `literal_extent_example_contract`
+test requires its declared result type, exact shape `[4]` and four sevens on
+Eval/C, and a domain trap when the input has five elements. The 40-call literal
+claim matrix separately covers exported calls, top-level bindings, inlined
+roots, aliases, and discarded calls. Guard mutations reject deleting or emptying
+the new parity row, making it library-only, or removing its corpus entry.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the

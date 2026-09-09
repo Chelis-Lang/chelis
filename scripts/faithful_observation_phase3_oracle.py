@@ -65,6 +65,7 @@ REQUIRED_TESTS = {
         "parity_constraint_directed_risk_guards_library_only",
         "parity_iter_foundation",
         "parity_list_foundation",
+        "parity_literal_extent_claim",
         "parity_scalar_string_foundation",
         "parity_tensor_structural_ops",
         "parity_hello_tensor_library_only",
@@ -155,6 +156,10 @@ REQUIRED_EVAL_RECEIPTS = {
 # chelis#889/#893 add checked_reshape.ch and its executable parity row.
 # Independent runtime and generated host/DAG UBSan controls cover exact stored
 # bits, empty domains, metadata rejection, and owned reshape independence.
+# chelis#1377 adds literal_extent_claim.ch and its executable parity row.
+# runtime_extent_claim_preparation independently asserts the example's declared
+# signature, exact shape/value, and the required failure with five input elements.
+# Its 40-call matrix separately exercises export, binding, and inlined roots.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_checked_reshape": "3f2defb3802726dac732a24ee5a9815433c8a16679f60a8ae337268305119424",
@@ -165,7 +170,7 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "61685ac93d7419e13a781bfbdf764cbdfac0181b149ca83f59e552756fbc98b5",
+        "parity_corpus_is_complete": "0e0f4a60820edc8b2cbaee0c3691398a107b5a899479643868e6a3e4a51d1728",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",
         "parity_hash_order_determinism": "148c637280b238c9a119e22196960703873e291f1f0df59323c33ddb96b47170",
@@ -180,6 +185,7 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_iter_foundation": "c99d74a439e006c29748429c3877941460cd3ed18a0a98fd16caf81fb510c84f",
         "parity_linreg_library_only": "041271517605b7fa97a616c9fbe37d97d30bf0a6740c419e7dd91182736d97e4",
         "parity_list_foundation": "5400fe48566a947d9970a2231ea00b2d573abe32fcf3576b3ef7c8dfece02f14",
+        "parity_literal_extent_claim": "9458c0cd6591887b81d4e4c6334846f6cd37dc5cd59b4a396a8bd9c7d9684592",
         "parity_mnist_library_only": "f46a10e016c52751f1072770cce71c39e8322d5ce8b19f1c81879d53fbc833f4",
         "parity_opaque_invariants_library_only": "f2a0340b7b1d509b2d06ad84eb11ff7f237015ee90555ea9c1c7609c1b3d25f5",
         "parity_opaque_invariants_simplex_library_only": "92ed0ac36b8cfedfad49a86707e83f230c7edcf0484e29951c0a16c1d9c2e865",

@@ -714,6 +714,44 @@ fn literal_result_claim_contract() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Independent expected-value and rejection evidence for the executable example.
+#[test]
+fn literal_extent_example_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let source = include_str!("../../../examples/literal_extent_claim.ch");
+    for good in [true, false] {
+        let source = if good {
+            source.to_owned()
+        } else {
+            let changed = source.replace("3.0f32, 4.0f32]", "3.0f32, 4.0f32, 5.0f32]");
+            assert_ne!(
+                source, changed,
+                "negative example must change the actual extent"
+            );
+            changed
+        };
+        let case = Case {
+            id: format!("literal.example.{good}"),
+            issue: 1377,
+            source,
+            signature: None,
+            exported: None,
+            expected: if good {
+                Expected::Tensor(vec![4], vec![7.0; 4])
+            } else {
+                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+            },
+        };
+        let observation = observe(&case);
+        assert_eq!(
+            observation["check"]["signatures"]["fill_four"],
+            "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"
+        );
+        let failures = contract_failures(&case, &observation);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
 /// [04] §4.7 and [06] §5.2: a call's runtime obligation survives another
 /// inlining boundary and remains observable when its result is discarded.
 #[test]
