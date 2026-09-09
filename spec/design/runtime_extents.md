@@ -15,7 +15,7 @@ language rule and does not relax the numbered specs to match a baseline.
 
 ## Current state and remaining work
 
-The reference implementation state for the merged inventory is `3fbc1df49`.
+The reference implementation state for the merged inventory is `fc1abe414`.
 The following are merged mechanisms, not a claim of complete class coverage.
 
 | delivery | merged PR | established behavior |
@@ -29,6 +29,7 @@ The following are merged mechanisms, not a claim of complete class coverage.
 | S2c | #1605 (`42ce46cdc`) | deferral recorder, stores, executor, settlement registry, and source-ordinal index removed |
 | B2b-0 | #1616 (`f6cfd2d72`) | seven existing phase-B rows receive passing receipts; no guard mechanism changes |
 | B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case #1619 exit passes |
+| B2b-0b numeric local guards | #1662 (`5dde8373c`) | literal/resolved claims compare independent runtime carriers; the 32-lane local matrix passes |
 
 The extent carrier is no longer a display name, and sources/classes already
 exist. What remains is preservation of a claim and its caller witnesses,
@@ -340,7 +341,7 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
-The recorded phase-B corpus has 55 rows: 34 at exit,
+The recorded phase-B corpus has 56 rows: 35 at exit,
 21 short. This is baseline metadata, not a fresh execution receipt. The final
 command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
@@ -383,7 +384,7 @@ baseline changes only the two #1619 C results and #1266's record-alias C
 result: all three now execute with their expected values. The record-alias
 Eval failure and direct-field failures remain; #1266 is still open.
 
-The next bounded B2b-0b kernel repair compares literal and resolved named
+The merged B2b-0b numeric kernel repair compares literal and resolved named
 claims against independent nonnegative runtime sizes at live `Expand` and
 `Reshape` nodes. A number in result metadata is a requirement, not a proof
 about the carrier. Both lanes consume the shared local sites, and C checks
@@ -402,6 +403,24 @@ registers it as `guard.local.numeric_carriers.eval_c`. This receipt does not
 cover claim formation from anonymous resolved metadata, negative-extent
 rendering, op-computed sources without carriers, or preservation through
 calls, inlining and dead-code elimination.
+
+The local guard-order repair groups C guards by introducing operation and
+retains the derivation's declaration order within that operation. Movement
+consumers supply their supported extent expressions together, so output axis
+order cannot reorder simultaneous claims. Legacy declarations remain separate
+from this guard schedule. Its bounded acceptance command is:
+
+```sh
+cargo test -p chelis-backend-c --test exec_compile \
+  local_reshape_guards_follow_declaration_order -- --exact --nocapture
+```
+
+This eight-lane matrix reverses two resolved named axes in a runtime reshape.
+It asserts the exact first failing claim for each single-axis mismatch and
+for simultaneous mismatches, plus exact shape and values when both agree.
+Phase B records `guard.local.declaration_order.eval_c`. This closes the P2
+multi-axis reshape ordering witness recorded during #1662; it does not claim
+the remaining op-computed guard coverage or call/witness transport.
 
 The separate six-case #1377 prerequisite runner remains intentionally red:
 

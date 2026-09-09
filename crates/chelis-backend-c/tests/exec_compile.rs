@@ -6085,3 +6085,120 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         result.c_source
     );
 }
+
+/// Spec/04 section 4.7: simultaneous local guards follow declaration order,
+/// even when reshape reverses the claimed axes. Each lane owes the exact first
+/// failure independently; the matching control must preserve shape and values.
+#[test]
+fn local_reshape_guards_follow_declaration_order() {
+    use chelis_ir::dag::RtDim;
+    use chelis_ir::eval::{TensorValue, eval_tensor_with};
+    let mut dag = Dag::new();
+    let n = DimInfo::Named("n".into(), Some(4));
+    let m = DimInfo::Named("m".into(), Some(2));
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![n.clone(), m.clone()],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let int = TensorType {
+        dims: vec![],
+        precision: Prim::Int64,
+    };
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], int.clone(), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], int.clone(), None);
+    let ashape = dag.add_node(RiscOp::Shape { axis: 1 }, vec![x], int.clone(), None);
+    let bshape = dag.add_node(RiscOp::Shape { axis: 0 }, vec![x], int.clone(), None);
+    let ac = dag.add_node(RiscOp::Add, vec![ashape, a], int.clone(), None);
+    let bc = dag.add_node(RiscOp::Add, vec![bshape, b], int, None);
+    let root = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1), RtDim::Node(2)],
+        },
+        vec![x, ac, bc],
+        TensorType {
+            dims: vec![m, n],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(root);
+    let generated = codegen_with_options(
+        &dag,
+        "order_probe",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(generated.input_labels, ["x", "a", "b"]);
+    for (delta_a, delta_b) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        let good = delta_a == 0 && delta_b == 0;
+        let eval = eval_tensor_with(&dag, |name| match name {
+            "x" => Some(TensorValue::from_vec(
+                vec![4, 2],
+                (1..=8).map(f64::from).collect(),
+            )),
+            "a" => Some(TensorValue::scalar(f64::from(delta_a))),
+            "b" => Some(TensorValue::scalar(f64::from(delta_b))),
+            _ => None,
+        });
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void order_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{ float x[8]={{1,2,3,4,5,6,7,8}}; int64_t sh[2]={{4,2}},da={delta_a},db={delta_b};
+chelis_tensor* inputs[3]={{chelis_tensor_entry_borrow(2,sh,CHELIS_DTYPE_F32,x,sizeof(x)),chelis_tensor_entry_borrow(0,NULL,CHELIS_DTYPE_I64,&da,sizeof(da)),chelis_tensor_entry_borrow(0,NULL,CHELIS_DTYPE_I64,&db,sizeof(db))}};
+chelis_tensor* outputs[1]={{NULL}}; order_probe(inputs,3,outputs,1);
+if(chelis_tensor_rank(outputs[0])!=2 || chelis_tensor_shape(outputs[0],0)!=2 || chelis_tensor_shape(outputs[0],1)!=4) return 41;
+chelis_read_view v=chelis_tensor_read_view(outputs[0]); if(v.count!=8) return 42;
+for(int i=0;i<8;i++) if(((const float*)v.data)[i]!=i+1) return 43;
+puts("EXACT"); return 0; }}"#
+        );
+        let (ok, c) = compile_and_run_kernel_capturing(
+            "local_reshape_guard_order",
+            &generated.c_source,
+            &harness,
+        );
+        if good {
+            let v = eval.unwrap();
+            assert_eq!(v[&root].shape, [2, 4]);
+            assert_eq!(
+                v[&root].to_f64_lossy_vec(),
+                (1..=8).map(f64::from).collect::<Vec<_>>()
+            );
+            assert!(ok, "{c}");
+            assert_eq!(c.trim(), "EXACT");
+        } else {
+            let e = eval.unwrap_err();
+            assert!(!ok, "mismatching claims must fail: {c}");
+            let (claim, required, axis, observed) = if delta_b != 0 {
+                ("n", 4, 1, 5)
+            } else {
+                ("m", 2, 0, 3)
+            };
+            let context = format!(
+                "extent {claim}: claimed = {required}, node {} axis {axis} = {observed}",
+                root.0
+            );
+            for (lane, diagnostic) in [("eval", e), ("c", c)] {
+                let diagnostic = diagnostic.replace('`', "");
+                assert!(
+                    diagnostic
+                        .lines()
+                        .any(|line| line == "numeric trap: domain in reshape at int64"),
+                    "{lane}: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.lines().any(|line| line == context),
+                    "{lane}: expected {context}, observed {diagnostic}"
+                );
+            }
+        }
+    }
+}
