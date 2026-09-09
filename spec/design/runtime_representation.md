@@ -637,6 +637,8 @@ result allocation; each worker owns its scratch tensor and write guard. Sum keep
 #1299's adjacent-pair tree and integer finalization; Count keeps its original
 row-major leaves, checked int64 pairs, and odd tails. Existing dtype rejection,
 non-Sum arithmetic, and vendor-selection obligations remain separately owned.
+Kernel scratch remains outside the shared planner's distinct DAG-slot bound;
+using checked runtime allocation does not make scratch a planned tensor slot.
 
 This is one shippable adoption slice because result validation, loop bounds, source
 indices, and scratch capacity must agree for the same grouping. Its oracle combines

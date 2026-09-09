@@ -8436,8 +8436,9 @@ mod tests {
         assert!(!c.contains("cblas_sgemm("));
         assert!(
             c.lines()
-                .any(|line| line.contains("__sum_n_") && line.ends_with(" = 3;"))
+                .any(|line| line.contains("__sum_n_") && line.ends_with("_leaf_count;"))
         );
+        assert!(c.contains("chelis_reduction_count("));
         assert!(c.contains("__sum_level_"));
     }
 
