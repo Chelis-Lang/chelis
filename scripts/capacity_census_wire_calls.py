@@ -409,18 +409,19 @@ def analyze_fixture(
             dependencies.add(path.parent)
         command += ["-Ldependency=" + str(path) for path in sorted(dependencies)]
         command += [arg for name in cfg for arg in ("--cfg", name)]
-        _run(
-            command,
-            cwd=directory,
-            env={
+        run_options = {
+            "cwd": directory,
+            "env": {
                 **_driver_runtime_environment(driver),
                 "WIRE_CALL_REPORT": str(output_path),
                 "WIRE_CALL_SCOPE": scope or "",
                 "PYO3_PYTHON": sys.executable,
                 "VIRTUAL_ENV": sys.prefix,
             },
-            log_prefix=log_prefix,
-        )
+        }
+        if log_prefix is not None:
+            run_options["log_prefix"] = log_prefix
+        _run(command, **run_options)
         if not output_path.is_file():
             raise ValueError("compiler did not write invocation evidence")
         return read_evidence(json.loads(output_path.read_text()))
