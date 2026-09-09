@@ -162,7 +162,7 @@ def _test_artifact(root: Path, target: Path, group: Group, output: str) -> Path:
     artifacts = []
     for record in records:
         if not isinstance(record, dict):
-            continue
+            raise CapacityOracleError(f"{group.name}: Cargo emitted a non-object artifact record")
         target_record = record.get("target")
         profile = record.get("profile")
         executable = record.get("executable")

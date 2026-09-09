@@ -161,16 +161,26 @@ class ExecutionTests(unittest.TestCase):
             source.parent.mkdir(parents=True)
             source.write_text("// fixture\n")
             target = root / "target/dtype-capacity"
+            target.mkdir(parents=True)
+            owned = target / "owned-test"
+            owned.write_text("")
             foreign = root / "foreign-test"
             foreign.write_text("")
-            payload = json.dumps([[], {
+            record = {
                 "reason": "compiler-artifact",
                 "target": {"name": group.binary, "kind": ["test"], "src_path": str(source)},
                 "profile": {"test": True},
-                "executable": str(foreign),
-            }])
-            with self.assertRaises(oracle.CapacityOracleError):
-                oracle._test_artifact(root, target, group, payload)
+                "executable": str(owned),
+            }
+            self.assertEqual(
+                oracle._test_artifact(root, target, group, json.dumps(record)), owned
+            )
+            malformed = "[]\n" + json.dumps(record)
+            foreign_record = {**record, "executable": str(foreign)}
+            for payload in (malformed, json.dumps(foreign_record)):
+                with self.subTest(payload=payload):
+                    with self.assertRaises(oracle.CapacityOracleError):
+                        oracle._test_artifact(root, target, group, payload)
 
     def test_capacity_environment_rejects_stale_source_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
