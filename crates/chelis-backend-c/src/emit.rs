@@ -5136,9 +5136,16 @@ impl CEmitter {
             dims: vec![],
             precision,
         });
-        self.line(&format!("int64_t __sum_n_{id} = {axis_size};"));
+        let index_et = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.line(&format!("{index_et} __sum_n_{id} = {axis_size};"));
+        // After the signed-domain check, the usual C integer conversions
+        // compare the full count with the target's allocation limit without
+        // narrowing it to size_t before the check.
         self.line(&format!(
-            "if (__sum_n_{id} < 0 || (uint64_t)__sum_n_{id} > SIZE_MAX / sizeof({et})) abort();"
+            "if (__sum_n_{id} < 0 || __sum_n_{id} > SIZE_MAX / sizeof({et})) abort();"
         ));
         self.line(&format!("{et} *__sum_level_{id} = __sum_n_{id} ? ({et}*)malloc((size_t)__sum_n_{id} * sizeof({et})) : NULL;"));
         self.line(&format!("if (__sum_n_{id} && !__sum_level_{id}) abort();"));
@@ -5152,18 +5159,22 @@ impl CEmitter {
             dims: vec![],
             precision,
         });
+        let index_et = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
         let zero = Self::scalar_zero_literal(precision);
         self.line(&format!("while (__sum_n_{id} > 1) {{"));
         self.indent += 1;
         self.line(&format!(
-            "int64_t __next_n_{id} = __sum_n_{id} / 2 + __sum_n_{id} % 2;"
+            "{index_et} __next_n_{id} = __sum_n_{id} / 2 + __sum_n_{id} % 2;"
         ));
         self.line(&format!(
-            "for (int64_t __j_{id} = 0; __j_{id} < __next_n_{id}; __j_{id}++) {{"
+            "for ({index_et} __j_{id} = 0; __j_{id} < __next_n_{id}; __j_{id}++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t __left_{id} = 2 * __j_{id};"));
-        self.line(&format!("int64_t __right_{id} = __left_{id} + 1;"));
+        self.line(&format!("{index_et} __left_{id} = 2 * __j_{id};"));
+        self.line(&format!("{index_et} __right_{id} = __left_{id} + 1;"));
         let left = format!("__sum_level_{id}[__left_{id}]");
         let right = format!("__sum_level_{id}[__right_{id}]");
         let sum = if precision.is_integer() {
@@ -5174,7 +5185,7 @@ impl CEmitter {
             }
             .to_string();
             format!(
-                "({et})chelis_int_checked_add((int64_t){left}, (int64_t){right}, {bits}, {trap:?})"
+                "({et})chelis_int_checked_add(({index_et}){left}, ({index_et}){right}, {bits}, {trap:?})"
             )
         } else {
             format!("{left} + {right}")

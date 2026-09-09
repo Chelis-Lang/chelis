@@ -1553,19 +1553,7 @@
       "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum",
-      "sample": "int8_t"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
       "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
     },
     {
@@ -2218,14 +2206,6 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "((float*)t{id}_data)[0] = chelis_sum_f32((const float*)t{a}_data, t{a}_size);"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "sample": "for (int64_t __zi = 0; __zi < t{id}_size; __zi++) {{ (({acc_c_ty}*)t{id}_data)[__zi] = 0; }}"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
       "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
     },
     {
