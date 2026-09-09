@@ -301,12 +301,12 @@ fn native_context_eval_json_uses_the_same_execution_codec() {
     .unwrap();
     std::fs::write(
         root.join("reef.lock"),
-        "[package]\nname = \"json_control\"\nversion = \"0.1.0\"\n",
+        "dependencies = []\n\n[package]\nname = \"json_control\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
     std::fs::write(
         root.join("src/lib.ch"),
-        "module JsonControl.Lib\nexport (keep)\ndef keep(x: tensor[1, int64]) -> tensor[1, int64] = x\n",
+        "module JsonControl.Lib\nexport (keep, keep_float)\ndef keep(x: tensor[1, int64]) -> tensor[1, int64] = neg(neg(x))\ndef keep_float(x: tensor[1, f64]) -> tensor[1, f64] = neg(neg(x))\n",
     )
     .unwrap();
     Python::with_gil(|py| {
@@ -315,31 +315,39 @@ fn native_context_eval_json_uses_the_same_execution_codec() {
         kwargs
             .set_item("project_root", root.to_str().unwrap())
             .unwrap();
-        let bindings =
-            json!({"x":{"shape":[1],"data":{"dtype":"int64","values":[9007199254740993_i64]}}});
-        let source = "module JsonControl.Entry\nimport JsonControl.Lib (keep)\ny = keep((x : tensor[1, int64]))\nzero = -0.0f64\n";
-        let value = decode(
-            module
-                .getattr("eval_json")
-                .unwrap()
-                .call((source, bindings.to_string()), Some(&kwargs))
-                .unwrap(),
-        );
-        assert_eq!(
-            value["schema_version"],
-            json!(EXECUTION_VALUE_SCHEMA_VERSION)
-        );
-        let roots = value["roots"].as_array().unwrap();
-        let root = |name| &roots.iter().find(|root| root["name"] == name).unwrap()["value"];
-        assert_eq!(
-            root("y"),
-            &json!({"type":"tensor","value":{"shape":[1],"data":{"dtype":"int64","values":[9007199254740993_i64]}}})
-        );
-        assert_eq!(
-            root("zero"),
-            &json!({"type":"scalar","value":{"dtype":"f64","bits":"8000000000000000"}})
-        );
-        let _: EvalResult = serde_json::from_value(value).unwrap();
+        for (dtype, function, data) in [
+            (
+                "int64",
+                "keep",
+                json!({"dtype":"int64","values":[9007199254740993_i64]}),
+            ),
+            (
+                "f64",
+                "keep_float",
+                json!({"dtype":"f64","bits":["8000000000000000"]}),
+            ),
+        ] {
+            let tensor = json!({"shape":[1],"data":data});
+            let bindings = json!({"x":tensor.clone()});
+            let source = format!(
+                "module JsonControl.Entry\nimport JsonControl.Lib ({function})\nx = (x : tensor[1, {dtype}])\ny = {function}(x)\n"
+            );
+            let value = decode(
+                module
+                    .getattr("eval_json")
+                    .unwrap()
+                    .call((source, bindings.to_string()), Some(&kwargs))
+                    .unwrap(),
+            );
+            assert_eq!(
+                value["schema_version"],
+                json!(EXECUTION_VALUE_SCHEMA_VERSION)
+            );
+            let roots = value["roots"].as_array().unwrap();
+            let root = roots.iter().find(|root| root["name"] == "y").unwrap();
+            assert_eq!(root["value"], json!({"type":"tensor","value":tensor}));
+            let _: EvalResult = serde_json::from_value(value).unwrap();
+        }
         assert!(
             module
                 .getattr("eval_json")
