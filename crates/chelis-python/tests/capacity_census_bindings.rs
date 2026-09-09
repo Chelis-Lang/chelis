@@ -125,10 +125,6 @@ const FROZEN_BINDING_ROWS: &[FrozenSurfaceRow] = &[
 
 // Only these unchanged foundation rows retain the temporary admission path.
 const ACTIVE_LEGACY_IDS: &[&str] = &[
-    "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String>",
-    "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<String>",
-    "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<String>",
-    "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str, project_root: Option<&str>) -> PyResult<String>",
     "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
     "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
     "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
@@ -139,10 +135,6 @@ const ACTIVE_LEGACY_IDS: &[&str] = &[
 // Public-name equality cannot admit a renamed Rust implementation or a new
 // getter/setter/constructor kind into the frozen cohort.
 const ACTIVE_LEGACY_IMPLEMENTATIONS: &[&str] = &[
-    "chelis_python::check_json#function",
-    "chelis_python::compile_json#function",
-    "chelis_python::desugar_json#function",
-    "chelis_python::eval_json#function",
     "chelis_python::NativeCompiledModel::__call__#method",
     "chelis_python::NativeTensor::__dlpack__#method",
     "chelis_python::NativeTensor::__dlpack_device__#method",
@@ -782,19 +774,24 @@ fn retired_binding_rows_cannot_regain_legacy_admission() {
         .into_iter()
         .filter(|row| !active_legacy_rows().contains(row))
         .collect();
-    assert_eq!(retired.len(), 9);
+    assert_eq!(retired.len(), 13);
     for mut row in retired {
         row.flags = vec!["float-carrier".into()];
         assert!(current_authority_problem(&[row], None).is_some());
     }
     let mut baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
-    let row = baseline["rows"]
+    let transport_rows = baseline["rows"]
         .as_array_mut()
         .unwrap()
         .iter_mut()
-        .find(|row| row.get("authority").is_some())
-        .unwrap();
-    row["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+        .filter(|row| {
+            row.get("authority").and_then(|value| value.as_str()) == Some("TaggedTransport")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(transport_rows.len(), 4);
+    for row in transport_rows {
+        row["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+    }
     assert!(baseline_problem(&serde_json::to_vec(&baseline).unwrap()).is_some());
 }
 
@@ -816,7 +813,10 @@ fn copied_missing_and_duplicate_binding_registrations_fail() {
             "numeric" => {
                 let row = rows
                     .iter_mut()
-                    .find(|row| row.get("authority").is_some())
+                    .find(|row| {
+                        row.get("authority").and_then(|value| value.as_str())
+                            == Some("nonnumeric")
+                    })
                     .unwrap();
                 row["flags"] = serde_json::json!(["numeric-return"]);
             }
