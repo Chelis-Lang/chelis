@@ -60,6 +60,8 @@ class ContractTests(unittest.TestCase):
             "capacity_census_stdlib_tests::forward_and_recursive_aliases_reach_a_finite_numeric_fixed_point",
             "capacity_census_stdlib_tests::generic_summaries_substitute_used_parameter_positions",
             "capacity_census_stdlib_tests::alias_body_changes_capacity_without_rewriting_the_authored_identity",
+            "capacity_census_stdlib_tests::symbolic_tensor_precision_requires_an_adt_operation_row",
+            "capacity_census_stdlib_tests::imported_symbolic_precision_reaches_adt_rows_without_tainting_boolean_instances",
         } <= stdlib)
 
     def test_composite_keeps_capacity_missing_until_the_final_binding_gate_exists(self):

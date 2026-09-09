@@ -86,6 +86,8 @@ GROUPS = (
             "capacity_census_stdlib_tests::generic_summaries_substitute_used_parameter_positions",
             "capacity_census_stdlib_tests::alias_body_changes_capacity_without_rewriting_the_authored_identity",
             "capacity_census_stdlib_tests::stdlib_closure_preserves_all_final_registered_source_identities",
+            "capacity_census_stdlib_tests::symbolic_tensor_precision_requires_an_adt_operation_row",
+            "capacity_census_stdlib_tests::imported_symbolic_precision_reaches_adt_rows_without_tainting_boolean_instances",
         ),
         (
             "final_stdlib_registrations_are_exact_and_bijective_with_normative_registries",
@@ -93,6 +95,7 @@ GROUPS = (
             "capacity_census_stdlib_tests::forward_and_recursive_aliases_reach_a_finite_numeric_fixed_point",
             "capacity_census_stdlib_tests::generic_summaries_substitute_used_parameter_positions",
             "capacity_census_stdlib_tests::stdlib_closure_preserves_all_final_registered_source_identities",
+            "capacity_census_stdlib_tests::imported_symbolic_precision_reaches_adt_rows_without_tainting_boolean_instances",
         ),
         (
             "an_exported_stdlib_def_without_a_signature_fails_loudly",
@@ -102,6 +105,7 @@ GROUPS = (
         (
             "a_new_stdlib_numeric_def_requires_semantic_registration",
             "capacity_census_stdlib_tests::alias_body_changes_capacity_without_rewriting_the_authored_identity",
+            "capacity_census_stdlib_tests::symbolic_tensor_precision_requires_an_adt_operation_row",
         ),
     ),
     Group(
