@@ -5,7 +5,7 @@ mod style_gate;
 
 use chelis_compiler_api::compiler::BuildTarget;
 use chelis_compiler_api::schema::{
-    Diagnostic, EvalRequest, SourceKind, WireInferredAdtArg, WireInferredDim,
+    CheckResult, Diagnostic, EvalRequest, SourceKind, WireInferredAdtArg, WireInferredDim,
     WireInferredDimensionArg, WireInferredEffect, WireInferredPrecision, WireInferredType,
 };
 use chelis_deep::DeepTag;
@@ -2169,11 +2169,12 @@ const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 /// `errors[]` array carries a single `Other`-kind entry with the
 /// supplied message; the rest of the report shape mirrors a zero-
 /// node program with score 0.
-fn synthetic_check_report_with_error(message: &str) -> String {
-    // chelis#886: the early-failure path builds its error object from the
-    // same typed producer as the checker's, rather than a fourth `format!`
-    // template. Byte-preserving: an `Other` diagnostic with no location
-    // serializes to exactly the object this used to spell by hand.
+fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // chelis#886 [04-FIT-12]: the early-failure path is not a second
+    // producer. It builds the same `CheckResult` the checker's path builds
+    // and renders it through the same serializer, so a failure that
+    // short-circuits the pipeline is transported by the report's type
+    // rather than by a template that happens to agree with it.
     let error = chelis_types::errors::CheckError {
         kind: chelis_types::errors::CheckErrorKind::Other,
         message: message.to_string(),
@@ -2184,27 +2185,26 @@ fn synthetic_check_report_with_error(message: &str) -> String {
         span_id: None,
         suggestions: Vec::new(),
     };
-    let error_json = serde_json::to_string(&Diagnostic::from_check_error(&error))
-        .unwrap_or_else(|_| "{\"kind\":\"Other\",\"message\":\"\",\"severity\":0.5}".to_string());
-    format!(
-        concat!(
-            "{{\n",
-            "  \"score\": 0,\n",
-            "  \"components\": {{\n",
-            "    \"parse\": 0,\n",
-            "    \"structure\": 0,\n",
-            "    \"names\": 0,\n",
-            "    \"types\": 0\n",
-            "  }},\n",
-            "  \"typed_nodes\": 0,\n",
-            "  \"untyped_nodes\": 0,\n",
-            "  \"total_nodes\": 0,\n",
-            "  \"unresolved_names\": [],\n",
-            "  \"errors\": [{}]\n",
-            "}}"
-        ),
-        error_json,
-    )
+    let result = CheckResult {
+        score: 0.0,
+        components: chelis_compiler_api::schema::FitnessComponents {
+            parse: 0.0,
+            structure: 0.0,
+            names: 0.0,
+            types: 0.0,
+        },
+        typed_nodes: 0,
+        untyped_nodes: 0,
+        total_nodes: 0,
+        unresolved_names: Vec::new(),
+        inferred_signatures: None,
+        errors: vec![Diagnostic::from_check_error(&error)],
+    };
+    // Propagated rather than absorbed into a fallback string. A fallback
+    // would be a second producer of the document -- the exact thing
+    // [04-FIT-11] forbids -- reintroduced to handle a failure this report's
+    // owned `String`s, `f64`s and `Value`s cannot have.
+    Ok(result.to_report_json()?)
 }
 
 /// Exit-code contract (issue #207, supersedes RT-205 F7):
@@ -2392,7 +2392,7 @@ fn cmd_check_one_on_grown_stack(
                 let json = synthetic_check_report_with_error(&format!(
                     "failed to read {}",
                     file.display()
-                ));
+                ))?;
                 return Ok((json, true));
             }
         };
@@ -2406,7 +2406,7 @@ fn cmd_check_one_on_grown_stack(
     let prepared = match chelis_reef::prepare_program_for_file(file) {
         Ok(prepared) => prepared,
         Err(message) => {
-            let json = synthetic_check_report_with_error(&message);
+            let json = synthetic_check_report_with_error(&message)?;
             return Ok((json, true));
         }
     };
@@ -2419,7 +2419,7 @@ fn cmd_check_one_on_grown_stack(
     if let Some(prepared_ref) = &prepared
         && prepared_ref.entry_decls.is_empty()
     {
-        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
         return Ok((json, true));
     }
 
@@ -2456,18 +2456,14 @@ fn cmd_check_one_on_grown_stack(
         None
     };
 
-    let (report, effect_errors, linearity_errors, inferred_signatures_json) =
+    let (report, effect_errors, linearity_errors, inferred_signatures) =
         if let Some(layered) = layered {
             match layered {
                 chelis_compiler_api::LayeredCheck::Clean {
                     fitness,
                     typed_program,
                 } => {
-                    let inferred = if show_inferred {
-                        format_inferred_signatures_json(&typed_program)
-                    } else {
-                        String::new()
-                    };
+                    let inferred = show_inferred.then(|| inferred_signatures_value(&typed_program));
                     (fitness, Vec::new(), Vec::new(), inferred)
                 }
                 chelis_compiler_api::LayeredCheck::EffectRejected {
@@ -2475,11 +2471,7 @@ fn cmd_check_one_on_grown_stack(
                     effect_errors,
                     typed_program,
                 } => {
-                    let inferred = if show_inferred {
-                        format_inferred_signatures_json(&typed_program)
-                    } else {
-                        String::new()
-                    };
+                    let inferred = show_inferred.then(|| inferred_signatures_value(&typed_program));
                     (fitness, effect_errors, Vec::new(), inferred)
                 }
                 chelis_compiler_api::LayeredCheck::LinearityRejected {
@@ -2487,11 +2479,7 @@ fn cmd_check_one_on_grown_stack(
                     linearity_errors,
                     typed_program,
                 } => {
-                    let inferred = if show_inferred {
-                        format_inferred_signatures_json(&typed_program)
-                    } else {
-                        String::new()
-                    };
+                    let inferred = show_inferred.then(|| inferred_signatures_value(&typed_program));
                     (fitness, Vec::new(), linearity_errors, inferred)
                 }
             }
@@ -2511,7 +2499,7 @@ fn cmd_check_one_on_grown_stack(
                     match chelis_surf::parser::parse_str(&source) {
                         Ok(decls) => decls,
                         Err(err) => {
-                            let json = synthetic_check_report_with_error(&err.to_string());
+                            let json = synthetic_check_report_with_error(&err.to_string())?;
                             return Ok((json, true));
                         }
                     }
@@ -2523,7 +2511,7 @@ fn cmd_check_one_on_grown_stack(
             // `chelis check` and `chelis build` now reject it with the
             // same canonical message so the two surfaces agree.
             if decls.is_empty() {
-                let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+                let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
                 return Ok((json, true));
             }
             let prepared = chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None)
@@ -2534,8 +2522,7 @@ fn cmd_check_one_on_grown_stack(
         report,
         &effect_errors,
         &linearity_errors,
-        &inferred_signatures_json,
-        show_inferred,
+        inferred_signatures,
     )
 }
 
@@ -2546,30 +2533,25 @@ fn check_prepared_for_cli(
     chelis_types::FitnessReport,
     Vec<chelis_effects::EffectError>,
     Vec<chelis_types::errors::CheckError>,
-    String,
+    Option<serde_json::Value>,
 ) {
     let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+            // A rejected program has no inferred signatures to report, but
+            // the caller asked for the member, so it is present and empty --
+            // distinct from absent, which means "not requested".
             return (
                 fitness,
                 Vec::new(),
                 Vec::new(),
-                if show_inferred {
-                    "[]".to_string()
-                } else {
-                    String::new()
-                },
+                show_inferred.then(|| serde_json::Value::Array(Vec::new())),
             );
         }
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
     };
 
     let fitness = analysis.fitness().clone();
-    let inferred = if show_inferred {
-        format_inferred_signatures_json(analysis.program())
-    } else {
-        String::new()
-    };
+    let inferred = show_inferred.then(|| inferred_signatures_value(analysis.program()));
     match chelis_compiler_api::pipeline::complete_checks(
         analysis,
         chelis_compiler_api::pipeline::SemanticContext::Isolated,
@@ -2601,8 +2583,7 @@ fn assemble_check_json(
     mut report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
-    inferred_signatures_json: &str,
-    show_inferred: bool,
+    inferred_signatures: Option<serde_json::Value>,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
@@ -2621,58 +2602,47 @@ fn assemble_check_json(
     // kind from a Rust identifier; projecting onto the schema type keeps the
     // census rooted where it is and takes the spelling from the sealed
     // `DiagnosticKind` vocabulary.
-    let mut errors_json: Vec<String> = Vec::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
     for error in &report.errors {
-        errors_json.push(serde_json::to_string(&Diagnostic::from_check_error(error))?);
+        errors.push(Diagnostic::from_check_error(error));
     }
     for error in effect_errors {
         // `EffectError` carries no severity of its own; 0.8 was a constant
         // in the template this replaces.
-        errors_json.push(serde_json::to_string(&Diagnostic::from_effect_error(
-            error, 0.8,
-        ))?);
+        errors.push(Diagnostic::from_effect_error(error, 0.8));
     }
     for error in linearity_errors {
-        errors_json.push(serde_json::to_string(&Diagnostic::from_check_error(error))?);
+        errors.push(Diagnostic::from_check_error(error));
     }
 
-    let json = format!(
-        concat!(
-            "{{\n",
-            "  \"score\": {},\n",
-            "  \"components\": {{\n",
-            "    \"parse\": {},\n",
-            "    \"structure\": {},\n",
-            "    \"names\": {},\n",
-            "    \"types\": {}\n",
-            "  }},\n",
-            "  \"typed_nodes\": {},\n",
-            "  \"untyped_nodes\": {},\n",
-            "  \"total_nodes\": {},\n",
-            "  \"unresolved_names\": {}{}\n",
-            "  \"errors\": [{}]\n",
-            "}}"
-        ),
-        report.score,
-        report.components.parse,
-        report.components.structure,
-        report.components.names,
-        report.components.types,
-        report.typed_nodes,
-        report.untyped_nodes,
-        report.total_nodes,
-        serde_json::to_string(&report.unresolved_names)?,
-        if show_inferred {
-            format!(",\n  \"inferred_signatures\": {inferred_signatures_json},")
-        } else {
-            ",".to_string()
+    // chelis#886 [04-FIT-11]: one typed value, serialized once. The
+    // document used to be a `format!` template that spelled every key by
+    // hand, so `CheckResult` described a shape nothing produced. Adding a
+    // report field now changes this struct and the wire together, and
+    // cannot change one without the other.
+    let result = CheckResult {
+        score: report.score,
+        components: chelis_compiler_api::schema::FitnessComponents {
+            parse: report.components.parse,
+            structure: report.components.structure,
+            names: report.components.names,
+            types: report.components.types,
         },
-        errors_json.join(","),
-    );
+        typed_nodes: report.typed_nodes,
+        untyped_nodes: report.untyped_nodes,
+        total_nodes: report.total_nodes,
+        unresolved_names: report.unresolved_names.clone(),
+        // [04-FIT-13]: a member of the report's type, absent by omission
+        // when the caller did not ask for it. It used to be a JSON string
+        // spliced between two literal keys of the template.
+        inferred_signatures,
+        errors,
+    };
     // Issue #207: surface the non-empty-errors flag so the caller can
     // map it to the process exit code. The fitness JSON shape is
     // unchanged; this is purely an out-of-band signal.
-    let errors_in_report = !errors_json.is_empty();
+    let errors_in_report = !result.errors.is_empty();
+    let json = result.to_report_json()?;
     Ok((json, errors_in_report))
 }
 
@@ -2702,7 +2672,7 @@ fn cmd_check_one_deep(
     let deep_exprs = match chelis_deep::parse_and_stamp_file(&deep_source) {
         Ok(deep_exprs) => deep_exprs,
         Err(err) => {
-            let json = synthetic_check_report_with_error(&err.to_string());
+            let json = synthetic_check_report_with_error(&err.to_string())?;
             return Ok((json, true));
         }
     };
@@ -2710,19 +2680,13 @@ fn cmd_check_one_deep(
     // zero top-level exprs): reject with the same canonical message so
     // the `.dp` and `.ch` surfaces agree.
     if deep_exprs.is_empty() {
-        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
         return Ok((json, true));
     }
     let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs, None);
     let (report, effect_errors, linearity_errors, inferred) =
         check_prepared_for_cli(prepared, show_inferred);
-    assemble_check_json(
-        report,
-        &effect_errors,
-        &linearity_errors,
-        &inferred,
-        show_inferred,
-    )
+    assemble_check_json(report, &effect_errors, &linearity_errors, inferred)
 }
 
 fn advisory_lint_scope(file: &Path) -> &Path {
@@ -2798,7 +2762,12 @@ mod advisory_lint_scope_tests {
     }
 }
 
-fn format_inferred_signatures_json(checked: &chelis_types::CheckedProgram) -> String {
+/// The structured inferred-signature rows, as a JSON value.
+///
+/// chelis#886 [04-FIT-13]: these used to be rendered to a string here and
+/// spliced into the document template. They are now a value carried in
+/// `CheckResult`, so the report's type covers them like every other member.
+fn inferred_signatures_value(checked: &chelis_types::CheckedProgram) -> serde_json::Value {
     // Per-def inferred effect rows, keyed by def name. Computed from the
     // same `CheckedProgram` so the structured effect-row a consumer
     // (Hull) reads is the exact row `chelis check` infers. Functions
@@ -2848,7 +2817,7 @@ fn format_inferred_signatures_json(checked: &chelis_types::CheckedProgram) -> St
             })
         })
         .collect();
-    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+    serde_json::Value::Array(entries)
 }
 
 /// Convert a checker [`Type`] into the lossless, serde-friendly

@@ -1107,6 +1107,19 @@ pub struct CheckResult {
     pub untyped_nodes: usize,
     pub total_nodes: usize,
     pub unresolved_names: Vec<String>,
+    /// The inferred-signature tree, present only when the caller asked for
+    /// it (chelis#886, [04-FIT-13]).
+    ///
+    /// A member of the report's type rather than a JSON fragment spliced
+    /// into a `format!` template. It is deliberately `serde_json::Value`
+    /// and not a struct-per-row: the CLI already builds these rows with
+    /// `serde_json::json!`, so there is no parallel Rust type here for the
+    /// document to drift against, and an opaque value adds no numeric field
+    /// to the wire census that [`Diagnostic`] roots. Typing the row shape
+    /// itself is real work, but it is a different defect from the one this
+    /// field closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_signatures: Option<serde_json::Value>,
     pub errors: Vec<Diagnostic>,
 }
 
@@ -1119,6 +1132,8 @@ pub struct WireCheckResult {
     pub untyped_nodes: usize,
     pub total_nodes: usize,
     pub unresolved_names: Vec<String>,
+    #[serde(default)]
+    pub inferred_signatures: Option<serde_json::Value>,
     pub errors: Vec<WireDiagnostic>,
 }
 

@@ -8,6 +8,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`chelis check`'s report document has one producer (chelis#886).** The
+  outer document was assembled by two `format!` templates -- one for the
+  checker's report, one for failures that short-circuit before it -- while
+  `chelis_compiler_api::schema::CheckResult` described the same shape and
+  produced nothing. Both templates are gone: every `chelis check` document,
+  including the early-failure ones, is now `CheckResult` serialized through
+  `CheckResult::to_report_json`, satisfying [04-FIT-11] and [04-FIT-12].
+  `inferred_signatures` becomes a member of that type rather than a JSON
+  string spliced between two literal keys ([04-FIT-13]). **The emitted bytes
+  are unchanged**, verified across 3034 `chelis check` invocations over the
+  `examples/` and hull conformance corpora: the report keeps its bespoke
+  layout -- two-space indent, single-line arrays, and `format!`'s spelling of
+  an integral double as `1` rather than `1.0` -- so this is not a wire change
+  and needs no pin bump.
+
 - **ReLU now retains its dedicated [05-OP-43] identity and adjoint
   (chelis#1313).** Reverse-mode AD returns the complete incoming cotangent
   only where `0 < x`, and exact positive zero at both signed zeros and NaN;

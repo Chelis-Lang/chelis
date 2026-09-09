@@ -844,6 +844,9 @@ pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
         untyped_nodes: report.untyped_nodes,
         total_nodes: report.total_nodes,
         unresolved_names: report.unresolved_names,
+        // The embedding API has no `--show-inferred` counterpart, so the
+        // member is absent rather than empty (chelis#886 [04-FIT-13]).
+        inferred_signatures: None,
         errors: report.errors.iter().map(check_error_diagnostic).collect(),
     })
 }
@@ -2459,6 +2462,7 @@ pub fn check_in_context(
         untyped_nodes: 0,
         total_nodes,
         unresolved_names: vec![],
+        inferred_signatures: None,
         errors: vec![],
     })
 }
