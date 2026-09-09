@@ -417,6 +417,11 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // the harness fails loud rather than silently shrinking.
 
 #[test]
+fn parity_checked_reshape() {
+    drive_parity(&examples_root().join("checked_reshape.ch"), true);
+}
+
+#[test]
 fn parity_dict_foundation() {
     drive_parity(&examples_root().join("dict_foundation.ch"), true);
 }
@@ -558,6 +563,7 @@ fn parity_rank_poly_borrow_library_only() {
 #[test]
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
+        "checked_reshape.ch",
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
         "dict_foundation.ch",

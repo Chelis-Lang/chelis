@@ -107,7 +107,7 @@ fn assert_reuse_proven(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_
     );
     assert!(
         c.contains(&format!(
-            "chelis_tensor_repurpose(t{fused_id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){{ chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)(4)) }});"
+            "chelis_tensor_repurpose(t{fused_id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){{ chelis_scalar_from_bits(CHELIS_DTYPE_I64, 4) }});"
         )),
         "proven reuse must reset exact descriptor metadata; got:\n{c}"
     );

@@ -365,7 +365,7 @@ fn fused_in_place_compile_run_reuses_program_owned_storage() {
     assert!(
         result
             .c_source
-            .contains("chelis_tensor_repurpose(t3, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){ chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)(4)) });"),
+            .contains("chelis_tensor_repurpose(t3, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(1)), (chelis_scalar[]){ chelis_scalar_from_bits(CHELIS_DTYPE_I64, 4) });"),
         "the transferred descriptor must receive exact output metadata"
     );
     let stdout = compile_and_run(

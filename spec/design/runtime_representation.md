@@ -484,6 +484,44 @@ The host contract suites run in both profiles through the existing Phase 0
 command and hosted job. Their addition is supporting evidence for this host
 slice, not the final Phase 1 completion oracle.
 
+#### Generated C snapshot and reshape delivery (#889)
+
+Generated DAG snapshots consume `chelis_tensor_stride` and
+`chelis_tensor_byte_count`, projections of the host's private checked metadata.
+The byte count describes the logical copy range, not spare storage capacity.
+The host stride adapter delegates to the same observation. Neither emitter
+reconstructs those values from raw shape and dtype observations.
+
+DAG reshape calls `chelis_tensor_check_reshape` before destination allocation or
+repurpose, transporting the same target shape as that submission through exact
+tagged int64 rank and extent scalars, like the existing repurpose boundary.
+Host reshape delegates
+to `chelis_tensor_reshape`, whose runtime owner validates a flat exact int64 list,
+constructs checked target metadata, checks equal counts, and copies through
+`AllocationBytes` into an independent result. Empty copies submit no null-pointer
+memory operation. All four declarations have exact [05-OP-33] registrations.
+This is a separable adoption of existing checked metadata; it creates no new
+descriptor or Python interface.
+
+The slice's acceptance surface combines `checked_c_metadata` in debug and release,
+optimized generated host/DAG reshape execution with undefined-behavior
+sanitization, and bounded emitter delegation controls. Positive cases include all
+nine representations, exact stored bits, scalar and zero-extent shapes, int64
+metadata above int32, and metadata observation during a write guard. Negative
+cases cover malformed carriers, invalid axes, unequal counts, overflow of count,
+stride or byte size, and data access during a write guard. A mutation that restores
+raw snapshot arithmetic must fail the bounded delegation control. The Phase 0
+coverage freeze is explicitly extended with these supporting tests and mutation;
+its 358-row immutable foundation inventory is unchanged. The two retired
+emitter spelling owners leave active debt (343 to 341).
+
+This does not finish generated C adoption: coordinate indexing, sparse/BLAS loop
+domains, Count/window scratch allocation, and the complete Phase 1 execution
+receipt/mutation oracle remain outstanding. Host-only results do not establish
+device execution or close #889/#893. Generated host/device descriptors and
+validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
+interfaces and owns their exact discovery and authority registrations.
+
 ## C3. One generated host/device descriptor schema
 
 A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
