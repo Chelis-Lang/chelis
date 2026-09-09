@@ -201,8 +201,19 @@ def adapter_payload(graph, adapter):
     fields = body.get("kind", {}).get("plain", {})
     ids = fields.get("fields", [])
     _require(not fields.get("has_stripped_fields") and len(ids) == 1, "compiler JSON adapter changed fields")
+    module_location = graph.locations.get(MODULE.removesuffix("::"))
+    _require(module_location is not None and module_location[0] == location[0],
+             "missing defining compiler JSON module")
+    module = graph._item(*module_location)
+    module_body = module.get("inner", {}).get("module", {})
+    _require(not module_body.get("is_stripped") and item["id"] in module_body.get("items", []),
+             "compiler JSON adapter is outside its defining module")
+    # Rustdoc records a private field as restricted to its defining module.
+    # Join the compiler's parent item to that module; a path spelling alone
+    # cannot prove privacy, and crate/public visibility permits construction.
+    private = {"restricted": {"parent": module["id"], "path": "::compiler_json"}}
     field = graph._item(location[0], ids[0])
-    _require(field.get("name") == "value" and field.get("visibility") == "default"
+    _require(field.get("name") == "value" and field.get("visibility") == private
              and set(field.get("inner", {})) == {"struct_field"}, "compiler JSON must retain one private typed value")
     _require(item.get("span", {}).get("filename") == SOURCE, "compiler JSON adapter moved from its compiled owner")
     ty = field["inner"]["struct_field"]

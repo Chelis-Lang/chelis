@@ -44,6 +44,8 @@ def conversion_fixture():
 
 def graph_fixture():
     a, api = Artifact("chelis_python"), Artifact("chelis_compiler_api")
+    a.add(2, "compiler_json", {"module": {"items": list(range(20, 25)), "is_stripped": False}},
+          path=["chelis_python", "compiler_json"], visibility="crate")
     a.external(10, "pyo3::err::PyResult")
     a.external(11, "alloc::collections::btree::map::BTreeMap")
     a.external(12, "alloc::string::String")
@@ -55,7 +57,7 @@ def graph_fixture():
         if adapter == "EvalBindingsJson":
             payload = reference(11, reference(12), payload)
         field = a.field("value", payload)
-        a.doc["index"][str(field)]["visibility"] = "default"
+        a.doc["index"][str(field)]["visibility"] = {"restricted": {"parent": 2, "path": "::compiler_json"}}
         a.struct(index, adapter, [field], public=False)
         a.doc["paths"][str(index)]["path"] = (MODULE + adapter).split("::")
         a.doc["index"][str(index)]["span"] = {"filename": SOURCE}
@@ -154,13 +156,17 @@ class CompilerJsonAuthority(unittest.TestCase):
         for index, (adapter, _) in enumerate(list(OUTPUTS.values()) + [("EvalBindingsJson", "TensorValue")], 20):
             a, api = graph_fixture()
             self.assertTrue(adapter_payload(RustdocGraph([a.doc, api.doc]), MODULE + adapter).numeric_leaves)
-            for mutation in ("field", "public", "extra", "moved", "generic"):
+            for mutation in ("field", "public", "crate", "wrong_parent", "wrong_path", "unowned", "extra", "moved", "generic"):
                 changed = copy.deepcopy(a.doc)
                 item = changed["index"][str(index)]
                 body = item["inner"]["struct"]
                 field = changed["index"][str(body["kind"]["plain"]["fields"][0])]
                 if mutation == "field": field["inner"]["struct_field"] = reference(12)
                 elif mutation == "public": field["visibility"] = "public"
+                elif mutation == "crate": field["visibility"] = "crate"
+                elif mutation == "wrong_parent": field["visibility"]["restricted"]["parent"] = 0
+                elif mutation == "wrong_path": field["visibility"]["restricted"]["path"] = "::another_module"
+                elif mutation == "unowned": changed["index"]["2"]["inner"]["module"]["items"].remove(index)
                 elif mutation == "extra": body["kind"]["plain"]["fields"].append(body["kind"]["plain"]["fields"][0])
                 elif mutation == "moved": item["span"]["filename"] = "elsewhere.rs"
                 else: body["generics"]["params"] = [{"name": "T", "kind": {"type": {"bounds": [], "default": None, "is_synthetic": False}}}]
