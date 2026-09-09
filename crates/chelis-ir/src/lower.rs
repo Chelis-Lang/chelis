@@ -1314,22 +1314,6 @@ pub(crate) fn prepare_subexpr_lowering_context(
     }
 }
 
-pub(crate) fn try_lower_subexpr_program_with_context(
-    expr: &Expr,
-    scoped_tensor_types: UnordMap<String, TensorType>,
-    context: &SubexprLoweringContext,
-) -> Result<Dag, LowerDiagnostic> {
-    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    try_lower_subexpr_program_with_context_and_random_state(
-        expr,
-        scoped_tensor_types,
-        context,
-        None,
-        0,
-    )
-    .map(|(dag, _)| dag)
-}
-
 pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
@@ -1337,8 +1321,14 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
 ) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     catch_lowering(|| {
-        let (dag, _, value_root_count, list_checks) =
-            lower_subexpr_program_inner_impl(expr, scoped_tensor_types, context, None, 0, true);
+        let (dag, _, value_root_count, list_checks) = lower_subexpr_program_inner_impl(
+            expr,
+            scoped_tensor_types.into_sorted(),
+            context,
+            None,
+            0,
+            true,
+        );
         LoweredSubexprWithControls {
             dag,
             value_root_count,
@@ -1354,38 +1344,44 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
     random_seed: Option<u64>,
     random_counter: u64,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
-    catch_lowering(|| {
-        lower_subexpr_program_inner(
-            expr,
-            scoped_tensor_types,
-            context,
-            random_seed,
-            random_counter,
-        )
-    })
-}
-
-fn lower_subexpr_program_inner(
-    expr: &Expr,
-    scoped_tensor_types: UnordMap<String, TensorType>,
-    context: &SubexprLoweringContext,
-    random_seed: Option<u64>,
-    random_counter: u64,
-) -> (Dag, u64) {
-    let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
+    // An expression without a declaring signature assigns its internal ABI
+    // deterministically. Signature-bearing helpers use the ordered boundary.
+    try_lower_subexpr_program_with_ordered_inputs(
         expr,
-        scoped_tensor_types,
+        scoped_tensor_types.into_sorted(),
         context,
         random_seed,
         random_counter,
-        false,
-    );
-    (dag, random_counter)
+    )
+}
+
+/// Lower a helper with the input order assigned by its declaring signature.
+/// Input labels still map host arguments to slots; section 4.7 also observes
+/// those slots when more than one interface claim fails.
+pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
+    expr: &Expr,
+    scoped_bindings: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<(Dag, u64), LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    catch_lowering(|| {
+        let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
+            expr,
+            scoped_bindings,
+            context,
+            random_seed,
+            random_counter,
+            false,
+        );
+        (dag, random_counter)
+    })
 }
 
 fn lower_subexpr_program_inner_impl(
     expr: &Expr,
-    scoped_tensor_types: UnordMap<String, TensorType>,
+    scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     random_seed: Option<u64>,
     random_counter: u64,
@@ -1398,20 +1394,9 @@ fn lower_subexpr_program_inner_impl(
     );
     ctx.random_seed = random_seed;
     ctx.random_counter = random_counter;
-    // Pre-create a `Load` for every scoped tensor param in a DETERMINISTIC
-    // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `UnordMap`,
-    // whose iteration order is randomized per process; using it directly made
-    // the pre-created `Load` node order — and therefore the tensor-helper
-    // kernel's input-slot order (`input_labels` follows `dag.nodes()`) —
-    // non-deterministic across builds. For an `expand` whose extent is
-    // read from a shape-source operand referenced ONLY via `shape(x, …)` (the
-    // §4.7.2 `bias_broadcast` example), both that operand and the data operand
-    // survive DCE, so their relative slot order flipped build-to-build and the
-    // emitted C was not byte-identical (violating the codegen-determinism
-    // invariant and chelis#469's positive oracle). Sorting by name makes the
-    // kernel ABI stable; the host caller maps arguments by `input_label`, so
-    // the slot order is internal and any stable order is correct.
-    let scoped_bindings = scoped_tensor_types.into_sorted();
+    // Pre-create every scoped input before body lowering. Declared helpers
+    // supply signature order; signatureless entries supply their assigned ABI
+    // order. DCE removes unused inputs without permuting the surviving loads.
     for (name, tensor_ty) in scoped_bindings {
         let load = ctx.dag.add_node(
             RiscOp::Load {

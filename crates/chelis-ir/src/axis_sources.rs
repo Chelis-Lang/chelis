@@ -920,10 +920,10 @@ fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
 ///
 /// Both lowering paths land on this one key. `lower_fn` registers parameter
 /// `Load`s in declared order, so first occurrence IS declared signature
-/// order there; the subexpression path pre-creates them in a deliberately
-/// name-sorted order and declares no signature, so the ABI branch governs and
-/// that order is the assigned one. It is also exactly what the C emitter's
-/// `input_labels` assigns, so a guard's order here and its slot there cannot
+/// order there. Helpers extracted from a declared function receive that same
+/// parameter order. Only signatureless subexpressions assign name-sorted
+/// slots, so the ABI branch governs those entries. This is also what the C
+/// emitter's `input_labels` assigns, so a guard's order here and its slot there cannot
 /// disagree.
 fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
     let name = match &dag.get(load)?.op {
@@ -1210,18 +1210,14 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
                 continue;
             }
             let claim = DimClaim::Name(name.clone());
-            let entry = OrderedMember {
-                slot: match source {
-                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
-                    _ => None,
-                },
-                node: node.id.0,
-                member: ClassMember {
+            let entry = OrderedMember::new(
+                dag,
+                ClassMember {
                     node: node.id,
                     axis,
                     source: source.clone(),
                 },
-            };
+            );
             match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
                 Some((_, members)) => members.push(entry),
                 None => grouped.push((claim, vec![entry])),
@@ -1260,22 +1256,54 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
 /// The sort key C2.4 rule 1 defines: interface members before local ones,
 /// interface members by assigned ABI input slot, every remaining tie by node
 /// position.
-type OrderKey = (bool, Option<usize>, usize);
+type OrderKey = (bool, Option<(usize, usize)>, usize);
 
 /// A member together with the key that orders it.
 ///
-/// `slot` is the declaring `Load`'s assigned ABI input slot for an interface
+/// `slot` is the declaring `Load`'s assigned ABI input slot and axis for an interface
 /// member and `None` for a local one, so sorting on `(slot.is_none(), slot,
 /// node)` puts every interface member ahead of every local one, orders the
 /// interface group by assigned slot, and breaks every remaining tie by node
 /// position. That is C2.4 rule 1 in one key.
 struct OrderedMember {
-    slot: Option<usize>,
+    slot: Option<(usize, usize)>,
     node: usize,
     member: ClassMember,
 }
 
 impl OrderedMember {
+    fn new(dag: &Dag, member: ClassMember) -> Self {
+        // A named class takes its canonical value from an axis declaring
+        // that name, not from a foreign value that merely claims equality.
+        let slot = match member.source {
+            AxisSource::ExternalAxis { load, axis } => {
+                abi_input_slot(dag, load).map(|slot| (slot, axis))
+            }
+            _ => None,
+        };
+        Self {
+            slot,
+            node: member.node.0,
+            member,
+        }
+    }
+
+    fn literal_guard_key(&self, dag: &Dag) -> OrderKey {
+        // A literal is its own canonical value. Its guard order therefore
+        // follows the input being checked, even when a later operation
+        // consumes a folded shape read or scalar parameter from that input.
+        let input_axis = member_load_axis(dag, &self.member).or_else(|| {
+            if let AxisSource::ScalarInput { input } = self.member.source {
+                load_through_casts(dag, self.member.node, input).map(|load| (load, 0))
+            } else {
+                None
+            }
+        });
+        let slot =
+            input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
+        (slot.is_none(), slot, self.node)
+    }
+
     fn key(&self) -> OrderKey {
         (self.slot.is_none(), self.slot, self.node)
     }
@@ -1298,18 +1326,14 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             if !is_member(&node.op, axis, &claim, source) {
                 continue;
             }
-            let entry = OrderedMember {
-                slot: match source {
-                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
-                    _ => None,
-                },
-                node: node.id.0,
-                member: ClassMember {
+            let entry = OrderedMember::new(
+                dag,
+                ClassMember {
                     node: node.id,
                     axis,
                     source: source.clone(),
                 },
-            };
+            );
             match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
                 Some((_, members)) => members.push(entry),
                 None => grouped.push((claim, vec![entry])),
@@ -1319,7 +1343,11 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
 
     let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
     for (claim, mut members) in split_by_scope(dag, grouped) {
-        members.sort_by_key(OrderedMember::key);
+        let order_key = |member: &OrderedMember| match claim {
+            DimClaim::Literal(_) => member.literal_guard_key(dag),
+            DimClaim::Name(_) => member.key(),
+        };
+        members.sort_by_key(order_key);
         // A `Name` class needs two witnesses: one has nothing to disagree
         // with. A `Literal` class needs one, because C2.4 makes the literal
         // the canonical VALUE rather than a first member, so a single
@@ -1331,7 +1359,7 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
         if members.len() < needed {
             continue;
         }
-        let order = members[0].key();
+        let order = order_key(&members[0]);
         classes.push((
             order,
             RuntimeDimClass {

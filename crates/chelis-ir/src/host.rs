@@ -1741,7 +1741,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
         .map(|(params, _)| params)
         .unwrap_or_default();
-    let mut scope = UnordMap::new();
+    let mut scope = Vec::new();
     for (index, param) in children(params_list).iter().enumerate() {
         let pname = param_name(param)?;
         let pty = declared_param_tys
@@ -1750,7 +1750,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
             .or_else(|| param_host_type(param).map(|ty| expand_host_type_aliases(program, ty)))
             .filter(|ty| !ty.is_unresolved())?;
         let tensor_ty = tensor_type_from_host_input(&pty)?;
-        scope.insert(pname, tensor_ty);
+        scope.push((pname, tensor_ty));
     }
 
     let body_expr = kids.get(1)?;
@@ -1760,8 +1760,10 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
     let context = crate::lower::prepare_subexpr_lowering_context(program.type_env(), defs.clone());
-    match crate::lower::try_lower_subexpr_program_with_context(body_expr, scope, &context) {
-        Ok(dag) => Some(dag),
+    match crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+        body_expr, scope, &context, None, 0,
+    ) {
+        Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
@@ -3107,6 +3109,7 @@ pub fn host_def_kernel(
         &signature.body_expr,
         program,
         &signature.scope,
+        Some(&signature.params),
         &expected,
         random,
     )?;
@@ -3701,6 +3704,7 @@ fn lower_def_body_kernel(
         &signature.body_expr,
         program,
         &signature.scope,
+        Some(&signature.params),
         &expected,
         None,
     ) {
@@ -3751,25 +3755,40 @@ fn lower_kernel_dag(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &UnordMap<String, HostTypeTerm>,
+    declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
     random: Option<RandomLoweringState>,
 ) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
     let context = cached_subexpr_lowering_context(program);
-    let scope_types = collect_tensor_scope(scope);
+    let scope_types = match declaring_params {
+        Some(params) => params
+            .iter()
+            .filter_map(|param| {
+                tensor_type_from_host_input(&param.ty).map(|ty| (param.name.clone(), ty))
+            })
+            .collect(),
+        None => collect_tensor_scope(scope).into_sorted(),
+    };
     let (dag, next_random_counter) = match random {
         None => (
-            crate::lower::try_lower_subexpr_program_with_context(expr, scope_types, &context)?,
+            crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+                expr,
+                scope_types,
+                &context,
+                None,
+                0,
+            )?
+            .0,
             None,
         ),
         Some(state) => {
-            let (dag, counter) =
-                crate::lower::try_lower_subexpr_program_with_context_and_random_state(
-                    expr,
-                    scope_types,
-                    &context,
-                    state.seed,
-                    state.counter,
-                )?;
+            let (dag, counter) = crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+                expr,
+                scope_types,
+                &context,
+                state.seed,
+                state.counter,
+            )?;
             (dag, Some(counter))
         }
     };
@@ -4087,7 +4106,7 @@ fn lower_tensor_helper_dag(
     // helper sub-lowering instead of swallowing it; the host
     // fallback would otherwise emit an undefined-symbol call to
     // the rejected grad function.
-    match lower_kernel_dag(expr, program, scope, expected, None) {
+    match lower_kernel_dag(expr, program, scope, None, expected, None) {
         Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)

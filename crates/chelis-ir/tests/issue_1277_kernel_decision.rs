@@ -105,3 +105,82 @@ fn a_host_only_builtin_inside_the_body_is_host_before_lowering() {
                z = [7i64]\n  m = len(z)\n  if (m > 0i64) then x else x\n}\n";
     assert_eq!(decision(src, "f"), Ok(false));
 }
+
+/// Section 4.7 orders interface checks by the declaring signature even when
+/// the implementation extracts a tensor helper. Shape-only inputs remain ABI
+/// witnesses; an unrelated dead input must not change their relative order.
+#[test]
+fn tensor_helper_retains_declaring_parameter_order() {
+    use chelis_ir::host::{RandomLoweringState, lower_named_tensor_entry_dag};
+    let program = checked_surf(
+        "def f(b: tensor[f32], unused: tensor[f32], z: tensor[rows, f32], a: tensor[cols, f32]) -> tensor[4, 3, f32] = insert(insert(b, 0i32, shape(a, 0i32)), 0i32, shape(z, 0i32))\n",
+    );
+    for random in [
+        None,
+        Some(RandomLoweringState {
+            seed: Some(7),
+            counter: 9,
+        }),
+    ] {
+        let kernel = host_def_kernel(&program, "f", random).unwrap().unwrap();
+        assert_eq!(
+            kernel
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "z", "a"]
+        );
+        assert_eq!(kernel.next_random_counter, random.map(|s| s.counter));
+        assert_load_order_after_rebuilding(&kernel.dag, &["b", "z", "a"]);
+    }
+    let dag = lower_named_tensor_entry_dag(&program, "f").unwrap();
+    assert_load_order_after_rebuilding(&dag, &["b", "z", "a"]);
+}
+
+fn assert_load_order_after_rebuilding(dag: &chelis_ir::Dag, expected: &[&str]) {
+    let mut dag = chelis_ir::optimize::dead_code_eliminate(dag);
+    chelis_ir::optimize::constant_fold(&mut dag);
+    let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let names = dag
+        .nodes()
+        .iter()
+        .filter_map(|node| match &node.op {
+            chelis_ir::RiscOp::Load { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, expected);
+}
+
+/// A signatureless subexpression has an assigned deterministic ABI order.
+/// Reversing insertion into its unordered scope must not reverse that ABI.
+#[test]
+fn signatureless_helper_retains_assigned_abi_order() {
+    use chelis_ir::dag::{DimInfo, TensorType};
+    use chelis_types::types::Prim;
+    use chelis_unord::UnordMap;
+    let expr = chelis_deep::parser::parse_str("(app {} (var {} add) (var {} z) (var {} a))")
+        .unwrap()
+        .remove(0);
+    for names in [["z", "a"], ["a", "z"]] {
+        let mut scope = UnordMap::new();
+        for name in names {
+            scope.insert(
+                name.to_owned(),
+                TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::F32,
+                },
+            );
+        }
+        let dag = chelis_ir::lower::try_lower_subexpr_program(
+            &expr,
+            scope,
+            UnordMap::new(),
+            UnordMap::new(),
+        )
+        .unwrap();
+        assert_load_order_after_rebuilding(&dag, &["a", "z"]);
+    }
+}

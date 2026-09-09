@@ -24,9 +24,9 @@
 //! the guard order follows the assigned slots, and never a separate traversal
 //! by binding name, hash iteration, or node identity." In the IR both branches
 //! collapse to one key: `lower_fn` registers parameter `Load`s in declared
-//! order, and the subexpression path pre-creates them in a deliberately
-//! name-sorted order for build determinism and declares no signature. The ABI
-//! input slot of the declaring `Load` is therefore the assigned slot in both
+//! order, and helpers extracted from declared functions retain that order.
+//! Only signatureless subexpressions assign name-sorted slots for determinism.
+//! The ABI input slot of the declaring `Load` is therefore the assigned slot in both
 //! cases.
 //!
 //! That is the sentence's own conclusion and not an inference from the two
@@ -1891,4 +1891,55 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         err.contains("extent `n`: claimed = 4,"),
         "and compares against the literal, not a binder: {err}"
     );
+}
+
+/// Folded shape reads remain interface witnesses. Their introducing operation
+/// order must not reverse the declaring parameters (or axes within one input).
+#[test]
+fn folded_interface_claims_follow_declaring_slots_and_axes() {
+    for same_input in [false, true] {
+        let mut dag = Dag::new();
+        let b = f32_load(&mut dag, "b", vec![]);
+        let z = f32_load(&mut dag, "z", vec![named("rows"), named("cols")]);
+        let a = if same_input {
+            z
+        } else {
+            f32_load(&mut dag, "a", vec![named("other")])
+        };
+        let inner = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(if same_input { 1 } else { 0 }),
+                },
+            },
+            vec![b, a],
+            ty(vec![DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        let outer = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![inner, z],
+            ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        dag.add_root(outer);
+        let classes = derive_runtime_dim_classes(&dag);
+        assert_eq!(
+            claims(&classes),
+            vec![DimClaim::Literal(4), DimClaim::Literal(3)]
+        );
+        assert!(
+            classes
+                .iter()
+                .all(|class| class.placement(&dag) == GuardPlacement::Entry)
+        );
+    }
 }
