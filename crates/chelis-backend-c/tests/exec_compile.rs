@@ -67,6 +67,15 @@ fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
     use chelis_ir::dag::RtDim;
     // Each expected map is explicit, independent of the production coordinate helpers.
     let cases = [
+        // A three-cycle distinguishes a permutation from its inverse.
+        (
+            vec![2, 2, 2],
+            vec![2, 2, 2],
+            RiscOp::Permute {
+                axes: vec![1, 2, 0],
+            },
+            vec![0, 4, 1, 5, 2, 6, 3, 7],
+        ),
         (
             vec![2, 3],
             vec![3, 2],
@@ -261,6 +270,32 @@ int main(void) {{
                         "missing or late validation reached allocation"
                     );
                 }
+            }
+            if prim == Prim::Int64 && input_shape == &[2, 2, 2] {
+                let mut inverse = generated.c_source.clone();
+                for (old, new) in [
+                    (
+                        "in_indices[1] = out_indices[0];",
+                        "in_indices[0] = out_indices[1];",
+                    ),
+                    (
+                        "in_indices[2] = out_indices[1];",
+                        "in_indices[1] = out_indices[2];",
+                    ),
+                    (
+                        "in_indices[0] = out_indices[2];",
+                        "in_indices[2] = out_indices[0];",
+                    ),
+                ] {
+                    assert!(inverse.contains(old));
+                    inverse = inverse.replace(old, new);
+                }
+                let run = checked_indexing_run(&inverse, &harness);
+                assert_eq!(
+                    run.status.code(),
+                    Some(4),
+                    "inverse permutation must corrupt the exact result"
+                );
             }
             if prim == Prim::Int64 && input_shape == &[2, 3] {
                 let anchor = "chelis_tensor_flat_index(t0, in_indices)";
