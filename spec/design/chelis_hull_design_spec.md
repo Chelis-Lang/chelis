@@ -886,6 +886,33 @@ type CheckResult =
 
 ---
 
+### Release-pinned scalar observation repair (Hull #18, 2026-09-09)
+
+Hull's existing scalar differential campaign runs on the released host pin and
+is not an implementation of the current exact execution codec in spec/10 §3.
+For that historical observation leg, `compiler_eval_scalar` admits only the
+pin's execution envelope version 2, exit zero, and exactly one root. A rank-zero
+tensor root is read from `value.shape = []` and
+`value.data = {dtype: "f32", values: [number]}`. Require that dtype, rank and
+one-element cardinality before reading the number; do not read the first element
+of an arbitrary tensor or treat missing data as a nonfinite result. The old
+array-shaped `data` form, wrong/missing dtype, non-scalar shape, absent/extra
+elements and nonnumeric elements are not scalar observations. Existing scalar
+root cases retain their separate interpretation and tolerance policy.
+
+This is a bounded Hull decoder repair, not a second compiler wire format or a
+legacy fallback in the compiler's normative version-3 codec. Missing and other
+envelope versions fail the pinned leg; future exact-bit, full-tensor and
+nonfinite-class comparisons need their own checked observation boundary.
+An undecodable result still occupies a failing existing campaign bucket, never
+disappears from its denominator. No compiler behavior, CLI, ABI or pin changes.
+
+Acceptance requires synthetic envelope/dtype/rank/cardinality negative parity
+and a native end-to-end reproduction of the rank-zero f32 conditional cast that
+returns 8, plus a different scalar tensor value. The full standing 10,000-check/
+1,000-eval campaign remains owed after this repair and the separate positional
+sum repair; it does not certify the current normative exact codec.
+
 ### Opt-in compiler trace for the canonical LaCaDiLE revision
 
 The `chelis-ir/lowering-trace` Cargo feature enables an additive, in-memory
