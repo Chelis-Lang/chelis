@@ -1,0 +1,131 @@
+name: OpenSpec autoland controller
+
+# Turn an ordinary branch push into an internal OpenSpec pull request.
+#
+# WHY `workflow_run`
+#
+# A `push` event runs the workflow file from the pushed branch, which the
+# pusher wrote. A privileged push workflow could therefore be rewritten by
+# the very change it is judging. `workflow_run` runs the DEFAULT BRANCH's
+# copy of this file instead, which is the trust boundary. The push-side
+# `openspec-autoland-signal.yml` exists only to make this event fire; it
+# holds no permissions and this workflow reads nothing it produced --
+# not its outputs, not its artifacts, not its conclusion.
+#
+# Everything acted on is re-derived from the API by
+# `scripts/openspec_controller.py`, running from this checkout of the
+# default branch: the event type (must be `push`), the head repository
+# (must be this one), the branch (must not be the default), the commit, and
+# whether the branch still points at it. The boundary verdict is computed by
+# `scripts/openspec_acceptance.py` over `git diff --raw` metadata, never by
+# executing anything from the pushed branch.
+#
+# NO PULL-REQUEST CONTENT IS CHECKED OUT OR RUN. The only checkout is of
+# the default branch; the pushed commit enters as fetched Git objects.
+#
+# WHY THE PULL REQUEST IS NOT OPENED WITH `GITHUB_TOKEN`
+#
+# A pull request opened with `GITHUB_TOKEN` raises no `pull_request` event,
+# so the workflows that publish this repository's required status checks do
+# not start. `conformance.yml` runs only on `push: [main]` and
+# `pull_request`, and `changelog.yml` has only `pull_request`, so at least
+# two required contexts could never appear and the pull request could never
+# go green.
+#
+# So the create call -- and only the create call -- uses the
+# `OPENSPEC_SUBMISSION_TOKEN` repository secret. Every read below keeps the
+# ordinary `GITHUB_TOKEN`, whose `permissions:` block deliberately grants
+# `pull-requests: read` and not `write`: the default token is not able to
+# open a pull request even by mistake.
+#
+# There is NO fallback. If the secret is absent the controller reports the
+# push blocked, with the setup recipe, and writes nothing. A fallback would
+# open a pull request that can never merge and hide the misconfiguration.
+#
+# The secret reaches this workflow only, which runs from the default
+# branch. `openspec-autoland-signal.yml` and
+# `openspec-autoland-validate.yml` run head-supplied files and reference no
+# secret at all; `scripts/test_openspec_controller.py` asserts that.
+#
+# This workflow must NOT be a required status check. It is an actor, not a
+# gate (chelis#419).
+
+on:
+  workflow_run:
+    workflows: ["OpenSpec autoland signal"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One decision per branch. A newer push supersedes an in-flight one, and
+  # the controller refuses anyway if the branch has moved off the commit it
+  # was told about.
+  group: openspec-autoland-controller-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  controller:
+    name: openspec-autoland-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Reads only. `actions: read` is required for
+    # `GET /repos/{owner}/{repo}/actions/runs/{id}`, which is how the push
+    # identity is re-derived; `contents: read` reads the branch heads;
+    # `pull-requests: read` lists an existing pull request. Creating one
+    # uses the separate submission credential, so the default token
+    # deliberately cannot.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    # The event must be a push from this repository. The controller checks
+    # both again from the API; this only avoids starting a runner.
+    if: >-
+      github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    steps:
+      - name: Check out the trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          path: base
+
+      - name: Fetch the pushed commit as objects only
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git -C base fetch --no-tags --quiet origin "$HEAD_SHA"
+
+      - name: Classify the push and open or reuse its pull request
+        env:
+          # Reads run under the default token. The submission credential is
+          # handed to the one call that opens the pull request, inside the
+          # controller, and to nothing else.
+          GH_TOKEN: ${{ github.token }}
+          OPENSPEC_SUBMISSION_TOKEN: ${{ secrets.OPENSPEC_SUBMISSION_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set +e
+          python3 base/scripts/openspec_controller.py \
+            --repository "$REPOSITORY" \
+            --run-id "$RUN_ID" \
+            --default-branch "$DEFAULT_BRANCH" \
+            --repository-path base | tee controller.txt
+          status="${PIPESTATUS[0]}"
+          set -e
+          {
+            echo '## OpenSpec autoland controller'
+            echo
+            echo '```'
+            cat controller.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Exit 1 means "this push is not a document change", which is an
+          # ordinary answer and not a broken run. Only an operational
+          # failure (2) fails the job.
+          if [ "$status" -ge 2 ]; then exit "$status"; fi

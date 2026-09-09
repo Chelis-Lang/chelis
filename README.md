@@ -577,6 +577,96 @@ artifacts or GitHub Actions, build a local compiler binary and run:
 See [scripts/README.md](scripts/README.md) for the local downstream gate
 workflow.
 
+## Submitting an OpenSpec document change
+
+**Just push the branch.** A push that touches `openspec/**` on any branch
+other than `main` starts `openspec-autoland`: it classifies the pushed
+commit, opens an internal pull request when every changed path is an
+OpenSpec document, waits for the required checks on that exact commit, and
+merges it. Nothing local is required and no human approval is involved.
+
+```sh
+git switch -c openspec/add-thing
+# edit openspec/** only
+git commit -am "docs(openspec): add the thing"
+git push -u origin HEAD
+```
+
+A push that touches anything outside the OpenSpec document set is
+classified `review`, nothing is written, and the change follows the
+ordinary path. Normative `openspec/specs/**` text is inside the document
+set, by explicit maintainer authorization.
+
+`openspec-submit` remains available inside Devenv as an optional local
+helper -- it validates before pushing and reports the outcome in your
+terminal -- but it is no longer how a change lands:
+
+```sh
+openspec-submit --dry-run       # print the plan; write nothing
+openspec-submit                 # submit and wait for accepted or blocked
+```
+
+### One-time activation
+
+Autoland is inert until two things are true. Both are maintainer actions
+outside any automated session.
+
+**1. The workflow files must be on `main`.** `workflow_run` and
+`pull_request_target` only take effect from the default branch, so nothing
+runs until this change set lands there.
+
+**2. The `OPENSPEC_SUBMISSION_TOKEN` repository secret must exist.**
+
+A pull request opened with the built-in `GITHUB_TOKEN` raises no
+`pull_request` event, so the workflows publishing the required status
+checks never start and the pull request could never go green. Measured
+against this repository: `conformance.yml` runs only on `push: [main]` and
+`pull_request`, and `changelog.yml` has only `pull_request`, so
+`Hull Conformance Gate (Linux)` and `Changelog` can never appear. The
+controller therefore opens the pull request with a separate credential, and
+there is deliberately **no fallback** -- if the secret is missing it reports
+the push blocked, with this recipe, and writes nothing.
+
+Create a **fine-grained personal access token**:
+
+| Setting | Value |
+|---|---|
+| Resource owner | the account or organization owning this repository |
+| Repository access | **Only select repositories** → this repository |
+| Repository permission | **Pull requests: Read and write** |
+| Also granted automatically | Metadata: Read |
+| Do **not** grant | Contents, Workflows, Administration, Actions, or anything else |
+| Expiry | pick a date and set a rotation reminder; the token stops working when it expires and autoland then reports blocked |
+
+`Pull requests: write` is the exact and only permission
+`POST /repos/{owner}/{repo}/pulls` requires, which is why the controller
+calls that endpoint directly instead of `gh pr create` -- the CLI would
+additionally read repository and branch metadata. The **Workflows**
+permission is *not* needed: it governs writing repository content, and this
+credential never pushes. The token's identity is the pull-request author,
+so a dedicated machine user is preferable to a personal account.
+
+Save it as a repository secret named `OPENSPEC_SUBMISSION_TOKEN`
+(Settings → Secrets and variables → Actions). It is referenced by
+`openspec-autoland-controller.yml` only, which runs from the default
+branch; the push-side signal workflow and the head-run validator reference
+no secret at all.
+
+A GitHub App installation token would be the stronger choice, but it is not
+what this wiring uses: installation tokens expire after an hour, so they
+cannot be stored as a secret. Using one would mean storing an App ID and
+private key and minting a token per run -- more moving parts, and not
+implemented here.
+
+**Other current blockers.** Strict validation runs
+`openspec validate --all`, which fails today on two unrelated active
+changes and blocks every submission until they are fixed. A branch whose
+`.github`, `scripts`, Devenv, Nix, or toolchain content differs from
+`origin/main` is refused; rebase first.
+
+Outside Devenv, run `python3 scripts/openspec_submit.py` with a managed
+Python (see [Python and the gate](#python-and-the-gate)).
+
 ## Project Structure
 
 ```text
