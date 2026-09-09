@@ -90,8 +90,13 @@ both platforms. CI stage runs skip all of it.
 `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`,
 held for the whole run so two cold full gates in different worktrees cannot
 starve each other. The default is to wait indefinitely, polling every 10 s with
-a heartbeat naming the holder every 60 s; `--no-wait` and `--lease-timeout
-SECONDS` exit 4 instead, `--no-lease` bypasses. `--fast` only reports a holder.
+a heartbeat naming the holder and queue position every 60 s. Numbered tickets
+in `gate.lock.queue/` are registered under a short `gate.lock.queue.lock` mutex;
+only the oldest live ticket may acquire. Ticket liveness is kernel-backed, so
+cancelled or killed waiters cannot leave a permanently blocking ticket. Queue
+errors stop with exit 2. `--no-wait` exits 4 when the lease or queue is busy;
+`--lease-timeout SECONDS` bounds the entire wait; `--no-lease` bypasses.
+`--fast` only reports a holder. FIFO requires updated runners in each worktree.
 The kernel releases the lock on holder death, SIGKILL included, so the JSON
 sidecar beside the lock is descriptive, never authoritative; nothing is killed.
 
@@ -1793,7 +1798,7 @@ def run_status(
     if termination == "lease-timeout":
         print(
             "gate: exit 4 is the lease timeout, not a gate failure; another "
-            "gate held the lease",
+            "gate held the lease or was ahead in its queue",
             file=output,
         )
     print(f"gate: log: {handle.get('log', '?')}", file=output, flush=True)
@@ -1975,20 +1980,29 @@ def describe_holder(holder: dict | None) -> str:
 
 
 class LeaseHeld(Exception):
-    """Raised when the lease is held and the caller declined to keep
+    """Raised when the lease or queue is busy and the caller declined to keep
     waiting (`--no-wait`, or `--lease-timeout` elapsed)."""
 
-    def __init__(self, holder: dict | None, waited: float) -> None:
+    def __init__(
+        self, holder: dict | None, waited: float, queue_position: int | None = None
+    ) -> None:
         super().__init__(describe_holder(holder))
         self.holder = holder
         self.waited = waited
+        self.queue_position = queue_position
+
+
+class LeaseQueueError(OSError):
+    """Queue bookkeeping failed; proceeding could overtake live waiters."""
 
 
 class GateLease:
-    """An advisory `fcntl.flock` on one file, plus a JSON sidecar naming the
-    holder. The kernel owns liveness: the lock vanishes with the holder's
-    last file descriptor, SIGKILL included, so no pid check is needed and a
-    stale sidecar without a lock is simply overwritten by the next acquirer.
+    """A FIFO admission queue ahead of the advisory flock and holder sidecar.
+
+    A short queue lock serializes ticket registration and admission. Order is
+    registration order, not process start time. Each waiter holds its ticket's
+    flock; an unlocked ticket is abandoned, even after SIGKILL or PID reuse.
+    The main lock still owns holder liveness and remains visible to old probes.
     """
 
     def __init__(
@@ -2019,6 +2033,11 @@ class GateLease:
         self.poll_seconds = poll_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self._fd: int | None = None
+        self.queue_path = path.with_name(path.name + ".queue")
+        self._queue_guard_fd: int | None = None
+        self._ticket_path: Path | None = None
+        self._ticket_fd: int | None = None
+        self.queue_position: int | None = None
         self.held = False
         self.wait_seconds = 0.0
         self.holder_seen: dict | None = None
@@ -2061,36 +2080,136 @@ class GateLease:
             os.close(fd)
 
     def acquire(self) -> None:
+        # Acquisition can be interrupted before run_local/run_full stores this
+        # object in main's cleanup state. Own every descriptor here until then.
+        try:
+            self._acquire()
+        except OSError as exc:
+            opened_main = self._fd is not None
+            self.release()
+            if opened_main:
+                raise LeaseQueueError(str(exc)) from exc
+            raise
+        except BaseException:
+            self.release()
+            raise
+        finally:
+            if self._queue_guard_fd is not None:
+                os.close(self._queue_guard_fd)
+                self._queue_guard_fd = None
+
+    def _try_turn(self) -> bool:
+        # Never block on bookkeeping: --no-wait and the overall deadline apply
+        # even if a process is stopped while holding this short-lived mutex.
+        if not self._try_flock(self._queue_guard_fd):
+            return False
+        try:
+            live: list[Path] = []
+            # iterdir surfaces I/O errors; glob can suppress an unreadable
+            # directory and would incorrectly describe the queue as empty.
+            tickets = (p for p in self.queue_path.iterdir() if p.suffix == ".ticket")
+            for ticket in sorted(tickets, key=lambda p: int(p.stem)):
+                if ticket == self._ticket_path:
+                    live.append(ticket)
+                    continue
+                try:
+                    fd = os.open(ticket, os.O_RDONLY)
+                except FileNotFoundError:
+                    continue  # A cancelled waiter removed its ticket.
+                try:
+                    if self._try_flock(fd):
+                        ticket.unlink(missing_ok=True)
+                    else:
+                        live.append(ticket)
+                finally:
+                    os.close(fd)
+            if self._ticket_path is None:
+                number = int(live[-1].stem) + 1 if live else 1
+                ticket = self.queue_path / f"{number:020d}.ticket"
+                self._ticket_fd = os.open(ticket, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+                self._ticket_path = ticket
+                # Nobody can inspect this ticket until the queue lock drops.
+                if not self._try_flock(self._ticket_fd):
+                    raise RuntimeError("new gate queue ticket is already locked")
+                live.append(ticket)
+            self.queue_position = live.index(self._ticket_path) + 1
+            if self.queue_position != 1 or not self._try_flock(self._fd):
+                return False
+            self._leave_queue()
+            return True
+        except (OSError, ValueError) as exc:
+            raise LeaseQueueError(str(exc)) from exc
+        finally:
+            fcntl.flock(self._queue_guard_fd, fcntl.LOCK_UN)
+
+    def _leave_queue(self) -> None:
+        try:
+            if self._ticket_path is not None:
+                self._ticket_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise LeaseQueueError(str(exc)) from exc
+        finally:
+            self._ticket_path = None
+            if self._ticket_fd is not None:
+                os.close(self._ticket_fd)
+                self._ticket_fd = None
+
+    def _acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            self.queue_path.mkdir(exist_ok=True)
+            self._queue_guard_fd = os.open(
+                self.path.with_name(self.path.name + ".queue.lock"),
+                os.O_RDWR | os.O_CREAT, 0o644,
+            )
+        except OSError as exc:
+            raise LeaseQueueError(str(exc)) from exc
         started = self._clock()
         last_heartbeat = started
         announced = False
         transient_retry = True
-        while not self._try_flock(self._fd):
-            holder = self.current_holder(self.path)
+        attempted = False
+        while True:
+            waited = self._clock() - started
+            if attempted and self.timeout is not None and waited >= self.timeout:
+                self.wait_seconds = waited
+                raise LeaseHeld(self.peek(self.path) or None, waited, self.queue_position)
+            attempted = True
+            if self._try_turn():
+                break
+            holder = self.peek(self.path)
             if holder:
                 self.holder_seen = holder
-            elif transient_retry:
+            elif transient_retry and self.queue_position == 1:
                 # No sidecar yet: either a holder is between its flock and
                 # its sidecar write, or a `--fast` peek holds a shared lock
                 # for a few microseconds. One short retry settles both
                 # before this run announces an unknown holder.
                 transient_retry = False
-                self._sleep(TRANSIENT_RETRY_SECONDS)
+                pause = TRANSIENT_RETRY_SECONDS
+                if self.timeout is not None:
+                    pause = max(0.0, min(pause, self.timeout - waited))
+                self._sleep(pause)
                 continue
             now = self._clock()
             waited = now - started
             expired = self.timeout is not None and waited >= self.timeout
             if not self.wait or expired:
-                os.close(self._fd)
-                self._fd = None
                 self.wait_seconds = waited
-                raise LeaseHeld(holder, waited)
+                raise LeaseHeld(holder or None, waited, self.queue_position)
+            position = (
+                f"queue position {self.queue_position}"
+                if self.queue_position is not None else "waiting to register a queue ticket"
+            )
+            holder_text = (
+                f"held by {describe_holder(holder)}"
+                if holder is not None else "no current holder"
+            )
             if not announced:
                 print(
-                    f"gate: waiting for the gate lease {self.path} held by "
-                    f"{describe_holder(holder)}; polling every "
+                    f"gate: waiting for the gate lease {self.path}; {position}; "
+                    f"{holder_text}; polling every "
                     f"{self.poll_seconds:.0f} s (pass --no-wait, "
                     "--lease-timeout SECONDS, or --no-lease to change this)",
                     file=self.output,
@@ -2101,27 +2220,22 @@ class GateLease:
             elif now - last_heartbeat >= self.heartbeat_seconds:
                 print(
                     f"gate: still waiting ({waited:.0f} s) for the gate lease "
-                    f"held by {describe_holder(holder)}",
+                    f"{position}; {holder_text}",
                     file=self.output,
                     flush=True,
                 )
                 last_heartbeat = now
             # Never sleep past the deadline: a bounded wait is honoured to
             # the second, not to the next poll boundary.
-            pause = self.poll_seconds
+            pause = (
+                self.poll_seconds if self._ticket_path is not None
+                else TRANSIENT_RETRY_SECONDS
+            )
             if self.timeout is not None:
                 pause = max(0.0, min(pause, self.timeout - waited))
             self._sleep(pause)
         self.wait_seconds = self._clock() - started
-        try:
-            self._write_sidecar()
-        except OSError:
-            # Holding the flock without a sidecar would let other gates wait
-            # on an anonymous holder while this run reports no lease at all.
-            # Release the lock and let the caller report the bypass truthfully.
-            os.close(self._fd)
-            self._fd = None
-            raise
+        self._write_sidecar()
         self.held = True
 
     def _write_sidecar(self) -> None:
@@ -2149,13 +2263,18 @@ class GateLease:
             os.fsync(stream.fileno())
 
     def release(self) -> None:
-        if self._fd is None:
-            return
-        if self.held:
-            self.sidecar_path.unlink(missing_ok=True)
-        os.close(self._fd)
-        self._fd = None
-        self.held = False
+        try:
+            if self.held:
+                self.sidecar_path.unlink(missing_ok=True)
+        finally:
+            try:
+                self._leave_queue()
+            finally:
+                if self._fd is not None:
+                    os.close(self._fd)
+                    self._fd = None
+                self.held = False
+                self.queue_position = None
 
     def __enter__(self) -> "GateLease":
         self.acquire()
@@ -2219,6 +2338,15 @@ def take_lease(
     )
     try:
         lease.acquire()
+    except LeaseQueueError as exc:
+        print(
+            f"gate: cannot use the gate lease queue at {path}: {exc}. "
+            "Repair the queue directory or explicitly pass --no-lease to bypass it.",
+            file=error,
+        )
+        record["mode"] = "error"
+        report.termination = "environment"
+        return EXIT_ENVIRONMENT, None
     except OSError as exc:
         # An unusable lease directory must not turn into a false red.
         print(
@@ -2237,8 +2365,16 @@ def take_lease(
             if getattr(args, "no_wait", False)
             else f"--lease-timeout {args.lease_timeout:g} elapsed"
         )
+        position = (
+            f"; queue position {held.queue_position}"
+            if held.queue_position is not None else ""
+        )
+        holder_text = (
+            f"held by {describe_holder(held.holder)}"
+            if held.holder is not None else "no readable holder"
+        )
         print(
-            f"gate: the gate lease {path} is held by {describe_holder(held.holder)} "
+            f"gate: the gate lease {path} is unavailable ({holder_text}{position}) "
             f"and {reason}. Rerun without the flag to wait, or pass --no-lease "
             "to bypass the lease. Exit 4 means lease-timeout, not a gate failure.",
             file=error,
@@ -2516,7 +2652,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--no-wait",
         action="store_true",
-        help="Exit 4 immediately when another gate holds the lease.",
+        help="Exit 4 when the lease or its admission queue is busy.",
     )
     p.add_argument(
         "--no-lease",

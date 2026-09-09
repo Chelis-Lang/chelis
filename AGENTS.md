@@ -999,17 +999,18 @@ the probe is skipped and the summary records why; the environment checks, the `.
 warning, the lease, and the summary behave the same on both platforms. CI stage runs
 skip the preflight.
 
-`--local` and the bare full gate then take an advisory workstation-wide lease,
-`fcntl.flock` on `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`,
-else `~/.cache/chelis`, held for the whole run so two cold gates in different worktrees do
-not starve each
-other. The default is to wait indefinitely, polling every 10 seconds with a heartbeat
-every 60 seconds that names the holder's pid, worktree, head, and start time.
-`--no-wait` exits 4 at once when the lease is held, `--lease-timeout SECONDS` caps the
-wait and exits 4 on expiry, and `--no-lease` bypasses it. `--fast` never takes the
-lease; it prints a note when a full gate holds it. The kernel releases the lock when
-the holder exits, SIGKILL included, so the sidecar naming the holder is descriptive,
-never authoritative.
+`--local` and the bare full gate hold a workstation-wide `flock` on `gate.lock`
+under `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`.
+Updated runners acquire in ticket-registration order. Cancellation, timeout, and
+process death release queue places; kernel locks establish liveness, including after
+SIGKILL. Holder sidecars are descriptive only.
+
+Waits are indefinite by default, polling every 10 seconds; 60-second heartbeats show
+holder details and queue position. `--no-wait` exits 4 on lease/queue contention;
+`--lease-timeout SECONDS` caps the wait (exit 4); `--no-lease` bypasses; queue errors
+exit 2. `--fast` only reports a holder. Update active worktrees to honor the queue.
+Queue mechanics live in `scripts/gate.py`; acceptance:
+`.venv/bin/python -m unittest scripts.test_gate_queue`.
 
 Every command's combined stdout and stderr streams live. On failure the gate
 retains the complete transcript under `target/gate-failures/`, replays the
