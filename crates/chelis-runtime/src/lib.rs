@@ -2410,6 +2410,190 @@ pub unsafe extern "C" fn chelis_tensor_check_expand(
     metadata_or_fail((*tensor).metadata.require_expansion(&target, axis), context);
 }
 
+fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
+    result.unwrap_or_else(|error| {
+        let class = match &error {
+            MetadataError::Domain(_) => "domain",
+            MetadataError::Overflow(_) => "overflow",
+        };
+        eprintln!("{error}");
+        runtime_fail!("numeric trap: {class} in {op} at int64")
+    })
+}
+
+fn affine_scalar(value: chelis_scalar, op: &str) -> i64 {
+    affine_result(
+        if value.dtype == CHELIS_DTYPE_I64 && value.reserved == [0; 7] {
+            Ok(i64::from_ne_bytes(value.bits.to_ne_bytes()))
+        } else {
+            Err(MetadataError::Domain(
+                "requires canonical tagged int64 metadata".into(),
+            ))
+        },
+        op,
+    )
+}
+
+unsafe fn affine_array(values: *const chelis_scalar, length: usize, op: &str) -> Vec<i64> {
+    if length > 0 && values.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null movement bounds".into())),
+            op,
+        );
+    }
+    let count = affine_result(ElementCount::scratch_entries(length, 0), op);
+    affine_result(count.scratch_len::<chelis_scalar>(), op);
+    let mut result = Vec::with_capacity(affine_result(count.scratch_len::<i64>(), op));
+    for axis in 0..length {
+        result.push(affine_scalar(values.add(axis).read(), op));
+    }
+    result
+}
+
+#[derive(Clone, Copy)]
+enum AffineShapeOp {
+    Pad,
+    Shrink,
+    Stride,
+}
+
+unsafe fn affine_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    first: *const chelis_scalar,
+    second: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+    operation: AffineShapeOp,
+) {
+    let op = match operation {
+        AffineShapeOp::Pad => "pad",
+        AffineShapeOp::Shrink => "shrink",
+        AffineShapeOp::Stride => "stride",
+    };
+    tensor_metadata_dtype(tensor, op);
+    let rank = affine_scalar(rank, op);
+    if rank < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain("negative movement rank".into())),
+            op,
+        );
+    }
+    let rank = affine_result(
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds int32")),
+        op,
+    );
+    if rank != (*tensor).rank() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "movement rank differs from input".into(),
+            )),
+            op,
+        );
+    }
+    let length = (*tensor).shape().len();
+    if length > 0 && shape.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null movement output shape".into())),
+            op,
+        );
+    }
+    let first = affine_array(first, length, op);
+    let target = match operation {
+        AffineShapeOp::Pad => (*tensor)
+            .metadata
+            .padded(&first, &affine_array(second, length, op)),
+        AffineShapeOp::Shrink => (*tensor)
+            .metadata
+            .shrunk(&first, &affine_array(second, length, op)),
+        AffineShapeOp::Stride => (*tensor).metadata.strided(&first),
+    };
+    let target = affine_result(target, op);
+    // All input arrays are decoded and the whole target is checked before any
+    // output write, including when the caller aliases an input bound array.
+    for (axis, &extent) in target.shape().iter().enumerate() {
+        shape
+            .add(axis)
+            .write(chelis_scalar_from_bits(CHELIS_DTYPE_I64, extent as u64));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_pad_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    before: *const chelis_scalar,
+    after: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+) {
+    affine_shape(tensor, rank, before, after, shape, AffineShapeOp::Pad);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_shrink_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    start: *const chelis_scalar,
+    end: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+) {
+    affine_shape(tensor, rank, start, end, shape, AffineShapeOp::Shrink);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_stride_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    steps: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+) {
+    affine_shape(
+        tensor,
+        rank,
+        steps,
+        std::ptr::null(),
+        shape,
+        AffineShapeOp::Stride,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_affine_index(
+    tensor: *const chelis_tensor,
+    coordinates: *const chelis_scalar,
+    offsets: *const chelis_scalar,
+    steps: *const chelis_scalar,
+) -> i64 {
+    let op = "affine_index";
+    tensor_metadata_dtype(tensor, op);
+    let count = affine_result(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        op,
+    );
+    let length = affine_result(count.scratch_len::<chelis_scalar>(), op);
+    if length > 0 && (coordinates.is_null() || offsets.is_null() || steps.is_null()) {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "null affine coordinates, offsets, or steps".into(),
+            )),
+            op,
+        );
+    }
+    let index = affine_result(
+        (*tensor).metadata.affine_index_by(|axis| {
+            (
+                affine_scalar(coordinates.add(axis).read(), op),
+                affine_scalar(offsets.add(axis).read(), op),
+                affine_scalar(steps.add(axis).read(), op),
+            )
+        }),
+        op,
+    );
+    affine_result(
+        i64::try_from(index).map_err(|_| MetadataError::Overflow("affine index exceeds int64")),
+        op,
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_check_reshape(
     tensor: *const chelis_tensor,

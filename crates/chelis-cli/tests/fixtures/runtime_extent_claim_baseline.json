@@ -1005,7 +1005,7 @@
   "shrink.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "chelis: runtime dim disagrees with static extent 2 at node 2 axis 0",
+      "stderr": "movement target mismatch at node 2 axis 0\nnumeric trap: domain in shrink at int64",
       "stdout": "",
       "success": false
     },

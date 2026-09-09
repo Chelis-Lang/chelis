@@ -6779,12 +6779,6 @@ impl CEmitter {
         }
     }
 
-    /// chelis#616: whether any bound in a `(start, end)` pair list is
-    /// node-valued (runtime) on the given axis.
-    fn pair_is_node(pair: &(RtDim, RtDim)) -> bool {
-        pair.0.node_input().is_some() || pair.1.node_input().is_some()
-    }
-
     /// Declare an op-owned runtime extent under its existing representation
     /// owner. Guard scheduling is separate from C variable declaration.
     fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
@@ -6881,6 +6875,47 @@ impl CEmitter {
         ));
     }
 
+    /// Materialize canonical bound scalars before allocation can repurpose a source.
+    fn emit_affine_bounds(&mut self, name: &str, expressions: &[String]) {
+        let values = expressions
+            .iter()
+            .map(|value| format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, ({value}))"))
+            .collect::<Vec<_>>();
+        let values = if values.is_empty() {
+            "{0}".into()
+        } else {
+            values.join(", ")
+        };
+        self.line(&format!(
+            "chelis_scalar {name}[{}] = {{ {values} }};",
+            expressions.len().max(1)
+        ));
+    }
+
+    /// Derive checked extents before consuming the existing ordered extent claims.
+    fn emit_affine_shape(&mut self, id: usize, a: usize, ty: &TensorType, op: &str, bounds: &str) {
+        let rank = ty.dims.len();
+        self.line(&format!(
+            "chelis_scalar t{id}_movement_shape[{}];",
+            rank.max(1)
+        ));
+        self.line(&format!(
+            "chelis_tensor_{op}_shape(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {bounds}, t{id}_movement_shape);"
+        ));
+        let extents = (0..rank)
+            .map(|axis| (axis, format!("t{id}_movement_shape[{axis}].bits")))
+            .collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &extents);
+        // Check every submitted axis, including static and symbolic bystanders.
+        // Equal element counts alone cannot authorize a different movement shape.
+        for (axis, dim) in ty.dims.iter().enumerate() {
+            let expected = Self::emit_dim_expr(&DimExpr::from(dim));
+            self.line(&format!(
+                "if (t{id}_movement_shape[{axis}].bits != ({expected})) {{ fprintf(stderr, \"movement target mismatch at node {id} axis {axis}\\n\"); chelis_numeric_trap(\"numeric trap: domain in {op} at int64\"); }}"
+            ));
+        }
+    }
+
     fn emit_pad(
         &mut self,
         id: usize,
@@ -6892,124 +6927,63 @@ impl CEmitter {
     ) {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
-        // chelis#616: per-axis (before, after) C expressions and the runtime
-        // output extent for any node-valued axis (`in + before + after`),
-        // declared into its `_anon_dim_{id}_{d}` before the alloc.
-        let pad_exprs: Vec<(String, String)> = padding
+        let before = padding
             .iter()
             .enumerate()
-            .map(|(d, (b, aft))| {
-                (
-                    Self::bound_c_expr(b, inputs, a, d, dag),
-                    Self::bound_c_expr(aft, inputs, a, d, dag),
-                )
-            })
-            .collect();
-        let mut extents = Vec::new();
-        for (d, pair) in padding.iter().enumerate() {
-            let (before_e, after_e) = &pad_exprs[d];
-            let extent = format!("t{a}_shape[{d}] + ({before_e}) + ({after_e})");
-            if Self::pair_is_node(pair) {
-                self.line(&format!(
-                    "if (({before_e}) < 0 || ({after_e}) < 0) {{ fprintf(stderr, \
-                     \"chelis: runtime pad bound out of range at node {id} axis {d}\\n\"); abort(); }}"
-                ));
-                self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
-            }
-            extents.push((d, extent));
-        }
-        self.emit_runtime_dim_sites(id, &extents);
+            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .collect::<Vec<_>>();
+        let after = padding
+            .iter()
+            .enumerate()
+            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .collect::<Vec<_>>();
+        self.emit_affine_bounds(&format!("t{id}_before"), &before);
+        self.emit_affine_bounds(&format!("t{id}_after"), &after);
+        self.emit_affine_bounds(&format!("t{id}_steps"), &vec!["1".into(); padding.len()]);
+        self.emit_affine_shape(id, a, ty, "pad", &format!("t{id}_before, t{id}_after"));
         self.emit_slot_wrapper(id, ty);
-        // WS-A1: pad fill must honor the output dtype. Pre-WS-A1 the
-        // default arm fell through to chelis_fill_f32 even for f64
-        // outputs, silently truncating the fill value. Match each
-        // active dtype explicitly; an unhandled dtype panics rather
-        // than silently downgrades.
         assert_eq!(fill.prim(), ty.precision, "verified pad fill dtype");
-        match fill.element_ref() {
-            ElementRef::I8(value) => {
-                self.line(&format!(
-                    "{{ int8_t *__p = (int8_t*)t{id}_data; for (int64_t __i = 0; __i < t{id}_size; __i++) __p[__i] = INT8_C({value}); }}"
-                ));
-            }
-            ElementRef::I16(value) => {
-                self.line(&format!(
-                    "{{ int16_t *__p = (int16_t*)t{id}_data; for (int64_t __i = 0; __i < t{id}_size; __i++) __p[__i] = INT16_C({value}); }}"
-                ));
-            }
-            ElementRef::I32(value) => {
-                self.line(&format!(
-                    "{{ int32_t *__p = (int32_t*)t{id}_data; for (int64_t __i = 0; __i < t{id}_size; __i++) __p[__i] = INT32_C({value}); }}"
-                ));
-            }
-            ElementRef::I64(value) => {
-                self.line(&format!(
-                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));",
-                    Self::i64_c_literal(value)
-                ));
-            }
-            ElementRef::F64(value) => {
-                let bits = value.to_bits();
-                self.line(&format!(
-                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64, UINT64_C(0x{bits:016x})));"
-                ));
-            }
-            ElementRef::F32(value) => {
-                let bits = value.to_bits();
-                self.line(&format!(
-                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT32_C(0x{bits:08x})));"
-                ));
-            }
-            ElementRef::F16(value) => {
-                let bits = value.to_bits();
-                self.line(&format!(
-                    "{{ uint16_t *__p = (uint16_t*)t{id}_data; for (int64_t __i = 0; __i < t{id}_size; __i++) __p[__i] = UINT16_C(0x{bits:04x}); }}"
-                ));
-            }
-            ElementRef::Bf16(value) => {
-                let bits = value.to_bits();
-                self.line(&format!(
-                    "{{ uint16_t *__p = (uint16_t*)t{id}_data; for (int64_t __i = 0; __i < t{id}_size; __i++) __p[__i] = UINT16_C(0x{bits:04x}); }}"
-                ));
-            }
-            ElementRef::Bool(value) => {
-                let bits = u8::from(value);
-                self.line(&format!(
-                    "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, UINT8_C({bits})));"
-                ));
-            }
+        let bits = match fill.element_ref() {
+            ElementRef::I8(n) => u64::from(n as u8),
+            ElementRef::I16(n) => u64::from(n as u16),
+            ElementRef::I32(n) => u64::from(n as u32),
+            ElementRef::I64(n) => n as u64,
+            ElementRef::F64(n) => n.to_bits(),
+            ElementRef::F32(n) => u64::from(n.to_bits()),
+            ElementRef::F16(n) => u64::from(n.to_bits()),
+            ElementRef::Bf16(n) => u64::from(n.to_bits()),
+            ElementRef::Bool(n) => u64::from(n),
+        };
+        let dtype = ty
+            .precision
+            .runtime_dtype()
+            .expect("verified pad dtype")
+            .c_macro();
+        if ty.precision == Prim::Int64 {
+            let value = fill.as_i64_exact().expect("verified int64 pad fill");
+            self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));", Self::i64_c_literal(value)));
+        } else {
+            let literal = match ty.precision {
+                Prim::F32 => format!("UINT32_C(0x{bits:08x})"),
+                Prim::F64 => format!("UINT64_C(0x{bits:016x})"),
+                _ => format!("UINT64_C({bits})"),
+            };
+            self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits({dtype}, {literal}));"));
         }
-        // Copy source data into the padded region
         self.line(&format!("for (int64_t i = 0; i < t{a}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "int64_t src_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
+            "chelis_scalar coordinates[t{a}_rank > 0 ? t{a}_rank : 1];"
         ));
+        self.line(&format!("chelis_tensor_unravel_index(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), coordinates);"));
+        self.line(&format!("int64_t dst = chelis_tensor_affine_index(t{id}, coordinates, t{id}_before, t{id}_steps);"));
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{a}_shape, t{a}_rank, src_indices);"
-        ));
-        self.line(&format!(
-            "int64_t dst_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        for (d, (before_e, _)) in pad_exprs.iter().enumerate() {
-            self.line(&format!(
-                "dst_indices[{d}] = src_indices[{d}] + {before_e};"
-            ));
-        }
-        self.line(&format!(
-            "int64_t dst_flat = chelis_indices_to_flat(dst_indices, t{id}_strides, t{id}_rank);"
-        ));
-        self.line(&format!(
-            "int64_t src_flat = chelis_indices_to_flat(src_indices, t{a}_strides, t{a}_rank);"
-        ));
-        self.line(&format!(
-            "(({et}*)t{id}_data)[dst_flat] = (({et}*)t{a}_data)[src_flat];"
+            "(({et}*)t{id}_data)[dst] = ((const {et}*)t{a}_data)[i];"
         ));
         self.indent -= 1;
         self.line("}");
     }
 
-    // ---- Shrink ----
     fn emit_shrink(
         &mut self,
         id: usize,
@@ -7018,20 +6992,6 @@ impl CEmitter {
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
-        // chelis#368/#551: the `SHRINK_TO_END` full-axis sentinel encodes
-        // "shrink axis `d` to its full runtime extent" for a SYMBOLIC no-pad
-        // axis whose extent cannot be baked as a literal `usize`. The eval lane
-        // resolves it via `bind_symbolic_dims` (binding the symbol to a concrete
-        // value). The C build lane never binds — the symbol stays a runtime C
-        // variable — so we resolve it structurally instead: the shrink loop
-        // below is driven entirely by the OUTPUT shape (`t{id}_shape`, sized
-        // from `ty`) and the per-axis start offset `lo`; the `hi` bound is not
-        // read by codegen. A sentinel bound is a full-axis identity (`lo == 0`,
-        // output extent == input extent), so the emitted loop is already
-        // correct once `ty`'s axis dim (the same symbolic dim) is declared by
-        // `symbolic_occurrences`. Fail loud only for a MALFORMED sentinel: one
-        // on an axis whose output dim is concrete (a producing-pass bug that
-        // would silently drop a real trim), or with a nonzero start.
         for (d, (lo, hi)) in bounds.iter().enumerate() {
             if !matches!(hi, RtDim::ToEnd) {
                 continue;
@@ -7048,66 +7008,47 @@ impl CEmitter {
         }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
-        // chelis#616: per-axis start/end C expressions; declare the runtime
-        // output extent (`end - start`) into each node-valued axis's
-        // `_anon_dim_{id}_{d}` before the alloc, with a runtime range guard.
-        let shrink_exprs: Vec<(String, String)> = bounds
+        // Verified ToEnd is the identity end of a symbolic bystander; read the
+        // saved input extent before any output allocation or repurpose.
+        let start = bounds
             .iter()
             .enumerate()
-            .map(|(d, (s, e))| {
-                (
-                    Self::bound_c_expr(s, inputs, a, d, dag),
-                    Self::bound_c_expr(e, inputs, a, d, dag),
-                )
-            })
-            .collect();
-        let mut extents = Vec::new();
-        for (d, pair) in bounds.iter().enumerate() {
-            let (start_e, end_e) = &shrink_exprs[d];
-            let extent = format!("({end_e}) - ({start_e})");
-            if Self::pair_is_node(pair) {
-                // `end <= start` (empty or inverted) mirrors the evaluator's
-                // rejection exactly — error-path parity, chelis#616.
-                self.line(&format!(
-                    "if (({start_e}) < 0 || ({end_e}) <= ({start_e}) || ({end_e}) > t{a}_shape[{d}]) \
-                     {{ fprintf(stderr, \"chelis: runtime shrink bound out of range at node {id} \
-                     axis {d}\\n\"); abort(); }}"
-                ));
-                self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
+            .map(|(axis, (n, _))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .collect::<Vec<_>>();
+        let end = bounds
+            .iter()
+            .enumerate()
+            .map(|(axis, (_, n))| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .collect::<Vec<_>>();
+        self.emit_affine_bounds(&format!("t{id}_start"), &start);
+        self.emit_affine_bounds(&format!("t{id}_end"), &end);
+        self.emit_affine_bounds(&format!("t{id}_steps"), &vec!["1".into(); bounds.len()]);
+        self.emit_affine_shape(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));
+        // Preserve the existing runtime-bound empty-range rejection shared
+        // with Eval. The metadata API also serves statically empty tensors;
+        // this operation-level admission rule is separate from shape safety.
+        for (axis, (start, end)) in bounds.iter().enumerate() {
+            if start.node_input().is_some() || end.node_input().is_some() {
+                self.line(&format!("if (t{id}_start[{axis}].bits == t{id}_end[{axis}].bits) {{ chelis_numeric_trap(\"numeric trap: domain in shrink at int64\"); }}"));
             }
-            // chelis#616: declare (or guard) this axis's runtime output
-            // extent under its actual symbolic dim name (a fresh
-            // `_anon_dim_*` or a sig-named `k`), which `shape_literal`
-            // references for the output allocation.
-            extents.push((d, extent));
         }
-        self.emit_runtime_dim_sites(id, &extents);
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "int64_t dst_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+            "chelis_scalar coordinates[t{id}_rank > 0 ? t{id}_rank : 1];"
+        ));
+        self.line(&format!("chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), coordinates);"));
+        self.line(&format!(
+            "int64_t src = chelis_tensor_affine_index(t{a}, coordinates, t{id}_start, t{id}_steps);"
         ));
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}_shape, t{id}_rank, dst_indices);"
-        ));
-        self.line(&format!(
-            "int64_t src_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        for (d, (start_e, _)) in shrink_exprs.iter().enumerate() {
-            self.line(&format!("src_indices[{d}] = dst_indices[{d}] + {start_e};"));
-        }
-        self.line(&format!(
-            "int64_t src_flat = chelis_indices_to_flat(src_indices, t{a}_strides, t{a}_rank);"
-        ));
-        self.line(&format!(
-            "(({et}*)t{id}_data)[i] = (({et}*)t{a}_data)[src_flat];"
+            "(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"
         ));
         self.indent -= 1;
         self.line("}");
     }
 
-    // ---- Stride ----
     fn emit_stride(
         &mut self,
         id: usize,
@@ -7117,60 +7058,25 @@ impl CEmitter {
         dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        // chelis#616: per-axis step C expressions. The strided output extent is
-        // `ceil(input_extent / step)`, which is runtime whenever the input axis
-        // or the step is runtime; declare each such axis's `_anon_dim_{id}_{d}`
-        // before the view alloc reads it via `shape_literal`.
-        let step_exprs: Vec<String> = strides
+        let et = Self::elem_type(ty);
+        let steps = strides
             .iter()
             .enumerate()
-            .map(|(d, s)| Self::bound_c_expr(s, inputs, a, d, dag))
-            .collect();
-        let mut extents = Vec::new();
-        for (d, step_e) in step_exprs.iter().enumerate() {
-            // Declare (or guard) a runtime output extent where the
-            // occurrence pass marked this op as the axis's runtime-dim site
-            // (a bystander symbolic axis — e.g. a passed-through `batch` —
-            // is declared by `symbolic_bindings` from its Load and must not
-            // be redeclared here), and additionally emit the step and
-            // static-extent guards for any node-valued step.
-            let node_step = strides.get(d).is_some_and(|s| s.node_input().is_some());
-            let has_site = self.runtime_dim_sites.contains_key(&(id, d));
-            if !node_step && !has_site {
-                continue;
-            }
-            let extent = format!("(t{a}_shape[{d}] + ({step_e}) - 1) / ({step_e})");
-            self.line(&format!(
-                "if (({step_e}) <= 0) {{ fprintf(stderr, \"chelis: runtime stride step must be \
-                 positive at node {id} axis {d}\\n\"); abort(); }}"
-            ));
-            if node_step {
-                self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
-            }
-            extents.push((d, extent));
-        }
-        self.emit_runtime_dim_sites(id, &extents);
-        let elem_type = Self::elem_type(ty);
+            .map(|(axis, n)| Self::bound_c_expr(n, inputs, a, axis, dag))
+            .collect::<Vec<_>>();
+        self.emit_affine_bounds(&format!("t{id}_steps"), &steps);
+        self.emit_affine_bounds(&format!("t{id}_offsets"), &vec!["0".into(); strides.len()]);
+        self.emit_affine_shape(id, a, ty, "stride", &format!("t{id}_steps"));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+            "chelis_scalar coordinates[t{id}_rank > 0 ? t{id}_rank : 1];"
         ));
+        self.line(&format!("chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), coordinates);"));
+        self.line(&format!("int64_t src = chelis_tensor_affine_index(t{a}, coordinates, t{id}_offsets, t{id}_steps);"));
         self.line(&format!(
-            "int64_t in_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        for (d, step_e) in step_exprs.iter().enumerate() {
-            self.line(&format!("in_indices[{d}] = out_indices[{d}] * ({step_e});"));
-        }
-        self.line(&format!(
-            "int64_t src = chelis_indices_to_flat(in_indices, t{a}_strides, t{a}_rank);"
-        ));
-        self.line(&format!(
-            "(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"
+            "(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"
         ));
         self.indent -= 1;
         self.line("}");
@@ -8278,7 +8184,7 @@ mod tests {
         assert!(c.contains(
             "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"
         ));
-        assert!(c.contains("dst_indices[0] = src_indices[0] + 1"));
+        assert!(c.contains("chelis_tensor_affine_index(t1, coordinates, t1_before, t1_steps)"));
     }
 
     #[test]
@@ -8299,7 +8205,7 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("src_indices[0] = dst_indices[0] + 1"));
+        assert!(c.contains("chelis_tensor_affine_index(t0, coordinates, t1_start, t1_steps)"));
     }
 
     /// chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
@@ -8346,7 +8252,7 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("in_indices[0] = out_indices[0] * (2)"));
+        assert!(c.contains("chelis_tensor_affine_index(t0, coordinates, t1_offsets, t1_steps)"));
         assert!(!c.contains("t1->strides[0] ="));
     }
 

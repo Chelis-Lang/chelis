@@ -716,6 +716,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_affine_index ( const chelis_tensor * tensor , const chelis_scalar * coordinates , const chelis_scalar * offsets , const chelis_scalar * steps ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_tensor_byte_count ( const chelis_tensor * tensor ) ;",
       "flags": [
         "numeric-op"
@@ -879,6 +886,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_pad_shape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * before , const chelis_scalar * after , chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tensor_release ( const chelis_tensor * tensor ) ;",
       "flags": []
     },
@@ -890,6 +902,16 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tensor_retain ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_shrink_shape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * start , const chelis_scalar * end , chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_stride_shape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * steps , chelis_scalar * shape ) ;",
       "flags": []
     },
     {

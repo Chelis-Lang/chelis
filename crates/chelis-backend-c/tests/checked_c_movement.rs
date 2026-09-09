@@ -6,6 +6,41 @@ fn method<'a>(source: &'a str, name: &str) -> &'a str {
 }
 
 fn validate(source: &str) -> Result<(), String> {
+    let shape = method(source, "emit_affine_shape");
+    for required in [
+        "chelis_tensor_{op}_shape(",
+        "self.emit_runtime_dim_sites(",
+        "movement target mismatch",
+    ] {
+        if !shape.contains(required) {
+            return Err(format!("missing affine shape obligation: {required}"));
+        }
+    }
+    for name in ["emit_pad", "emit_shrink", "emit_stride"] {
+        let body = method(source, name);
+        let check = body
+            .find("self.emit_affine_shape(")
+            .ok_or_else(|| format!("{name}: missing affine shape validation"))?;
+        if check >= body.find("self.emit_slot_wrapper(").expect("allocation") {
+            return Err(format!("{name}: late affine shape validation"));
+        }
+        for retired in [
+            "chelis_flat_to_indices(",
+            "chelis_indices_to_flat(",
+            "src_indices[",
+            "in_indices[",
+            "dst_indices[",
+        ] {
+            if body.contains(retired) {
+                return Err(format!("{name}: raw affine coordinate authority"));
+            }
+        }
+        if !body.contains("chelis_tensor_affine_index(")
+            || !body.contains("chelis_tensor_unravel_index(")
+        {
+            return Err(format!("{name}: missing checked affine coordinates"));
+        }
+    }
     for (name, check) in [
         ("emit_permute", "chelis_tensor_check_permute("),
         ("emit_expand", "chelis_tensor_check_expand("),
@@ -50,6 +85,33 @@ fn permutation_and_expansion_use_checked_metadata_before_allocation() {
 fn movement_control_rejects_removed_checks_and_raw_index_helpers() {
     let source = include_str!("../src/emit.rs");
     validate(source).unwrap();
+    for removed in ["chelis_tensor_{op}_shape(", "movement target mismatch"] {
+        assert!(
+            validate(&source.replace(removed, "erased_obligation"))
+                .unwrap_err()
+                .contains("missing affine shape obligation")
+        );
+    }
+    for name in ["emit_pad", "emit_shrink", "emit_stride"] {
+        let body = method(source, name);
+        let missing = body.replace("self.emit_affine_shape(", "self.retired_affine_shape(");
+        assert!(
+            validate(&source.replace(body, &missing))
+                .unwrap_err()
+                .contains("missing affine shape validation")
+        );
+        let allocation = "self.emit_slot_wrapper(id, ty);";
+        let late = body.replace(allocation, "").replacen(
+            "        let a = inputs[0].0;",
+            &format!("        {allocation}\n        let a = inputs[0].0;"),
+            1,
+        );
+        assert!(
+            validate(&source.replace(body, &late))
+                .unwrap_err()
+                .contains("late affine shape validation")
+        );
+    }
     for name in ["emit_permute", "emit_expand"] {
         let body = method(source, name);
         let allocation = "self.emit_slot_wrapper(id, ty);";
