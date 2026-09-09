@@ -1,10 +1,10 @@
 {
   "broadcast.folded": {
     "c": {
-      "stage": "build",
-      "stderr": "error: ownership lowering invariant failed in `dag`: binary op at node 3 has mismatched dimension at axis 0: Lit(1) vs Lit(3)",
-      "stdout": "",
-      "success": false
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "xs = tensor(shape=[3], data=[1.0, 2.0, 3.0])\nout = tensor(shape=[3], data=[false, true, true])",
+      "success": true
     },
     "check": {
       "errors": [],
@@ -73,9 +73,9 @@
   "broadcast.symbolic": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `1`: claimed = 1, xs axis 0 = 3\nnumeric trap: domain in load at int64",
-      "stdout": "",
-      "success": false
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[false, true, true])",
+      "success": true
     },
     "check": {
       "errors": [],
@@ -746,9 +746,9 @@
   "record.alias": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `1`: claimed = 1, q axis 0 = 2\nnumeric trap: domain in load at int64",
-      "stdout": "",
-      "success": false
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[0.25, 0.25])",
+      "success": true
     },
     "check": {
       "errors": [],

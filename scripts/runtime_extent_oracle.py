@@ -543,6 +543,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         ),
         _row(
+            "expand.positional.replacement.shape_size.eval_c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_broadcast.singleton_broadcast_contract",
+        ),
+        _row(
             "expand.positional.replacement_zero.c",
             "silent_unguarded",
             EXECUTES,
@@ -929,6 +935,15 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "every_rebuild_pass_preserves_the_derived_classes",
             ),
             ("every_rebuild_pass_preserves_the_derived_classes",),
+        ),
+        TestTarget(
+            "cli_broadcast",
+            (
+                "cargo", "test", "-p", "chelis-cli", "--test",
+                "runtime_extent_claim_preparation", "singleton_broadcast_contract",
+                "--", "--nocapture", "--exact",
+            ),
+            ("singleton_broadcast_contract",),
         ),
         TestTarget(
             "cli_slice_b",

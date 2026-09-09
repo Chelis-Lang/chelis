@@ -15,7 +15,7 @@ language rule and does not relax the numbered specs to match a baseline.
 
 ## Current state and remaining work
 
-The reference implementation state for this refresh is `db9dd8f1a`.
+The reference implementation state for the merged inventory is `a4c026870`.
 The following are merged mechanisms, not a claim of complete class coverage.
 
 | delivery | merged PR | established behavior |
@@ -58,11 +58,28 @@ Current failure boundaries:
 - #665/#1556: declaration consumers still use legacy name recovery. #1482
   additionally needs an actual shape source for a synthesized constant.
 - #1566: evaluator binding inference can identify separate signatures by
-  binder spelling. #1619: a shape-derived broadcast size can be used where
-  the unit-extent guard must observe the operand axis.
+  binder spelling.
 - #1512: the old deferred-expand witnesses are unreachable, but unresolved
   variables have other origins. The remaining early-return validation audit
   is open; neither the old census nor four `sum` probes closes it.
+
+B2b-0b's broadcast preparation repair addresses #1619: for `Expand` outputs
+without explicit named dimensions, C's anonymous-axis rewrite uses
+`output_axis_sources`, filling anonymous axes from their own size/kept-axis
+sources. Literal result claims survive, and an anonymous resolved number
+remains a literal obligation. The previous
+same-rank shortcut copied the operand's unit extent onto the output, creating
+a false result claim against the size-source tensor. The unit-precondition
+derivation already read the correct operand and is unchanged. Outputs with
+explicit named dimensions retain their existing preparation path: preserving
+the name without its unread declaring witness can newly execute a wrong
+shape. B2b-1 owns preservation and enforcement of those scoped claims.
+
+The bounded acceptance command is `singleton_broadcast_contract` in C5.
+Literal inlining guards, op-computed local guards, and scoped claim transport
+remain separate obligations below. In particular, an inlined call with a
+non-unit argument still loses its runtime unit guard; repairing #1619's
+anonymous-output rewrite does not establish claim preservation through calls.
 
 ## Part I: implementation contracts
 
@@ -323,7 +340,7 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
-At the reference head the recorded phase-B corpus has 53 rows: 32 at exit,
+The recorded phase-B corpus has 54 rows: 33 at exit,
 21 short. This is baseline metadata, not a fresh execution receipt. The final
 command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
@@ -331,7 +348,7 @@ passing phase or erase outstanding B rows. `--phase a` and `--phase b`
 retain their names and row-transition checks.
 
 The preparation suite is `crates/chelis-cli/tests/runtime_extent_claim_preparation.rs`.
-It separates two commands and two meanings:
+Its baseline and full pending acceptance remain separate:
 
 ```sh
 cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation
@@ -339,14 +356,32 @@ cargo test -p chelis-cli --test runtime_extent_claim_preparation \
   claimed_extent_contract -- --ignored --exact --nocapture
 ```
 
-The first records measured current behavior with explicit issue-owned gaps;
-it must fail on an unexplained behavior change. The second is the manual
+The first locks measured current behavior with explicit issue-owned gaps and
+runs the repaired broadcast subset. It must fail on an unexplained behavior
+change. The second is the manual
 acceptance runner over the SAME fixtures and asserts the decided contract.
 It is intentionally red until the owning fixes land, reports every failed
 cell, and must run before any fixture is claimed repaired. An ignored
 acceptance test, a clean checker, object-only output, or equal wrong answers
 on Eval/C is never a passing completion receipt. Missing compiler/toolchain
 prerequisites fail the suite rather than skip a lane.
+
+The #1619 exit is the unignored `singleton_broadcast_contract` test:
+
+```sh
+cargo test -p chelis-cli --test runtime_extent_claim_preparation \
+  singleton_broadcast_contract -- --exact --nocapture
+```
+
+Its 11 cases check the original literal/symbolic/folded comparisons, a static
+non-unit rejection, numeric broadcasts through export/binding/inlined-main
+routes, and satisfied/refuted runtime unit operands through export/binding
+routes. They assert exact signatures where applicable, shapes, values and
+failure context. Phase B registers this execution receipt as
+`expand.positional.replacement.shape_size.eval_c`. The broader 55-case
+baseline changes only the two #1619 C results and #1266's record-alias C
+result: all three now execute with their expected values. The record-alias
+Eval failure and direct-field failures remain; #1266 is still open.
 
 The suite's rows distinguish:
 
@@ -400,7 +435,7 @@ All are Slice B work under #1277 unless expressly separated.
 
 | owner | entry | deliverable and exit |
 |---|---|---|
-| B2b-0b: local guards | merged B2r/S2b | literal-claim mismatches including #1377; op-computed local extents; #1619's operand/result attribution; exact positive/negative C/Eval rows |
+| B2b-0b: remaining local guards | merged B2r/S2b and the broadcast preparation repair above | literal-claim mismatches including #1377; op-computed local extents; exact positive/negative C/Eval rows |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566 and #1397's declaration-erasure half |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
