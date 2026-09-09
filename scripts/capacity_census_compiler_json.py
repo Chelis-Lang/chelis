@@ -74,9 +74,14 @@ MAP = _nominal(
 
 def validate_conversion_calls(raw):
     """Check compiler-derived obligations; a successful check is not a witness."""
+    crate = raw.get("crate")
+    # rustc's local crate root has an empty DefPath, unlike a nominal item.
+    # Keep the exact defining crate/root check separate from item identities.
+    _require(isinstance(crate, dict) and all(crate.get(key) == value for key, value in {
+        "crate": "chelis_python", "item_name": "chelis_python", "path": "", "def_id": "0:0",
+    }.items()), "compiler JSON scope requires the exact local chelis_python crate root")
     _require(
         raw.get("format") == 2 and raw.get("scope") == "compiler-json"
-        and identity(raw["crate"]) == "chelis_python::"
         and not raw.get("errors") and raw.get("bodies"),
         "missing actual compiler JSON ownership scope",
     )
@@ -356,6 +361,10 @@ def verify_compiler_json_bindings(root: Path, target: Path):
         graph.publication_graph()
         driver = build_driver(root, target / "compiler-json-driver")
         evidence = collect_library(root, target, driver, scope="compiler-json")
+        # Retain the actual compiler packet before obligation reconciliation,
+        # including when a new ownership check rejects. This file is output
+        # for diagnosis only; the factory never reads it to issue authority.
+        (process_directory / "conversion-evidence.json").write_text(json.dumps(evidence, sort_keys=True) + "\n")
         ownership = validate_conversion_calls(evidence["evidence"])
         construction = compile_construction_controls(root, target, evidence)
         mir_controls = verify_mir_controls(root, target, driver, evidence)

@@ -29,7 +29,9 @@ def conversion_fixture():
             "payloads": [{"shape": payload}], "serializers": [], "local_callee": False,
         }
     return {
-        "format": 2, "scope": "compiler-json", "crate": definition("chelis_python::"),
+        "format": 2, "scope": "compiler-json", "crate": {
+            "crate": "chelis_python", "item_name": "chelis_python", "path": "", "def_id": "0:0",
+        },
         "bodies": ["compiled"], "errors": [], "conversion_traits": traits,
         "deserialize_trait": definition("serde_core::de::Deserialize"),
         "codec_calls": [], "schema_calls": [], "dynamic_returns": [],
@@ -114,6 +116,12 @@ class CompilerJsonAuthority(unittest.TestCase):
     def test_compiled_conversion_ownership_cannot_be_a_named_helper(self):
         raw = conversion_fixture()
         self.assertEqual(len(validate_conversion_calls(raw)), 5)
+        for field, wrong in (("crate", "chelis_compiler_api"), ("item_name", "impostor"),
+                             ("path", "::compiler_json"), ("def_id", "1:0")):
+            changed = copy.deepcopy(raw)
+            changed["crate"][field] = wrong
+            with self.subTest(root_field=field), self.assertRaises(GraphError):
+                validate_conversion_calls(changed)
         for mutation in ("helper", "trait", "root", "duplicate", "missing", "callee", "extra"):
             changed = copy.deepcopy(raw)
             call = changed["calls"][0]
