@@ -23,7 +23,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -75,6 +78,7 @@ class FakeApi:
         self.create_url = create_url
         self.calls: list[list[str]] = []
         self.envs: list[dict] = []
+        self.cwds: list[str | None] = []
 
     @staticmethod
     def default_run(**overrides: object) -> dict:
@@ -94,6 +98,8 @@ class FakeApi:
     def __call__(self, command, **kwargs: object):
         self.calls.append(list(command))
         self.envs.append(dict(kwargs.get("env") or {}))
+        cwd = kwargs.get("cwd")
+        self.cwds.append(None if cwd is None else str(cwd))
         joined = " ".join(command)
         if command[0] != "gh" and "openspec_acceptance.py" in joined:
             return _Result(self.verdict, self.verdict_text, "")
@@ -836,6 +842,132 @@ class SubmissionCredentialTests(unittest.TestCase):
         source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertNotIn('or os.environ.get("GITHUB_TOKEN")', source)
         self.assertNotIn('or os.environ.get("GH_TOKEN")', source)
+
+
+class RelativeRepositoryPathTests(unittest.TestCase):
+    """The workflow checks out to `base/`, not to the working directory.
+
+    Every other test here passes `Path(".")`, where applying the path twice
+    is invisible: `./.` is `.`. The hosted controller passes `base`, and the
+    first real run failed with
+
+        openspec_acceptance: cannot run Git:
+        [Errno 2] No such file or directory: 'base'
+
+    because the classifier was started with `cwd=base` AND `--repo base`,
+    so it looked for `base/base`. A relative path must not be resolved once
+    by the parent and again by the child.
+    """
+
+    def classifier_call(self, api: FakeApi) -> tuple[list[str], str | None]:
+        for call, cwd in zip(api.calls, api.cwds):
+            if any("openspec_acceptance.py" in part for part in call):
+                return call, cwd
+        raise AssertionError("the classifier was never invoked")
+
+    def test_the_classifier_repo_argument_survives_its_own_cwd(self) -> None:
+        api = FakeApi()
+        status, output = run_controller(api, repository_path=Path("base"))
+        self.assertEqual(status, controller.QUEUED, output)
+        call, cwd = self.classifier_call(api)
+        repo = call[call.index("--repo") + 1]
+        # Resolving the argument against the child's own working directory
+        # must land on the repository, not on a sibling beneath it.
+        self.assertEqual(
+            (Path(cwd or ".") / repo).resolve(),
+            Path("base").resolve(),
+            f"--repo {repo!r} under cwd {cwd!r} does not name the repository",
+        )
+
+    def test_a_relative_checkout_directory_reaches_a_real_git_repository(
+        self,
+    ) -> None:
+        """The failure was in a real subprocess, so prove it with one.
+
+        The fake runner answers `gh`, but the classifier runs for real
+        against a real repository in a subdirectory -- the exact shape the
+        workflow uses.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            checkout = workspace / "base"
+            head, base = self.build_repository(checkout)
+
+            class RealClassifier(FakeApi):
+                def __call__(self, command, **kwargs: object):
+                    if any("openspec_acceptance.py" in part for part in command):
+                        self.calls.append(list(command))
+                        self.envs.append({})
+                        self.cwds.append(str(kwargs.get("cwd")))
+                        return subprocess.run(
+                            list(command),
+                            cwd=kwargs.get("cwd"),
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                        )
+                    return super().__call__(command, **kwargs)
+
+            api = RealClassifier(
+                run=FakeApi.default_run(head_sha=head),
+                branch_sha=head,
+                base_sha=base,
+            )
+            out = io.StringIO()
+            # `base` stays RELATIVE here, and the process runs from the
+            # directory holding it, exactly as the workflow does.
+            previous = os.getcwd()
+            os.chdir(workspace)
+            try:
+                with redirect_stdout(out), redirect_stderr(out):
+                    status = controller.run(
+                        repository=REPO,
+                        run_id=RUN_ID,
+                        default_branch="main",
+                        repository_path=Path("base"),
+                        runner=api,
+                        submission_token=SUBMISSION_TOKEN,
+                    )
+            finally:
+                os.chdir(previous)
+            output = out.getvalue()
+            self.assertNotIn("cannot run Git", output)
+            self.assertNotIn("No such file or directory", output)
+            self.assertEqual(status, controller.QUEUED, output)
+
+    def build_repository(self, checkout: Path) -> tuple[str, str]:
+        """A real repository whose tip changes one OpenSpec document."""
+        checkout.mkdir(parents=True)
+
+        def git(*arguments: str) -> str:
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        git("init", "--quiet", "--initial-branch", "main")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test")
+        # Governance content the head must carry unchanged. Without it the
+        # identity comparison has nothing to read and refuses, which is its
+        # own fail-closed rule and would mask the path bug under test.
+        for governance in (".github/workflows/ci.yml", "scripts/gate.py"):
+            path = checkout / governance
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# governance\n", encoding="utf-8")
+        document = checkout / "openspec" / "changes" / "demo"
+        document.mkdir(parents=True)
+        (document / "proposal.md").write_text("# Demo\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "--quiet", "--no-verify", "-m", "base")
+        base = git("rev-parse", "HEAD")
+        (document / "proposal.md").write_text("# Demo\n\nMore.\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "--quiet", "--no-verify", "-m", "document change")
+        return git("rev-parse", "HEAD"), base
 
 
 class CredentialExposureTests(unittest.TestCase):
