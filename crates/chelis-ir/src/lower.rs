@@ -12742,15 +12742,18 @@ impl LowerCtx {
                     &self.rank_substitutions,
                 )
             });
-        let params = stamped_parts(&elems[2])
-            .map(|(_, _, params)| {
-                params
-                    .iter()
-                    .filter_map(param_name_and_type_expr)
-                    .map(|(name, _)| name)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let Some((DeepTag::Params, _, params)) = stamped_parts(&elems[2]) else {
+            raise_malformed_deep(
+                "an `fn` form without its parameter list",
+                Some(elems[2].span()),
+                self.current_span_id.clone(),
+            );
+        };
+        let params = params
+            .iter()
+            .filter_map(param_name_and_type_expr)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
         if let Some(ty) = &declared_result {
             self.prepare_parameter_witnesses(&params, ty, call_span);
         }
