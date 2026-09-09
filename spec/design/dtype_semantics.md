@@ -1356,8 +1356,8 @@ A numeric value is transported through §C3's exact dtype-tagged carrier or its
 recognized wire representation under [04-NUM-11] and the owning serialization
 contract. Integers and floats retain their source distinctions. An exact int64
 does not pass through f64; dtype and payload must agree. Recognition reuses the
-closed dtype vocabulary and canonical carrier definitions, including sanctioned
-reduced-float wire images; it does not build another dtype table or assume that
+closed dtype vocabulary and canonical carrier definitions, including spec/10
+§3.2's exact storage-width bit codec; it does not build another dtype table or assume that
 the Rust field width alone establishes the payload dtype. A newly authored exact
 f64 carrier can qualify under this rule. A wrapper around arbitrary f64 does
 not qualify merely because the wrapper is tagged.
@@ -1474,7 +1474,7 @@ expectations may use only behavior decided by the controlling spec.
 | Source identity and use | Preserve coordinate and opaque identity independently; identical offsets in distinct source contexts stay distinguishable; valid local slicing succeeds. | Reconstruct identity from offsets, treat a foreign identity as local, or overflow/exceed the known local buffer at slicing; reject at the owning use boundary. |
 | Scoped input reference | Reconstruct the intended earlier tensor input with its valid axis and retain shape-only input liveness; accept valid tensor dtypes and identical slots under distinct legitimate owners. | Zero/out-of-range slot, forbidden owner, reconstruction against the wrong owner's inputs, invalid source/axis under the owning contract, or a dropped shape-only edge fails the owning validation. |
 | Distinct numeric roles | Input reference coexists with the registered int32 axis and exact int64 extent. | Reclassify the axis or extent as reference metadata, or turn a slot into an extent without its governing operation. |
-| Numeric payload fidelity | Canonical value/wire carrier, including exact int64 `9007199254740993` and valid reduced-float images. | Arbitrary `Metadata::Value(f64)` transport registration, int64 through f64, dtype/payload mismatch, or invalid reduced-float image fails. |
+| Numeric payload fidelity | Canonical value/wire carrier, including exact int64 `9007199254740993` and exact reduced-float bits. | Arbitrary `Metadata::Value(f64)` transport registration, int64 through f64, dtype/payload mismatch, wrong-width bits, or a numeric float in the bit codec fails. |
 | Raw dtype selector | Canonical closed dtype carrier preserves its active/deferred disposition. | Register a raw integer dtype selector as transport, including after a rename that removes `dtype` from its field name. |
 | Shape and tags | Current Point/Range and dtype codec shapes match their recognized contracts. | Remove/change a required serde tag, add a numeric field, change width/codec, or substitute a lookalike carrier; rebaselining cannot admit it. |
 | Reachable graph | Registered transport through `Option`, `Vec`, alias, newtype, and imported helper; a nonnumeric companion stays nonnumeric. | Hide f64 behind those shapes, relocate a serialized helper, or leave a reachable generic unresolved; no numeric leaf disappears. |
@@ -1516,17 +1516,100 @@ The implementation handoff is a checklist within #1288, not another phase plan:
    enumerator/classifier, and paired controls together under §B1; require the
    aggregate's execution evidence on the implementation's exact head.
 
-This is an internal guard/registration migration; it can preserve existing wire
-bytes. The clarification requires no wire-version bump or user-data migration.
-If a later carrier redesign changes the serialized contract, it first amends the
-owning numbered chapter and follows that format's version rules.
+The four-leaf recognizer alone can preserve wire bytes. Full legacy retirement
+also changes value codecs and role carriers; its decided contract is now
+spec/10 §§3.2–3.5. The atomic delivery below owns that versioned migration.
 
 New or changed rows independently meet the final rule. Existing legacy rows keep
 their #1288 debt until individually migrated; the final contract applies to them
 too. Retiring all legacy exceptions remains #1288's broader deliverable, not an
 additional completion requirement for the membership definition. No baseline
-edit promotes coverage. This design-only change leaves the active manifest and
-guard artifacts unchanged.
+edit promotes coverage. The normative contract handoff changes no live
+enumerator, baseline, codec or version constant.
+
+#### Final wire and binding contract handoff
+
+**Current state.** The live execution version is 2 and WireDag version is 7.
+The numbered serialization contract decides execution version 3 and WireDag
+version 8; those formats are not implemented by this handoff. The existing
+84 wire legacy rows remain debt. Source inspection adds 21 previously missed
+numeric declaration leaves: the eight numeric variants of each private
+`ScalarWire` and `StorageWire` codec mirror, `WireDiagnostic.severity`, and
+`WireCheckResult`'s score and three counters. Together with the four transport
+and two operation registrations this is a source-derived 111-leaf mapping,
+not an executed discovery receipt or a future fixed baseline. Actual discovery
+owns the final count. Codec mirrors are associated with their public carrier;
+the WireDag encoder/decoder helper structs are endpoints of the same slots,
+not additional public fields. Exported schema roots and their real consumers
+keep the legacy fields reachable; lack of a direct caller does not retire one.
+
+The legacy dispositions have the following exhaustive ownership map. Variant
+sets include only their numeric leaves; each field still needs exact admission.
+
+| rows | existing fields | controlling contract |
+|---|---|---|
+| 16 | Eight numeric `ExecutionValue` scalar variants and eight numeric `TensorElements` variants | spec/10 §3.2; [04-NUM-2/11] |
+| 6 | `WireDeepAtom` Int/Float and `WireLiteral` Int/Float/TypedInt/TypedFloat | spec/10 §3.3; spec/02 P10 and spec/03 §6.4 |
+| 2 | `Span.offset`, `Span.len` | spec/10 §3.3; owning source context |
+| 17 | `EvaluatedRoot.node_id`; the three GradResult node fields; `LowerResult.named_roots`; `WireDag.roots` and version; `WireDagNode.id` and inputs; both `WireFusedInput` indices; `WireRtDim.Node.input`; the four inference variable IDs; execution version | spec/10 §3.4; runtime-reference rules in §3 |
+| 6 | `TensorValue.shape`, concrete dimension-expression leaf, both `WireDimInfo` sizes, inferred literal dimension, runtime literal dimension | spec/10 §§3.2/3.4; [04-NUM-11], [05-DIM-1/2] |
+| 23 | Thirteen positional axis leaves; OneHot vocabulary; four window/stride leaves; three random float parameters and two seeds | spec/10 §§3.2/3.4; [05-DIM-3], [05-OP-8/37/39], [05-RNG-1] |
+| 2 | Surf tuple-get index and optional vmap axis | spec/10 §3.3; normal source admission |
+| 12 | CheckResult score and three counters; four fitness components; diagnostic severity; two edit counts; optional peak byte estimate | [04-FIT-18], spec/10 §3.5 |
+
+**Representation.** General floating values move to the canonical dtype-tagged
+IEEE bit-string codec, shared by execution values and imported scalar/storage
+carriers. Integer values remain exact at their declared widths. Report fields
+retain JSON numbers through explicitly recognized fixed-dtype adapters over
+sealed numeric carriers; the field contract supplies the dtype and admissible
+domain. Finite bounds do not create a structural metadata exemption. Source
+numeric syntax remains distinct from finalized values. Normal source admission
+is required when raw syntax becomes executable, including #1604's live
+annotations; a historical macro or extension value is not an admission bypass.
+
+**Atomic implementation boundary.** One implementation PR switches every
+versioned public wire shape, all readers/writers, cache compatibility checks,
+consumer pins, random parameters and descriptor/reference carriers together
+with complete graph activation and wire exception retirement.
+No partial WireDag v8 is published. It rejects old, missing and future versions
+without a compatibility decoder. The existing versions and numeric codecs
+remain unchanged until that candidate is complete. Verifier, graph and codec
+infrastructure with independent fixtures may precede it, but does not claim
+live complete discovery. Every new or changed leaf has verifier-issued final
+authority; newly discovered leaves cannot copy a frozen disposition. The
+aggregate remains `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`,
+with exact artifact, selection and execution receipts. Old-producer/new-reader
+rejection and current/current success are required across caches and codecs.
+
+**Binding contracts.** spec/11 §1 owns `CompilerJson`, `CompiledTensorCall`,
+`DLPackCapsule` and `DLPackDevice` admission. The seven transport candidates are
+the four numeric compiler JSON functions, `CompiledModel.__call__`, and the
+two NativeTensor DLPack methods. Their string/dynamic Python outer types are
+not nonnumeric evidence. The nine structural candidates are the two model
+constructors, decompile/validate source results, four model name/path/target
+getters and the NativeTensor dtype getter. Actual registered payload contracts,
+not this list, determine final classification. The remaining shape getter
+has its own [05-OP-45] identity and exact `Vec<i64>` result; the C-only
+shape atom cannot supply that binding's authority. None of the 17 frozen
+binding rows is promoted by this planning classification.
+
+Binding discovery must follow registered methods and return-container capacity,
+and each numeric transport must bind the actual producer/consumer contract.
+The full-shape getter and the three native tensor transport methods depend on
+#893/#1345's validated wrappers and #889's checked metadata adoption. A
+compiler-JSON binding slice can ship independently; a public unvalidated
+native wrapper cannot stand in for the missing tensor boundary. DLPack keyword
+validation follows the external protocol, including version/device/stream/copy
+semantics; a supported current-device zero-copy path does not authorize ignored
+keywords or promise every optional move/copy path.
+
+**Retained owners.** The wire slice does not complete #1295's RNG arithmetic,
+ordinal-consumption or adjoint behavior. #888 retains capacity proofs with
+program scope, exact products, partial-expression validity and exact Repr at
+reuse. #889 retains checked allocation/view/copy adoption; #893/#1345 retain
+the generated tensor and Python/DLPack wrapper implementation. A wire
+registration proves none of those runtime exits. The respective non-regression
+oracles remain required whenever their boundary is touched.
 
 ---
 

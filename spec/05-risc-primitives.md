@@ -918,6 +918,26 @@ and the integer arithmetic feeding it) uses §2.4.1's node-valued `RtDim`
 capability; it does not allocate a second shape operation or a
 compile-time-only alias.
 
+#### Python full-shape metadata
+
+> **[05-OP-45]** `python_tensor_shape(tensor) -> extents` governs exactly
+> the registered binding identities in
+> `spec/registry/python_tensor_metadata.md`, incorporated by reference.
+> It borrows a validated tensor descriptor and returns all extents in axis
+> order as exact nonnegative `int64` values, exposed as Python integers.
+> The result length equals the descriptor's dynamic int32 rank, including
+> an empty vector for rank zero. It reads no tensor elements and preserves
+> every extent at every active element dtype and admitted device under
+> [04-NUM-11]. No host-width conversion, fixed-rank truncation, fabricated
+> extent, or unchecked foreign descriptor is admitted. Descriptor validity
+> and lifetime are established before the wrapper is constructed, as
+> specified in spec/11 §1.2; observing shape does not authorize allocation
+> or prove equality of capacities. This Python metadata operation is
+> non-differentiable and has no arithmetic accumulator. It does not alter
+> the language `shape(x, axis)` operation or its [05-OP-7] zero-cotangent rule.
+
+(The exact binding shape carrier is not fully implemented; see chelis#1288.)
+
 ### 2.6 Effectful Primitive
 
 | Name | Signature | Semantics | AD / effect note |

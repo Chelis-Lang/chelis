@@ -1,89 +1,100 @@
 # Foreign Function Interface
 
-**Status:** Outline for later phases.
-Chelis does not depend on FFI work for Phase 0 completion, but the expected direction is
-already clear enough to record.
-
 ## 1. Python Interop
 
-The Phase 3 Python path is split into two cuts:
+Python compiler entry points share the compiler API's source, diagnostic and
+value contracts. Compiler/build/runtime failures raise `ChelisError`;
+Python argument/type/data mismatches raise the appropriate Python exception.
+Compiler and evaluator work releases the GIL. Python tensor exchange
+preserves the exact dtype and dynamic descriptor required by [04-NUM-11];
+an f64 or NumPy default is not a substitute for the declared tensor dtype.
 
-### Phase 3b: Interop Core
+### 1.1 Compiler JSON boundaries
 
-- PyO3 bindings for compiler-facing entry points through a shared
-  `chelis-compiler-api` crate
-- install surface: `uv pip install ./bindings/python`
-- CPU-only DLPack interop with PyTorch as the tested guarantee
-- safetensors read/write helpers that round-trip with PyTorch
-- GIL release during compiler/evaluator work
-- `ChelisError` is reserved for compiler/build/runtime failures
-- Python-side data mismatches such as unsupported GPU tensors in this cut are surfaced as
-  `ValueError`
-- `chelis.eval(...)` may copy Python tensor inputs into the evaluator's internal
-  `Vec<f64>` representation in this cut
-- GPU tensors are rejected as Python-side `ValueError`s and deferred to `3b-ii`
+`check_json`, `compile_json`, `desugar_json`, and `eval_json` carry compiler
+API payloads governed by spec/10 §3, even though the Rust/Python outer carrier
+is a string. Their exact payload root, direction, version contract and
+admission path are part of the binding contract. `eval_json` validates tensor
+bindings before evaluation, and each output uses the same typed producer and
+numeric codecs as the corresponding compiler API result. Desugared source
+remains raw syntax until normal admission; a JSON string is not a checked AST.
 
-### Phase 3b-ii: Direct Execution + NumPy Guarantee
+Dynamic Python object types do not establish nonnumeric capacity.
+`PyAny`, `PyObject`, tuples, dictionaries, and a JSON string capable of
+transporting numbers require their actual payload contract. Conversely,
+source text, filesystem paths, names and dtype vocabulary strings retain
+those domains; a filename or a closed dtype spelling is not a tensor payload.
+A compiled-model handle does not itself authorize dereferencing arbitrary
+Python data: the callable boundary validates each supplied tensor.
 
-- `chelis.compile_and_load("model.ch")` as the product path for compiled execution
-- `chelis.load("model.so")` as the advanced loader for an existing artifact
-- sidecar manifest (`model.json`) recording source path + content hash, with a warning on
-  `load()` if the source has changed since compilation
-- direct loading/calling of compiled Chelis artifacts from Python
-- CPU direct execution verified for PyTorch CPU tensors and NumPy arrays
-- HIP device ABI emitted for direct GPU execution, with the Python GPU bridge layered on
-  that ABI
-- GIL release during native compile/build and compiled host/device execution
-- NumPy DLPack guarantee as a documented/tested promise
-- compiled execution currently limited to fully concrete `f32` / `f64` tensors on the C
-  target, and to fully concrete `f32` tensors on the HIP target (chelis#919, chelis#920).
-  The per-target admit-list is `supported_execution_dtypes` in `chelis-python`; the
-  marshalling layer derives the NumPy dtype and the DLPack element width from it rather
-  than assuming f32, and rejects any dtype it cannot describe
-- reef dependency resolution via `project_root=` on `compile_and_load` and `eval`
-  (chelis#816): with a reef package root, imports of reef-declared dependencies resolve
-  against the package's linked library context instead of failing with `unbound
-  variable`. `compile_and_load` auto-discovers the root by walking up from the source
-  file, but only when the (Surf) source contains an `import` declaration; an import-free
-  or non-Surf source, or `project_root=False`, takes the bare self-contained path. An
-  explicit `project_root=` path forces in-context resolution regardless (an
-  empty/whitespace `project_root=""` is rejected outright). `eval` (raw
-  text) requires an explicit `project_root=`. With no applicable root the bare
-  self-contained behavior is unchanged **except** that a rank-0 (scalar-out) tensor
-  entry is now rejected with wrap-as-`tensor[1, f32]` guidance on every path, bare
-  included (rather than emitting an unbuildable scalar kernel), and that when
-  auto-discovery found no root for an importing source, a failing bare compile's
-  error gains a hint naming `project_root=` (error text only; same failure). Default in-context entry
-  selection prefers a tensor def named `main`. A scalar-signature entry has no callable
-  tensor kernel and is rejected with tensor-wrap guidance; `eval` runs it. The
-  in-context lane is entry-scoped where the monolithic lane is whole-program: a
-  top-level (non-`def`) value binding in the new source does not decline compilation
-  (monolithically it does, `HasGlobals`) — the artifact is scoped to the selected
-  entry, and an unreferenced sibling global's computation is simply not part of it.
-  Run `eval` for whole-program semantics. Only the compiled source's own defs
-  are selectable as entries, by their bare names; imported library defs are
-  callable from the entry's body but are not themselves selectable via
-  `entry_name`. Reef-context resolution is **C-target
-  only**: a HIP reef-context compile (`target="hip"` with a `project_root=`) is rejected
-  as unsupported (chelis#829) rather than silently mis-scoped, and the rejection
-  fires before the reef context is compiled, so it does not cost the first
-  context build.
+### 1.2 Native tensor descriptors and shape
 
-### Phase 5a
+`CompiledModel.__call__` accepts and returns tensors only through validated
+wrappers. Each descriptor binds its exact active dtype, dynamic int32 rank,
+int64 extents, strides, element count and byte capacity, device and live owner.
+Construction or foreign adoption checks metadata, storage bounds, alignment,
+representability and ownership before creating a usable wrapper. Shape, dtype,
+device and element storage cannot be replaced independently after validation.
+Empty and rank-zero descriptors obey the same rules; no fixed-rank carrier,
+host-width extent, implicit f64 conversion, or default tensor repairs invalid
+input. Unsupported valid device/dtype combinations are rejected explicitly.
 
-- JAX DLPack guarantee alongside the StableHLO backend
+The `NativeTensor.shape` getter is exactly the non-differentiable metadata
+operation [05-OP-45]. Its Rust result is `Vec<i64>` and its Python result is an
+ordered collection of exact Python integers. `NativeTensor.dtype` reports the
+canonical dtype spelling of that same validated descriptor. These observations
+neither construct allocation capacities nor prove capacity equality.
 
-This is a Phase 3 interoperability feature, not a Phase 0 requirement.
+(The validated native tensor boundary is not fully implemented; see chelis#893.)
+
+### 1.3 DLPack exchange
+
+DLPack keywords are validated, never ignored. `__dlpack__` and
+`__dlpack_device__` follow the [Python DLPack protocol](https://dmlc.github.io/dlpack/latest/python_spec.html)
+and the [Array API argument contract](https://data-apis.org/array-api/2025.12/API_specification/generated/array_api.array.__dlpack__.html).
+The device pair identifies the validated wrapper's actual device. Version
+negotiation selects a supported capsule ABI, and the consumer validates the
+returned version. Malformed arguments are errors. An unsupported export or
+device request raises `BufferError`.
+
+On CPU, `stream` is `None`; other devices validate their protocol-specific
+stream values and synchronization obligations. An implementation may reject
+unsupported optional stream handling, but cannot silently ignore a supplied
+stream. `copy=False` never copies, `copy=True` requires a copy, and `copy=None`
+reuses storage when possible. An unsupported copy/move request fails instead
+of returning a contradictory capsule. A successful copy sets the protocol's
+copied flag. Capsule ownership transfer, consumption and deletion preserve
+one live storage owner for the consumer's entire use. A current-device
+zero-copy implementation does not promise support for every device or copy
+request, and the metadata contract does not mandate an implementation strategy.
+
+(The validated DLPack wrapper is not fully implemented; see chelis#1345.)
+
+### 1.4 Compiled artifact entry and resolution
+
+`compile_and_load` compiles and loads one selected callable entry. `load`
+loads an existing artifact with its matching metadata. Direct calls preserve
+the descriptor and ownership requirements above. Evaluator calls may copy
+input storage while preserving its exact dtype and values. Support for a
+host library or device does not authorize dtype substitution.
+The callable tensor interface rejects a scalar-signature entry; evaluation
+admits scalar results under its own execution-value contract.
+
+`project_root` supplies Reef dependency context. `compile_and_load` discovers
+a root from an importing Surf source unless explicitly disabled; an explicit
+nonempty root selects that context. Evaluation from raw text requires an
+explicit root to use Reef dependencies. Only the compiled source's own defs
+are selectable entries; imported defs may be called by them. Selection prefers
+an unambiguous tensor entry named `main`. Compilation in a linked context
+scopes to the selected entry, while evaluation retains whole-program semantics.
+A target/context combination that cannot satisfy these contracts fails
+explicitly instead of silently using a different scope.
 
 ## 2. C Interop
 
-Generated C headers and runtime support should make it possible to call compiled Chelis
-artifacts from C or C++.
-That interoperability follows naturally from the reference backend and does not require a
-separate host-language embedding model first.
-After Phase `3m`, that C-facing surface is expected to come from `chelis_runtime.h`
-plus the shipped Rust static runtime library rather than a generated `chelis_runtime.c`
-implementation file.
+Generated C headers and runtime support expose compiled Chelis artifacts to C
+and C++. The published declarations and ownership rules govern that boundary
+independently of the runtime implementation language.
 
 ### 2.1 Compiled value ownership
 
@@ -150,6 +161,5 @@ chelis#840 `c_ident` mapping (`emitted_function_name` in
 
 ## 3. Embedding the Compiler
 
-Longer term, the Rust crates should remain usable as libraries so Tide, editor tooling,
-and external integrations can embed compiler functionality directly rather than shelling
-out to the CLI.
+Rust library entry points and external integrations obey the same source,
+value, diagnostic and admission contracts as their CLI counterparts.
