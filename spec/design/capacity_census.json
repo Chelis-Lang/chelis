@@ -87,8 +87,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -130,8 +129,7 @@
       "id": "chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -141,14 +139,12 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -158,8 +154,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -169,40 +164,34 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_chunk ( const chelis_list * list , int64_t size ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -214,42 +203,36 @@
       "id": "chelis_runtime.h: chelis_list * chelis_list_drop ( const chelis_list * list , int64_t count ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_take ( const chelis_list * list , int64_t count ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -259,30 +242,26 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_mmap_read ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_range_i64 ( int64_t start , int64_t end ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -402,8 +381,7 @@
       "id": "chelis_runtime.h: chelis_string chelis_string_slice ( chelis_string value , int64_t start , int64_t len ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -556,8 +534,7 @@
       "id": "chelis_runtime.h: chelis_tuple * chelis_tuple_from_values ( const chelis_value * items , int64_t len ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -569,16 +546,14 @@
       "id": "chelis_runtime.h: chelis_value chelis_adt_get_field ( const chelis_adt * adt , int64_t index ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_list_index ( const chelis_list * list , int64_t index ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -590,8 +565,7 @@
       "id": "chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -700,16 +674,14 @@
       "id": "chelis_runtime.h: int64_t chelis_adt_field_count ( const chelis_adt * adt ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_dict_len ( const chelis_dict * dict ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -723,24 +695,21 @@
       "id": "chelis_runtime.h: int64_t chelis_list_len ( const chelis_list * list ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
@@ -789,32 +758,27 @@
       "id": "chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -824,14 +788,12 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -856,38 +818,32 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -917,20 +873,17 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -952,8 +905,7 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-struct",

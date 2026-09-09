@@ -328,15 +328,15 @@ numeric data, whether or not you have read that document:
   finding. Zero-exception classification is the landing rule: every discovered row
   must end in exactly one final authority class - structurally nonnumeric, a
   structurally recognized exact tagged carrier/transport, or an exact numeric
-  operation registration. The immutable foundation-era universe retains the old 39
-  grandfather rows, three successor overrides, and 155 permanent plain rows as
-  deletion debt owned by chelis#1288. The active primary baseline has already
-  moved 18 exact structurally nonnumeric rows, the eight tagged-carrier
-  declarations, and 123 registered numeric operations (the [05-OP-35]
-  stdlib surface registrations among them) to final authority; it
-  therefore retains no pre-ratchet grandfather rows, no successors, and 63
-  permanent plain rows as active debt, and the obsolete prelude `Json` row
-  is deleted. The
+  operation registration. Historical foundation snapshots record the old 39
+  grandfather rows, three successor overrides, and 155 permanent plain rows; the
+  executable primary census and guard retain none of those disposition lists or
+  admission paths. The active primary baseline has completed
+  that migration: all 237 rows have final authority as 66 exact structurally
+  nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
+  155 registered numeric operations (the [05-OP-35] stdlib registrations among
+  them). It retains no grandfather, successor-override, permanent-disposition,
+  integer-plumbing, or other transition rows. The
   84 typed-wire and 17 registered-PyO3 baseline rows remain sealed legacy cohorts,
   while Count's wire field is final-registered. Those lists confer no authorization
   for a new, renamed, reclassified, or otherwise changed row, and a change touching one
@@ -408,9 +408,9 @@ numeric data, whether or not you have read that document:
   non-character built-in arithmetic value type - including bare `int`, `short`,
   `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
   types - makes a callable `numeric-op`. Names and parameter-name heuristics never
-  turn a callable into plumbing. The executable census still contains three exact
-  integer-plumbing exceptions as chelis#1288 deletion debt; they cannot be copied,
-  widened, renamed, or used to authorize any changed declaration. The final rule
+  turn a callable into plumbing. The executable primary census has no
+  integer-plumbing exceptions; every arithmetic declaration follows the conservative
+  classification rule. The final rule
   registers extents, allocation sizes, indices, and dtype selectors as numeric
   operations; raw dtype selectors are forbidden.
   Conditional macro definitions

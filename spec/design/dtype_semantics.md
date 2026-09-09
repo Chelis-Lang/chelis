@@ -893,41 +893,26 @@ Deliverables, with phase homes:
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
 
-   The foundation enforces that landing rule for every new or changed identity
-   while the remaining migration proceeds. The primary baseline currently has
-   119 active legacy rows: 21 grandfather seams, 97 permanent plain rows, and
-   the obsolete prelude `Json` row. Its 18 exact nonnumeric rows, its eight
-   tagged-carrier declarations, and its 34 registered numeric operations have
-   final authority and no legacy disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
-   cohorts; Count's wire field is separately final-registered. These counts are
-   progress evidence, not the zero-exception completion oracle.
+   The primary baseline has completed that landing rule: its 237 discovered
+   rows have final authority as 66 exact nonnumeric rows, 16 exact tagged
+   carriers/transports, and 155 exact numeric-operation registrations. It has
+   zero grandfather, permanent-disposition, successor-override,
+   integer-plumbing, or other transition rows. The 84 wire and 17 binding
+   baseline rows remain sealed legacy cohorts; Count's wire field is separately
+   final-registered. These counts are current inventory evidence; executable
+   enumeration and exact one-class matching remain the completion oracle.
 
    The final C/runtime authority partition is exact:
 
-   - `Nonnumeric` contains only `chelis_file_exists`,
-     `chelis_string_contains`, `chelis_string_ends_with`, `chelis_string_eq`,
-     `chelis_string_starts_with`, `chelis_string_concat`,
-     `chelis_string_from_cstr`, `chelis_string_trim`, `chelis_string_data`,
-     `chelis_adt_get_tag`, `chelis_adt_tag_equals`, `chelis_fail`,
-     `chelis_read_file`, `chelis_write_file`, `chelis_read_lines`,
-     `chelis_list_dir`, `chelis_mmap_file`, and the opaque `chelis_string`
-     layout.
-   - `TaggedTransport` contains the exact `chelis_dtype`, `chelis_scalar`,
-     `chelis_tensor`, `chelis_value_tag`, `chelis_value`,
-     `chelis_option_scalar`, `chelis_option_value`, and `chelis_dict_entry`
-     layouts; `chelis_free`; `chelis_string_retain`, `chelis_string_release`,
-     `chelis_list_retain`, `chelis_list_release`, `chelis_tuple_retain`,
-     `chelis_tuple_release`, `chelis_dict_retain`, `chelis_dict_release`,
-     `chelis_adt_retain`, `chelis_adt_release`, `chelis_value_retain`, and
-     `chelis_value_release`; `chelis_value_from_string`,
-     `chelis_value_from_tensor`, `chelis_value_from_list`,
-     `chelis_value_from_tuple`, `chelis_value_from_dict`,
-     `chelis_value_from_adt`; `chelis_value_as_string`,
-     `chelis_value_as_tensor`, `chelis_value_as_list`,
-     `chelis_value_as_tuple`, `chelis_value_as_dict`, and
-     `chelis_value_as_adt`;
-     `chelis_list_empty`, `chelis_list_append`, `chelis_list_concat`,
-     `chelis_list_flatten`, `chelis_list_zip`; and
+   - `Nonnumeric` is the exact 66-descriptor registry. In particular, the
+     `chelis_adt`, `chelis_dict`, `chelis_list`, `chelis_string`, and
+     `chelis_tuple` retain/release pairs and `chelis_value_release` carry no
+     numeric value or capacity and are registered here.
+   - `TaggedTransport` is the exact 16-descriptor registry: the value-tag enum,
+     `chelis_scalar`, `chelis_value`, `chelis_read_view`, `chelis_write_view`,
+     `chelis_value_payload`, and dtype enum declarations; the [05-OP-31]
+     `chelis_dict_entry` shape; and `chelis_list_empty`, `chelis_list_append`,
+     `chelis_list_concat`, `chelis_list_flatten`, `chelis_list_zip`,
      `chelis_dict_keys`, `chelis_dict_values`, and `chelis_dict_entries`.
      A transport row only moves an
      already validated tagged value and never sizes, compares, indexes,
