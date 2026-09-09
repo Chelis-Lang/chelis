@@ -94,4 +94,3 @@ def validate_semantics(rows: dict[str, str], spec: str) -> None:
     for identity, clause in CASE_CLAUSES.items():
         if identity not in rows or clause not in blocks[rows[identity]]:
             raise RegistryError(f"wrong governing overload for {identity}")
-
