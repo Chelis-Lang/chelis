@@ -315,6 +315,303 @@ int main(void) {{
 }
 
 #[test]
+fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
+    use chelis_ir::dag::RtDim;
+    for (prim, dtype, seed, fill_bits) in [
+        (
+            Prim::F32,
+            "CHELIS_DTYPE_F32",
+            0x3f80_0000_u64,
+            0x3f80_0000_u64,
+        ),
+        (
+            Prim::F64,
+            "CHELIS_DTYPE_F64",
+            0x3ff0_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+        ),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00, 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80, 0x3f80),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993, 1),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100, 1),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100, 1),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 100, 1),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0, 1),
+    ] {
+        let pairs = |v: &[(usize, usize)]| {
+            v.iter()
+                .map(|&(a, b)| (RtDim::Lit(a), RtDim::Lit(b)))
+                .collect()
+        };
+        let fill = chelis_types::scalar_from_i64("pad", prim, 1).unwrap();
+        let mut padded = vec![-1_i64; 18];
+        for (input, output) in [8, 9, 10, 14, 15, 16].into_iter().enumerate() {
+            padded[output] = input as i64;
+        }
+        let cases = [
+            (
+                vec![2, 3],
+                vec![3, 6],
+                RiscOp::Pad {
+                    padding: pairs(&[(1, 0), (2, 1)]),
+                    fill,
+                },
+                padded,
+            ),
+            (
+                vec![3, 4],
+                vec![2, 3],
+                RiscOp::Shrink {
+                    bounds: pairs(&[(1, 3), (1, 4)]),
+                },
+                vec![5, 6, 7, 9, 10, 11],
+            ),
+            (
+                vec![3, 5],
+                vec![2, 2],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(3)],
+                },
+                vec![0, 3, 10, 13],
+            ),
+            (
+                vec![0, 3],
+                vec![1, 3],
+                RiscOp::Pad {
+                    padding: pairs(&[(0, 1), (0, 0)]),
+                    fill,
+                },
+                vec![-1; 3],
+            ),
+            (
+                vec![2, 3],
+                vec![0, 3],
+                RiscOp::Shrink {
+                    bounds: pairs(&[(1, 1), (0, 3)]),
+                },
+                vec![],
+            ),
+            (
+                vec![2, 0],
+                vec![1, 0],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
+                },
+                vec![],
+            ),
+            (
+                vec![],
+                vec![],
+                RiscOp::Pad {
+                    padding: vec![],
+                    fill,
+                },
+                vec![0],
+            ),
+            (
+                vec![1; 9],
+                vec![1; 9],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2); 9],
+                },
+                vec![0],
+            ),
+        ];
+        for (input_shape, output_shape, op, expected) in cases {
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: prim,
+            };
+            let mut dag = Dag::new();
+            let x = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(&input_shape),
+                None,
+            );
+            let y = dag.add_node(op.clone(), vec![x], ty(&output_shape), None);
+            dag.add_root(y);
+            let generated = codegen(&dag, "affine_movement").unwrap();
+            let spell = |values: Vec<i64>| {
+                if values.is_empty() {
+                    "0".into()
+                } else {
+                    values
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
+            };
+            let input_dims = spell(input_shape.iter().map(|&n| n as i64).collect());
+            let output_dims = spell(output_shape.iter().map(|&n| n as i64).collect());
+            let map = spell(expected.clone());
+            let input_rank = input_shape.len();
+            let output_rank = output_shape.len();
+            let input_count: usize = input_shape.iter().product();
+            let output_count = expected.len();
+            let bits = if prim == Prim::Bool {
+                "(uint64_t)(i % 2)".into()
+            } else {
+                format!("UINT64_C({seed}) + (uint64_t)i")
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void affine_movement(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t input_shape[] = {{{input_dims}}}, output_shape[] = {{{output_dims}}}, map[] = {{{map}}};
+    chelis_tensor *x = chelis_alloc({input_rank}, input_shape, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    unsigned char *data = chelis_tensor_write_view(guard).data;
+    size_t width = (size_t)chelis_dtype_size({dtype});
+    for (int64_t i=0; i<{input_count}; ++i) {{uint64_t bits = {bits}; memcpy(data + i*width, &bits, width);}}
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x}}, *outputs[] = {{NULL}};
+    affine_movement(inputs, 1, outputs, 1);
+    chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {output_count} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {output_rank}) return 2;
+    for (int axis=0; axis<{output_rank}; ++axis) if (chelis_tensor_shape(outputs[0], axis) != output_shape[axis]) return 3;
+    uint64_t fill = UINT64_C({fill_bits});
+    for (int64_t i=0; i<out.count; ++i) {{
+        const void *expected = map[i] < 0 ? (const void*)&fill : (const unsigned char*)in.data + map[i]*width;
+        if (memcmp((const unsigned char*)out.data + i*width, expected, width)) return 4;
+    }}
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("AFFINE PASS"); return 0;
+}}
+"#
+            );
+            let run = checked_indexing_run(&generated.c_source, &harness);
+            assert!(
+                run.status.success(),
+                "{prim:?} {op:?}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert_eq!(run.stdout, b"AFFINE PASS\n");
+        }
+    }
+}
+
+#[test]
+fn checked_c_movement_runtime_affine_bounds_reject_before_allocation() {
+    use chelis_ir::dag::RtDim;
+    for (name, op, cases) in [
+        (
+            "pad",
+            RiscOp::Pad {
+                padding: vec![(RtDim::Node(1), RtDim::Lit(0))],
+                fill: chelis_types::scalar_from_i64("pad", Prim::Int64, 1).unwrap(),
+            },
+            vec![(2, Some(5)), (-1, None), (i64::MAX, None)],
+        ),
+        (
+            "shrink",
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+            },
+            vec![(2, Some(2)), (0, None), (-1, None), (4, None)],
+        ),
+        (
+            "stride",
+            RiscOp::Stride {
+                strides: vec![RtDim::Node(1)],
+            },
+            vec![(2, Some(2)), (i64::MAX, Some(1)), (0, None), (-1, None)],
+        ),
+    ] {
+        let ty = |dims| TensorType {
+            dims,
+            precision: Prim::Int64,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(3)]),
+            None,
+        );
+        let n = dag.add_node(RiscOp::Load { name: "n".into() }, vec![], ty(vec![]), None);
+        let y = dag.add_node(
+            op,
+            vec![x, n],
+            ty(vec![DimInfo::Named("result".into(), None)]),
+            None,
+        );
+        dag.add_root(y);
+        let generated = codegen(&dag, "dynamic_affine").unwrap();
+        for (bound, expected) in cases {
+            let expected_count = expected.unwrap_or(0);
+            let padding = name == "pad";
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void dynamic_affine(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t shape[] = {{3}};
+    chelis_tensor *x = chelis_alloc(1, shape, CHELIS_DTYPE_I64), *n = chelis_alloc(0, NULL, CHELIS_DTYPE_I64);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 7)); chelis_tensor_end_write(guard);
+    guard = chelis_tensor_begin_write(n);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({bits}))); chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x,n}}, *outputs[] = {{NULL}};
+    dynamic_affine(inputs,2,outputs,1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {expected_count}) return 4;
+    for (int64_t i=0; i<out.count; ++i) if (((const int64_t*)out.data)[i] != ({pad} && i < {bound} ? 1 : 7)) return 5;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); chelis_tensor_release(n);
+    puts("DYNAMIC AFFINE PASS"); return 0;
+}}
+"#,
+                bits = bound as u64,
+                pad = i32::from(padding)
+            );
+            let source = if expected.is_none() {
+                let allocation = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains(" = chelis_alloc("))
+                    .expect("output allocation");
+                generated.c_source.replacen(
+                    allocation,
+                    &format!("exit(78); /* allocation reached */\n{allocation}"),
+                    1,
+                )
+            } else {
+                generated.c_source.clone()
+            };
+            let run = checked_indexing_run(&source, &harness);
+            if expected.is_some() {
+                assert!(
+                    run.status.success(),
+                    "{name} {bound}: {}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(run.stdout, b"DYNAMIC AFFINE PASS\n");
+            } else {
+                assert!(!run.status.success(), "{name} {bound}: {run:?}");
+                assert_ne!(
+                    run.status.code(),
+                    Some(78),
+                    "allocation preceded rejection: {name} {bound}"
+                );
+                let class = if bound == i64::MAX {
+                    "overflow"
+                } else {
+                    "domain"
+                };
+                assert!(
+                    String::from_utf8_lossy(&run.stderr)
+                        .ends_with(&format!("numeric trap: {class} in {name} at int64\n")),
+                    "{run:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn checked_c_indexing_dag_scalar_fused_reuse_and_empty_execute_under_sanitizers() {
     use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
     for prim in [Prim::F32, Prim::F64] {

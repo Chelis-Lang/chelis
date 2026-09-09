@@ -238,9 +238,15 @@ impl ShapeMetadata {
         &self,
         mut coordinate: impl FnMut(usize) -> i64,
     ) -> Result<usize, MetadataError> {
+        self.try_flat_index_by(|axis| Ok(coordinate(axis)))
+    }
+    fn try_flat_index_by(
+        &self,
+        mut coordinate: impl FnMut(usize) -> Result<i64, MetadataError>,
+    ) -> Result<usize, MetadataError> {
         let mut flat = 0_i64;
         for (axis, (&extent, &stride)) in self.shape.iter().zip(self.strides()).enumerate() {
-            let index = coordinate(axis);
+            let index = coordinate(axis)?;
             if index < 0 || index >= extent {
                 return Err(MetadataError::Domain("tensor index outside shape".into()));
             }
@@ -251,6 +257,77 @@ impl ShapeMetadata {
         }
         self.require_index(flat)?;
         usize::try_from(flat).map_err(|_| MetadataError::Overflow("tensor index exceeds usize"))
+    }
+    pub(crate) fn affine_index_by(
+        &self,
+        mut terms: impl FnMut(usize) -> (i64, i64, i64),
+    ) -> Result<usize, MetadataError> {
+        self.try_flat_index_by(|axis| {
+            let (coordinate, offset, step) = terms(axis);
+            if coordinate < 0 || offset < 0 || step <= 0 {
+                return Err(MetadataError::Domain(
+                    "invalid affine coordinate, offset, or step".into(),
+                ));
+            }
+            coordinate
+                .checked_mul(step)
+                .and_then(|n| n.checked_add(offset))
+                .ok_or(MetadataError::Overflow("affine coordinate exceeds int64"))
+        })
+    }
+    fn movement_shape(
+        &self,
+        mut extent: impl FnMut(usize, i64) -> Result<i64, MetadataError>,
+    ) -> Result<Self, MetadataError> {
+        let count = ElementCount::scratch_entries(self.shape.len(), 0)?;
+        let mut shape = Vec::with_capacity(count.scratch_len::<i64>()?);
+        for (axis, &input) in self.shape.iter().enumerate() {
+            shape.push(extent(axis, input)?);
+        }
+        let result = Self::contiguous(&shape, self.dtype)?;
+        result.bytes.allocation()?;
+        Ok(result)
+    }
+    pub(crate) fn padded(&self, before: &[i64], after: &[i64]) -> Result<Self, MetadataError> {
+        self.require_bound_ranks(before, after)?;
+        self.movement_shape(|axis, input| {
+            if before[axis] < 0 || after[axis] < 0 {
+                return Err(MetadataError::Domain("negative padding bound".into()));
+            }
+            input
+                .checked_add(before[axis])
+                .and_then(|n| n.checked_add(after[axis]))
+                .ok_or(MetadataError::Overflow("padded extent exceeds int64"))
+        })
+    }
+    pub(crate) fn shrunk(&self, start: &[i64], end: &[i64]) -> Result<Self, MetadataError> {
+        self.require_bound_ranks(start, end)?;
+        self.movement_shape(|axis, input| {
+            if start[axis] < 0 || end[axis] < start[axis] || end[axis] > input {
+                return Err(MetadataError::Domain(
+                    "shrink bounds outside input extent".into(),
+                ));
+            }
+            // The ordered nonnegative bounds prove this difference representable.
+            Ok(end[axis] - start[axis])
+        })
+    }
+    pub(crate) fn strided(&self, steps: &[i64]) -> Result<Self, MetadataError> {
+        self.require_bound_ranks(steps, steps)?;
+        self.movement_shape(|axis, input| {
+            let step = steps[axis];
+            if step <= 0 {
+                return Err(MetadataError::Domain("stride step must be positive".into()));
+            }
+            // Unlike (input + step - 1) / step, this is valid at int64::MAX.
+            Ok(input / step + i64::from(input % step != 0))
+        })
+    }
+    fn require_bound_ranks(&self, first: &[i64], second: &[i64]) -> Result<(), MetadataError> {
+        if first.len() != self.shape.len() || second.len() != self.shape.len() {
+            return Err(MetadataError::Domain("movement bound rank mismatch".into()));
+        }
+        Ok(())
     }
     pub(crate) fn unravel(&self, linear: i64, out: &mut [i64]) -> Result<(), MetadataError> {
         unravel(&self.shape, self.elements, linear, out)

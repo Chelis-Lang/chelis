@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "25b27505000f86868a02247964d03a76b055d8329451774f1f80f3fa643a1555"
+FREEZE_SHA256 = "73a29872ed36bd3bf638c59b27ef8dadd34fc576f1314dcbba5a350d2125a719"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1668,7 +1668,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--features", "ownership-ledger",
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
-                "--test", "checked_c_indexing", "--test", "checked_c_movement",
+                "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_affine",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",

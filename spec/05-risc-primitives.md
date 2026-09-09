@@ -1969,6 +1969,34 @@ exact ADT identity by [05-OP-34].
 > an active write guard, change no tensor metadata, payload, or ownership, and
 > have no cotangent or accumulator. They preserve [05-MOV-1]'s movement semantics.
 >
+> `chelis_tensor_pad_shape`, `chelis_tensor_shrink_shape`, and
+> `chelis_tensor_stride_shape` derive a complete checked target shape from the
+> input metadata and rank-many exact tagged int64 bounds. The supplied tagged
+> int64 rank must equal the input rank. Padding requires nonnegative before/after
+> amounts and computes `input + before + after` with checked addition. Shrinking
+> requires `0 <= start <= end <= input` and computes `end - start`; equal endpoints
+> describe an empty axis. Striding requires positive steps and computes the exact
+> ceiling quotient without an overflowing intermediate sum. Each validates the
+> complete target count, suffix strides, representation bytes, and target allocation
+> domain before writing rank-many canonical int64 scalars to the caller's output
+> array. Positive rank requires non-null bound and output arrays. Rank zero admits
+> empty arrays and retains one element. Empty targets do not bypass bound checks.
+> Callers preserve operation extent claims and require the computed shape to equal
+> the shape submitted for allocation or repurpose, before either occurs.
+>
+> `chelis_tensor_affine_index` takes rank-many exact tagged int64 coordinates,
+> nonnegative offsets, and positive steps. It computes each coordinate as
+> `coordinate * step + offset` with checked arithmetic, requires both the original
+> coordinate to be nonnegative and the resulting coordinate to be inside the
+> tensor's extent, and returns the checked row-major int64 index. Positive rank
+> requires all three arrays; rank zero admits empty arrays and returns zero.
+> Empty tensors admit no index. These four operations access metadata only, remain
+> valid during a write guard, and change no tensor metadata, payload, or ownership.
+> They have no cotangent or accumulator. Malformed carriers, pointers, ranks, bounds,
+> or indices trap `Domain`; unrepresentable metadata or arithmetic traps `Overflow`.
+> Numeric failures use [04-NUM-9]'s canonical line at `int64`, with operation `pad`,
+> `shrink`, `stride`, or `affine_index`, respectively.
+>
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked
 > reshape validation before allocating result storage, returns an independent

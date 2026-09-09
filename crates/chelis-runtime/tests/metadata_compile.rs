@@ -95,6 +95,21 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
+            ".checked_add(before[axis])",
+            ".wrapping_add(before[axis]).checked_add(0)",
+            "affine_metadata_checks_exact_extents_and_offsets_without_storage",
+        ),
+        (
+            ".checked_mul(step)",
+            ".wrapping_mul(step).checked_add(0)",
+            "affine_metadata_checks_exact_extents_and_offsets_without_storage",
+        ),
+        (
+            "end[axis] > input",
+            "false",
+            "affine_metadata_checks_exact_extents_and_offsets_without_storage",
+        ),
+        (
             "self.shape.as_ref() == domain",
             "true",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",

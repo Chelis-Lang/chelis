@@ -519,8 +519,8 @@ fn issue_616_runtime_shrink_zero_size_axis_errs_in_both_lanes() {
     );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("shrink bound out of range"),
-        "C abort must name the shrink range guard; stderr={stderr}"
+        stderr.lines().last() == Some("numeric trap: domain in shrink at int64"),
+        "C rejection must use the canonical shrink domain diagnostic; stderr={stderr}"
     );
 }
 
@@ -556,7 +556,7 @@ fn issue_616_runtime_shrink_overshoot_errs_in_both_lanes() {
     );
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains("shrink bound out of range"),
-        "C abort must name the shrink range guard; stderr={stderr}"
+        stderr.lines().last() == Some("numeric trap: domain in shrink at int64"),
+        "C rejection must use the canonical shrink domain diagnostic; stderr={stderr}"
     );
 }

@@ -305,3 +305,43 @@ fn checked_movement_coordinates_preserve_exact_large_indices_without_storage() {
         .is_err());
     assert!(metadata.flat_index_by(|_| -1).is_err());
 }
+
+#[test]
+fn affine_metadata_checks_exact_extents_and_offsets_without_storage() {
+    let extent = 9_007_199_254_740_995;
+    let large = ShapeMetadata::contiguous(&[extent], RuntimeDType::I8).unwrap();
+    assert_eq!(
+        large.strided(&[2]).unwrap().shape(),
+        &[4_503_599_627_370_498]
+    );
+    assert_eq!(
+        large
+            .affine_index_by(|_| (4_503_599_627_370_496, 1, 2))
+            .unwrap(),
+        9_007_199_254_740_993_usize
+    );
+    assert_eq!(large.padded(&[1], &[2]).unwrap().shape(), &[extent + 3]);
+    assert_eq!(
+        large.shrunk(&[extent], &[extent]).unwrap().elements().get(),
+        0
+    );
+    assert!(matches!(
+        large.padded(&[i64::MAX], &[0]),
+        Err(MetadataError::Overflow(_))
+    ));
+    assert!(large.padded(&[-1], &[0]).is_err());
+    assert!(large.shrunk(&[0], &[extent + 1]).is_err());
+    assert!(large.strided(&[0]).is_err());
+    assert!(large.strided(&[]).is_err());
+    assert!(matches!(
+        large.affine_index_by(|_| (i64::MAX, 1, 2)),
+        Err(MetadataError::Overflow(_))
+    ));
+    assert!(large.affine_index_by(|_| (extent, 0, 1)).is_err());
+    let empty = ShapeMetadata::contiguous(&[0, i64::MAX], RuntimeDType::I8).unwrap();
+    assert!(empty.padded(&[0, 0], &[0, 1]).is_err());
+    assert!(empty.strided(&[1, -1]).is_err());
+    assert!(empty.affine_index_by(|_| (0, 0, 1)).is_err());
+    let wide = ShapeMetadata::contiguous(&[1], RuntimeDType::F64).unwrap();
+    assert!(wide.padded(&[0], &[i64::MAX / 8]).is_err());
+}

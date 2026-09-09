@@ -589,7 +589,31 @@ preserved; the two retired movement-template rows reduce active debt from 326
 to 324 without adding an owner exception. This extends supporting evidence and
 does not implement the complete Phase 1 receipt oracle.
 
-Generated C adoption still requires padding, shrinking, striding, reduction
+#### Generated C padding, shrinking, and striding (#889)
+
+This slice routes these three DAG emitters through the private checked shape
+owner. Three metadata-only C operations derive and validate the complete target
+shape before exposing its extents; one affine-coordinate operation checks the
+offset/step map through that same owner. Generated C preserves extent-claim order,
+checks the submitted shape against the computed shape before allocation or reuse,
+and uses checked unraveling and affine indices without per-element allocation.
+Payload copying preserves stored bits; padding uses the existing tagged fill.
+Runtime-bound shrinking retains its existing empty-range rejection, shared with
+Eval; this slice does not change that operation-level admission rule. The metadata
+operations and statically empty C paths retain zero-element shapes.
+
+The bounded acceptance surface is `checked_c_affine` in debug and release,
+the backend movement adoption controls, and optimized generated-C sanitizer
+execution. Controls cover all nine dtypes, scalar/empty/high ranks, exact large
+metadata, invalid bounds and target shapes, arithmetic overflow, and erased/late
+validation. The Phase 0 coverage manifest adds the runtime suite in both profiles;
+its digest changes for that command registration. The immutable 358-row foundation
+is preserved, and retiring the three raw movement templates reduces active debt
+from 324 to 321. Checked-add/multiply and bounds mutations execute against the
+private metadata owner. No new inventory identity or owner exception is admitted.
+The complete Phase 1 oracle remains a separate deliverable.
+
+Generated C adoption still requires reduction
 indexing, sparse/BLAS loop domains, and Count/window scratch allocation. The
 complete Phase 1 execution receipt/mutation oracle remains outstanding. Host-only results do not establish
 device execution or close #889/#893. Generated host/device descriptors and
