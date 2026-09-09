@@ -108,7 +108,7 @@ fn cases() -> Vec<Case> {
             if good {
                 Expected::Tensor(vec![3], vec![7.0; 3])
             } else {
-                Expected::Domain("load", &["x", "y", "axis", "2", "3"])
+                Expected::Domain("load", &["x axis 0 = 2", "y axis 0 = 3"])
             },
         );
         call_matrix(
@@ -121,7 +121,7 @@ fn cases() -> Vec<Case> {
             if good {
                 Expected::Tensor(vec![2, 2], vec![1.0, 1.0, 2.0, 2.0])
             } else {
-                Expected::Domain("load", &["x", "y", "axis", "2", "3"])
+                Expected::Domain("load", &["x axis 0 = 2", "y axis 0 = 3"])
             },
         );
         call_matrix(
@@ -134,7 +134,7 @@ fn cases() -> Vec<Case> {
             if good {
                 Expected::Tensor(vec![4], vec![7.0; 4])
             } else {
-                Expected::Domain("load", &["x", "axis", "4", "5"])
+                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
             },
         );
         call_matrix(
@@ -147,7 +147,7 @@ fn cases() -> Vec<Case> {
             if good {
                 Expected::Tensor(vec![2], vec![2.0, 3.0])
             } else {
-                Expected::Domain("shrink", &["axis", "2", "3"])
+                Expected::Domain("shrink", &["claimed = 2", "shrink axis 0 = 3"])
             },
         );
     }
@@ -281,7 +281,7 @@ fn cases() -> Vec<Case> {
         (
             "scope.unread.mismatch",
             3,
-            Expected::Domain("load", &["x", "p", "axis", "2", "3"]),
+            Expected::Domain("load", &["x axis 0 = 2", "p axis 0 = 3"]),
         ),
     ] {
         add(
@@ -534,6 +534,25 @@ fn tensor(stdout: &str, name: &str) -> Option<(Vec<usize>, Vec<f64>)> {
     Some((shape, data))
 }
 
+// Context is information, not the canonical trap line's fixed bytes. Ignore
+// punctuation/whitespace, but retain each source/axis/value association and
+// the sign of an extent. Separate records can appear in either order.
+fn context_has_record(stderr: &str, record: &str) -> bool {
+    fn words(text: &str) -> Vec<&str> {
+        text.split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-' | '.'))
+            .filter(|word| !word.is_empty())
+            .collect()
+    }
+    let required = words(record);
+    assert!(
+        !required.is_empty(),
+        "a trap context record must convey information"
+    );
+    words(stderr)
+        .windows(required.len())
+        .any(|seen| seen == required)
+}
+
 fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
     let mut failures = Vec::new();
     let check = &observation["check"];
@@ -607,15 +626,9 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                     && stderr
                         .lines()
                         .any(|line| line == format!("numeric trap: domain in {op} at int64"))
-                    && context.iter().all(|part| {
-                        if part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                            stderr
-                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                                .any(|word| word == *part)
-                        } else {
-                            stderr.contains(part)
-                        }
-                    })
+                    && context
+                        .iter()
+                        .all(|record| context_has_record(stderr, record))
             }
             Expected::Reject(_) => unreachable!(),
         };
@@ -727,7 +740,7 @@ fn claims_and_traps_require_their_own_evidence() {
     );
     observed["check"]["signatures"]["f"] = "() -> tensor[4, f32]".into();
     assert!(contract_failures(&case, &observed).is_empty());
-    case.expected = Expected::Domain("load", &["x axis 0", "4", "5"]);
+    case.expected = Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]);
     for lane in ["eval", "c"] {
         observed[lane] = json!({"stage":"execute", "success":false,"stdout":"",
             "stderr":"extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at int64"});
@@ -752,5 +765,39 @@ fn claims_and_traps_require_their_own_evidence() {
         contract_failures(&case, &observed).len(),
         2,
         "source and observed-value context is required"
+    );
+}
+
+#[test]
+fn trap_context_keeps_source_axis_and_signed_value_together() {
+    let case = cases()
+        .into_iter()
+        .find(|case| case.id == "literal.export.mismatch")
+        .unwrap();
+    let mut observed = observe(&case);
+    // Isolate diagnostic acceptance from the separately recorded signature
+    // erasure. This does not claim that the compiler preserved the signature.
+    observed["check"]["signatures"]["f"] = case.signature.unwrap().into();
+    assert!(contract_failures(&case, &observed).is_empty());
+    for context in [
+        "claimed = 4, x axis 1 = 5",
+        "claimed = 5, x axis 0 = 4",
+        "claimed = 4, x axis 0 = -5",
+        "claimed = 4, y axis 0 = 5",
+        "claimed = 4, x axis 0 = 50",
+    ] {
+        observed["c"]["stderr"] =
+            format!("{context}\nnumeric trap: domain in load at int64").into();
+        assert_eq!(
+            contract_failures(&case, &observed).len(),
+            1,
+            "wrong context accepted: {context}"
+        );
+    }
+    observed["c"]["stderr"] =
+        "x axis 0: 5\nclaimed: 4\nnumeric trap: domain in load at int64".into();
+    assert!(
+        contract_failures(&case, &observed).is_empty(),
+        "context punctuation and record order are not normative"
     );
 }
