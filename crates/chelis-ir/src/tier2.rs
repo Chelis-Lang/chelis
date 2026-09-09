@@ -1113,7 +1113,15 @@ pub fn lower_conv(
         n.filter(|n| i64::try_from(*n).is_ok())
             .expect("conv shape arithmetic exceeds int64")
     };
-    let product = |dims: &[usize]| dims.iter().fold(1usize, |n, &d| checked(n.checked_mul(d)));
+    // Products are typed dimension expressions. Their existing checked finite
+    // evaluator owns the machine projection; this operation additionally enforces
+    // the language's int64 extent domain. They are never capacity-equality keys.
+    let product = |dims: &[usize]| {
+        let expression = dims.iter().fold(DimExpr::Concrete(1), |lhs, &rhs| {
+            DimExpr::Mul(Box::new(lhs), Box::new(DimExpr::Concrete(rhs)))
+        });
+        checked(expression.as_concrete())
+    };
     let mut padded_shape = input_shape.clone();
     let mut output_shape = vec![input_shape[0], kernel_shape[0]];
     for axis in 0..rank {
@@ -1171,10 +1179,10 @@ pub fn lower_conv(
         parent_span,
     );
     let kernel_volume = product(&kernel_shape[2..]);
-    let contracted = checked(input_shape[1].checked_mul(kernel_volume));
+    let contracted = product(&[input_shape[1], kernel_volume]);
     let output_volume = product(&output_shape[2..]);
-    let columns = checked(input_shape[0].checked_mul(output_volume));
-    let index_count = checked(contracted.checked_mul(columns));
+    let columns = product(&[input_shape[0], output_volume]);
+    let index_count = product(&[contracted, columns]);
     let mut indices = Vec::with_capacity(index_count);
     for contraction in 0..contracted {
         let channel = contraction / kernel_volume;
@@ -1192,22 +1200,12 @@ pub fn lower_conv(
                 coordinates[axis] = output_position % output_shape[axis + 2];
                 output_position /= output_shape[axis + 2];
             }
-            let mut index = checked(
-                batch
-                    .checked_mul(input_shape[1])
-                    .and_then(|n| n.checked_add(channel)),
-            );
+            let mut index = checked(product(&[batch, input_shape[1]]).checked_add(channel));
             for axis in 0..rank {
                 let coordinate = checked(
-                    coordinates[axis]
-                        .checked_mul(strides[axis])
-                        .and_then(|n| n.checked_add(offsets[axis])),
+                    product(&[coordinates[axis], strides[axis]]).checked_add(offsets[axis]),
                 );
-                index = checked(
-                    index
-                        .checked_mul(padded_shape[axis + 2])
-                        .and_then(|n| n.checked_add(coordinate)),
-                );
+                index = checked(product(&[index, padded_shape[axis + 2]]).checked_add(coordinate));
             }
             indices.push(
                 chelis_types::scalar_from_i64(
@@ -2073,6 +2071,43 @@ mod tests {
         );
         let _ = lower_layer_norm(
             &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5, None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "conv shape arithmetic exceeds int64")]
+    fn conv_rejects_extent_product_overflow_before_materializing_windows() {
+        let mut dag = Dag::new();
+        let extent = usize::try_from(i64::MAX).expect("64-bit target");
+        let ty = |dims: &[usize]| TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision: Prim::F32,
+        };
+        let input_ty = ty(&[1, 2, extent]);
+        let kernel_ty = ty(&[1, 2, 1]);
+        let output_ty = ty(&[1, 1, extent]);
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty.clone(),
+            None,
+        );
+        let kernel = dag.add_node(
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            kernel_ty.clone(),
+            None,
+        );
+        lower_conv(
+            &mut dag,
+            input,
+            kernel,
+            &input_ty,
+            &kernel_ty,
+            &output_ty,
+            &[1],
+            &[(0, 0)],
+            None,
         );
     }
 
