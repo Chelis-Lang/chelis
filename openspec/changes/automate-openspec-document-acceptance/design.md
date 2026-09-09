@@ -172,7 +172,9 @@ The job:
 
 Step 4's failure modes are the ones that bite: no checks reported yet, a context that exists but is `neutral`/`skipped`, a required context whose app id does not match, and a re-run that supersedes an earlier conclusion. Each must be an explicit refusal.
 
-**What is not proven locally.** The worker's read and decision paths were exercised against the live API read-only: required-context discovery returned all nine contexts, evaluation of a real head sha returned zero failures, and a commit missing one context failed closed naming it. The merge call itself has never run, and `pull_request_target` only takes effect once this file is on `main`.
+**What is not proven locally.** The worker's read and decision paths were exercised against the live API read-only: required-context discovery returned all nine contexts, evaluation of a real head sha returned zero failures, and a commit missing one context failed closed naming it. The merge call itself has never run under the Actions token.
+
+These files are on `main` (see Migration Plan), so `workflow_run` and `pull_request_target` take effect. Being live is not being proven: the create call and the merge call stay unverified until a hosted document push is observed end to end.
 
 **No new credential or setting is needed.**
 
@@ -325,10 +327,34 @@ The change is additive. `openspec-validate` keeps running in advisory mode and i
 
 Ordering:
 
-1. Land the classifier, the submission command, their tests, and the workflow. Autoland does nothing until the repository settings below allow it, so this step is inert.
-2. Nothing else happens automatically. Automatic merging is a separate reviewed change with the prerequisites in D13, and it does not proceed by relaxing a review requirement that also covers code.
+1. Land the classifier, the controller, the merge worker, the submission command, their tests, and the four workflows.
+2. Give the mint a credential whose installation can open a pull request.
+3. Repair what the hosted runs find.
+4. Observe one hosted document push end to end.
 
-Rollback is deleting the workflow file. It touches neither the submission command nor the document tree.
+**Step 1 landed.** Pull request #1653 merged as `40266a0a` after every required check passed on its exact head `581955a1`, by an ordinary merge bound to that sha: no administrative option, no auto-merge grant, no protection changed. It carried `a658d655`, repairing a pre-existing tree-wide validation failure in `harden-lint-traversal-edges` whose MODIFIED block had renamed two scenarios. That failure reproduced on pristine `origin/main`, and while it stood, strict validation would have refused every document submission.
+
+**Step 2 landed, because the first hosted run refused.** The controller as first deployed minted from the shared `CI_APP_*` App, and its first real run failed: HTTP 422, `The permissions requested are not granted to this installation`. The classify step never ran and no pull request was opened -- the designed fail-closed path, not a fallback to `GITHUB_TOKEN`. The remedy was a dedicated App, `chelis-openspec`, rather than widening a shared App whose key several workflows already hold. Pull request #1660 merged as `59bf8bda`.
+
+**Step 3 took two more merges, each paid for by a hosted refusal.**
+
+- #1661, merged as `07a27c7c`. With the credential working, the classifier failed: `cannot run Git: [Errno 2] No such file or directory: 'base'`. The workflow checks the default branch out to `base/` and passes `--repository-path base`; every command already runs with `cwd` set to that path, and the classifier was *additionally* told the path, so it resolved `base/base`.
+- #1663, merged as `a3787c6e`. The classifier then returned `verdict=auto` and the create call answered `422 Validation Failed`. The minted token carried `pull-requests: write` alone, which cannot resolve the head and base refs `POST /pulls` names; it now also carries `contents: read`, which the installation already grants and which permits no push.
+- #1676, merged as `492f87b3`. The App then opened pull request #1674 and the merge worker discovered all ten required contexts, printed every one, and exited on `403 Resource not accessible by integration`. `GET /commits/{sha}/check-runs` needs the `checks` permission, which the merge job never held; `checks: read` and `statuses: read` are now granted, both reads.
+
+Three properties of this sequence are worth keeping, because none of them were designed in.
+
+The path bug is the instructive one. Every local test passed `Path(".")`, where applying a relative path twice is invisible, so a fully green suite coexisted with a controller that could not run at all. A default that makes an operation idempotent will hide that the operation happens twice.
+
+The 422 cost a round trip to a hosted runner for information the response had already carried: `gh api` puts its status line on stderr and the `errors` array on stdout, and the controller reported only the first. It now reports both.
+
+The 403 is the same lesson from the other side. Discovery of the required contexts uses a different endpoint from reading their results, so the worker printed all ten contexts and the pinned validation workflow before failing, and the output named no permission at all. A log that gets further before failing is not evidence of being closer to correct.
+
+And the mechanism's first four acts on real infrastructure were all refusals that wrote nothing. That is the boundary behaving as designed, and it is the only reason four separate misconfigurations produced no bad pull request between them.
+
+**Step 4 is the open oracle.** Until a hosted push is observed opening a pull request and merging it, the create call and the merge call remain unverified.
+
+Rollback is deleting the workflow files. It touches neither the submission command nor the document tree.
 
 ## Open Questions
 

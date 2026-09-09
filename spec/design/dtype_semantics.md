@@ -1057,6 +1057,24 @@ Deliverables, with phase homes:
      `an_exported_stdlib_def_without_a_signature_fails_loudly`, with
      `a_declared_stdlib_signature_enumerates_and_a_type_export_does_not`
      keeping a dtype-free type export from reading as one).
+     Discovery links the complete stdlib source package through Reef's
+     declaration linker, then resolves signatures, nominal fields and alias
+     bodies through the compiler's Deep type resolver. Source paths and
+     authored signatures remain the census identities; qualified compiler
+     names govern the graph. Same-package imports include private helpers,
+     local declarations shadow imports, and unresolved imports, type names,
+     arities or argument kinds fail discovery.
+     Finite summaries track concrete numeric domains and formal payload
+     positions to a worklist fixed point. They follow the compiler's
+     containers, function inputs/results, tuples, references and tensor
+     precisions, including recursive aliases and changing recursive generic
+     arguments. Aliases are transparent; a nominal boundary stops bare-carrier
+     flags while its payloads still contribute numeric reachability. Declared
+     dtype bounds and the existing precision-name backstop remain capacity;
+     an ordinary unbounded `p -> p` stays nonnumeric. The stdlib closure cases
+     in `capacity_census_tripwire` exercise these boundaries and preserve the
+     existing 84 definition and five ADT identities. This is declared-surface
+     evidence, not body inference, backend acceptance or completion of [#1288].
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
      enforcement-relevant derived classification for every matched
@@ -2528,6 +2546,41 @@ The [#1287] child command is
 capacity, loud [#1291] device receipts, semantic registration, and executable
 example parity. [#1291] later replaces those device receipts with its hardware
 execution oracle; it does not weaken or bypass the [#1287] core receipt.
+
+**Pre-4C framework delivery.** `scripts/dtype_pre_phase4c_oracle.py` now owns
+the prerequisite command manifest and rejects missing owners before executing
+children. This framework is not a green entry receipt: the remaining child
+oracles are explicit `MissingOracle` entries, and the existing Count, ReLU,
+direct-arithmetic, and freeze drivers still need execution-receipt adapters.
+Normal-gate activation remains #1296 work after every prerequisite and adapter
+is available. The framework's acceptance command is
+`.venv/bin/python scripts/test_dtype_pre_phase4c_oracle.py`; it executes positive
+and negative child-process fixtures, not the missing language implementations.
+
+Each child adapter receives `CHELIS_ORACLE_RECEIPT`, `CHELIS_ORACLE_RUN_ID`,
+`CHELIS_ORACLE_HEAD`, and `CHELIS_ORACLE_SOURCE_DIGEST` from the composite. It
+writes schema-1 execution evidence with its exact command identity, selected
+test identities, individual outcomes, positive/negative/mutation obligations,
+and host-lane execution references. Selections and outcomes must come from
+the test framework; a committed expected inventory or a driver-authored
+success packet is not execution evidence. Adapters need their own bypass,
+ignored-test, and zero-match mutations before adoption. Every selected test
+must execute successfully, and every obligation must cite an executed test.
+The structural freeze, #1288 census, and #1294 atom-closure legs execute their
+guards without inventing host behavior cells. Every other prerequisite requires
+`eval`, `c-host`, and `c-dag`; a receipt cannot waive those lanes. Unbuilt HIP/Metal cells carry explicit issue-bearing
+dispositions, whose authorities are checked against the rejection manifest
+and live OPEN issue state. Children still own complete cell discovery and
+the governing per-cell acceptance requirements.
+
+Evidence is retained in a fresh directory under `target/`, separately for
+every child: stdout, stderr, and the execution packet cannot overwrite a
+sibling's receipt. Adapters must likewise preserve each nested test process's
+framework output, including separate JUnit files where used. The composite
+rejects stale source/head/run identities, duplicate or missing cases, skips,
+waivers, nonzero exits, and missing or duplicate final success markers. Only
+a complete successful run over unchanged committed source writes the aggregate
+receipt and prints `DTYPE PRE-PHASE-4C ORACLE: PASS`.
 
 ### Phase 4C - populate the machine authorities
 

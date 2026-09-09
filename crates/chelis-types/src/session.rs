@@ -361,6 +361,16 @@ pub(crate) fn build_type_env_from_library(
     })
 }
 
+pub(crate) fn resolve_declared_surface(
+    exprs: &[chelis_deep::Expr],
+) -> Result<crate::infer::DeclaredTypeSurface, InferResult> {
+    crate::infer::run_on_grown_stack(|| {
+        run_with_metadata(exprs, |sink| {
+            crate::infer::resolve_declared_surface_in_session(exprs, sink)
+        })
+    })
+}
+
 pub(crate) fn build_compiled_library_context(
     exprs: &[chelis_deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {

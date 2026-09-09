@@ -305,6 +305,7 @@ CLIPPY_NO_DEFAULT_FEATURES: list[str] = [
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-backend-c/sleef,"
+    "chelis-compiler-api/emission-observer,"
     "chelis-e2e/hip-local-gpu,"
     "chelis-ir/lowering-trace,"
     "chelis-prove/clarabel,"
@@ -491,6 +492,12 @@ LOWERING_TRACE_TESTS: list[str] = [
     "--lib", "--test", "lowering_trace",
 ]
 
+EMISSION_OBSERVER_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
+    "emission-observer", "--test", "emission_observer",
+    "--test", "execution_artifact_metadata",
+]
+
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
         CLIPPY_WORKSPACE,
@@ -513,6 +520,7 @@ STAGES: dict[str, list[list[str]]] = {
     "integration": [
         NEXTEST_WORKSPACE_CI,
         LOWERING_TRACE_TESTS,
+        EMISSION_OBSERVER_TESTS,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
         [MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
@@ -569,6 +577,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     UNREPRESENTABLE_DOMAIN_ORACLE,
     RUNTIME_REPRESENTATION_ORACLE,
     LOWERING_TRACE_TESTS,
+    EMISSION_OBSERVER_TESTS,
 ]
 
 # The `--fast` inner-loop pass. Fix-in-place commands first, so the tree the
@@ -2619,7 +2628,7 @@ def selected_stage_commands(
     else:
         selected = [list(command) for command in commands]
     if support_slice is not None:
-        selected = selected[:2] if support_slice == "frontend" else selected[2:]
+        selected = selected[:3] if support_slice == "frontend" else selected[3:]
     if partition is not None:
         selected[0].extend(["--partition", partition])
     return selected

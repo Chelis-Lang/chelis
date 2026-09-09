@@ -535,6 +535,71 @@ class SourceReconciliationTests(unittest.TestCase):
                 (), REPO_ROOT, exceptions=(), nightly_only=nightly
             )
 
+    def test_rustdoc_fixtures_have_exact_owning_gate_and_reconcile(self) -> None:
+        fixture_directory = "scripts/fixtures/capacity_graph"
+        selected = tuple(
+            exception
+            for exception in CLOSURE.UNCOMPILED_EXCEPTIONS
+            if exception.directory == fixture_directory
+        )
+        self.assertEqual(
+            len(selected), 1, "standalone rustdoc fixtures need their owning gate"
+        )
+        self.assertEqual(
+            selected[0].owning_gate, "scripts/test_capacity_census_graph.py"
+        )
+        fixtures = {
+            source
+            for source in CLOSURE.repository_rust_sources()
+            if source.startswith(fixture_directory + "/")
+        }
+        self.assertEqual(
+            fixtures,
+            {
+                fixture_directory + "/graph.rs",
+                fixture_directory + "/serde/src/lib.rs",
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            for source in fixtures | {"src/compiled.rs", selected[0].owning_gate}:
+                path = root / source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            (deps / "unit.d").write_text(
+                "target/debug/deps/x.rmeta: src/compiled.rs\n", encoding="utf-8"
+            )
+            arguments = ((root / "target/debug",), root)
+            CLOSURE.check_every_source_is_compiled(
+                *arguments, exceptions=selected, nightly_only=()
+            )
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure,
+                "capacity_graph/graph.rs.*capacity_graph/serde/src/lib.rs",
+            ):
+                CLOSURE.check_every_source_is_compiled(
+                    *arguments, exceptions=(), nightly_only=()
+                )
+            gate = root / selected[0].owning_gate
+            gate.unlink()
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure, "missing owning gate"
+            ):
+                CLOSURE.check_every_source_is_compiled(
+                    *arguments, exceptions=selected, nightly_only=()
+                )
+            gate.write_text("", encoding="utf-8")
+            (root / "scripts/fixtures/neighbor.rs").write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(
+                CLOSURE.ConfigurationClosureFailure, "scripts/fixtures/neighbor.rs"
+            ):
+                CLOSURE.check_every_source_is_compiled(
+                    *arguments, exceptions=selected, nightly_only=()
+                )
+
     def test_live_exceptions_are_standalone_cargo_projects(self) -> None:
         for exception in CLOSURE.UNCOMPILED_EXCEPTIONS:
             directory = REPO_ROOT / exception.directory

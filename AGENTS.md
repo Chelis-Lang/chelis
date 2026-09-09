@@ -483,8 +483,9 @@ Autoland opens the pull request with a short-lived installation token,
 minted per run from the `chelis-openspec` GitHub App, which exists for this
 mechanism alone (`vars.OPENSPEC_APP_ID`,
 `secrets.OPENSPEC_APP_PRIVATE_KEY` -- not the shared `CI_APP_*`
-credentials, whose installation grants no pull-request write), scoped to this repository
-and to `Pull requests: write` alone, and revoked when the job ends. The
+credentials, whose installation grants no pull-request write), scoped to
+this repository and to `Pull requests: write` with `Contents: read`, and
+revoked when the job ends. The
 built-in `GITHUB_TOKEN` cannot be used, because a pull request opened with
 it starts none of the required checks. If the App is not configured, or its
 installation lacks that permission here, the controller reports the push

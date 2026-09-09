@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use crate::dag::{Dag, NodeId};
+use crate::dag::{Dag, NodeId, TensorType};
 use crate::grad::GradResult;
 use crate::lower::{LowerDiagnostic, LoweredLibrary};
 use chelis_types::CheckedProgram;
@@ -46,6 +46,41 @@ pub struct Gradient {
     /// Missing entries retain the raw AD pass's result. Source-level zero
     /// materialization happens later and is not silently attributed to this pass.
     pub gradients: BTreeMap<NodeId, NodeId>,
+    /// Filled after this invocation is spliced and its result packed. `None`
+    /// is an incomplete observation, never evidence of a completed application.
+    pub application: Option<Application>,
+}
+
+/// The actual returned structure; leaves refer to `Application.after_packing`.
+/// An empty tuple retains a discrete/unit cotangent, not a missing tensor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    Node(NodeId),
+    Tuple(Vec<Value>),
+    Adt {
+        ctor: String,
+        field_names: Option<Vec<String>>,
+        fields: Vec<Value>,
+    },
+}
+
+/// The caller is the parent of the enclosing `Gradient.context`. Specialization
+/// and splice maps are observations to check, not trusted semantic equalities.
+#[derive(Debug, Clone)]
+pub struct Application {
+    pub formal_types: Vec<TensorType>,
+    pub actual_types: Vec<TensorType>,
+    pub specialized: Dag,
+    /// Formal load names to IDs in `before_splice`, including captured bindings.
+    pub arguments: BTreeMap<String, NodeId>,
+    pub wrt_actuals: Vec<NodeId>,
+    /// Specialized backward IDs to IDs in the caller's `after_splice`.
+    pub remap: BTreeMap<NodeId, NodeId>,
+    pub before_splice: Dag,
+    pub after_splice: Dag,
+    /// Includes shaped-zero materialization and final reuse hints.
+    pub after_packing: Dag,
+    pub result: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +144,7 @@ pub(crate) struct Collector {
     context: ContextId,
 }
 
-fn ordered(remap: &UnordMap<NodeId, NodeId>) -> BTreeMap<NodeId, NodeId> {
+pub(crate) fn ordered(remap: &UnordMap<NodeId, NodeId>) -> BTreeMap<NodeId, NodeId> {
     remap
         .to_sorted()
         .into_iter()
@@ -158,8 +193,10 @@ impl Collector {
         output: NodeId,
         wrt: &[NodeId],
         result: &GradResult,
-    ) {
-        self.state.borrow_mut().gradients.push(Gradient {
+    ) -> usize {
+        let mut state = self.state.borrow_mut();
+        let index = state.gradients.len();
+        state.gradients.push(Gradient {
             context: self.context,
             forward: forward.clone(),
             output,
@@ -167,7 +204,17 @@ impl Collector {
             backward: result.dag.clone(),
             backward_output: result.output_node,
             gradients: ordered(&result.grad_nodes),
+            application: None,
         });
+        index
+    }
+
+    pub(crate) fn application(&self, gradient: usize, application: Application) {
+        let mut state = self.state.borrow_mut();
+        let gradient = &mut state.gradients[gradient];
+        assert_eq!(gradient.context, self.context);
+        assert!(gradient.application.is_none());
+        gradient.application = Some(application);
     }
 
     pub(crate) fn normalization(

@@ -43,8 +43,9 @@ green.
 So the create call -- and only the create call -- uses a short-lived
 installation token, which the workflow mints from the GitHub App this
 repository already configures. It is scoped to this repository and to
-`Pull requests: write` alone, and it is revoked when the job ends; nothing
-is stored. Reads keep the ambient token, and the workflow grants that token
+`Pull requests: write` with `Contents: read` -- the second is what lets the
+endpoint resolve the head and base refs -- and it is revoked when the job
+ends; nothing is stored. Reads keep the ambient token, and the workflow grants that token
 `pull-requests: read` rather than `write`, so the default credential cannot
 open a pull request even by mistake.
 
@@ -118,9 +119,10 @@ MISSING_TOKEN_ADVICE = f"""no submission credential reached this step, so no pul
                  pull-request write, and widening it would give every
                  workflow holding its key the ability to open pull requests.
               2. The App's installation covers this repository and grants
-                 "Pull requests: write" on it. That is the exact and only
-                 permission `POST /repos/{{owner}}/{{repo}}/pulls` needs;
-                 the mint step requests nothing else.
+                 "Pull requests: write" and "Contents: read" on it. Those
+                 are the two `POST /repos/{{owner}}/{{repo}}/pulls` needs --
+                 the second to resolve the head and base refs -- and the
+                 mint step requests nothing else.
               3. The mint step ran before this one and produced a token.
                  A mint failure is reported by that step, not this one:
                  HTTP 422 "The permissions requested are not granted to
@@ -449,9 +451,16 @@ def create_pull_request(
         token=submission_token,
     )
     if getattr(completed, "returncode", None) != 0:
-        message = (
-            getattr(completed, "stderr", "") or getattr(completed, "stdout", "") or ""
-        ).strip()
+        # BOTH streams. `gh api` puts its one-line status on stderr and the
+        # response body -- which carries the `errors` array naming the field
+        # GitHub objected to -- on stdout. Reporting only the status reduces
+        # a 422 to "Validation Failed" and throws away the reason, which
+        # then costs a round trip to a hosted runner to rediscover.
+        parts = [
+            (getattr(completed, "stderr", "") or "").strip(),
+            (getattr(completed, "stdout", "") or "").strip(),
+        ]
+        message = " ".join(part for part in parts if part) or "no output"
         raise ControllerError(f"cannot open the pull request: {message}")
     try:
         payload = json.loads(getattr(completed, "stdout", "") or "")

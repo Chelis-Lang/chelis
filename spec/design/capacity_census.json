@@ -27,21 +27,24 @@
       {
         "leg": "std-adt-numeric",
         "artifact": "packages/chelis-std/src/**/*.ch desugared Deep AST",
-        "enumerator": "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs",
+        "enumerator": "stdlib_rows -> Reef declaration linker -> resolved type fixed point",
         "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
         "expected_success": "capacity_census_matches_public_surface passes",
         "mutations": [
-          "std_adt_identity_changes_when_same_dtype_variant_changes"
+          "std_adt_identity_changes_when_same_dtype_variant_changes",
+          "stdlib_closure_tests::mutual_nominal_recursion_propagates_numeric_fields"
         ]
       },
       {
         "leg": "std-def-numeric",
         "artifact": "packages/chelis-std/src/**/*.ch desugared Deep AST",
-        "enumerator": "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs",
+        "enumerator": "stdlib_rows -> Reef declaration linker -> resolved type fixed point",
         "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
         "expected_success": "capacity_census_matches_public_surface passes",
         "mutations": [
-          "exported_public_numeric_stdlib_def_is_enumerated"
+          "exported_public_numeric_stdlib_def_is_enumerated",
+          "stdlib_closure_tests::private_helpers_and_transparent_aliases_survive_relocation",
+          "stdlib_closure_tests::unresolved_nominals_and_wrong_nominal_arguments_fail_closed"
         ]
       },
       {
@@ -1150,9 +1153,7 @@
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
-      "flags": [
-        "float-carrier"
-      ]
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
@@ -1162,9 +1163,7 @@
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
-      "flags": [
-        "numeric-op"
-      ]
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
@@ -1334,9 +1333,7 @@
     {
       "kind": "std-def-numeric",
       "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
-      "flags": [
-        "numeric-op"
-      ]
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
@@ -1444,16 +1441,12 @@
     {
       "kind": "std-def-numeric",
       "id": "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
-      "flags": [
-        "numeric-op"
-      ]
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
-      "flags": [
-        "numeric-op"
-      ]
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
