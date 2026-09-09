@@ -321,25 +321,16 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
       }
     }
 
-    -- T-Expand -- expand(e, axis, size)
-    -- Mirrors the shipped checker's `check_expand_signature`
-    -- (`crates/chelis-types/src/infer.rs`, dispatched from the `expand` builtin).
-    -- e must be a tensor. axis must be non-negative (else the shipped DimensionMismatch
-    -- "expand requires non-negative axis"); a literal size must be > 0 (else the shipped
-    -- DimensionMismatch "expand requires positive size"); a symbolic-dim-name size
-    -- becomes DName. The shipped checker selects SAME-rank broadcast (replace dims[axis]
-    -- with size, requires axis < rank) vs INSERT-rank (insert size at axis, output rank =
-    -- input rank + 1) using the *expected* result type. Hull synthesizes bottom-up with no
-    -- expected type, so it canonically produces the SAME-rank replace form (requires
-    -- axis < rank); the INSERT-rank reading is a documented v0.1.0 narrowing (not
-    -- bottom-up disambiguable). Element type is INVARIANT (precision must equal the
-    -- input). Effects pass through. (The from-1 broadcast restriction is not a type-level
-    -- guard.)
+    -- T-Expand: spec/04 section 4.7.2, spec/05 section 2.4.1.
+    -- Same-rank replacement of one unit axis; insertion is a distinct operation.
+    -- A symbolic operand extent needs the concrete unit-extent guard at evaluation.
     EExpand(e, axis, size) -> {
       (t, effs) = type_check(ctx, e)?
       match t {
         TTensor(dims, elem) ->
-          if axis < 0 or (is_literal(size) and dim_lit(size) <= 0) then None
+          if not is_int32(axis) or axis < 0 or axis >= length(dims) then None
+          else if is_literal(dims[axis]) and dim_lit(dims[axis]) != 1 then None
+          else if not (is_named(size) or (is_literal(size) and dim_lit(size) >= 0)) then None
           else Some((TTensor(replace_at(dims, axis, size), elem), effs))
         _ -> None
       }
@@ -633,6 +624,37 @@ def eval_to_value(e: Expr, max_steps: int64) -> (Expr, int64) = {
 The evaluator is intentionally simple and slow. Tensors are nested lists of scalars. Operations are element-by-element loops. This is the reference semantics - what programs MEAN - not a practical execution engine. The real compiler's evaluator and code generators must agree with this reference on every well-typed program.
 
 ### 4.1 Pinned evaluator decisions for v0.1.0
+
+**Broadcast-coordinate repair (Hull #20, 2026-09-09; acceptance pending).**
+The `EExpand`/`TExpand` model implements the same-rank unit-axis rule above.
+For concrete `TData`, validate nonnegative extents, exact buffer cardinality,
+an in-range int32-compatible axis, operand extent 1 and nonnegative new size.
+Preserve all other axes. For each row-major output coordinate, read the input
+at the same coordinates except that the selected coordinate is zero. Repeating
+the entire flat buffer is correct only for an outer axis, not in general.
+Size zero yields an empty buffer with the requested shape; singleton expansion
+is identity. Axis equal to rank is not an insertion fallback. A malformed
+operand or failed unit-extent claim has no successful reference reduction.
+
+`type_check` rejects known nonunit extents and negative literal sizes, while
+retaining symbolic names and operand effects. Concrete evaluation enforces
+the unit-extent obligation for symbolic input shapes. The generator's operand
+has literal extent 1 at the chosen axis, not a freshly invented dimension;
+the output keeps the requested dimension at that position. Other bystanders
+and element-type checking are unchanged. This is a Hull model repair, not a
+change to Chelis's decided semantics, compiler behavior or any shell pin.
+
+Acceptance requires coordinate-distinct inner/outer 2-D and middle-axis 3-D
+examples, singleton/empty axes and bystanders, invalid buffers/axes/known
+nonunit extents, and generated unit-axis operands with checked round trips.
+Run the complete Hull suite and two-pass 10,000-program/28-rule generator
+oracle; report a same-seed bounded compiler-check pilot before/after this repair
+separately from the standing full campaign. A released compiler's historical
+type rule is not grounds to weaken the current normative unit-axis contract.
+This does not add an `insert` AST constructor, runtime dimension evaluation,
+exact integer data evaluation, a trap outcome, or a derivative evaluator.
+The f32-buffer and symbolic-evaluation limitations remain explicit; the
+repair must not be described as full language or AD conformance.
 
 **Ordered reduction repair (2026-09-09; Hull implementation acceptance pending).**
 The modeled single-axis `sum` uses the `ESum(operand, axis)` representation above.
