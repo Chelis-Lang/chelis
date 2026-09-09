@@ -69,14 +69,23 @@ class Adjudicate(unittest.TestCase):
         )
         self.assertEqual(problems, [])
 
-    def test_exact_permanent_disposition_passes_without_issue_lookup(self) -> None:
+    def test_exact_deferred_family_disposition_passes_without_issue_lookup(self) -> None:
         disposition = next(
             value
             for value in LEGACY_TRANSITION_DISPOSITIONS
-            if "initial non-seam" in value
+            if "wire schema" in value
+        )
+        problems = adjudicate([row(disposition, census_family="wire")], {})
+        self.assertEqual(problems, [])
+
+    def test_retired_primary_disposition_fails_closed(self) -> None:
+        disposition = (
+            "permanent-disposition(C6 initial non-seam complete descriptor set "
+            "ratified 2026-08-04)"
         )
         problems = adjudicate([row(disposition)], {})
-        self.assertEqual(problems, [])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("UNRECOGNIZED disposition", problems[0])
 
     def test_invented_refless_disposition_fails_closed(self) -> None:
         problems = adjudicate([row("permanent-disposition(reviewed and fine)")], {})

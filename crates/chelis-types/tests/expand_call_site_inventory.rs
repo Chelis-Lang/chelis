@@ -132,8 +132,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
-        7,
-        "same-rank singleton broadcasts for record projection, literal/symbolic/folded sizes and sum validation, plus the non-unit rejection; rank-raising claim fixtures use insert",
+        9,
+        "same-rank broadcasts for record projection, literal/symbolic/folded sizes, sum validation, and exported/binding/root acceptance with a runtime unit-operand control and refusal; rank-raising claim fixtures use insert",
     ),
     // `expand`'s own runtime behaviour suite. It exists because the previous
     // `expand.ch` was entirely rank-increasing and moved to `insert.ch`

@@ -27,6 +27,268 @@ use support::{codegen, codegen_with_options, emit_host_program};
 
 mod common;
 
+fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
+    let probe = common::probe_dir("checked_c_indexing");
+    let dir = probe.path();
+    fs::write(dir.join("kernel.c"), source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(Default::default());
+    let binary = dir.join("probe");
+    let compiled = Command::new(toolchain.compiler)
+        .args([
+            "-O2",
+            "-fsanitize=address,undefined",
+            "-fno-sanitize-recover=all",
+        ])
+        .args(toolchain.compile_flags)
+        .arg("-I")
+        .arg(runtime_include_dir())
+        .arg(dir.join("kernel.c"))
+        .arg(dir.join("main.c"))
+        .arg(runtime_lib_path())
+        .args(toolchain.link_flags)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}\n{source}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    Command::new(binary)
+        .env("ASAN_OPTIONS", "detect_leaks=0")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn checked_c_indexing_dag_scalar_fused_reuse_and_empty_execute_under_sanitizers() {
+    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+    for prim in [Prim::F32, Prim::F64] {
+        for shape in [vec![], vec![4], vec![0], vec![1; 9]] {
+            for fused in [false, true] {
+                let ty = TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: prim,
+                };
+                let scalar_ty = if fused {
+                    TensorType {
+                        dims: vec![],
+                        precision: prim,
+                    }
+                } else {
+                    ty.clone()
+                };
+                let mut dag = Dag::new();
+                let input =
+                    dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+                let scalar =
+                    dag.add_node(RiscOp::Load { name: "s".into() }, vec![], scalar_ty, None);
+                let negated = dag.add_node(RiscOp::Neg, vec![input], ty.clone(), None);
+                let op = if fused {
+                    RiscOp::FusedElem {
+                        ops: vec![FusedStep {
+                            op: FusedStepOp::Add,
+                            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                        }],
+                    }
+                } else {
+                    RiscOp::Add
+                };
+                let result = dag.add_node(op, vec![negated, scalar], ty, None);
+                if fused {
+                    dag.set_reusable_input(result, negated);
+                }
+                dag.add_root(result);
+                let generated = codegen(&dag, "checked_indexing").unwrap();
+                assert!(
+                    generated
+                        .c_source
+                        .contains("chelis_tensor_elementwise_index_step_for_shape(")
+                );
+                if fused && !shape.contains(&0) {
+                    assert!(
+                        generated.c_source.contains("chelis_tensor_repurpose("),
+                        "fixture must exercise storage reuse"
+                    );
+                }
+                let inputs = generated
+                    .input_labels
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let elem = if prim == Prim::F32 { "float" } else { "double" };
+                let dtype = if prim == Prim::F32 {
+                    "CHELIS_DTYPE_F32"
+                } else {
+                    "CHELIS_DTYPE_F64"
+                };
+                let dims = if shape.is_empty() {
+                    "1".into()
+                } else {
+                    shape
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let rank = shape.len();
+                let count = shape.iter().product::<usize>();
+                let scalar_rank = if fused { 0 } else { rank };
+                let scalar_count = if fused { 1 } else { count };
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+void checked_indexing(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t dims[] = {{ {dims} }};
+    chelis_tensor *x = chelis_alloc({rank}, dims, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    {elem} *data = ({elem} *)chelis_tensor_write_view(guard).data;
+    for (int64_t i = 0; i < {count}; ++i) data[i] = ({elem})(i + 1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *s = chelis_alloc({scalar_rank}, dims, {dtype});
+    guard = chelis_tensor_begin_write(s);
+    for (int64_t i = 0; i < {scalar_count}; ++i) (({elem} *)chelis_tensor_write_view(guard).data)[i] = 10;
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{ {inputs} }}, *outputs[1] = {{NULL}};
+    checked_indexing(inputs, 2, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (view.count != {count} || chelis_tensor_rank(outputs[0]) != {rank}) return 2;
+    for (int64_t i = 0; i < view.count; ++i)
+        if (((const {elem} *)view.data)[i] != 9 - i) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); chelis_tensor_release(s);
+    puts("CHECKED INDEX PASS");
+    return 0;
+}}
+"#
+                );
+                let run = checked_indexing_run(&generated.c_source, &harness);
+                assert!(
+                    run.status.success(),
+                    "{prim:?} {shape:?} fused={fused}: {}\n{}",
+                    String::from_utf8_lossy(&run.stderr),
+                    generated.c_source
+                );
+                assert_eq!(String::from_utf8_lossy(&run.stdout), "CHECKED INDEX PASS\n");
+                if fused && prim == Prim::F32 && shape == vec![4] {
+                    // Execute the actual emitted fast-path condition with its
+                    // scalar protection removed. ASan must observe the scalar
+                    // read beyond its allocation; a source-only check is insufficient.
+                    let anchor = "t3_input1_step == 1";
+                    assert!(generated.c_source.contains(anchor));
+                    let bad_fast =
+                        checked_indexing_run(&generated.c_source.replace(anchor, "1"), &harness);
+                    assert!(!bad_fast.status.success());
+                    assert!(String::from_utf8_lossy(&bad_fast.stderr).contains("AddressSanitizer"));
+
+                    // A same-capacity header change must be rejected while the
+                    // original shape remains observable. Moving validation past
+                    // fused repurpose erases it and makes this witness return success.
+                    let lines: Vec<_> = generated
+                        .c_source
+                        .lines()
+                        .filter(|line| {
+                            line.contains("const int64_t t3_input") && line.contains("_step =")
+                        })
+                        .collect();
+                    assert_eq!(lines.len(), 2);
+                    let steps = format!("{}\n{}\n", lines[0], lines[1]);
+                    assert!(generated.c_source.contains(&steps));
+                    let change = r#"
+    chelis_tensor_end_write(t2_write_guard);
+    chelis_tensor_repurpose(t2, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2),
+        (chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2)});
+    t2_write_guard = chelis_tensor_begin_write(t2);
+    t2_data = chelis_tensor_write_view(t2_write_guard).data;
+"#;
+                    let changed = generated
+                        .c_source
+                        .replace(&steps, &format!("{change}{steps}"));
+                    let run = checked_indexing_run(&changed, &harness);
+                    assert!(!run.status.success());
+                    assert!(
+                        String::from_utf8_lossy(&run.stderr)
+                            .contains("Domain: chelis_tensor_elementwise_index_step_for_shape")
+                    );
+                    let rebound = "t2_data = t3_data;";
+                    assert_eq!(changed.matches(rebound).count(), 1);
+                    let late = changed
+                        .replace(&steps, "")
+                        .replace(rebound, &format!("{rebound}\n{steps}"));
+                    let run = checked_indexing_run(&late, &harness);
+                    assert!(
+                        run.status.success(),
+                        "late-validation mutation did not erase the witness: {}",
+                        String::from_utf8_lossy(&run.stderr)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_indexing_host_scalar_projection_and_reversed_domain_execute_under_sanitizers() {
+    for builtin in ["add", "max_elem"] {
+        for reversed in [false, true] {
+            let (lhs, rhs) = if reversed {
+                (vec![], vec![4])
+            } else {
+                (vec![4], vec![])
+            };
+            let source = emit_host_program(
+                &host_binary_program(builtin, lhs, rhs),
+                "checked_host_indexing",
+            )
+            .unwrap();
+            assert!(source.contains("chelis_tensor_elementwise_index_step("));
+            assert!(!source.contains("chelis_host_indices_to_flat"));
+            let args = if reversed { "s, x" } else { "x, s" };
+            let expected = if builtin == "add" { "i + 11" } else { "10" };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
+int main(void) {{
+    int64_t dim = 4;
+    chelis_tensor *x = chelis_alloc(1, &dim, CHELIS_DTYPE_F32);
+    chelis_tensor *s = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    float *data = (float *)chelis_tensor_write_view(guard).data;
+    for (int i = 0; i < 4; ++i) data[i] = i + 1;
+    chelis_tensor_end_write(guard);
+    guard = chelis_tensor_begin_write(s);
+    *(float *)chelis_tensor_write_view(guard).data = 10;
+    chelis_tensor_end_write(guard);
+    chelis_tensor *out = the_fn({args});
+    chelis_read_view view = chelis_tensor_read_view(out);
+    if (view.count != 4) return 2;
+    for (int i = 0; i < 4; ++i) if (((const float *)view.data)[i] != {expected}) return 3;
+    chelis_tensor_release(out); chelis_tensor_release(x); chelis_tensor_release(s);
+    puts("CHECKED HOST PASS");
+    return 0;
+}}
+"#
+            );
+            let run = checked_indexing_run(&source, &harness);
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            if reversed {
+                assert!(!run.status.success());
+                assert!(
+                    stderr.contains("Domain: chelis_tensor_elementwise_index_step"),
+                    "{stderr}"
+                );
+            } else {
+                assert!(run.status.success(), "{stderr}\n{source}");
+                assert_eq!(String::from_utf8_lossy(&run.stdout), "CHECKED HOST PASS\n");
+            }
+        }
+    }
+}
+
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
@@ -5301,153 +5563,218 @@ int main() {{
     );
 }
 
-/// A LOCAL member whose own dim the checker resolved is not a guard site.
-///
-/// The rule keys on PROVENANCE, the same axis section 4.7 uses to place a
-/// guard at entry or at the introducing operation. A local member's extent is
-/// the shape of a tensor THIS function computed, so when the checker resolved
-/// its dim to a literal the read equals that literal by construction and the
-/// comparison could only catch a compiler bug - which C2.4 already declines
-/// for a literal claim matching a literal size. An INTERFACE member's
-/// resolved size is a claim about what the caller must pass and proves
-/// nothing, so it is guarded and never exempted: that is chelis#1377's entry
-/// row, and `an_interface_member_of_a_mixed_class_is_still_checked` measures
-/// it for the mixed case where the class as a whole is Local.
-///
-/// EVIDENTIARY STATUS: regression test, measured both ways - reverting the
-/// predicate emits this site. It is NOT a disposition lock: `main` forms no
-/// class here at all, so there is nothing for a lock to hold.
+/// [04] section 4.7: a declared number is a claim, not evidence about
+/// the independent size carrier. Exercise live Expand/Reshape sites with
+/// computed scalar sizes and reads of computed tensors, on both host lanes.
 #[test]
-fn a_local_member_the_checker_resolved_is_not_a_guard_site() {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
-    let resolved = || TensorType {
-        dims: vec![DimInfo::Named("n".into(), Some(4))],
-        precision: Prim::F32,
-    };
-    let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], resolved(), None);
-    let b = dag.add_node(
-        RiscOp::Load { name: "b".into() },
-        vec![],
-        TensorType {
-            dims: vec![],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let strided = dag.add_node(
-        RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
-        },
-        vec![x],
-        TensorType {
-            dims: vec![DimInfo::Named("s".into(), None)],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let out = dag.add_node(
-        RiscOp::Expand {
-            axis: 0,
-            size: RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-        },
-        vec![b, strided],
-        resolved(),
-        None,
-    );
-    dag.add_root(out);
-
-    let src = codegen(&dag, "resolved_local").expect("codegen").c_source;
-
-    // The POSITIVE half, in the same shape with the claim left unresolved, so
-    // neither assertion is satisfiable by an empty file and the pair
-    // discriminates the predicate rather than the presence of output.
-    let mut open = Dag::new();
-    let unresolved = || TensorType {
-        dims: vec![DimInfo::Named("n".into(), None)],
-        precision: Prim::F32,
-    };
-    let ox = open.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        unresolved(),
-        None,
-    );
-    let ob = open.add_node(
-        RiscOp::Load { name: "b".into() },
-        vec![],
-        TensorType {
-            dims: vec![],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let ostrided = open.add_node(
-        RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
-        },
-        vec![ox],
-        TensorType {
-            dims: vec![DimInfo::Named("s".into(), None)],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let oout = open.add_node(
-        RiscOp::Expand {
-            axis: 0,
-            size: RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-        },
-        vec![ob, ostrided],
-        unresolved(),
-        None,
-    );
-    open.add_root(oout);
-    let open_src = codegen(&open, "open_local").expect("codegen").c_source;
-    assert!(
-        open_src.contains("node 3 axis 0 = %lld"),
-        "an unresolved Local member is still a guard site: {open_src}"
-    );
-    // The discriminating assertion names the SITE, not a bare absence of
-    // `extent`: the input preamble's static-dim check and chelis#616's
-    // `emit_static_dim_guard` also compare against 4 in this program, and an
-    // earlier draft asserting `!= 4)` passed on those with and without the
-    // predicate, saying nothing about the guard under test.
-    assert!(
-        !src.contains("node 3 axis 0 = %lld"),
-        "a local member the checker resolved is the compiler's own proof and \
-         owes no runtime self-check: {src}"
-    );
-    // And the interface half is untouched: `x`'s own axis still carries the
-    // ABI check, so the narrowing did not widen into deleting the caller's
-    // obligation.
-    assert!(
-        src.contains("input `x` axis 0 expected 4"),
-        "an interface member's resolved size is a caller claim and stays checked: {src}"
-    );
+fn numeric_local_extent_claims_execute_exactly() {
+    use chelis_ir::dag::{RtAxis, RtDim};
+    use chelis_ir::eval::{TensorValue, eval_tensor_with};
+    let mut failures = Vec::new();
+    let mut executions = 0;
+    for resolved_name in [false, true] {
+        for reshape in [false, true] {
+            for tensor_size in [false, true] {
+                let mut dag = Dag::new();
+                let claim = if resolved_name {
+                    DimInfo::Named("n".into(), Some(4))
+                } else {
+                    DimInfo::Lit(4)
+                };
+                let x = dag.add_node(
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    TensorType {
+                        dims: vec![claim.clone()],
+                        precision: Prim::F32,
+                    },
+                    None,
+                );
+                let integer = TensorType {
+                    dims: vec![],
+                    precision: Prim::Int64,
+                };
+                let delta = dag.add_node(
+                    RiscOp::Load {
+                        name: "delta".into(),
+                    },
+                    vec![],
+                    integer.clone(),
+                    None,
+                );
+                let (size, carrier) = if tensor_size {
+                    let strided = dag.add_node(
+                        RiscOp::Stride {
+                            strides: vec![RtDim::Node(1)],
+                        },
+                        vec![x, delta],
+                        TensorType {
+                            dims: vec![DimInfo::Named("computed".into(), None)],
+                            precision: Prim::F32,
+                        },
+                        None,
+                    );
+                    (
+                        strided,
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        },
+                    )
+                } else {
+                    let read =
+                        dag.add_node(RiscOp::Shape { axis: 0 }, vec![x], integer.clone(), None);
+                    let sum = dag.add_node(RiscOp::Add, vec![read, delta], integer, None);
+                    (sum, RtDim::Node(1))
+                };
+                let operand = if reshape {
+                    x
+                } else {
+                    dag.add_node(
+                        RiscOp::Sum {
+                            axis: 0,
+                            accumulator: Prim::F32,
+                        },
+                        vec![x],
+                        TensorType {
+                            dims: vec![],
+                            precision: Prim::F32,
+                        },
+                        None,
+                    )
+                };
+                let op = if reshape {
+                    RiscOp::Reshape {
+                        new_shape: vec![carrier],
+                    }
+                } else {
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: carrier,
+                    }
+                };
+                let root = dag.add_node(
+                    op,
+                    vec![operand, size],
+                    TensorType {
+                        dims: vec![claim],
+                        precision: Prim::F32,
+                    },
+                    None,
+                );
+                dag.add_root(root);
+                let generated = codegen_with_options(
+                    &dag,
+                    "numeric_claim",
+                    CodegenOptions {
+                        use_blas: false,
+                        math_lib_override: Some(MathLib::None),
+                        static_entry: false,
+                    },
+                )
+                .expect("the runtime carrier is supported");
+                assert_eq!(generated.input_labels, ["x", "delta"]);
+                for good in [true, false] {
+                    let delta_value = if tensor_size {
+                        if good { 1 } else { 2 }
+                    } else if good {
+                        0
+                    } else {
+                        1
+                    };
+                    let observed = if good {
+                        4
+                    } else if tensor_size {
+                        2
+                    } else {
+                        5
+                    };
+                    let name =
+                        format!("numeric_local_{resolved_name}_{reshape}_{tensor_size}_{good}");
+                    let op = if reshape { "reshape" } else { "expand" };
+                    let trap = format!("numeric trap: domain in {op} at int64");
+                    let context = format!("node {} axis 0 = {observed}", root.0);
+                    let expected = if reshape {
+                        vec![1.0, 2.0, 3.0, 4.0]
+                    } else {
+                        vec![10.0; 4]
+                    };
+                    let evaluation = eval_tensor_with(&dag, |input| match input {
+                        "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+                        "delta" => Some(TensorValue::scalar(f64::from(delta_value))),
+                        _ => None,
+                    });
+                    match evaluation {
+                        Ok(values) if good => {
+                            let actual = &values[&root];
+                            if actual.shape != [4] || actual.to_f64_lossy_vec() != expected {
+                                failures
+                                    .push(format!("{name}.eval: wrong shape/value: {actual:?}"));
+                            }
+                        }
+                        Err(error)
+                            if !good
+                                && error.lines().any(|line| line == trap)
+                                && error.contains("claimed = 4")
+                                && error.contains(&context) => {}
+                        other => failures.push(format!(
+                            "{name}.eval: expected good={good}, observed {other:?}"
+                        )),
+                    }
+                    let expected_c = if reshape {
+                        "{1,2,3,4}"
+                    } else {
+                        "{10,10,10,10}"
+                    };
+                    let harness = format!(
+                        r#"{HARNESS_HEADER}
+extern void numeric_claim(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+int main(void) {{
+    float xd[4] = {{1,2,3,4}};
+    int64_t delta = {delta_value};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 4), chelis_tensor_entry_borrow(0, NULL, CHELIS_DTYPE_I64, &delta, sizeof(delta))}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    numeric_claim(inputs, 2, outputs, 1);
+    if (chelis_tensor_rank(outputs[0]) != 1 || chelis_tensor_shape(outputs[0], 0) != 4) return 41;
+    chelis_tensor* dense = chelis_contiguous(outputs[0]);
+    chelis_read_view view = chelis_tensor_read_view(dense);
+    float expected[4] = {expected_c};
+    if (view.dtype != CHELIS_DTYPE_F32 || view.count != 4) return 42;
+    for (int i = 0; i < 4; i++) if (((const float*)view.data)[i] != expected[i]) return 43;
+    puts("EXACT SHAPE AND VALUES");
+    return 0;
+}}
+"#
+                    );
+                    let (ok, output) =
+                        compile_and_run_kernel_capturing(&name, &generated.c_source, &harness);
+                    if good {
+                        if !ok || output.trim() != "EXACT SHAPE AND VALUES" {
+                            failures.push(format!(
+                                "{name}.c: expected exact execution, ok={ok}: {output}"
+                            ));
+                        }
+                    } else if ok
+                        || !output.lines().any(|line| line == trap)
+                        || !output.contains("claimed = 4")
+                        || !output.contains(&context)
+                    {
+                        failures.push(format!(
+                            "{name}.c: expected {trap} with {context}, ok={ok}: {output}"
+                        ));
+                    }
+                    executions += 2;
+                }
+            }
+        }
+    }
+    assert_eq!(executions, 32, "every pair must execute both lanes");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// P2-2's measurement, kept as a row. A class MIXING an interface member with
-/// a local one is `Local` as a whole, because `placement` returns `Entry`
-/// only when every member is an interface value. The question that raises: is
-/// the INTERFACE member still checked, given that the entry path skips Local
-/// classes and the local path applies the resolved-dim skip?
-///
-/// It is, and by the ABI static-dim check rather than by a class guard. The
-/// b2.4 narrowing that drops that check is built from `entry_dim_classes()`
-/// alone, so it never fires for a member of a Local class, and the caller's
-/// obligation on `x` axis 0 survives. Driving the kernel with the wrong
-/// extent for `x` aborts on it.
-///
-/// EVIDENTIARY STATUS: regression test for the narrowing's boundary. It fails
-/// if the ABI narrowing is ever widened from `entry_dim_classes()` to every
-/// class, which is the change that would leave this axis unchecked.
+/// A mixed class keeps the static ABI check on its resolved declaring input.
+/// The entry-class narrowing must not erase it merely because the class also
+/// has local carrier members.
 #[test]
 fn an_interface_member_of_a_mixed_class_is_still_checked() {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
@@ -5555,29 +5882,9 @@ int main() {{
     );
 }
 
-/// The narrow case round 2 asked to be measured: an INTERFACE member carrying
-/// a literal claim on an input whose own declared dim is SYMBOLIC, in a class
-/// a computed co-member places `Local`.
-///
-/// Every check that could cover `x` axis 0 is out of the way by construction:
-/// the ABI static-dim preamble needs a `known_dim_size` and `n` has none; the
-/// entry path takes `entry_dim_classes()` and this class is Local; and the
-/// local path takes `Name` claims only, so a `Literal` claim contributes no
-/// site at all. The question is whether anything traps when the caller passes
-/// the wrong extent.
-///
-/// **Nothing traps, and `main` does not either.** Measured both ways by
-/// running this exact DAG on a tree built from `6b00299b6`: no ABI check, no
-/// entry guard, no local guard, and the kernel runs to `shape=4` on a caller
-/// that passed 5. So this is a PRE-EXISTING gap that this slice neither
-/// introduces nor worsens, not a regression, and closing it needs per-MEMBER
-/// placement - an interface member guarded at entry regardless of what its
-/// class's other members are - which is a mechanism change and belongs with
-/// B2b's derivation work rather than here.
-///
-/// EVIDENTIARY STATUS: disposition lock on a pre-existing gap, not a
-/// regression test. It goes red when someone closes the gap, which is the
-/// point: the row names the case so the closure is deliberate.
+/// A literal claim reading a symbolic input, in a class placed Local by a
+/// computed co-member. No static ABI check covers the input; the local
+/// carrier consumer must check its independently supplied extent.
 fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let four = || TensorType {
@@ -5644,7 +5951,7 @@ fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
 }
 
 #[test]
-fn a_literal_claim_on_a_symbolic_input_in_a_local_class_is_unguarded() {
+fn a_literal_claim_on_a_symbolic_input_in_a_local_class_traps() {
     let dag = symbolic_input_mixed_class_dag();
     let result = codegen_with_options(
         &dag,
@@ -5656,17 +5963,9 @@ fn a_literal_claim_on_a_symbolic_input_in_a_local_class_is_unguarded() {
         },
     )
     .expect("codegen");
-    // Every check that could cover the interface member is absent, and each
-    // for its own reason: no `known_dim_size` on a symbolic `n`, the entry
-    // path takes Entry classes only, and the local path takes `Name` claims
-    // only.
+    // The symbolic input supplies no static ABI size check. The operation
+    // still owes its local literal claim before allocation or indexing.
     assert!(!result.c_source.contains("input `x` axis 0 expected"));
-    assert_eq!(
-        result.c_source.matches("numeric trap: domain in").count(),
-        0,
-        "no guard of any kind covers this axis: {}",
-        result.c_source
-    );
     let harness = format!(
         r#"{HARNESS_HEADER}
 extern void sym_mixed(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
@@ -5685,33 +5984,20 @@ int main() {{
 "#
     );
     let (ok, out) = compile_and_run_kernel_capturing("sym_mixed", &result.c_source, &harness);
-    assert!(ok, "the gap is silent rather than trapping: {out}");
+    assert!(!ok, "the local literal claim must trap: {out}");
     assert!(
-        out.contains("NO TRAP shape=4"),
-        "a caller passing 5 for a claimed 4 runs to completion, as it does on \
-         `main`: {out}"
+        out.lines()
+            .any(|line| line == "numeric trap: domain in expand at int64")
+            && out.contains("claimed = 4")
+            && out.contains("node 2 axis 0 = 5")
+            && !out.contains("NO TRAP"),
+        "the failure must identify the literal claim and observed carrier: {out}"
     );
 }
 
-/// The row that fails without the local-member narrowing, and the `Name`
-/// sibling of the unguarded-gap row above.
-///
-/// A `Name` class over an INTERFACE member reading `y`'s axis and a LOCAL
-/// co-member reading a strided tensor. Both declaring inputs are symbolic, so
-/// no ABI static-dim check covers either; the co-member places the class
-/// `Local`, so the entry path skips it; and the claim is a `Name`, so the
-/// local path does take it. The interface member's own dim is RESOLVED, which
-/// is exactly the shape the resolved-dim proof would exempt if it were
-/// applied to every member of a Local class instead of to local members only.
-///
-/// With the narrowing the interface member keeps its site and a caller
-/// passing disagreeing extents traps. Without it the member is skipped and
-/// the kernel is silent - and nothing else catches it, which is what makes
-/// this the coverage the narrowing was missing.
-///
-/// EVIDENTIARY STATUS: regression test for the narrowing, measured both ways.
-/// It also shows the narrowing buys a check `main` never had: `main` forms no
-/// class here at all.
+/// An unresolved symbolic input supplies an independently observed extent
+/// under a resolved named claim. A computed co-member places the class Local;
+/// the resolved result metadata must not exempt its interface member either.
 #[test]
 fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};

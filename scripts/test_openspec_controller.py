@@ -23,7 +23,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -75,6 +78,7 @@ class FakeApi:
         self.create_url = create_url
         self.calls: list[list[str]] = []
         self.envs: list[dict] = []
+        self.cwds: list[str | None] = []
 
     @staticmethod
     def default_run(**overrides: object) -> dict:
@@ -94,6 +98,8 @@ class FakeApi:
     def __call__(self, command, **kwargs: object):
         self.calls.append(list(command))
         self.envs.append(dict(kwargs.get("env") or {}))
+        cwd = kwargs.get("cwd")
+        self.cwds.append(None if cwd is None else str(cwd))
         joined = " ".join(command)
         if command[0] != "gh" and "openspec_acceptance.py" in joined:
             return _Result(self.verdict, self.verdict_text, "")
@@ -557,10 +563,17 @@ class ControllerWorkflowTests(unittest.TestCase):
             found.append("stored-pat-secret")
         if f"actions/create-github-app-token@{APP_TOKEN_SHA}" not in commands:
             found.append("app-token-action")
-        if "app-id: ${{ vars.CI_APP_ID }}" not in commands:
+        if "app-id: ${{ vars.OPENSPEC_APP_ID }}" not in commands:
             found.append("app-id-source")
-        if "private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}" not in commands:
+        if "private-key: ${{ secrets.OPENSPEC_APP_PRIVATE_KEY }}" not in commands:
             found.append("app-private-key-source")
+        # The dedicated App only. The shared CI App's installation does not
+        # grant pull-request write here -- minting from it returned HTTP 422,
+        # "The permissions requested are not granted to this installation" --
+        # and widening that App would hand pull-request write to every
+        # workflow that already uses it for cross-repo reads.
+        if "CI_APP_ID" in commands or "CI_APP_PRIVATE_KEY" in commands:
+            found.append("shared-app-credentials")
         # Scoped to this repository only, never the whole installation.
         if "owner: ${{ github.repository_owner }}" not in commands:
             found.append("token-owner-scope")
@@ -760,8 +773,8 @@ class SubmissionCredentialTests(unittest.TestCase):
         """
         api = FakeApi()
         _, output = run_controller(api, submission_token=None)
-        self.assertIn("CI_APP_ID", output)
-        self.assertIn("CI_APP_PRIVATE_KEY", output)
+        self.assertIn("OPENSPEC_APP_ID", output)
+        self.assertIn("OPENSPEC_APP_PRIVATE_KEY", output)
         self.assertIn("installation", output.lower())
         for stale in (
             "personal access token",
@@ -831,6 +844,132 @@ class SubmissionCredentialTests(unittest.TestCase):
         self.assertNotIn('or os.environ.get("GH_TOKEN")', source)
 
 
+class RelativeRepositoryPathTests(unittest.TestCase):
+    """The workflow checks out to `base/`, not to the working directory.
+
+    Every other test here passes `Path(".")`, where applying the path twice
+    is invisible: `./.` is `.`. The hosted controller passes `base`, and the
+    first real run failed with
+
+        openspec_acceptance: cannot run Git:
+        [Errno 2] No such file or directory: 'base'
+
+    because the classifier was started with `cwd=base` AND `--repo base`,
+    so it looked for `base/base`. A relative path must not be resolved once
+    by the parent and again by the child.
+    """
+
+    def classifier_call(self, api: FakeApi) -> tuple[list[str], str | None]:
+        for call, cwd in zip(api.calls, api.cwds):
+            if any("openspec_acceptance.py" in part for part in call):
+                return call, cwd
+        raise AssertionError("the classifier was never invoked")
+
+    def test_the_classifier_repo_argument_survives_its_own_cwd(self) -> None:
+        api = FakeApi()
+        status, output = run_controller(api, repository_path=Path("base"))
+        self.assertEqual(status, controller.QUEUED, output)
+        call, cwd = self.classifier_call(api)
+        repo = call[call.index("--repo") + 1]
+        # Resolving the argument against the child's own working directory
+        # must land on the repository, not on a sibling beneath it.
+        self.assertEqual(
+            (Path(cwd or ".") / repo).resolve(),
+            Path("base").resolve(),
+            f"--repo {repo!r} under cwd {cwd!r} does not name the repository",
+        )
+
+    def test_a_relative_checkout_directory_reaches_a_real_git_repository(
+        self,
+    ) -> None:
+        """The failure was in a real subprocess, so prove it with one.
+
+        The fake runner answers `gh`, but the classifier runs for real
+        against a real repository in a subdirectory -- the exact shape the
+        workflow uses.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            checkout = workspace / "base"
+            head, base = self.build_repository(checkout)
+
+            class RealClassifier(FakeApi):
+                def __call__(self, command, **kwargs: object):
+                    if any("openspec_acceptance.py" in part for part in command):
+                        self.calls.append(list(command))
+                        self.envs.append({})
+                        self.cwds.append(str(kwargs.get("cwd")))
+                        return subprocess.run(
+                            list(command),
+                            cwd=kwargs.get("cwd"),
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                        )
+                    return super().__call__(command, **kwargs)
+
+            api = RealClassifier(
+                run=FakeApi.default_run(head_sha=head),
+                branch_sha=head,
+                base_sha=base,
+            )
+            out = io.StringIO()
+            # `base` stays RELATIVE here, and the process runs from the
+            # directory holding it, exactly as the workflow does.
+            previous = os.getcwd()
+            os.chdir(workspace)
+            try:
+                with redirect_stdout(out), redirect_stderr(out):
+                    status = controller.run(
+                        repository=REPO,
+                        run_id=RUN_ID,
+                        default_branch="main",
+                        repository_path=Path("base"),
+                        runner=api,
+                        submission_token=SUBMISSION_TOKEN,
+                    )
+            finally:
+                os.chdir(previous)
+            output = out.getvalue()
+            self.assertNotIn("cannot run Git", output)
+            self.assertNotIn("No such file or directory", output)
+            self.assertEqual(status, controller.QUEUED, output)
+
+    def build_repository(self, checkout: Path) -> tuple[str, str]:
+        """A real repository whose tip changes one OpenSpec document."""
+        checkout.mkdir(parents=True)
+
+        def git(*arguments: str) -> str:
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        git("init", "--quiet", "--initial-branch", "main")
+        git("config", "user.email", "test@example.invalid")
+        git("config", "user.name", "Test")
+        # Governance content the head must carry unchanged. Without it the
+        # identity comparison has nothing to read and refuses, which is its
+        # own fail-closed rule and would mask the path bug under test.
+        for governance in (".github/workflows/ci.yml", "scripts/gate.py"):
+            path = checkout / governance
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# governance\n", encoding="utf-8")
+        document = checkout / "openspec" / "changes" / "demo"
+        document.mkdir(parents=True)
+        (document / "proposal.md").write_text("# Demo\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "--quiet", "--no-verify", "-m", "base")
+        base = git("rev-parse", "HEAD")
+        (document / "proposal.md").write_text("# Demo\n\nMore.\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "--quiet", "--no-verify", "-m", "document change")
+        return git("rev-parse", "HEAD"), base
+
+
 class CredentialExposureTests(unittest.TestCase):
     """The submission credential exists only in the trusted workflow."""
 
@@ -840,7 +979,7 @@ class CredentialExposureTests(unittest.TestCase):
         )
 
     def test_only_the_controller_workflow_references_the_app_key(self) -> None:
-        secret = "CI_APP_PRIVATE_KEY"
+        secret = "OPENSPEC_APP_PRIVATE_KEY"
         controller_text = self.workflow("openspec-autoland-controller.yml")
         self.assertIn(secret, controller_text)
         for other in (
@@ -851,9 +990,26 @@ class CredentialExposureTests(unittest.TestCase):
             with self.subTest(workflow=other):
                 other_text = self.workflow(other)
                 self.assertNotIn(secret, other_text)
-                self.assertNotIn("CI_APP_ID", other_text)
+                self.assertNotIn("OPENSPEC_APP_ID", other_text)
                 self.assertNotIn("create-github-app-token", other_text)
                 self.assertNotIn("OPENSPEC_SUBMISSION_TOKEN", other_text)
+
+    def test_the_shared_ci_app_keeps_its_own_consumers(self) -> None:
+        """This change must not disturb the App it did not switch.
+
+        The dedicated App exists because the shared one lacks pull-request
+        write here. The reverse must also hold: the workflows that mint
+        cross-repo read tokens from the shared App keep doing exactly that,
+        so a future reader cannot mistake this for a repository-wide
+        migration off `CI_APP_ID`.
+        """
+        for name in ("conformance-nightly.yml", "ecosystem-drift.yml"):
+            with self.subTest(workflow=name):
+                text = self.workflow(name)
+                self.assertIn("vars.CI_APP_ID", text)
+                self.assertIn("secrets.CI_APP_PRIVATE_KEY", text)
+                self.assertNotIn("OPENSPEC_APP_ID", text)
+                self.assertNotIn("OPENSPEC_APP_PRIVATE_KEY", text)
 
     def test_no_head_controlled_workflow_can_reach_any_secret(self) -> None:
         """The signal and validator run head-supplied files."""
@@ -868,7 +1024,7 @@ class CredentialExposureTests(unittest.TestCase):
         commands = "\n".join(
             line for line in text.splitlines() if not line.strip().startswith("#")
         )
-        self.assertEqual(commands.count("secrets.CI_APP_PRIVATE_KEY"), 1)
+        self.assertEqual(commands.count("secrets.OPENSPEC_APP_PRIVATE_KEY"), 1)
         self.assertEqual(commands.count("steps.app-token.outputs.token"), 1)
         self.assertNotIn("secrets.OPENSPEC_SUBMISSION_TOKEN", commands)
 

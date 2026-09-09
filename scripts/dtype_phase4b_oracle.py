@@ -103,6 +103,7 @@ CONTRACT_FILES = (
     "spec/registry/c_heap_lifetime.md",
     "spec/registry/stdlib_adt_identities.md",
     "spec/registry/stdlib_numeric_manifest.md",
+    "spec/registry/python_tensor_metadata.md",
 )
 OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
 ATOM_START = re.compile(
@@ -153,6 +154,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     42: "`stop_gradient(value) -> result`",
     43: "`relu(x) -> result`",
     44: "`heap_lifetime(handle, parameters...) -> result`",
+    45: "`python_tensor_shape(tensor) -> extents`",
 }
 
 # These are independent, executable copies of the exact normative manifests.
@@ -160,6 +162,9 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
 # these rows make a missing, renamed, duplicated, or retyped callable explain
 # itself as a manifest failure rather than only as an opaque hash mismatch.
 EXPECTED_OP_MANIFESTS = {
+    "05-OP-45": (
+        "| full tensor shape | `chelis_python::NativeTensor::shape(self: &Self) -> Vec<i64>` |",
+    ),
     "05-OP-31": tuple(
         """\
 | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
@@ -214,6 +219,8 @@ EXPECTED_OP_MANIFESTS = {
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
 | contiguous stride | `int64_t chelis_tensor_stride(const chelis_tensor *tensor, int32_t axis)` |
 | logical byte count | `int64_t chelis_tensor_byte_count(const chelis_tensor *tensor)` |
+| tensor iteration index step | `int64_t chelis_tensor_elementwise_index_step(const chelis_tensor *input, const chelis_tensor *domain)` |
+| shape iteration index step | `int64_t chelis_tensor_elementwise_index_step_for_shape(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *shape)` |
 | reshape validation | `void chelis_tensor_check_reshape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape)` |
 | owned reshape | `chelis_tensor *chelis_tensor_reshape(const chelis_tensor *tensor, const chelis_list *shape)` |
 | contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
@@ -396,6 +403,8 @@ EXPECTED_OP_MANIFESTS = {
 }
 
 FROZEN_ATOM_DIGESTS = {
+    '05-OP-45': '68421184e132aaa0acdf115ce5b1300aae3a717cf78e754127901839fb4e55b9',
+    '04-FIT-18': '24894c3cdf89f26da5372f59d0443a4ce74e1b684db654159c91830107e669aa',
     "04-LIN-3": "52a61c21d53b8eaf194feebed4eee608f49bc30ebb0008fcc4d366fd93c3e649",
     "04-LIN-4": "ab21050a84236c40236b7d8d53453767dc15839a44ae1fd012d33bed411fecf9",
     "04-LIN-5": "2ad4e07442bf890a6fdd434362f50ab86215d6bd35c3d680e515de6fba5f9a29",
@@ -441,7 +450,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "a28418e0864597e1754eb1f3cfce5ee95ac96e9575b471d689719c8f74bbef56",
+    "05-OP-33": "351ab8e6ef739ce3fee1db7b04b8299240c63598c79dbf20e92f2d9c94a38aab",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -460,11 +469,23 @@ FROZEN_ATOM_DIGESTS = {
 # mechanism. An intentional change owes the owning spec/design update, every
 # consuming contract, and an adversarial mutation before this manifest moves.
 FROZEN_REGION_DIGESTS = {
+    'Python numeric boundary': (
+        'spec/11-ffi.md',
+        '## 1. Python Interop',
+        '## 2. C Interop',
+        '4ab5f5f0b8cd948648b4afa4ade5950b8686b1e10e2809ab5c78e26450ae7ee7',
+    ),
+    'numeric wire codecs and roles': (
+        'spec/10-serialization.md',
+        '### 3.2 Exact Numeric Value Codec',
+        '## 4. Invariant Revalidation At Decode Boundaries',
+        '1703f7335244efd2d1189e74ab33cbecb8a57bbe615027fd1fa20cdbd83d42b4',
+    ),
     "agent numeric surface discipline": (
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "de1f56b43a92495cc8a71d7e543b888372f4fb803946a1fed78eb603fb67f917",
+        "92b7a9076e1b671f4d7e7329337380939ab816a90f157533041d2b78a658b0b9",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
@@ -506,7 +527,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "1867155f6dfa7ae8689a0c276dbe33742638f3355c8a2d2ea2cb3d8ba0b4235b",
+        "ce86cffbf75b8cebd6a69cb4c0be02742a93bf98e51bfdaa893a0ee56013441d",
     ),
     "capability schema": (
         "spec/design/capability_table.md",
@@ -589,6 +610,7 @@ def atom_blocks(text: str) -> dict[str, str]:
 
 
 OP_MANIFEST_REGISTRY_FILES = {
+    "05-OP-45": "spec/registry/python_tensor_metadata.md",
     "05-OP-31": "spec/registry/c_scalar_carrier.md",
     "05-OP-32": "spec/registry/c_container_boundary.md",
     "05-OP-33": "spec/registry/c_tensor_runtime.md",
@@ -1195,7 +1217,7 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 7 is explicitly\npresent", "wire v7 presence"),
+            ("Schema version 8 is explicitly\npresent", "wire v8 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
@@ -1217,7 +1239,7 @@ def validate_normative_contract(
                 "wire Pad payload rejection",
             ),
             (
-                "No v5\nnumeric-fill migration or inferred fill dtype exists",
+                "No\nnumeric-fill migration or inferred fill dtype exists",
                 "wire Pad no compatibility",
             ),
         ),
@@ -1235,6 +1257,36 @@ def validate_normative_contract(
             ("independently owned and may\nbe released in either order", "FFI root owners"),
             ("governed by [05-OP-31..33]", "FFI complete C authority range"),
         ),
+        violations,
+    )
+    require_all(
+        spec10,
+        (
+            ("f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
+            ("No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
+            ("A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
+            ("A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
+            ("Bounds alone never establish transport authority.", "wire report numeric authority"),
+            ("`schema_version: 3`", "execution v3 exactness"),
+        ),
+        violations,
+    )
+    require_all(
+        spec04,
+        (("untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),),
+        violations,
+    )
+    require_all(
+        spec11,
+        (
+            ("Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),
+            ("DLPack keywords are validated, never ignored.", "binding DLPack keyword admission"),
+        ),
+        violations,
+    )
+    require_all(
+        docs["spec/design/dtype_semantics.md"],
+        (("No partial WireDag v8 is published.", "wire atomic cutover"),),
         violations,
     )
     require_all(
@@ -2225,11 +2277,16 @@ def validate_normative_contract(
             "outside AD and have no accumulator",
         ),
         "05-OP-33": (
+            "returns exact int64 zero for a rank-zero input, or one when the input shape",
+            "is identical to the domain shape",
+            "It validates every extent and the exact zero-aware element product before",
+            "An iteration domain requires neither storage byte counts nor contiguous suffix strides",
+            "A caller validates the original input before repurposing its storage",
             "excluding spare storage capacity",
             "takes rank and every target extent as exact tagged int64 scalars",
             "changes no metadata, ownership, or payload",
             "preserves every stored element bit",
-            "exactly the twenty-six final public C callable identities",
+            "exactly the twenty-eight final public C callable identities",
             "axes and unboxed rank are `int32_t`",
             "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
             "handles, and every tensor result is a new owner",

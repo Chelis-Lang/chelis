@@ -1558,24 +1558,6 @@ pub struct LocalGuardClaim {
     pub observed: LocalGuardObservation,
 }
 
-/// Whether a class member's own output dim carries an extent the checker
-/// already resolved.
-///
-/// For a LOCAL member that is the compiler's own proof: the extent is produced
-/// inside this function and the resolved size is what it was produced to be.
-/// For an INTERFACE member it is a claim about what the caller must pass and
-/// proves nothing, which is why `chelis#1377`'s input axis is guarded rather
-/// than exempted. [`RuntimeDimClass::placement`] is a property of the whole
-/// CLASS, so its `Local` verdict does not establish that a given member is
-/// local; callers pair this with [`member_load_axis`] to ask that per member.
-fn member_dim_is_statically_resolved(dag: &Dag, member: &ClassMember) -> bool {
-    matches!(
-        dag.get(member.node)
-            .and_then(|node| node.output_type.dims.get(member.axis)),
-        Some(DimInfo::Named(_, Some(_))) | Some(DimInfo::Lit(_))
-    )
-}
-
 /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
 /// site guards against.
 ///
@@ -1595,48 +1577,28 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
         if class.placement(dag) != GuardPlacement::Local {
             continue;
         }
-        let DimClaim::Name(name) = &class.claim else {
-            continue;
+        // A numeric result annotation supplies the required value, never
+        // evidence that the operation's independent carrier produces it.
+        // Literal classes need no binder witness; resolved named classes keep
+        // their existing class identity and compare against the required number.
+        let (name, resolved) = match &class.claim {
+            DimClaim::Literal(value) => (value.to_string(), Some(*value)),
+            DimClaim::Name(name) => {
+                let required = class.members.iter().find_map(|member| {
+                    match dag.get(member.node)?.output_type.dims.get(member.axis)? {
+                        DimInfo::Named(_, Some(value)) | DimInfo::Lit(value) => Some(*value),
+                        DimInfo::Named(_, None) => None,
+                    }
+                });
+                (name.clone(), required)
+            }
         };
-        // The class's canonical VALUE. C2.4 makes a literal claim its own
-        // canonical value; a `Name` the checker resolved to a literal is the
-        // same situation reached by a different spelling, so the comparison is
-        // against that literal rather than against a variable no lane
-        // declares.
-        let resolved = class.members.iter().find_map(|member| {
-            match dag.get(member.node)?.output_type.dims.get(member.axis)? {
-                DimInfo::Named(_, Some(value)) | DimInfo::Lit(value) => Some(*value),
-                DimInfo::Named(_, None) => None,
-            }
-        });
         for member in &class.members {
-            // C2.7 puts "does this site owe a guard" in the derivation rather
-            // than in an emitter, so a lane cannot answer it a second way.
-            //
-            // A LOCAL member's extent is produced by the compiler inside this
-            // function, so a resolved static size on its own dim is the
-            // checker's proof and the comparison would be a value against the
-            // literal it was produced from - a self-check that can only catch
-            // a compiler bug, which C2.4 already declines for a literal claim
-            // matching a literal size. This keys on PROVENANCE, the same axis
-            // section 4.7 uses to place a guard at entry or at the introducing
-            // operation: an INTERFACE member's resolved size is a caller claim
-            // and is guarded (chelis#1377), never exempted.
-            // Narrowed to LOCAL members. `placement` is a property of the
-            // whole class - `Entry` only when every member is an interface
-            // value - so one local member makes a MIXED class Local, and
-            // applying the proof to every member of it would exempt an
-            // interface member whose resolved size is a caller claim.
-            // Measured: the caller's obligation on such a member survives on
-            // the ABI static-dim check, because b2.4's narrowing of that check
-            // is built from `entry_dim_classes()` alone and never fires for a
-            // member of a Local class. The predicate is narrowed anyway, so
-            // the comment and the code say the same thing.
-            if member_load_axis(dag, member).is_none()
-                && member_dim_is_statically_resolved(dag, member)
-            {
-                continue;
-            }
+            // Only the independent extent source can discharge a claim.
+            // Runtime carriers remain observable even when result metadata
+            // contains a number. Literal-source proofs were handled by
+            // is_member; unsupported observation kinds remain outside this
+            // carrier consumer.
             if !matches!(
                 member.source,
                 AxisSource::InputAxis { .. } | AxisSource::ScalarInput { .. }
@@ -1657,13 +1619,9 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 // both members and no site existed to compare them, so the
                 // claim executed unguarded on every lane.
                 //
-                // The two sources that stay out are not omissions. An
-                // `ExternalAxis` member IS the declaration each lane reads the
-                // canonical value from, so guarding it would compare a value
-                // against itself. An `OpComputed` member's guard needs the
-                // derivation narrowed first, because a claim over a statically
-                // determined operation output - a matmul's `Literal(64)` axis -
-                // would guard a value against the literal it was produced from.
+                // External declarations retain their existing entry checks.
+                // OpComputed sources need independent observations beyond
+                // these carriers; B2b-0b still owns that separate extension.
                 continue;
             }
             let Some(node) = dag.get(member.node) else {

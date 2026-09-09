@@ -2268,6 +2268,23 @@ shape is a change to a published interface.
 | `typed_ast` | annotated Deep carrying a type on every node | always |
 | `inferred_signatures` | structured signature tree | only when the caller requests inferred signatures |
 
+> **[04-FIT-18]** `score`, `components.parse`, `components.structure`,
+> `components.names`, `components.types`, and diagnostic `severity` SHALL be
+> finite `f64` values in `[0, 1]`. Signed zero is admitted and preserved.
+> `severity` orders the producer's assessment from least to most severe;
+> it neither changes diagnostic presence nor replaces the error-list exit rule.
+> Score components and the weighted total retain §6.1's measurements and
+> weights. Checked-node counters SHALL be exact nonnegative `int64`, with
+> `typed_nodes <= total_nodes` and
+> `untyped_nodes = total_nodes - typed_nodes`. Their provenance remains
+> [04-FIT-1]. Counter overflow or an inconsistent report is an error, never
+> a wrapped counter or a repaired total. The fixed-dtype number codecs in
+> spec/10 §3.5 preserve the JSON number/integer field shapes above through
+> canonical sealed numeric carriers. NaN, infinity, an out-of-domain value,
+> or a missing required field is rejected, never rounded, clamped or defaulted.
+
+(The fixed-dtype report carrier requirement is not fully implemented; see chelis#1288.)
+
 > **[04-FIT-13]** `typed_ast` and, when requested, `inferred_signatures`
 > SHALL be carried in the same typed value as the rest of the report.
 > They are members of the report's type -- `inferred_signatures` absent by

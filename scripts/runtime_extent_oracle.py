@@ -543,6 +543,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         ),
         _row(
+            "expand.positional.replacement.shape_size.eval_c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_broadcast.singleton_broadcast_contract",
+        ),
+        _row(
             "expand.positional.replacement_zero.c",
             "silent_unguarded",
             EXECUTES,
@@ -666,6 +672,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "ice",
             "typed_unsupported(#1482)",
             "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+        ),
+        _row(
+            "guard.local.numeric_carriers.eval_c",
+            "silent_unguarded",
+            EXECUTES,
+            "exec_c.numeric_local_extent_claims_execute_exactly",
         ),
         _row(
             "shrink.to_end.nonzero_start",
@@ -931,6 +943,15 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
             ("every_rebuild_pass_preserves_the_derived_classes",),
         ),
         TestTarget(
+            "cli_broadcast",
+            (
+                "cargo", "test", "-p", "chelis-cli", "--test",
+                "runtime_extent_claim_preparation", "singleton_broadcast_contract",
+                "--", "--nocapture", "--exact",
+            ),
+            ("singleton_broadcast_contract",),
+        ),
+        TestTarget(
             "cli_slice_b",
             (
                 "cargo", "test", "-p", "chelis-cli", "--test",
@@ -980,7 +1001,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
         # on C are proved by DRIVEN rows that compile the exported kernel and
         # call it with runtime inputs. This target is where those rows live.
         # `exec_compile` is a large shared binary, so this target names its
-        # four rows with `--exact` rather than running the whole file: the
+        # rows with `--exact` rather than running the whole file: the
         # receipt check requires the observed set to EQUAL the expected one,
         # and an unfiltered run would tie this phase's oracle to every
         # unrelated numeric row in that file.
@@ -995,6 +1016,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+                "numeric_local_extent_claims_execute_exactly",
             ),
             (
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
@@ -1003,6 +1025,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+                "numeric_local_extent_claims_execute_exactly",
             ),
         ),
     )

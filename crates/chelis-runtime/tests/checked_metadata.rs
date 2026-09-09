@@ -8,6 +8,40 @@ use chelis_vocab::RuntimeDType;
 use metadata::{ByteCount, ElementCount, IterationSpace, MetadataError, ShapeMetadata};
 
 #[test]
+fn checked_iteration_steps_preserve_exact_large_domains_without_storage() {
+    let scalar = ShapeMetadata::contiguous(&[], RuntimeDType::F64).unwrap();
+    for extent in [i32::MAX as i64 + 1, 9_007_199_254_740_993, i64::MAX] {
+        let input = ShapeMetadata::contiguous(&[extent], RuntimeDType::I8).unwrap();
+        let domain = IterationSpace::new(&[extent]).unwrap();
+        assert_eq!(domain.elementwise_index_step(&input).unwrap(), 1);
+        assert_eq!(input.elementwise_index_step(&input).unwrap(), 1);
+        assert_eq!(scalar.elementwise_index_step(&input).unwrap(), 0);
+        assert!(matches!(
+            input.elementwise_index_step(&scalar),
+            Err(MetadataError::Domain(_))
+        ));
+        assert_eq!(domain.elementwise_index_step(&scalar).unwrap(), 0);
+        assert_eq!(domain.elements().get(), extent);
+        let different = IterationSpace::new(&[1, extent]).unwrap();
+        assert!(matches!(
+            different.elementwise_index_step(&input),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    let empty = IterationSpace::new(&[0, i64::MAX, i64::MAX]).unwrap();
+    assert_eq!(empty.elements().get(), 0);
+    assert_eq!(empty.elementwise_index_step(&scalar).unwrap(), 0);
+    assert!(matches!(
+        IterationSpace::new(&[0, -1]),
+        Err(MetadataError::Domain(_))
+    ));
+    assert!(matches!(
+        IterationSpace::new(&[3_074_457_345_618_258_603, 3]),
+        Err(MetadataError::Overflow(_))
+    ));
+}
+
+#[test]
 fn rank_zero_and_each_dtype_have_exact_count_bytes_and_strides() {
     for dtype in RuntimeDType::ALL {
         let scalar = ShapeMetadata::contiguous(&[], dtype).unwrap();

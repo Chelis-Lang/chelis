@@ -946,6 +946,26 @@ and the integer arithmetic feeding it) uses §2.4.1's node-valued `RtDim`
 capability; it does not allocate a second shape operation or a
 compile-time-only alias.
 
+#### Python full-shape metadata
+
+> **[05-OP-45]** `python_tensor_shape(tensor) -> extents` governs exactly
+> the registered binding identities in
+> `spec/registry/python_tensor_metadata.md`, incorporated by reference.
+> It borrows a validated tensor descriptor and returns all extents in axis
+> order as exact nonnegative `int64` values, exposed as Python integers.
+> The result length equals the descriptor's dynamic int32 rank, including
+> an empty vector for rank zero. It reads no tensor elements and preserves
+> every extent at every active element dtype and admitted device under
+> [04-NUM-11]. No host-width conversion, fixed-rank truncation, fabricated
+> extent, or unchecked foreign descriptor is admitted. Descriptor validity
+> and lifetime are established before the wrapper is constructed, as
+> specified in spec/11 §1.2; observing shape does not authorize allocation
+> or prove equality of capacities. This Python metadata operation is
+> non-differentiable and has no arithmetic accumulator. It does not alter
+> the language `shape(x, axis)` operation or its [05-OP-7] zero-cotangent rule.
+
+(The exact binding shape carrier is not fully implemented; see chelis#1288.)
+
 ### 2.6 Effectful Primitive
 
 | Name | Signature | Semantics | AD / effect note |
@@ -1890,7 +1910,7 @@ exact ADT identity by [05-OP-34].
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the twenty-six final public C callable identities enumerated in
+> exactly the twenty-eight final public C callable identities enumerated in
 > the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
 > incorporates by reference. These
 > signatures are canonical: axes and unboxed rank are `int32_t`; extents, sizes,
@@ -1959,6 +1979,24 @@ exact ADT identity by [05-OP-34].
 > zero elements but still requires representable suffix strides; rank zero has
 > one element. Malformed metadata or unequal counts trap `Domain`; unrepresentable
 > products, strides, byte counts, or allocation projections trap `Overflow`.
+>
+> `chelis_tensor_elementwise_index_step` validates input and domain tensor metadata
+> and returns exact int64 zero for a rank-zero input, or one when the input shape
+> is identical to the domain shape. Any other shape pairing traps `Domain`, even
+> when the element counts agree or are zero. Input and domain dtypes may differ.
+> `chelis_tensor_elementwise_index_step_for_shape` applies the same rule to an
+> iteration domain supplied as exact tagged int64 rank and extents. The decoded
+> rank must fit nonnegative int32; positive rank requires a non-null shape pointer.
+> It validates every extent and the exact zero-aware element product before
+> selecting the scalar or identity step. An iteration domain requires neither
+> storage byte counts nor contiguous suffix strides. Negative rank or extents,
+> malformed tagged scalars, and invalid handles trap `Domain`; unrepresentable
+> rank, element count, or scratch allocation projections trap `Overflow`.
+> Both step operations observe only checked metadata, remain valid during active
+> write guards, and change no metadata, ownership, or payload. A caller validates
+> the original input before repurposing its storage, uses the checked domain count
+> as its loop bound, and maps a domain index `i` to the input index `i * step`.
+> These internal scalar projections do not introduce language-level broadcasting.
 >
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked
