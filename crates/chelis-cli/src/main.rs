@@ -2372,11 +2372,37 @@ fn cmd_check_one_on_grown_stack(
     show_inferred: bool,
     allow_style_violations: bool,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file).ok();
-    if let Some(source) = &source {
-        style_gate::enforce_style_gate(file, source, allow_style_violations)?;
-        emit_advisory_lint_warnings_for_file(file);
+    // chelis#886 [04-FIT-12]: a failure before the checker is transported by
+    // the report, not by a display string on stderr and an empty stdout.
+    //
+    // Both arms below keep writing the human diagnostic to stderr as well.
+    // The atom requires the failure to reach the report; it does not ask for
+    // the terminal message to be taken away, and `spec/01` §Style Gate makes
+    // that stderr line part of the gate's own contract.
+    //
+    // Exit status moves 1 -> 2 on these paths as a consequence, because the
+    // status is derived from this function's `Ok`/`Err` discriminant. §
+    // Gating pins only "`0` iff empty, non-zero otherwise", so both values
+    // conform; 2 is chosen to converge on the Deep arm below, which already
+    // reported an unreadable file this way.
+    let source = match fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(error) => {
+            let message = format!("failed to read {}: {error}", file.display());
+            eprintln!("error: {message}");
+            let json = synthetic_check_report_with_error(&message)?;
+            return Ok((json, true));
+        }
+    };
+    if let Err(error) = style_gate::enforce_style_gate(file, &source, allow_style_violations) {
+        // `enforce_style_gate` already printed the one-issue-per-line detail;
+        // this is the summary line `main`'s error arm used to print.
+        let message = error.to_string();
+        eprintln!("error: {message}");
+        let json = synthetic_check_report_with_error(&message)?;
+        return Ok((json, true));
     }
+    emit_advisory_lint_warnings_for_file(file);
     // Deep (`.dp`) ingestion: a standalone `.dp` is already-lowered IR,
     // not a Surf package, so the reef loader below returns `Ok(None)`
     // for it and the monolithic else-arm would feed Deep s-expressions
@@ -2386,17 +2412,10 @@ fn cmd_check_one_on_grown_stack(
     // `cmd_surf`, `cmd_fmt`, and `copy_cost_for_file`.
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("dp") {
-        let source = match &source {
-            Some(source) => source,
-            None => {
-                let json = synthetic_check_report_with_error(&format!(
-                    "failed to read {}",
-                    file.display()
-                ))?;
-                return Ok((json, true));
-            }
-        };
-        return cmd_check_one_deep(source, show_inferred);
+        // The unreadable-`.dp` arm that used to live here is gone: the read
+        // above now transports that failure for every extension, which is
+        // what made the Surf and Deep arms disagree in the first place.
+        return cmd_check_one_deep(&source, show_inferred);
     }
     // Wave-1 red-team M1 (#207 follow-up): parse failures used to
     // short-circuit through `?` into the `Err(err)` arm in `main`,
@@ -2445,12 +2464,20 @@ fn cmd_check_one_on_grown_stack(
         if chelis_compiler_api::cache_disabled() {
             None
         } else {
-            chelis_compiler_api::check_layered(
+            // [04-FIT-12]: the layered checker's own failure is transported
+            // too. It used to propagate, so a cache-path failure emitted no
+            // document while the identical monolithic-path failure did.
+            match chelis_compiler_api::check_layered(
                 &prepared.stdlib_decls,
                 prepared.stdlib_source_digest,
                 &prepared.non_stdlib_decls,
-            )
-            .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
+            ) {
+                Ok(layered) => layered,
+                Err(error) => {
+                    let json = synthetic_check_report_with_error(&compiler_error_messages(&error))?;
+                    return Ok((json, true));
+                }
+            }
         }
     } else {
         None
@@ -2491,7 +2518,11 @@ fn cmd_check_one_on_grown_stack(
             let decls = match &prepared {
                 Some(prepared) => prepared.decls.clone(),
                 None => {
-                    let source = fs::read_to_string(file)?;
+                    // Reuses the source read at the top of this function. It
+                    // used to re-read the file here with `?`, a second
+                    // unreported failure path for the same file
+                    // (chelis#886 [04-FIT-12]).
+                    //
                     // Wave-1 red-team M1 (#207 follow-up): same handling
                     // as the prepared-path parse error above, for the
                     // raw `parse_str` branch used when no reef context
@@ -2514,8 +2545,16 @@ fn cmd_check_one_on_grown_stack(
                 let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
                 return Ok((json, true));
             }
-            let prepared = chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None)
-                .map_err(|error| boxed_string_error(error.to_string()))?;
+            // [04-FIT-12]: "any preparation failure occurring before type
+            // checking begins" is the atom's own wording, so this is
+            // transported rather than propagated.
+            let prepared = match chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let json = synthetic_check_report_with_error(&error.to_string())?;
+                    return Ok((json, true));
+                }
+            };
             check_prepared_for_cli(prepared, show_inferred)
         };
     assemble_check_json(
