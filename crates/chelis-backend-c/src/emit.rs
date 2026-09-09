@@ -1513,35 +1513,6 @@ impl CEmitter {
         seen
     }
 
-    /// Resolve an `InputAxis`-sourced class member to the kernel input slot
-    /// and axis its guard reads.
-    ///
-    /// `AxisSource::InputAxis`'s slot indexes the OWNING NODE's inputs; a
-    /// prologue guard needs the kernel input slot of the tensor that operand
-    /// names. `None` means the operand is not an input tensor at all - a
-    /// computed producer, or a label with no assigned slot - and
-    /// `RuntimeDimClass::placement` has already kept such a class Local, so
-    /// there is nothing for the prologue to emit.
-    fn member_input_slot(
-        dag: VerifiedDagView<'_>,
-        input_slots: &chelis_unord::UnordMap<String, usize>,
-        member: &chelis_ir::axis_sources::ClassMember,
-    ) -> Option<(usize, i32)> {
-        // Only the folded-read spelling is emitted here: a `Load`'s own axis
-        // is already declared and guarded by the binding loop above.
-        if !matches!(
-            member.source,
-            chelis_ir::axis_sources::AxisSource::InputAxis { .. }
-        ) {
-            return None;
-        }
-        let (load, read_axis) = dag.member_load_axis(member)?;
-        let RiscOp::Load { name: label } = &dag.get(load)?.op else {
-            return None;
-        };
-        Some((*input_slots.get(label.as_str())?, read_axis as i32))
-    }
-
     fn emit_input_shape_preamble(
         &mut self,
         dag: VerifiedDagView<'_>,
@@ -1575,15 +1546,16 @@ impl CEmitter {
         // caller passing a wrong-shaped tensor to an exported kernel -
         // survives for every axis no class guards, including in programs
         // that contain no runtime extent at all.
+        let entry_guards = dag.entry_extent_guards();
         let mut literal_claim_pairs = chelis_unord::UnordMap::<(usize, i32), usize>::new();
-        for class in dag.entry_dim_classes() {
-            let chelis_ir::axis_sources::DimClaim::Literal(value) = class.claim else {
-                continue;
-            };
-            for member in &class.members {
-                if let Some(pair) = Self::member_input_slot(dag, input_slots, member) {
-                    literal_claim_pairs.insert(pair, value);
-                }
+        for guard in &entry_guards {
+            if let chelis_ir::axis_sources::EntryExtentGuard::Literal {
+                required,
+                observed: (load, axis),
+            } = guard
+                && let RiscOp::Load { name } = &dag.get(*load).expect("entry input").op
+            {
+                literal_claim_pairs.insert((input_slots[name.as_str()], *axis as i32), *required);
             }
         }
 
@@ -1634,34 +1606,6 @@ impl CEmitter {
             }
         }
 
-        // chelis#1277 b2.4: one guard per (claim, input slot, axis), and never
-        // against the pair the claim's canonical value was read from.
-        //
-        // Both loops below can reach one (slot, axis): the binding view sees a
-        // `Load`'s own axis as an `ExternalAxis` member, and the class view
-        // sees a folded `shape(t, k)` read of the same tensor as an
-        // `InputAxis` member. Measured on chelis#1374's kernel, the two
-        // spellings of one axis produced `if (chelis_tensor_shape(inputs[2],
-        // 0) != n)` twice; on the form where the claim's other witness is
-        // dropped as unused they collapsed onto the canonical itself and
-        // produced `int64_t n = chelis_tensor_shape(inputs[1], 0);` followed
-        // by `if (chelis_tensor_shape(inputs[1], 0) != n)`, a comparison of a
-        // value with itself. Neither is a guard: one is noise, the other is a
-        // condition that cannot hold.
-        let mut guarded = chelis_unord::UnordSet::<(String, usize, i32)>::new();
-        // Where each name was declared, so a guard reads the same witness the
-        // context line names.
-        let mut declared_from = chelis_unord::UnordMap::<String, (usize, usize)>::new();
-
-        // Slot-indexed labels, so a guard names the tensor it reads without
-        // re-walking the DAG for a name the slot map already keys.
-        let mut input_labels = vec![String::new(); input_slots.len()];
-        for (label, slot) in input_slots.to_sorted() {
-            if let Some(entry) = input_labels.get_mut(*slot) {
-                *entry = label.clone();
-            }
-        }
-
         // DECLARATIONS come from the occurrence walk, and that split is a
         // measured limit rather than a leftover.
         //
@@ -1695,175 +1639,48 @@ impl CEmitter {
                 "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
                 binding.name
             ));
-            // The declaring witness is the pair a guard must not compare
-            // against, so the dedupe is seeded from the DECLARATION rather
-            // than from the derivation's canonical: those can differ, and a
-            // guard reporting one witness while reading another would name
-            // the wrong tensor in its context line.
-            guarded.insert((binding.name.clone(), canonical_slot, *canonical_axis as i32));
-            declared_from.insert(binding.name.clone(), (canonical_slot, *canonical_axis));
             self.declared_dim_names.insert(binding.name.clone());
         }
 
-        // Classes preserve witness identity; scheduling belongs to individual
-        // checks. A class containing inputs z and q must not pull q ahead of
-        // an intervening input a whose obligation belongs to another class.
-        let mut entry_guards = Vec::new();
-        for binding in dag.symbolic_bindings_interface() {
-            // chelis#616: an op-declared dim is declared inline at its
-            // owning op (the bound scalars are computed tensors that do not
-            // exist here at prologue time); see `runtime_dim_sites`.
-            // The canonical is this CLASS's own first witness, never the
-            // variable the walk declared for the same spelling. The two are
-            // scoped differently now: the derivation splits a name by root
-            // scope (C2.4) and the walk does not, so comparing a scoped
-            // member against a globally declared variable pairs witnesses
-            // from two signatures. Measured on
-            // `rank_poly_tier3::named_axis_eval_parity_corners`, where that
-            // pairing survived the regrouping and kept trapping a correct
-            // program: `seq` is a 3-element axis in `total`'s signature and a
-            // 2-element one in `use2`'s, and the walk declares one of them.
-            //
-            // Reading both operands directly also makes the guard independent
-            // of which name the emitter happened to allocate under, which is
-            // the coupling that hid this.
-            let SymbolicDimSource::Load {
-                input_label: canonical_label,
-                axis: canonical_axis,
-            } = binding.canonical.source.clone()
-            else {
-                continue;
-            };
-            let canonical_slot = input_slots[canonical_label.as_str()];
-            let canonical_label = canonical_label.as_str();
-            let canonical_read =
-                format!("chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis})");
-            guarded.insert((binding.name.clone(), canonical_slot, canonical_axis as i32));
-            // `binding.name` flows into BOTH an identifier context (the
-            // emitted `int {name} = ...;` declarator) and a format-string
-            // context (the fprintf below). The identifier emission is
-            // guarded by parser/IR construction; the format-string
-            // emission needs `%`/`\\`/`"`/control sanitization here.
-            // The Load `input_label` is a LoadStoreName-validated name but
-            // we route both through the format-string sanitizer to lock the
-            // architectural pattern.
-            let binding_name_fmt =
-                chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
-            for occurrence in std::iter::once(binding.canonical).chain(binding.others) {
-                // Op-declared guard sites are emitted at their owning op.
-                let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
-                    continue;
+        // Shared IR owns ordering and witness identity. Rendering never
+        // re-groups checks by class, name or guard kind.
+        for guard in entry_guards {
+            use chelis_ir::axis_sources::EntryExtentGuard;
+            let input_read = |(load, axis): (NodeId, usize)| {
+                let RiscOp::Load { name } = &dag.get(load).expect("entry input").op else {
+                    unreachable!("entry witness must be an input");
                 };
-                let slot = input_slots[input_label];
-                if !guarded.insert((binding.name.clone(), slot, *axis as i32)) {
-                    continue;
-                }
-                let occ_label_fmt =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(input_label);
-                // `spec/04-type-system.md` section 4.7: a runtime extent
-                // guard IS a typed operation-precondition guard under
-                // [04-NUM-9], so the user-facing line is exactly
-                // `numeric trap: domain in <op> at int64` with no prefix and
-                // no suffix. `<op>` is the `load` primitive of the later
-                // witness in signature order, and `<prim>` is `int64`
-                // because the guard finalizes an extent ([05-DIM-1]) rather
-                // than a tensor element. Routing through
-                // `chelis_numeric_trap` keeps the line byte-identical to
-                // every other numeric trap this lane emits.
-                //
-                // Section 4.7 also requires the disagreeing source names, the
-                // axis and each observed value to be conveyed "on separate
-                // lines accompanying that trap", binding the information and
-                // not the bytes, so the context is its own `fprintf` and the
-                // trap line stays exactly one line.
-                let canonical_label_fmt =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(canonical_label);
-                entry_guards.push((
-                    (canonical_slot, canonical_axis as i32).max((slot, *axis as i32)),
-                    format!("if (chelis_tensor_shape(inputs[{slot}], {axis}) != {canonical_read}) {{"),
-                    format!("fprintf(stderr, \"extent `{binding_name_fmt}`: {canonical_label_fmt} axis {canonical_axis} = %lld, {occ_label_fmt} axis {axis} = %lld\\n\", (long long)({canonical_read}), (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"),
-                ));
-            }
-        }
-
-        // chelis#1277 b2.4: the loop above carries only the members the
-        // binding view models - a `Name` claim witnessed by a `Load` axis.
-        // Two more member kinds place at ENTRY under `spec/04` section 4.7 and
-        // are guarded here.
-        //
-        // A `Literal` claim's canonical value is the literal itself (C2.4), so
-        // every member is one guard against it rather than against a first
-        // member; that is chelis#1377, a declared `tensor[4, f32]` over a read
-        // that yields 5. And an `InputAxis`-sourced member reads an input
-        // tensor's axis directly, which section 4.7 lists as an interface
-        // value, so its guard belongs at entry too; that is chelis#1376.
-        for class in dag.entry_dim_classes() {
-            let (canonical_expr, claim_text) = match &class.claim {
-                chelis_ir::axis_sources::DimClaim::Literal(value) => {
-                    (value.to_string(), value.to_string())
-                }
-                chelis_ir::axis_sources::DimClaim::Name(name) => (
-                    name.clone(),
-                    chelis_ir::span_sanitize::sanitize_for_format_string(name).to_string(),
-                ),
+                let slot = input_slots[name.as_str()];
+                let label = chelis_ir::span_sanitize::sanitize_for_format_string(name.as_str());
+                (
+                    format!("chelis_tensor_shape(inputs[{slot}], {axis})"),
+                    label.to_string(),
+                    axis,
+                )
             };
-            // A `Name` claim shares the dedupe key with the binding loop
-            // above, which guards the same claim by the same name; a
-            // `Literal` claim has no binding-loop counterpart, and its
-            // decimal spelling cannot collide with a Chelis binder.
-            let claim_key = canonical_expr.clone();
-            for member in &class.members {
-                // An `ExternalAxis` member is already guarded above, and a
-                // `Literal` member is the statically proved case the
-                // derivation excludes.
-                let Some((slot, read_axis)) = Self::member_input_slot(dag, input_slots, member)
-                else {
-                    continue;
-                };
-                if !guarded.insert((claim_key.clone(), slot, read_axis)) {
-                    continue;
+            let (left, right, diagnostic) = match guard {
+                EntryExtentGuard::Named {
+                    claim,
+                    canonical,
+                    observed,
+                } => {
+                    let (left, canonical_label, canonical_axis) = input_read(canonical);
+                    let (right, label, axis) = input_read(observed);
+                    let claim = chelis_ir::span_sanitize::sanitize_for_format_string(&claim);
+                    let diagnostic = format!(
+                        "fprintf(stderr, \"extent `{claim}`: {canonical_label} axis {canonical_axis} = %lld, {label} axis {axis} = %lld\\n\", (long long)({left}), (long long)({right}));"
+                    );
+                    (left, right, diagnostic)
                 }
-                let label = &input_labels[slot];
-                let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
-                entry_guards.push((
-                    (slot, read_axis),
-                    format!("if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != {canonical_expr}) {{"),
-                    format!("fprintf(stderr, \"extent `{claim_text}`: claimed = %lld, {label_fmt} axis {read_axis} = %lld\\n\", (long long)({canonical_expr}), (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"),
-                ));
-            }
-        }
-
-        // chelis#1277 S2b: the same-rank `expand`'s unit-extent claim. It is
-        // an operation PRECONDITION on an operand rather than an identity
-        // between output axes, so it is its own derivation, but it places and
-        // renders by the same rules: `spec/05-risc-primitives.md` section
-        // 2.4.1 sends a symbolic or runtime operand extent to "that claim's
-        // runtime extent guard", section 4.7 puts it at entry when the operand
-        // is an input tensor's axis, and the `<op>` slot is `load` for exactly
-        // that reason. The claimed side is the literal 1, so there is no
-        // canonical member to read it from.
-        for (load, read_axis) in dag.entry_unit_extent_reads() {
-            let Some(RiscOp::Load { name }) = dag.get(load).map(|node| &node.op) else {
-                continue;
+                EntryExtentGuard::Literal { required, observed } => {
+                    let (right, label, axis) = input_read(observed);
+                    let diagnostic = format!(
+                        "fprintf(stderr, \"extent `{required}`: claimed = {required}, {label} axis {axis} = %lld\\n\", (long long)({right}));"
+                    );
+                    (required.to_string(), right, diagnostic)
+                }
             };
-            let Some(&slot) = input_slots.get(name.as_str()) else {
-                continue;
-            };
-            let read_axis = read_axis as i32;
-            if !guarded.insert(("1".to_string(), slot, read_axis)) {
-                continue;
-            }
-            let label = &input_labels[slot];
-            let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
-            entry_guards.push((
-                (slot, read_axis),
-                format!("if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"),
-                format!("fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"),
-            ));
-        }
-        entry_guards.sort_by_key(|(order, _, _)| *order);
-        for (_, condition, diagnostic) in entry_guards {
-            self.line(&condition);
+            self.line(&format!("if ({right} != {left}) {{"));
             self.indent += 1;
             self.line(&diagnostic);
             self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
