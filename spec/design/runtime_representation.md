@@ -515,7 +515,52 @@ coverage freeze is explicitly extended with these supporting tests and mutation;
 its 358-row immutable foundation inventory is unchanged. The two retired
 emitter spelling owners leave active debt (343 to 341).
 
-This does not finish generated C adoption: coordinate indexing, sparse/BLAS loop
+#### Generated C shared indexing delivery (#889)
+
+The shared elementwise cohort saves runtime-checked scalar/identity projections
+before allocating or repurposing output storage. `ShapeMetadata` validates a
+tensor-domain projection; `IterationSpace` validates an unmaterialized domain
+without imposing storage bytes or suffix strides. [05-OP-33] owns the two C
+signatures and their exact tagged-int64 boundary. No Python interface changes.
+
+The bounded DAG cohort is `emit_binary`, `emit_floor_div`,
+`emit_floor_div_reduced_f`, `emit_binary_reduced_f`, `emit_binary_func`,
+`emit_cmplt`, `emit_unary`, `emit_integer_abs`, `emit_recip`, `emit_unary_func`,
+`emit_unary_reduced_f`, `emit_recip_reduced_f`, `emit_binary_func_reduced_f`,
+`emit_extrema_adjoint`, `emit_unary_func_reduced_f`, `emit_fused_elem`,
+`emit_realize`, and `emit_cast`. The host cohort is checked cast plus the four
+binary/unary operator/function dispatch arms. Their loops use the checked output
+count and `i * step`; direct-index fast paths additionally require identity
+projections or at most one output element. Cast failure selection retains the
+smallest failing domain index and applies the saved projection when reclassifying
+that input. The host's two coordinate helpers are deleted; its BLAS stride
+observer and the public raw movement/reduction helpers remain.
+
+The supporting acceptance surface is the existing Phase 0 command, extended with
+the runtime `checked_c_indexing` suite in debug and release, the backend's exact
+18+5 cohort control, optimized generated-C sanitizer execution, and the existing
+dtype, cast, and storage-reuse suites. Runtime mutations execute removed shape
+checking and incorrect scalar/identity steps against real owner tests. Emitter
+controls reject restored raw indexing, late validation, unchecked loop bounds,
+and scalar admission to fast paths. The registered `checked_reshape.ch` example
+also exercises ordinary elementwise composition and a checked cast.
+
+This is one shippable slice because the new index projections and their emitter
+consumers establish one shared iteration contract. The Phase 0 coverage digest
+changes to bind these commands and controls; its 358 immutable foundation rows
+remain unchanged. Fifteen retired load/store-template owners leave active debt
+(341 to 326); reduced-float and other surviving obligations keep their rows. This supporting
+evidence does not implement or pass the complete Phase 1 receipt/mutation oracle.
+
+The two new emitter projection helpers are exact final metadata owners in the
+inventory, alongside the existing checked runtime owners. Their int64 declarations
+are projections of the registered [05-OP-33] operations. The executable recorder
+compiles those production methods and rejects restored raw calculations, constant
+steps, and weakened identity conditions. This final classification is limited to
+these two methods and `backend-element-spelling`; another numeric or width owner
+still fails the inventory. It adds no foundation or active debt.
+
+Generated C adoption still requires movement and reduction indexing, sparse/BLAS loop
 domains, Count/window scratch allocation, and the complete Phase 1 execution
 receipt/mutation oracle remain outstanding. Host-only results do not establish
 device execution or close #889/#893. Generated host/device descriptors and

@@ -1293,27 +1293,6 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
     out.push("    return chelis_tensor_stride(tensor, axis);".to_string());
     out.push("}".to_string());
     out.push(
-        "static void chelis_host_flat_to_indices(int64_t flat, const chelis_tensor *tensor, int64_t *indices) {"
-            .to_string(),
-    );
-    out.push("    for (int32_t axis = chelis_tensor_rank(tensor); axis-- > 0;) {".to_string());
-    out.push("        int64_t extent = chelis_tensor_shape(tensor, axis);".to_string());
-    out.push("        indices[axis] = flat % extent;".to_string());
-    out.push("        flat /= extent;".to_string());
-    out.push("    }".to_string());
-    out.push("}".to_string());
-    out.push(
-        "static int64_t chelis_host_indices_to_flat(const int64_t *indices, const chelis_tensor *tensor) {"
-            .to_string(),
-    );
-    out.push("    int64_t flat = 0;".to_string());
-    out.push(
-        "    for (int32_t axis = 0; axis < chelis_tensor_rank(tensor); ++axis) flat += indices[axis] * chelis_host_tensor_stride(tensor, axis);"
-            .to_string(),
-    );
-    out.push("    return flat;".to_string());
-    out.push("}".to_string());
-    out.push(
         "static chelis_tensor *chelis_host_alloc_like(const chelis_tensor *input, chelis_dtype dtype) {"
             .to_string(),
     );
@@ -5109,8 +5088,8 @@ impl<'a> HostEmitter<'a> {
         let source_data = format!("{target}_cast_source");
         let target_data = format!("{target}_cast_target");
         let flat_index = format!("{target}_cast_i");
-        let indices = format!("{target}_cast_indices");
         let source_index = format!("{target}_cast_source_i");
+        self.emit_elementwise_index_step(target, "cast", input, input);
         self.lines.push(format!(
             "{}{target} = chelis_host_alloc_like({input}, {});",
             self.indent,
@@ -5141,15 +5120,7 @@ impl<'a> HostEmitter<'a> {
             self.indent,
         ));
         self.lines.push(format!(
-            "{}    int64_t {indices}[chelis_tensor_rank({input}) > 0 ? chelis_tensor_rank({input}) : 1];",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    chelis_host_flat_to_indices({flat_index}, {input}, {indices});",
-            self.indent,
-        ));
-        self.lines.push(format!(
-            "{}    int64_t {source_index} = chelis_host_indices_to_flat({indices}, {input});",
+            "{}    int64_t {source_index} = {flat_index} * {target}_cast_step;",
             self.indent,
         ));
         let source_value = format!("{source_data}[{source_index}]");
@@ -5194,8 +5165,23 @@ impl<'a> HostEmitter<'a> {
         ));
     }
 
+    fn emit_elementwise_index_step(
+        &mut self,
+        target: &str,
+        label: &str,
+        input: &str,
+        domain: &str,
+    ) {
+        self.lines.push(format!(
+            "{}const int64_t {target}_{label}_step = chelis_tensor_elementwise_index_step({input}, {domain});",
+            self.indent,
+        ));
+    }
+
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
         self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
+        self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
             "{}{target} = chelis_host_alloc_like({lhs}, chelis_host_tensor_dtype({lhs}));",
             self.indent
@@ -5219,6 +5205,8 @@ impl<'a> HostEmitter<'a> {
         func: BinaryElementwiseFunc,
     ) {
         self.emit_elementwise_operand_guard(target, lhs, rhs);
+        self.emit_elementwise_index_step(target, "lhs", lhs, lhs);
+        self.emit_elementwise_index_step(target, "rhs", rhs, lhs);
         self.lines.push(format!(
             "{}{target} = chelis_host_alloc_like({lhs}, chelis_host_tensor_dtype({lhs}));",
             self.indent
@@ -5238,6 +5226,7 @@ impl<'a> HostEmitter<'a> {
     }
 
     fn assign_tensor_unary_elementwise(&mut self, target: &str, input: &str, op: &str) {
+        self.emit_elementwise_index_step(target, "input", input, input);
         self.lines.push(format!(
             "{}{target} = chelis_host_alloc_like({input}, chelis_host_tensor_dtype({input}));",
             self.indent
@@ -5254,6 +5243,7 @@ impl<'a> HostEmitter<'a> {
     }
 
     fn assign_tensor_unary_func_elementwise(&mut self, target: &str, input: &str, func: &str) {
+        self.emit_elementwise_index_step(target, "input", input, input);
         self.lines.push(format!(
             "{}{target} = chelis_host_alloc_like({input}, chelis_host_tensor_dtype({input}));",
             self.indent
@@ -5279,7 +5269,7 @@ impl<'a> HostEmitter<'a> {
     /// Emit one arm of the elementwise binary operator dispatch.
     fn emit_binary_elementwise_arm(
         &mut self,
-        _target: &str,
+        target: &str,
         lhs: &str,
         rhs: &str,
         op: &str,
@@ -5303,16 +5293,10 @@ impl<'a> HostEmitter<'a> {
             "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t indices[chelis_tensor_rank({lhs}) > 0 ? chelis_tensor_rank({lhs}) : 1];"
+            "{ind}            int64_t idx_lhs = i * {target}_lhs_step;"
         ));
         self.lines.push(format!(
-            "{ind}            chelis_host_flat_to_indices(i, {lhs}, indices);"
-        ));
-        self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_host_indices_to_flat(indices, {lhs});"
-        ));
-        self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_host_indices_to_flat(indices, {rhs});"
+            "{ind}            int64_t idx_rhs = i * {target}_rhs_step;"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
@@ -5325,7 +5309,7 @@ impl<'a> HostEmitter<'a> {
     /// Emit one arm of the elementwise binary func dispatch.
     fn emit_binary_func_elementwise_arm(
         &mut self,
-        _target: &str,
+        target: &str,
         lhs: &str,
         rhs: &str,
         func: BinaryElementwiseFunc,
@@ -5349,16 +5333,10 @@ impl<'a> HostEmitter<'a> {
             "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t indices[chelis_tensor_rank({lhs}) > 0 ? chelis_tensor_rank({lhs}) : 1];"
+            "{ind}            int64_t idx_lhs = i * {target}_lhs_step;"
         ));
         self.lines.push(format!(
-            "{ind}            chelis_host_flat_to_indices(i, {lhs}, indices);"
-        ));
-        self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_host_indices_to_flat(indices, {lhs});"
-        ));
-        self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_host_indices_to_flat(indices, {rhs});"
+            "{ind}            int64_t idx_rhs = i * {target}_rhs_step;"
         ));
         let expression = match arm {
             DtypeArm::F32 | DtypeArm::F64 => format!(
@@ -5380,7 +5358,7 @@ impl<'a> HostEmitter<'a> {
     /// Emit one arm of the elementwise unary operator dispatch.
     fn emit_unary_elementwise_arm(
         &mut self,
-        _target: &str,
+        target: &str,
         input: &str,
         op: &str,
         arm: DtypeArm,
@@ -5400,13 +5378,7 @@ impl<'a> HostEmitter<'a> {
             "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t indices[chelis_tensor_rank({input}) > 0 ? chelis_tensor_rank({input}) : 1];"
-        ));
-        self.lines.push(format!(
-            "{ind}            chelis_host_flat_to_indices(i, {input}, indices);"
-        ));
-        self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_host_indices_to_flat(indices, {input});"
+            "{ind}            int64_t idx = i * {target}_input_step;"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {op}__input_data[idx];"
@@ -5419,7 +5391,7 @@ impl<'a> HostEmitter<'a> {
     /// Emit one arm of the elementwise unary func dispatch.
     fn emit_unary_func_elementwise_arm(
         &mut self,
-        _target: &str,
+        target: &str,
         input: &str,
         func: &str,
         arm: DtypeArm,
@@ -5439,13 +5411,7 @@ impl<'a> HostEmitter<'a> {
             "{ind}        for (int64_t i = 0; i < {target_view}.count; i++) {{"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t indices[chelis_tensor_rank({input}) > 0 ? chelis_tensor_rank({input}) : 1];"
-        ));
-        self.lines.push(format!(
-            "{ind}            chelis_host_flat_to_indices(i, {input}, indices);"
-        ));
-        self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_host_indices_to_flat(indices, {input});"
+            "{ind}            int64_t idx = i * {target}_input_step;"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {func}(__input_data[idx]);"

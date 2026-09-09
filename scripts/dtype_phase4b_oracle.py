@@ -213,6 +213,8 @@ EXPECTED_OP_MANIFESTS = {
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
 | contiguous stride | `int64_t chelis_tensor_stride(const chelis_tensor *tensor, int32_t axis)` |
 | logical byte count | `int64_t chelis_tensor_byte_count(const chelis_tensor *tensor)` |
+| tensor iteration index step | `int64_t chelis_tensor_elementwise_index_step(const chelis_tensor *input, const chelis_tensor *domain)` |
+| shape iteration index step | `int64_t chelis_tensor_elementwise_index_step_for_shape(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *shape)` |
 | reshape validation | `void chelis_tensor_check_reshape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape)` |
 | owned reshape | `chelis_tensor *chelis_tensor_reshape(const chelis_tensor *tensor, const chelis_list *shape)` |
 | contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
@@ -440,7 +442,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "a28418e0864597e1754eb1f3cfce5ee95ac96e9575b471d689719c8f74bbef56",
+    "05-OP-33": "351ab8e6ef739ce3fee1db7b04b8299240c63598c79dbf20e92f2d9c94a38aab",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -2224,11 +2226,16 @@ def validate_normative_contract(
             "outside AD and have no accumulator",
         ),
         "05-OP-33": (
+            "returns exact int64 zero for a rank-zero input, or one when the input shape",
+            "is identical to the domain shape",
+            "It validates every extent and the exact zero-aware element product before",
+            "An iteration domain requires neither storage byte counts nor contiguous suffix strides",
+            "A caller validates the original input before repurposing its storage",
             "excluding spare storage capacity",
             "takes rank and every target extent as exact tagged int64 scalars",
             "changes no metadata, ownership, or payload",
             "preserves every stored element bit",
-            "exactly the twenty-six final public C callable identities",
+            "exactly the twenty-eight final public C callable identities",
             "axes and unboxed rank are `int32_t`",
             "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
             "handles, and every tensor result is a new owner",

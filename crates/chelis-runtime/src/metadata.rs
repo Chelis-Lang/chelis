@@ -59,6 +59,12 @@ impl IterationSpace {
     pub(crate) fn elements(&self) -> ElementCount {
         self.elements
     }
+    pub(crate) fn elementwise_index_step(
+        &self,
+        input: &ShapeMetadata,
+    ) -> Result<i64, MetadataError> {
+        input.index_step_for_checked_shape(&self.shape)
+    }
     pub(crate) fn unravel(&self, linear: i64, out: &mut [i64]) -> Result<(), MetadataError> {
         unravel(&self.shape, self.elements, linear, out)
     }
@@ -201,6 +207,22 @@ impl ShapeMetadata {
     }
     pub(crate) fn dtype(&self) -> RuntimeDType {
         self.dtype
+    }
+    pub(crate) fn elementwise_index_step(&self, domain: &Self) -> Result<i64, MetadataError> {
+        self.index_step_for_checked_shape(&domain.shape)
+    }
+    // Only checked owners in this module may provide a domain. In particular,
+    // scalar and empty shortcuts must never bypass construction of that owner.
+    fn index_step_for_checked_shape(&self, domain: &[i64]) -> Result<i64, MetadataError> {
+        if self.rank == 0 {
+            Ok(0)
+        } else if self.shape.as_ref() == domain {
+            Ok(1)
+        } else {
+            Err(MetadataError::Domain(
+                "elementwise input shape does not match iteration domain".into(),
+            ))
+        }
     }
     pub(crate) fn flat_index(&self, indices: &[i64]) -> Result<usize, MetadataError> {
         if indices.len() != self.shape.len() {

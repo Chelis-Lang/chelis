@@ -2242,6 +2242,50 @@ fn validate_reshape_metadata(input: &ShapeMetadata, target: &ShapeMetadata, cont
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_elementwise_index_step(
+    input: *const chelis_tensor,
+    domain: *const chelis_tensor,
+) -> i64 {
+    let context = "chelis_tensor_elementwise_index_step";
+    tensor_metadata_dtype(input, context);
+    tensor_metadata_dtype(domain, context);
+    metadata_or_fail(
+        (*input)
+            .metadata
+            .elementwise_index_step(&(*domain).metadata),
+        context,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_elementwise_index_step_for_shape(
+    input: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) -> i64 {
+    let context = "chelis_tensor_elementwise_index_step_for_shape";
+    tensor_metadata_dtype(input, context);
+    let rank_i64 = exact_i64_scalar(rank, context);
+    if rank_i64 < 0 {
+        runtime_fail!("Domain: {context} negative rank {rank_i64}");
+    }
+    let rank = i32::try_from(rank_i64)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds int32"));
+    let axes = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null shape");
+    }
+    metadata_or_fail(axes.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(axes.scratch_len::<i64>(), context);
+    let mut extents = Vec::with_capacity(length);
+    for axis in 0..length {
+        extents.push(exact_i64_scalar(shape.add(axis).read(), context));
+    }
+    let domain = metadata_or_fail(IterationSpace::new(&extents), context);
+    metadata_or_fail(domain.elementwise_index_step(&(*input).metadata), context)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_check_reshape(
     tensor: *const chelis_tensor,
     rank: chelis_scalar,
