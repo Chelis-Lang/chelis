@@ -330,16 +330,55 @@ class AutolandWorkflowTests(unittest.TestCase):
         self.assertEqual(sorted(jobs), ["boundary", "merge"])
         self.assertEqual(jobs["boundary"]["permissions"], {"contents": "read"})
         # `actions: read` is what lets the worker pin the strict validation
-        # result to a run of one workflow file. It is a read grant, and the
-        # only two write grants stay `contents` and `pull-requests`.
+        # result to a run of one workflow file. `checks: read` is what lets
+        # it read the results at all: `GET /commits/{sha}/check-runs` needs
+        # the `checks` permission, and without it the worker discovers the
+        # required contexts and then dies on 403 before evaluating any of
+        # them. `statuses: read` covers the commit-status half of the same
+        # read. All three are read grants; the only two write grants stay
+        # `contents` and `pull-requests`.
         self.assertEqual(
             jobs["merge"]["permissions"],
-            {"actions": "read", "contents": "write", "pull-requests": "write"},
+            {
+                "actions": "read",
+                "checks": "read",
+                "contents": "write",
+                "pull-requests": "write",
+                "statuses": "read",
+            },
         )
         self.assertEqual(jobs["merge"]["needs"], "boundary")
         triggers = document.get(True, document.get("on"))
         self.assertIn("pull_request_target", triggers)
         self.assertNotIn("pull_request", triggers)
+
+    def test_dropping_a_read_grant_is_caught(self) -> None:
+        """Each read the worker needs, removed one at a time.
+
+        These are the grants whose absence produces a 403 *after* the
+        worker has already reported the required contexts, which reads as
+        a working discovery followed by an unexplained operational
+        failure. That is what happened on the first hosted merge attempt.
+        """
+        try:
+            import yaml
+        except ImportError:  # pragma: no cover - CI also runs actionlint
+            self.skipTest("PyYAML is unavailable; actionlint covers this in CI")
+        for grant in ("actions: read", "checks: read", "statuses: read"):
+            with self.subTest(grant=grant):
+                mutated = self.text.replace(f"      {grant}\n", "", 1)
+                self.assertNotEqual(mutated, self.text, "mutation changed nothing")
+                document = yaml.safe_load(mutated)
+                self.assertNotEqual(
+                    document["jobs"]["merge"]["permissions"],
+                    {
+                        "actions": "read",
+                        "checks": "read",
+                        "contents": "write",
+                        "pull-requests": "write",
+                        "statuses": "read",
+                    },
+                )
 
 
 class ValidationWorkflowTests(unittest.TestCase):
