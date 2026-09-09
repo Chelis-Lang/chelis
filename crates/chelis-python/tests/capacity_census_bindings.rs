@@ -784,11 +784,8 @@ fn retired_binding_rows_cannot_regain_legacy_admission() {
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|row| {
-            row.get("authority")
-                .is_some()
-                .then(|| row["id"].as_str().unwrap().to_string())
-        })
+        .filter(|row| row.get("authority").is_some())
+        .map(|row| row["id"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
     assert_eq!(final_ids.len(), 13);
     for id in final_ids {
@@ -826,8 +823,7 @@ fn copied_missing_and_duplicate_binding_registrations_fail() {
                 let row = rows
                     .iter_mut()
                     .find(|row| {
-                        row.get("authority").and_then(|value| value.as_str())
-                            == Some("nonnumeric")
+                        row.get("authority").and_then(|value| value.as_str()) == Some("nonnumeric")
                     })
                     .unwrap();
                 row["flags"] = serde_json::json!(["numeric-return"]);
