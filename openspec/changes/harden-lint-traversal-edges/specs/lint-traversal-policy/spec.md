@@ -13,11 +13,11 @@ A file or directory explicitly supplied as a lint root SHALL override a policy e
 - **WHEN** the user names an otherwise excluded directory directly
 - **THEN** the directory is entered while separately excluded nested descendants remain pruned, including for resolved symlink targets
 
-#### Scenario: Explicit special file fails loudly
+#### Scenario: Explicit special file is rejected
 - **WHEN** an explicitly named source-shaped path is a socket, FIFO, device, or another non-regular entry
 - **THEN** the lint invocation fails with the root path and rejection reason instead of exiting successfully with no entries
 
-#### Scenario: Explicit escaping symlink directory fails loudly
+#### Scenario: Explicit symlink directory cannot escape policy
 - **WHEN** an explicitly named directory link resolves outside the repository policy root
 - **THEN** the walker does not enter or import the target tree and the lint invocation fails with the root path and rejection reason
 

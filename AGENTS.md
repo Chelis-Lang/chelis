@@ -452,9 +452,76 @@ change set:
 ## OpenSpec (captured capabilities and advisory validation)
 
 The `openspec/` tree is the canonical OpenSpec planning and capability root.
-OpenSpec planning is optional. OpenSpec validation does not gate merges.
-`spec/design/spec_provenance.md` describes the future governance regime.
-This regime is not active.
+OpenSpec planning is optional. OpenSpec validation does not gate merges for
+human-reviewed changes. `spec/design/spec_provenance.md` describes the future
+governance regime. This regime is not active.
+
+### Submitting an OpenSpec document change
+
+**Push the branch. That is the whole workflow.**
+
+```sh
+git switch -c openspec/add-thing
+# edit openspec/** only
+git commit -am "docs(openspec): add the thing"
+git push -u origin HEAD
+```
+
+A push to any branch except `main` starts `openspec-autoland`: a
+permissionless signal workflow fires a `workflow_run`, the trusted
+controller re-derives the branch, commit, and repository from the API,
+classifies that exact commit with default-branch code, and opens or reuses
+one internal pull request. The merge worker then waits for the required
+checks on that commit and merges it. No local command is needed and no
+human approval is involved.
+
+`openspec-submit` (inside Devenv) is an optional local helper that
+validates before you push and reports the outcome in your terminal. It is
+not required, and it is not how a change lands.
+
+Autoland opens the pull request with a short-lived installation token,
+minted per run from the GitHub App this repository already uses
+(`vars.CI_APP_ID`, `secrets.CI_APP_PRIVATE_KEY`), scoped to this repository
+and to `Pull requests: write` alone, and revoked when the job ends. The
+built-in `GITHUB_TOKEN` cannot be used, because a pull request opened with
+it starts none of the required checks. If the App is not configured, or its
+installation lacks that permission here, the controller reports the push
+blocked and writes nothing -- it never opens a pull request that could not
+merge. `README.md` has the details.
+
+A push that touches anything outside the document set is classified
+`review`, nothing is written, and the change follows the ordinary path. Do
+not mix a document change with code in one branch if you want it to land
+automatically; split them.
+
+The document set is `openspec/project.md`, Markdown under
+`openspec/specs/`, and Markdown or `.openspec.yaml` under
+`openspec/changes/`. Normative capability specifications are included, per
+the maintainer authorization in `spec/design/spec_provenance.md`
+§ Automated acceptance of OpenSpec documents.
+
+Everything else keeps the ordinary review and test path, including any
+change to `openspec/config.yaml`, `scripts/openspec_*.py`,
+`scripts/check_openspec.py`, or any `.github/workflows/openspec-autoland*`
+file.
+
+`scripts/openspec_acceptance.py` is the single decision point, and it fails
+closed: an empty change set, an unreadable diff record, a symlink, an
+executable bit, a submodule pointer, a copy or type-change record, a
+deleted capability specification, or a rename crossing the boundary all
+route to human review. Do not add a path to its allowlist to make your
+change land; that file is itself outside the automatic path.
+
+Your branch must also carry byte-identical `.github`, `scripts`,
+`openspec/config.yaml`, Devenv, Nix, and toolchain content, compared by Git
+object id. A branch that predates a change to one of those is refused until
+you rebase -- deliberately, because a diff cannot tell "did not touch the
+workflow" apart from "carries an older workflow".
+
+**Automatic acceptance is not correctness evidence.** It proves the path
+boundary and schema validity. Where an accepted OpenSpec artifact contradicts
+`spec/**` or an executable oracle, the owning authority controls and the
+artifact is corrected.
 
 - The `openspec-validate` workflow uses a pinned `Chelis-Lang/ci` action.
   The action supplies Node 24.18.0 and the locked OpenSpec 1.6.0 package.

@@ -1,0 +1,188 @@
+name: OpenSpec autoland
+
+# Merge OpenSpec document pull requests without human review.
+#
+# The maintainer authorized automatic acceptance for OpenSpec document
+# paths, including normative `openspec/specs/**` text. Code, tooling, and
+# acceptance-policy changes keep the ordinary review and test path.
+#
+# WHY THE TRIGGER IS `pull_request_target`
+#
+# On a `pull_request` event the workflow file itself comes from the pull
+# request. A privileged `pull_request` workflow can therefore be rewritten
+# by the very change it is judging -- delete the boundary job, keep the
+# write token -- and no check written inside that workflow constrains it.
+# Checking out a trusted script does not help, because the step that runs
+# it is head-controlled too. The trust boundary is the trigger, not the
+# checkout.
+#
+# `pull_request_target` runs the base branch's copy of this file. The rule
+# that comes with it is absolute: NEVER check out or execute pull-request
+# code, configuration, or actions here. Each job makes exactly ONE
+# checkout, of the BASE revision, and fetches the pull request head as Git
+# objects. Its trees and blobs land in `base/.git/objects`; no head content
+# is written to a working tree and nothing outside the base checkout runs.
+#
+# WHAT THE MERGE JOB DOES AND DOES NOT DO
+#
+# It polls the checks branch protection actually requires, for the exact
+# head commit, then performs one ordinary merge bound to that commit. It
+# never enables auto-merge (a standing grant that outlives the commit it
+# was granted on), never uses an administrative or bypass option, never
+# submits an approval, and changes no repository setting. Branch
+# protection remains the final arbiter: if it refuses -- including for an
+# approval rule added later -- the job reports the pull request as blocked.
+#
+# WHAT THE VERDICT AUTHORIZES
+#
+# A boundary verdict covers `base.sha...head.sha` for one base BRANCH, so
+# the merge worker is given all three and refuses any base it did not
+# decide about. This matters because `pull_request_target` does not fire on
+# `edited`: retargeting the base after the verdict produces no new
+# decision, and a squash merge onto a different base lands a different
+# diff. A same-branch base that merely advanced is fine and is checked as
+# such; a rewound or rewritten one is refused.
+#
+# WHAT MAKES THE HEAD-SIDE VALIDATION TRUSTWORTHY
+#
+# `--require-identical-governance` compares Git object ids between head and
+# base for `.github`, `scripts`, `openspec/config.yaml`, and the Devenv,
+# Nix, and toolchain inputs that decide what CI executes. If those match,
+# the head-run `openspec-autoland-validate.yml` is the base's file running
+# in the base's declared environment, so its check run can be required by
+# name. A diff would answer a weaker question, because it starts at a merge
+# base and a head that merely predates a workflow change shows no
+# difference there.
+#
+# This workflow must NOT be a required status check. It is an actor, not a
+# gate: a required check that never reports would block every other pull
+# request forever (chelis#419).
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push supersedes an in-flight decision. The merge itself is bound
+  # to an exact commit, so a stale worker could not merge the new head
+  # anyway; cancelling just stops it from waiting for a commit nobody wants.
+  group: openspec-autoland-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  boundary:
+    name: openspec-autoland-boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.classify.outputs.verdict }}
+    steps:
+      - name: Check out the trusted base revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          path: base
+
+      - name: Fetch the pull request head as objects only
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git -C base fetch --no-tags --quiet origin \
+            "refs/pull/${PR_NUMBER}/head"
+
+      - name: Classify the change boundary
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          python3 base/scripts/openspec_acceptance.py \
+            --repo base --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --require-identical-governance > verdict.txt
+          status=$?
+          set -e
+          cat verdict.txt
+          {
+            echo '## OpenSpec autoland'
+            echo
+            echo '```'
+            cat verdict.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  merge:
+    name: openspec-autoland-merge
+    runs-on: ubuntu-latest
+    # Longer than the slowest required check, so the worker can wait for a
+    # full CI run rather than timing out on a healthy pull request.
+    timeout-minutes: 120
+    needs: boundary
+    if: >-
+      needs.boundary.outputs.verdict == 'auto'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.draft == false
+    permissions:
+      # `actions: read` lets the worker pin the strict validation result to
+      # a run of one workflow FILE rather than to a check-run name, which
+      # any workflow or commit status can claim. It grants no write.
+      #
+      # There is deliberately no attempt to read branch protection through
+      # `GET .../branches/{branch}/protection`: that endpoint needs the
+      # `Administration` permission and the `permissions:` block has no
+      # `administration` key, so GITHUB_TOKEN can never hold it. The worker
+      # discovers the required contexts through `GET .../branches/{branch}`,
+      # which needs only `contents: read` and carries the same data.
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out the trusted base revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          path: base
+
+      - name: Fetch the pull request head as objects only
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git -C base fetch --no-tags --quiet origin \
+            "refs/pull/${PR_NUMBER}/head"
+
+      - name: Re-derive the boundary before touching the write token
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 base/scripts/openspec_acceptance.py \
+            --repo base --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --require-identical-governance --require-auto
+
+      - name: Wait for the required checks and merge the exact head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 base/scripts/openspec_merge.py \
+            --repository "$REPOSITORY" \
+            --number "$PR_NUMBER" \
+            --head "$HEAD_SHA" \
+            --base-ref "$BASE_REF" \
+            --base-sha "$BASE_SHA" \
+            --require-context "OpenSpec Strict Validation" \
+            --require-workflow "openspec-autoland-validate.yml" \
+            --timeout-seconds 6000 \
+            --poll-seconds 60
