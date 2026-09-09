@@ -1705,6 +1705,10 @@ impl CEmitter {
             self.declared_dim_names.insert(binding.name.clone());
         }
 
+        // Classes preserve witness identity; scheduling belongs to individual
+        // checks. A class containing inputs z and q must not pull q ahead of
+        // an intervening input a whose obligation belongs to another class.
+        let mut entry_guards = Vec::new();
         for binding in dag.symbolic_bindings_interface() {
             // chelis#616: an op-declared dim is declared inline at its
             // owning op (the bound scalars are computed tensors that do not
@@ -1774,16 +1778,11 @@ impl CEmitter {
                 // trap line stays exactly one line.
                 let canonical_label_fmt =
                     chelis_ir::span_sanitize::sanitize_for_format_string(canonical_label);
-                self.line(&format!(
-                    "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {canonical_read}) {{"
+                entry_guards.push((
+                    (canonical_slot, canonical_axis as i32).max((slot, *axis as i32)),
+                    format!("if (chelis_tensor_shape(inputs[{slot}], {axis}) != {canonical_read}) {{"),
+                    format!("fprintf(stderr, \"extent `{binding_name_fmt}`: {canonical_label_fmt} axis {canonical_axis} = %lld, {occ_label_fmt} axis {axis} = %lld\\n\", (long long)({canonical_read}), (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"),
                 ));
-                self.indent += 1;
-                self.line(&format!(
-                    "fprintf(stderr, \"extent `{binding_name_fmt}`: {canonical_label_fmt} axis {canonical_axis} = %lld, {occ_label_fmt} axis {axis} = %lld\\n\", (long long)({canonical_read}), (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"
-                ));
-                self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
-                self.indent -= 1;
-                self.line("}");
             }
         }
 
@@ -1826,16 +1825,11 @@ impl CEmitter {
                 }
                 let label = &input_labels[slot];
                 let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
-                self.line(&format!(
-                    "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != {canonical_expr}) {{"
+                entry_guards.push((
+                    (slot, read_axis),
+                    format!("if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != {canonical_expr}) {{"),
+                    format!("fprintf(stderr, \"extent `{claim_text}`: claimed = %lld, {label_fmt} axis {read_axis} = %lld\\n\", (long long)({canonical_expr}), (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"),
                 ));
-                self.indent += 1;
-                self.line(&format!(
-                    "fprintf(stderr, \"extent `{claim_text}`: claimed = %lld, {label_fmt} axis {read_axis} = %lld\\n\", (long long)({canonical_expr}), (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
-                ));
-                self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
-                self.indent -= 1;
-                self.line("}");
             }
         }
 
@@ -1861,13 +1855,17 @@ impl CEmitter {
             }
             let label = &input_labels[slot];
             let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
-            self.line(&format!(
-                "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"
+            entry_guards.push((
+                (slot, read_axis),
+                format!("if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != 1) {{"),
+                format!("fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"),
             ));
+        }
+        entry_guards.sort_by_key(|(order, _, _)| *order);
+        for (_, condition, diagnostic) in entry_guards {
+            self.line(&condition);
             self.indent += 1;
-            self.line(&format!(
-                "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
-            ));
+            self.line(&diagnostic);
             self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
             self.indent -= 1;
             self.line("}");
