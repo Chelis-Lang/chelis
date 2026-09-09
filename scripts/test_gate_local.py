@@ -214,6 +214,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo clippy --workspace --all-targets -- -D warnings",
                 "cargo clippy --workspace --all-targets --features "
                 "chelis-backend-c/sleef,"
+                "chelis-compiler-api/emission-observer,"
                 "chelis-e2e/hip-local-gpu,"
                 "chelis-ir/lowering-trace,"
                 "chelis-prove/clarabel,"
@@ -240,6 +241,8 @@ class LocalCommandListTests(unittest.TestCase):
                 "--phase 0",
                 "cargo nextest run -p chelis-ir --features lowering-trace "
                 "--lib --test lowering_trace",
+                "cargo nextest run -p chelis-compiler-api --features emission-observer "
+                "--test emission_observer --test execution_artifact_metadata",
             ],
         )
 
