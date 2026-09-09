@@ -434,7 +434,10 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             .collect(),
 
         // --- Shape query: a rank-0 scalar has no output axis ---
-        RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => Vec::new(),
+        RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. } => Vec::new(),
+        RiscOp::CheckedUnitAxis { .. } => (0..rank).map(|axis| pass_through(id, 0, axis)).collect(),
 
         // --- Memory ---
         RiscOp::Const { .. } | RiscOp::ConstTensor { .. } => declared_shape_sources(dag, node),

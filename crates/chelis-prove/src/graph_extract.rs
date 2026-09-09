@@ -240,6 +240,8 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Stride { .. }
             | WireRiscOp::Shape { .. }
             | WireRiscOp::ExtentWitness { .. }
+            | WireRiscOp::CheckedReshapeExtent { .. }
+            | WireRiscOp::CheckedUnitAxis { .. }
             | WireRiscOp::Load { .. }
             | WireRiscOp::Store { .. }
             | WireRiscOp::Copy

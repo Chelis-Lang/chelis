@@ -336,6 +336,39 @@ The wider named-claim and op-computed-source exits remain separate. HIP and
 Metal retain their existing runtime scalar shape-read exclusions; these
 host execution receipts do not certify device execution.
 
+The next atomic host change owns #1686 and #1687. It adds two checked
+carriers to the construction and consumer inventory above:
+
+- `CheckedReshapeExtent { claim, axis }` consumes two ordinary scalar `int64`
+  inputs: the independently computed target and its required value. The
+  requirement is a tagged literal constant or the declaring parameter's
+  `ExtentWitness`, selected within the current signature activation before
+  substitution. `claim` is diagnostic text, not identity. The checked scalar
+  becomes the reshape target before allocation. Its computed axis has a fresh
+  runtime identity; the declared requirement remains an explicit checked edge.
+- `CheckedUnitAxis { axis }` consumes the original tensor and that same
+  tensor-axis witness carrying requirement one. Verification requires both
+  edges to agree, requires the unit obligation, and permits only the checked
+  axis to refine to one. It forwards the tensor after the witness succeeds;
+  `expand` then consumes that checked tensor without repeating the guard.
+
+Each activation owns fresh witness nodes. The lowering environment maps the
+signature's binders to these exact nodes and restores that map on return;
+ordinary graph edges, rather than spelling or reachability, carry identity
+through rebuilding and import. Every checked scalar and required witness is
+retained by the invocation's fresh return carrier, even when its result is
+discarded. CSE and folding preserve independent checks and call provenance.
+Grad retains primal checks; vmap shares scalar checks and shifts tensor-axis
+witnesses and unit refinements together. The verifier and exact wire decoder
+reject missing claims, wrong arity or scalar types, and unsupported refinements.
+The public completion command for these two obligations is
+`cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation -E
+ 'test(=omitted_extent_claim_contract)'`; it executes 90 independently authored
+export/binding/main fixtures. Internal rewrite and wire mutation tests support
+that oracle. The recorded pre-implementation run executes all 90 fixtures and
+fails 42 contract assertions. These are pending implementation receipts, not
+acceptance. HIP/Metal execution remains with the documented platform handoff.
+
 B2b-1 changes the checked-to-lowered claim carrier and every consumer together.
 Its PR must name the concrete type fields and all construction/rebuild/decode
 sites before implementation; compilation and negative tests reject omitted

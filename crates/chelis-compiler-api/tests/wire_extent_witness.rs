@@ -114,3 +114,109 @@ fn malformed_claims_and_invocation_edges_are_not_decoded_or_encoded() {
         );
     }
 }
+
+fn checked_fixture() -> WireDag {
+    let mut dag = fixture();
+    if let WireRiscOp::ExtentWitness { requirements, .. } = &mut dag.nodes[1].op {
+        *requirements = vec![integer(1)];
+    }
+    dag.nodes[2].op = WireRiscOp::CheckedUnitAxis {
+        axis: WireRtAxis::Lit { value: 0 },
+    };
+    dag.nodes[2].inputs = vec![0, 1];
+    dag.nodes[2].shape_deps.clear();
+    dag.nodes[2].output_type = WireTensorType {
+        dims: vec![WireDimInfo::Lit { size: 1 }],
+        precision: "f32".into(),
+    };
+    for id in [3, 4] {
+        dag.nodes.push(WireDagNode {
+            id,
+            op: WireRiscOp::Const { value: integer(2) },
+            inputs: vec![],
+            output_type: WireTensorType {
+                dims: vec![],
+                precision: "int64".into(),
+            },
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
+        });
+    }
+    dag.nodes.push(WireDagNode {
+        id: 5,
+        op: WireRiscOp::CheckedReshapeExtent {
+            claim: "rows".into(),
+            axis: WireRtAxis::Lit { value: 0 },
+        },
+        inputs: vec![3, 4],
+        output_type: WireTensorType {
+            dims: vec![],
+            precision: "int64".into(),
+        },
+        shape_deps: vec![integer(2)],
+        span_id: Some("reshape-call".into()),
+        merged_spans: vec![],
+    });
+    dag.roots = vec![5];
+    dag
+}
+
+#[test]
+fn checked_extent_edges_roundtrip_exactly_and_legacy_versions_are_rejected() {
+    let dag = checked_fixture();
+    let json = serde_json::to_value(&dag).unwrap();
+    let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    let mut old = json.clone();
+    old["schema_version"] = serde_json::json!(WIRE_DAG_SCHEMA_VERSION - 1);
+    assert!(WireDag::from_validated_json(&old.to_string()).is_err());
+    for (node, field) in [(5, "claim"), (5, "axis"), (2, "axis")] {
+        let mut missing = json.clone();
+        missing["nodes"][node]["op"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            WireDag::from_validated_json(&missing.to_string()).is_err(),
+            "missing node {node} field {field}"
+        );
+    }
+}
+
+#[test]
+fn checked_extent_wire_never_accepts_an_unproved_refinement() {
+    for mutation in 0..10 {
+        let mut dag = checked_fixture();
+        match mutation {
+            0 => {
+                dag.nodes[2].inputs.pop();
+            }
+            1 => dag.nodes[2].inputs[1] = 0,
+            2 => dag.nodes[2].output_type.dims[0] = WireDimInfo::Lit { size: 2 },
+            3 => dag.nodes[2].output_type.precision = "f64".into(),
+            4 => {
+                if let WireRiscOp::ExtentWitness { requirements, .. } = &mut dag.nodes[1].op {
+                    requirements.clear();
+                }
+            }
+            5 => {
+                dag.nodes[2].op = WireRiscOp::CheckedUnitAxis {
+                    axis: WireRtAxis::Lit { value: 1 },
+                }
+            }
+            6 => {
+                dag.nodes[5].inputs.pop();
+            }
+            7 => dag.nodes[5].inputs[0] = 2,
+            8 => dag.nodes[5].output_type.precision = "f32".into(),
+            9 => dag.nodes[5].inputs[1] = 5,
+            _ => unreachable!(),
+        }
+        assert!(dag.validate_wire_contract().is_err(), "mutation {mutation}");
+        assert!(
+            serde_json::to_value(dag).is_err(),
+            "encode mutation {mutation}"
+        );
+    }
+}

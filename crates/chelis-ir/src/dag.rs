@@ -709,6 +709,21 @@ pub enum RiscOp {
         axis: RtAxis,
         requirements: Vec<chelis_types::ScalarValue>,
     },
+    /// Checks an independently computed reshape target (input 0) against
+    /// its declaring witness or literal requirement (input 1). Both inputs
+    /// and the result are scalar int64. `claim` is diagnostic text only;
+    /// the input edge identifies the signature activation's requirement.
+    CheckedReshapeExtent {
+        claim: String,
+        axis: RtAxis,
+    },
+    /// Refines one tensor axis to one after its exact ExtentWitness has
+    /// checked that obligation. Inputs are the original tensor and witness.
+    /// Verification ties the witness to that tensor and axis; metadata alone
+    /// cannot authorize the refinement. All other dimensions are unchanged.
+    CheckedUnitAxis {
+        axis: RtAxis,
+    },
 
     // --- Memory ---
     /// A scalar constant carried as a SEALED finalized value (the
@@ -1165,7 +1180,10 @@ impl RiscOp {
             // input's real-valued data (its output is constant w.r.t. the
             // element values). Like the arg-reductions it is outside the
             // real-valued forward-bound story (chelis#513 / chelis#558).
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => false,
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => false,
 
             // Sparse gather/scatter index data movement; no real-valued
             // transformer is pinned, and `Scatter` / `ScatterElements`

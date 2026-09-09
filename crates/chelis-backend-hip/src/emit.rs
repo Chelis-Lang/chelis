@@ -1256,7 +1256,10 @@ impl HipEmitter {
             // `reject_unsupported_hip_ops` rejects it cleanly before
             // codegen, so no kernel name is registered. The launch-emit arm
             // below is a defensive `todo!` if one ever reaches codegen.
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => None,
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix())),
             RiscOp::ConstTensor { .. } => {
                 Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix()))
@@ -1963,7 +1966,10 @@ impl HipEmitter {
             // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); this
             // `todo!` is a defensive backstop matching the ReduceWindow
             // stubs above, reached only if some path bypasses that guard.
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => {
                 todo!(
                     "runtime `shape` value read must have been rejected before HIP codegen by [05-SHAPE-1]. Use `--target c`."
                 )
@@ -3851,7 +3857,7 @@ impl HipEmitter {
             // `Shape` materializes a fresh rank-0 scalar (trivially
             // contiguous). It is HIP-rejected before codegen under
             // [05-SHAPE-1], so this arm is only for classification completeness.
-            | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => true,
+            | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } | RiscOp::CheckedUnitAxis { .. } => true,
             RiscOp::Count { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])

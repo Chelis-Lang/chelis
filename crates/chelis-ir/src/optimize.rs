@@ -356,8 +356,12 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
         let op_key = format!("{:?}", node.op);
         let cse_key = (op_key, remapped_inputs.clone(), remapped_shape_deps.clone());
 
-        if !matches!(node.op, RiscOp::ExtentWitness { .. })
-            && let Some(&existing) = seen.get(&cse_key)
+        if !matches!(
+            node.op,
+            RiscOp::ExtentWitness { .. }
+                | RiscOp::CheckedReshapeExtent { .. }
+                | RiscOp::CheckedUnitAxis { .. }
+        ) && let Some(&existing) = seen.get(&cse_key)
         {
             // Duplicate: its full provenance (canonical + merged) folds
             // onto the survivor so the audit chain through the dropped

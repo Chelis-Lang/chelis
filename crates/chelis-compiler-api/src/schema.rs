@@ -2285,6 +2285,101 @@ impl WireDag {
                 }
             }
             match &node.op {
+                WireRiscOp::CheckedReshapeExtent { .. } => {
+                    let scalar =
+                        |ty: &WireTensorType| ty.dims.is_empty() && ty.precision == "int64";
+                    if node.inputs.len() != 2
+                        || !scalar(&node.output_type)
+                        || node.inputs.iter().any(|id| {
+                            self.nodes.get(*id).is_none_or(|input| {
+                                input.id != *id || *id >= index || !scalar(&input.output_type)
+                            })
+                        })
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag CheckedReshapeExtent node {} requires two earlier scalar int64 inputs and a scalar int64 output",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::CheckedUnitAxis {
+                    axis: WireRtAxis::Lit { value: axis },
+                } => {
+                    let valid = (|| {
+                        let [input_id, witness_id] = node.inputs.as_slice() else {
+                            return None;
+                        };
+                        if *input_id >= index || *witness_id >= index {
+                            return None;
+                        }
+                        let input = self.nodes.get(*input_id)?;
+                        let witness = self.nodes.get(*witness_id)?;
+                        let WireRiscOp::ExtentWitness {
+                            axis:
+                                WireRtAxis::Lit {
+                                    value: observed_axis,
+                                },
+                            requirements,
+                            ..
+                        } = &witness.op
+                        else {
+                            return None;
+                        };
+                        if input.id != *input_id
+                            || witness.id != *witness_id
+                            || witness.inputs.as_slice() != [*input_id]
+                            || observed_axis != axis
+                            || !requirements.iter().any(|value| {
+                                value.prim() == Prim::Int64 && value.as_i64_exact() == Some(1)
+                            })
+                        {
+                            return None;
+                        }
+                        let axis = usize::try_from(*axis).ok()?;
+                        if axis >= input.output_type.dims.len()
+                            || input.output_type.precision != node.output_type.precision
+                            || input.output_type.dims.len() != node.output_type.dims.len()
+                        {
+                            return None;
+                        }
+                        input
+                            .output_type
+                            .dims
+                            .iter()
+                            .zip(&node.output_type.dims)
+                            .enumerate()
+                            .all(|(index, (input, output))| {
+                                if index == axis {
+                                    return matches!(output, WireDimInfo::Lit { size: 1 });
+                                }
+                                match (input, output) {
+                                    (
+                                        WireDimInfo::Lit { size: lhs },
+                                        WireDimInfo::Lit { size: rhs },
+                                    ) => lhs == rhs,
+                                    (
+                                        WireDimInfo::Named {
+                                            name: lhs,
+                                            size: lhs_size,
+                                        },
+                                        WireDimInfo::Named {
+                                            name: rhs,
+                                            size: rhs_size,
+                                        },
+                                    ) => lhs == rhs && lhs_size == rhs_size,
+                                    _ => false,
+                                }
+                            })
+                            .then_some(())
+                    })()
+                    .is_some();
+                    if !valid {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag CheckedUnitAxis node {} requires its own tensor-axis witness with requirement one and only that axis refined",
+                            node.id
+                        )));
+                    }
+                }
                 WireRiscOp::Expand { size, .. } => {
                     validate_wire_rt_dim(&self.nodes, index, node, size, false, true, "Expand")?;
                     let expected_inputs = match size {
@@ -2989,6 +3084,13 @@ pub enum WireRiscOp {
         parameter: String,
         axis: WireRtAxis,
         requirements: Vec<chelis_types::ScalarValue>,
+    },
+    CheckedReshapeExtent {
+        claim: String,
+        axis: WireRtAxis,
+    },
+    CheckedUnitAxis {
+        axis: WireRtAxis,
     },
     Load {
         name: String,

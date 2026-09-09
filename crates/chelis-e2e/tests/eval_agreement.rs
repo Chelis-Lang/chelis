@@ -351,6 +351,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Stride { .. }
         | RiscOp::Shape { .. }
         | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }
         | RiscOp::Load { .. }

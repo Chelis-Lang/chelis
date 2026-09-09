@@ -762,6 +762,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         // (chelis#513/#558).
         | RiscOp::Shape { .. }
         | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Count { .. } => false,
     }
 }

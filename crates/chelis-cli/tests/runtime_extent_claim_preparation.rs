@@ -371,7 +371,10 @@ fn driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
         .map(|i| format!("a{i}"))
         .collect::<Vec<_>>()
         .join(",");
-    if header.lines().any(|line| line.starts_with("chelis_tensor* f(")) {
+    if header
+        .lines()
+        .any(|line| line.starts_with("chelis_tensor* f("))
+    {
         text.push_str(&format!("chelis_tensor *result = f({args});\n"));
     } else {
         // A single pure tensor definition is exported through the named
@@ -1214,6 +1217,10 @@ fn omitted_extent_claim_contract() {
                         "alias",
                         "{\n  k = floor_div(shape(x, 0i32), 2i64)\n  target = k\n  reshape(x, [target, 2i64])\n}",
                     ),
+                    (
+                        "result_alias",
+                        "{\n  result = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n  alias = result\n  alias\n}",
+                    ),
                 ] {
                     add(
                         &format!("omitted.reshape.{kind}.{form}.x{n}"),
@@ -1338,7 +1345,7 @@ fn omitted_extent_claim_contract() {
     }
     assert_eq!(
         fixtures.len(),
-        90,
+        102,
         "three routes for every positive/negative operation form"
     );
     let mut failures = Vec::new();

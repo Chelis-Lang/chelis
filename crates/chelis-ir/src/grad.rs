@@ -377,6 +377,8 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Stride { .. } => "stride",
         RiscOp::Shape { .. } => "shape",
         RiscOp::ExtentWitness { .. } => "extent_witness",
+        RiscOp::CheckedReshapeExtent { .. } => "reshape",
+        RiscOp::CheckedUnitAxis { .. } => "load",
         RiscOp::Const { .. } => "const",
         RiscOp::ConstTensor { .. } => "const_tensor",
         RiscOp::Load { .. } => "load",
@@ -1860,7 +1862,8 @@ fn compute_adjoints(
             // is not yet supported.
             None
         }
-        RiscOp::Copy => Some(vec![(node.inputs[0], g)]),
+        RiscOp::CheckedReshapeExtent { .. } => Some(vec![]),
+        RiscOp::Copy | RiscOp::CheckedUnitAxis { .. } => Some(vec![(node.inputs[0], g)]),
         RiscOp::Drop => None,
         RiscOp::Gather { axis } => {
             let values = node.inputs[0];

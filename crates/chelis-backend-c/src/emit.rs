@@ -815,6 +815,24 @@ impl CEmitter {
                 }
                 self.emit_shape(id, *axis as usize, &node.inputs, &node.output_type);
             }
+            RiscOp::CheckedReshapeExtent {
+                claim,
+                axis: RtAxis::Lit(axis),
+            } => {
+                let actual = node.inputs[0].0;
+                let required = node.inputs[1].0;
+                let claim = chelis_ir::span_sanitize::sanitize_for_format_string(claim);
+                self.line(&format!("if (t{actual}[0] != t{required}[0]) {{"));
+                self.indent += 1;
+                self.line(&format!("fprintf(stderr, \"extent `{claim}`: claimed = %lld, reshape axis {axis} = %lld\\n\", (long long)t{required}[0], (long long)t{actual}[0]);"));
+                self.line("chelis_numeric_trap(\"numeric trap: domain in reshape at int64\");");
+                self.indent -= 1;
+                self.line("}");
+                self.emit_realize(id, &node.inputs, &node.output_type);
+            }
+            RiscOp::CheckedUnitAxis { .. } => {
+                self.emit_realize(id, &node.inputs, &node.output_type)
+            }
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
             RiscOp::Sub => self.emit_binary(id, "-", &node.inputs, &node.output_type),

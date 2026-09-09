@@ -4875,7 +4875,10 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                 ));
             }
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not support the runtime `shape` \
@@ -6103,6 +6106,18 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             parameter: parameter.clone(),
             axis: WireRtAxis::Lit { value: *axis },
             requirements: requirements.clone(),
+        },
+        RiscOp::CheckedReshapeExtent {
+            claim,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRiscOp::CheckedReshapeExtent {
+            claim: claim.clone(),
+            axis: WireRtAxis::Lit { value: *axis },
+        },
+        RiscOp::CheckedUnitAxis {
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRiscOp::CheckedUnitAxis {
+            axis: WireRtAxis::Lit { value: *axis },
         },
         RiscOp::Load { name } => WireRiscOp::Load {
             name: name.as_str().to_string(),

@@ -1397,6 +1397,8 @@ fn lower_subexpr_program_inner_impl(
     // Pre-create every scoped input before body lowering. Declared helpers
     // supply signature order; signatureless entries supply their assigned ABI
     // order. DCE removes unused inputs without permuting the surviving loads.
+    let (parameter_names, parameter_types): (Vec<_>, Vec<_>) =
+        scoped_bindings.clone().into_iter().unzip();
     for (name, tensor_ty) in scoped_bindings {
         let load = ctx.dag.add_node(
             RiscOp::Load {
@@ -1408,7 +1410,9 @@ fn lower_subexpr_program_inner_impl(
         );
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
+    ctx.prepare_parameter_witnesses(&parameter_names, &parameter_types, None);
     let value = ctx.lower_expr(expr);
+    let value = ctx.retain_invocation_witnesses(value, 0);
     // Each leaf of the result pytree must be a DISTINCT root node.
     // `Dag::add_root` deduplicates by node id, so when the same node feeds
     // two leaves (chelis#520/#614: two `grad` targets whose adjoint is the
@@ -4164,6 +4168,43 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
         .map(|name| name.to_string())
 }
 
+/// The free value binding returned through lexical aliases, if there is one.
+/// An operation ends this walk: its own lowering receives the result claim.
+fn returned_binding_name(mut expr: &Expr) -> Option<String> {
+    let mut scopes: Vec<&[Expr]> = Vec::new();
+    loop {
+        let (tag, _, kids) = stamped_parts(expr)?;
+        match tag {
+            DeepTag::Borrow => expr = kids.first()?,
+            DeepTag::Block => expr = kids.last()?,
+            DeepTag::Let => {
+                let (DeepTag::Bind, _, bindings) = stamped_parts(kids.first()?)? else {
+                    return None;
+                };
+                scopes.push(bindings);
+                expr = kids.get(1)?;
+            }
+            DeepTag::Var => {
+                let name = bare_var_name(expr)?;
+                let mut binding_expr = None;
+                while let Some(bindings) = scopes.pop() {
+                    if let Some(index) = bindings.chunks_exact(2).rposition(|pair|
+                        matches!(&pair[0], Expr::Atom(Atom::Name(bound), _) if bound == &name)) {
+                        scopes.push(&bindings[..index * 2]);
+                        binding_expr = Some(&bindings[index * 2 + 1]);
+                        break;
+                    }
+                }
+                match binding_expr {
+                    Some(value) => expr = value,
+                    None => return Some(name),
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Result of attempting to recognize a `to_tensor` argument as a
 /// static numeric Cons-chain literal.
 ///
@@ -5029,6 +5070,9 @@ struct LowerCtx {
     /// forward this metadata; rebinding replaces it and scope exit restores it.
     /// The node comparison prevents a shadowed value reusing an outer witness.
     binding_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    /// Binder lookup exists only in the current signature activation. Once
+    /// selected, ordinary node edges carry the declaring witness's identity.
+    signature_witnesses: Vec<(String, NodeId)>,
     invocation_witnesses: Vec<NodeId>,
     local_callables: UnordMap<String, Expr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
@@ -5155,6 +5199,7 @@ impl LowerCtx {
             shape_bindings: UnordMap::new(),
             static_size_bindings: UnordMap::new(),
             binding_witnesses: UnordMap::new(),
+            signature_witnesses: Vec::new(),
             invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
@@ -5782,6 +5827,12 @@ impl LowerCtx {
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> LoweredValue {
+        self.lower_expr_with_claim(expr, None)
+    }
+
+    /// A declaration supplies obligations to its returned expression before
+    /// lowering can fold the expression's independent extent source.
+    fn lower_expr_with_claim(&mut self, expr: &Expr, claim: Option<&TensorType>) -> LoweredValue {
         // Thread the current Deep node's span_id through any add_node()
         // calls made while lowering this expr or its children. We snapshot
         // the previous span_id and restore it on return so sibling exprs
@@ -5796,17 +5847,17 @@ impl LowerCtx {
         }
         let result = match expr {
             Expr::Atom(atom, _) => self.lower_atom(atom),
-            Expr::List(list, span) => self.lower_list(list, *span),
+            Expr::List(list, span) => self.lower_list(list, *span, claim),
             Expr::Map(_, _) => raise_malformed_deep(
                 "a bare metadata map in expression position",
                 Some(expr.span()),
                 self.current_span_id.clone(),
             ),
-            Expr::MetaExpr(meta_expr, _) => self.lower_expr(&meta_expr.expr),
+            Expr::MetaExpr(meta_expr, _) => self.lower_expr_with_claim(&meta_expr.expr, claim),
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
                 let bridged = Expr::List(node.to_list(*span), *span);
-                self.lower_expr(&bridged)
+                self.lower_expr_with_claim(&bridged, claim)
             }
             Expr::BareList(_, _) | Expr::UnknownForm(_) => raise_malformed_deep(
                 "a transitional Expr variant in expression position",
@@ -5977,7 +6028,7 @@ impl LowerCtx {
         self.lower_expr(expr).expect_node(context)
     }
 
-    fn lower_list(&mut self, list: &List, span: Span) -> LoweredValue {
+    fn lower_list(&mut self, list: &List, span: Span, claim: Option<&TensorType>) -> LoweredValue {
         let elems = &list.elements;
         if elems.is_empty() {
             raise_malformed_deep(
@@ -6003,10 +6054,10 @@ impl LowerCtx {
 
         match deep_tag {
             Some(DeepTag::Def) => self.lower_def(elems),
-            Some(DeepTag::Let) => self.lower_let(elems),
+            Some(DeepTag::Let) => self.lower_let(elems, claim),
             Some(DeepTag::Lit) => self.lower_lit(elems),
             Some(DeepTag::Var) => self.lower_var(elems),
-            Some(DeepTag::App) => self.lower_app(elems, span),
+            Some(DeepTag::App) => self.lower_app(elems, span, claim),
             Some(DeepTag::Fn) => self.lower_fn(elems),
             Some(DeepTag::Pipe) => self.lower_pipe(elems),
             Some(DeepTag::Cast) => self.lower_cast(elems),
@@ -6024,7 +6075,7 @@ impl LowerCtx {
             Some(DeepTag::HandleEffect) => self.lower_handle_effect(list),
             Some(DeepTag::Jit) => self.lower_jit(elems),
             Some(DeepTag::Vmap) => self.lower_unsupported(DeepTag::Vmap.as_str(), elems),
-            Some(DeepTag::Block) => self.lower_block(elems, span),
+            Some(DeepTag::Block) => self.lower_block(elems, span, claim),
             // Declarations lowered as an inert zero node: these forms are
             // not value expressions (the checker never lets their "value"
             // flow into a computation), so the node is a structural no-op,
@@ -6105,7 +6156,12 @@ impl LowerCtx {
     /// block case and the host lanes. Discarded non-last values become
     /// dead DAG nodes and are removed by DCE; a childless block has no
     /// value and raises.
-    fn lower_block(&mut self, elems: &[Expr], span: Span) -> LoweredValue {
+    fn lower_block(
+        &mut self,
+        elems: &[Expr],
+        span: Span,
+        claim: Option<&TensorType>,
+    ) -> LoweredValue {
         let witness_start = self.invocation_witnesses.len();
         if elems.len() <= 2 {
             raise_malformed_deep(
@@ -6121,8 +6177,9 @@ impl LowerCtx {
             Self::default_type(),
             self.current_span_id.clone(),
         ));
-        for elem in &elems[2..] {
-            last = self.lower_expr(elem);
+        for (index, elem) in elems[2..].iter().enumerate() {
+            last = self
+                .lower_expr_with_claim(elem, (index + 3 == elems.len()).then_some(claim).flatten());
         }
         self.retain_invocation_witnesses(last, witness_start)
     }
@@ -6190,7 +6247,7 @@ impl LowerCtx {
     }
 
     /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
-    fn lower_let(&mut self, elems: &[Expr]) -> LoweredValue {
+    fn lower_let(&mut self, elems: &[Expr], claim: Option<&TensorType>) -> LoweredValue {
         let witness_start = self.invocation_witnesses.len();
         if elems.len() < 4 {
             raise_malformed_deep(
@@ -6201,6 +6258,7 @@ impl LowerCtx {
         }
         let saved = self.bindings.clone();
         let saved_witnesses = self.binding_witnesses.clone();
+        let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
@@ -6209,6 +6267,23 @@ impl LowerCtx {
 
         // elems[2] = (bind {} name1 expr1 name2 expr2 ...)
         if let Some((DeepTag::Bind, _, bind_kids)) = stamped_parts(&elems[2]) {
+            // Follow only the returned lexical binding, backwards through
+            // aliases. This identifies its producer before we lower it, even
+            // when the return is inside nested lets. Other bindings keep
+            // their own claims and evaluation positions.
+            let mut returned = claim.and_then(|_| returned_binding_name(&elems[3]));
+            let mut claimed_binding = None;
+            for (index, binding) in bind_kids.chunks_exact(2).enumerate().rev() {
+                if let Expr::Atom(Atom::Name(name), _) = &binding[0]
+                    && returned.as_ref() == Some(name)
+                {
+                    claimed_binding = Some(index * 2);
+                    returned = returned_binding_name(&binding[1]);
+                    if returned.is_none() {
+                        break;
+                    }
+                }
+            }
             let mut i = 0;
             while i + 1 < bind_kids.len() {
                 if let Expr::Atom(Atom::Name(name), _) = &bind_kids[i] {
@@ -6269,7 +6344,14 @@ impl LowerCtx {
                         self.local_callables.insert(name.clone(), callable);
                     } else {
                         let witnesses = self.binding_witnesses_for_expr(&bind_kids[i + 1]).cloned();
-                        let val_id = self.lower_expr(&bind_kids[i + 1]);
+                        let val_id = self.lower_expr_with_claim(
+                            &bind_kids[i + 1],
+                            if claimed_binding == Some(i) {
+                                claim
+                            } else {
+                                None
+                            },
+                        );
                         if let Some((input, witnesses)) = witnesses
                             && val_id.as_single_node() == Some(input)
                         {
@@ -6285,10 +6367,11 @@ impl LowerCtx {
             }
         }
 
-        let result = self.lower_expr(&elems[3]);
+        let result = self.lower_expr_with_claim(&elems[3], claim);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
         self.binding_witnesses = saved_witnesses;
+        self.signature_witnesses = saved_signature_witnesses;
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
@@ -6464,7 +6547,12 @@ impl LowerCtx {
     }
 
     /// `(app {meta...} func arg1 arg2 ...)`
-    fn lower_app(&mut self, elems: &[Expr], app_span: Span) -> LoweredValue {
+    fn lower_app(
+        &mut self,
+        elems: &[Expr],
+        app_span: Span,
+        claim: Option<&TensorType>,
+    ) -> LoweredValue {
         // A well-formed `(app)` has at minimum [tag, meta, func] (3
         // elements) for a zero-arg call. The previous `< 4` guard
         // rejected zero-arg user-def calls before any callable
@@ -6482,7 +6570,9 @@ impl LowerCtx {
             );
         }
 
-        let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
+        let ty = if let Some(claim) = claim {
+            claim.clone()
+        } else if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(meta)
         } else {
             Self::default_type()
@@ -7484,6 +7574,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
         let saved_witnesses = self.binding_witnesses.clone();
+        let saved_signature_witnesses = self.signature_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -7524,6 +7615,7 @@ impl LowerCtx {
                 None => Self::default_type(),
             })
             .collect();
+        let witness_param_types = param_types.clone();
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
@@ -7699,14 +7791,16 @@ impl LowerCtx {
                 )
             })
             .unwrap_or_else(|| expected_return_ty.clone());
-        self.prepare_parameter_witnesses(&param_names, &declared_result, call_span);
+        self.prepare_parameter_witnesses(&param_names, &witness_param_types, call_span);
         // Each unroll level costs multiple large lowering frames (debug
         // builds overflow the default 8 MB main-thread stack well before the
         // 512-level cap without this). `maybe_grow` at THIS site works where
         // chelis-types' boundary `stacker::grow` pattern would not: the
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
-        let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || self.lower_expr(body));
+        let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
+            self.lower_expr_with_claim(body, Some(&declared_result))
+        });
         if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
             let ret_ty = Self::type_from_type_expr_with_subst(
                 ret_ty_expr,
@@ -7724,6 +7818,7 @@ impl LowerCtx {
         self.preserve_literal_result(&result, &declared_result);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
+        self.signature_witnesses = saved_signature_witnesses;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -9504,6 +9599,11 @@ impl LowerCtx {
                             args[1].span_id().map(ToOwned::to_owned),
                         )
                     }),
+                };
+                let x = if inserts {
+                    x
+                } else {
+                    self.checked_unit_axis(x, axis, &args[0])
                 };
                 // Recover the broadcast extent. Three sources, in order:
                 //
@@ -11800,14 +11900,12 @@ impl LowerCtx {
     fn prepare_parameter_witnesses(
         &mut self,
         params: &[String],
-        result: &TensorType,
+        formal_types: &[TensorType],
         span: Option<String>,
     ) {
         self.binding_witnesses.clear();
-        if !result.dims.iter().any(|dim| matches!(dim, DimInfo::Lit(_))) {
-            return;
-        }
-        for name in params {
+        self.signature_witnesses.clear();
+        for (name, formal_type) in params.iter().zip(formal_types) {
             let Some(input) = self
                 .bindings
                 .get(name)
@@ -11837,6 +11935,16 @@ impl LowerCtx {
                     },
                     span.clone(),
                 );
+                if let Some(DimInfo::Named(binder, _)) = formal_type.dims.get(axis)
+                    && !binder.is_empty()
+                    && binder != "*"
+                    && !self
+                        .signature_witnesses
+                        .iter()
+                        .any(|(name, _)| name == binder)
+                {
+                    self.signature_witnesses.push((binder.clone(), witness));
+                }
                 witnesses.push(witness);
                 self.invocation_witnesses.push(witness);
             }
@@ -11853,6 +11961,86 @@ impl LowerCtx {
         let name = bare_var_name(expr)?;
         let binding @ (input, _) = self.binding_witnesses.get(&name)?;
         (self.bindings.get(&name)?.as_single_node()? == *input).then_some(binding)
+    }
+
+    fn checked_unit_axis(&mut self, input: NodeId, axis: usize, expr: &Expr) -> NodeId {
+        let mut ty = self
+            .dag
+            .get(input)
+            .expect("expand input")
+            .output_type
+            .clone();
+        if ty.dims.get(axis) == Some(&DimInfo::Lit(1)) {
+            return input;
+        }
+        let rt_axis = RtAxis::Lit(i32::try_from(axis).expect("checked axis fits int32"));
+        let existing = self
+            .binding_witnesses_for_expr(expr)
+            .and_then(|(_, witnesses)| witnesses.get(axis))
+            .copied();
+        let witness = match existing {
+            Some(witness) => witness,
+            None => {
+                let witness = self.dag.add_node(
+                    RiscOp::ExtentWitness {
+                        parameter: bare_var_name(expr).unwrap_or_else(|| "expand operand".into()),
+                        axis: rt_axis.clone(),
+                        requirements: Vec::new(),
+                    },
+                    vec![input],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                );
+                self.invocation_witnesses.push(witness);
+                witness
+            }
+        };
+        let one = chelis_types::scalar_from_i64("load", Prim::Int64, 1).expect("unit extent");
+        let RiscOp::ExtentWitness { requirements, .. } =
+            &mut self.dag.node_mut(witness).expect("witness").op
+        else {
+            unreachable!("binding witnesses are typed witnesses")
+        };
+        if !requirements.contains(&one) {
+            requirements.push(one);
+        }
+        *ty.dims.get_mut(axis).expect("checked expand axis") = DimInfo::Lit(1);
+        self.dag.add_node(
+            RiscOp::CheckedUnitAxis { axis: rt_axis },
+            vec![input, witness],
+            ty,
+            self.current_span_id.clone(),
+        )
+    }
+
+    fn required_extent_for_claim(&mut self, dim: &DimInfo) -> Option<NodeId> {
+        match dim {
+            DimInfo::Lit(required) => Some(
+                self.dag.add_node(
+                    RiscOp::Const {
+                        value: chelis_types::scalar_from_i64(
+                            "reshape",
+                            Prim::Int64,
+                            i64::try_from(*required).expect("checked extent fits int64"),
+                        )
+                        .expect("int64 extent"),
+                    },
+                    Vec::new(),
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                ),
+            ),
+            DimInfo::Named(name, _) => self
+                .signature_witnesses
+                .iter()
+                .find_map(|(binder, witness)| (binder == name).then_some(*witness)),
+        }
     }
 
     fn binding_witness_from_shape_arg(&self, expr: &Expr) -> Option<NodeId> {
@@ -11914,7 +12102,10 @@ impl LowerCtx {
             .iter()
             .copied()
             .filter(|witness| {
-                matches!(&self.dag.get(*witness).expect("witness").op,
+                matches!(
+                    &self.dag.get(*witness).expect("witness").op,
+                    RiscOp::CheckedReshapeExtent { .. }
+                ) || matches!(&self.dag.get(*witness).expect("witness").op,
                 RiscOp::ExtentWitness { requirements, .. } if !requirements.is_empty())
             })
             .collect::<Vec<_>>();
@@ -12295,6 +12486,42 @@ impl LowerCtx {
         let mut ty_dims = Vec::with_capacity(elements.len());
         let srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
+            if extract_int_for_dim(elem).is_none()
+                && let Some(claim) = checker_dims.get(axis)
+                && let Some(required) = self.required_extent_for_claim(claim)
+            {
+                // Capture the requirement before static shape arithmetic can
+                // replace the declared dimension with its computed value.
+                let actual = self.lower_expr_node(elem, "checked reshape target");
+                let label = match claim {
+                    DimInfo::Lit(n) => n.to_string(),
+                    DimInfo::Named(name, _) => name.clone(),
+                };
+                let checked = self.dag.add_node(
+                    RiscOp::CheckedReshapeExtent {
+                        claim: label,
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("reshape rank fits int32")),
+                    },
+                    vec![actual, required],
+                    TensorType {
+                        dims: Vec::new(),
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                );
+                self.invocation_witnesses.push(checked);
+                let slot = inputs.len();
+                inputs.push(checked);
+                op_dims.push(RtDim::Node(slot));
+                // This is the independently computed, now checked extent.
+                // Its declaration cannot re-enter legacy spelling classes;
+                // the requirement's identity is the explicit scalar edge.
+                ty_dims.push(DimInfo::Named(
+                    format!("_rt_dim_{}_{axis}", checked.0),
+                    None,
+                ));
+                continue;
+            }
             if let Some(value) = extract_int_for_dim(elem) {
                 if value < 0 {
                     return None;
@@ -12695,6 +12922,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
         let saved_witnesses = self.binding_witnesses.clone();
+        let saved_signature_witnesses = self.signature_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -12766,20 +12994,30 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             );
         };
-        let params = params
+        let (params, formal_types): (Vec<_>, Vec<_>) = params
             .iter()
             .filter_map(param_name_and_type_expr)
-            .map(|(name, _)| name)
-            .collect::<Vec<_>>();
-        if let Some(ty) = &declared_result {
-            self.prepare_parameter_witnesses(&params, ty, call_span);
-        }
-        let result = self.lower_expr(&elems[3]);
+            .filter_map(|(name, ty)| {
+                let input = self.bindings[&name].as_single_node()?;
+                let formal = match ty {
+                    Some(ty) => Self::formal_param_type_for_call(
+                        ty,
+                        &self.prec_substitutions,
+                        &self.rank_substitutions,
+                    ),
+                    None => self.dag.get(input).expect("parameter").output_type.clone(),
+                };
+                Some((name, formal))
+            })
+            .unzip();
+        self.prepare_parameter_witnesses(&params, &formal_types, call_span);
+        let result = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
         if let Some(ty) = &declared_result {
             self.preserve_literal_result(&result, ty);
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
+        self.signature_witnesses = saved_signature_witnesses;
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
