@@ -557,10 +557,17 @@ class ControllerWorkflowTests(unittest.TestCase):
             found.append("stored-pat-secret")
         if f"actions/create-github-app-token@{APP_TOKEN_SHA}" not in commands:
             found.append("app-token-action")
-        if "app-id: ${{ vars.CI_APP_ID }}" not in commands:
+        if "app-id: ${{ vars.OPENSPEC_APP_ID }}" not in commands:
             found.append("app-id-source")
-        if "private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}" not in commands:
+        if "private-key: ${{ secrets.OPENSPEC_APP_PRIVATE_KEY }}" not in commands:
             found.append("app-private-key-source")
+        # The dedicated App only. The shared CI App's installation does not
+        # grant pull-request write here -- minting from it returned HTTP 422,
+        # "The permissions requested are not granted to this installation" --
+        # and widening that App would hand pull-request write to every
+        # workflow that already uses it for cross-repo reads.
+        if "CI_APP_ID" in commands or "CI_APP_PRIVATE_KEY" in commands:
+            found.append("shared-app-credentials")
         # Scoped to this repository only, never the whole installation.
         if "owner: ${{ github.repository_owner }}" not in commands:
             found.append("token-owner-scope")
@@ -760,8 +767,8 @@ class SubmissionCredentialTests(unittest.TestCase):
         """
         api = FakeApi()
         _, output = run_controller(api, submission_token=None)
-        self.assertIn("CI_APP_ID", output)
-        self.assertIn("CI_APP_PRIVATE_KEY", output)
+        self.assertIn("OPENSPEC_APP_ID", output)
+        self.assertIn("OPENSPEC_APP_PRIVATE_KEY", output)
         self.assertIn("installation", output.lower())
         for stale in (
             "personal access token",
@@ -840,7 +847,7 @@ class CredentialExposureTests(unittest.TestCase):
         )
 
     def test_only_the_controller_workflow_references_the_app_key(self) -> None:
-        secret = "CI_APP_PRIVATE_KEY"
+        secret = "OPENSPEC_APP_PRIVATE_KEY"
         controller_text = self.workflow("openspec-autoland-controller.yml")
         self.assertIn(secret, controller_text)
         for other in (
@@ -851,9 +858,26 @@ class CredentialExposureTests(unittest.TestCase):
             with self.subTest(workflow=other):
                 other_text = self.workflow(other)
                 self.assertNotIn(secret, other_text)
-                self.assertNotIn("CI_APP_ID", other_text)
+                self.assertNotIn("OPENSPEC_APP_ID", other_text)
                 self.assertNotIn("create-github-app-token", other_text)
                 self.assertNotIn("OPENSPEC_SUBMISSION_TOKEN", other_text)
+
+    def test_the_shared_ci_app_keeps_its_own_consumers(self) -> None:
+        """This change must not disturb the App it did not switch.
+
+        The dedicated App exists because the shared one lacks pull-request
+        write here. The reverse must also hold: the workflows that mint
+        cross-repo read tokens from the shared App keep doing exactly that,
+        so a future reader cannot mistake this for a repository-wide
+        migration off `CI_APP_ID`.
+        """
+        for name in ("conformance-nightly.yml", "ecosystem-drift.yml"):
+            with self.subTest(workflow=name):
+                text = self.workflow(name)
+                self.assertIn("vars.CI_APP_ID", text)
+                self.assertIn("secrets.CI_APP_PRIVATE_KEY", text)
+                self.assertNotIn("OPENSPEC_APP_ID", text)
+                self.assertNotIn("OPENSPEC_APP_PRIVATE_KEY", text)
 
     def test_no_head_controlled_workflow_can_reach_any_secret(self) -> None:
         """The signal and validator run head-supplied files."""
@@ -868,7 +892,7 @@ class CredentialExposureTests(unittest.TestCase):
         commands = "\n".join(
             line for line in text.splitlines() if not line.strip().startswith("#")
         )
-        self.assertEqual(commands.count("secrets.CI_APP_PRIVATE_KEY"), 1)
+        self.assertEqual(commands.count("secrets.OPENSPEC_APP_PRIVATE_KEY"), 1)
         self.assertEqual(commands.count("steps.app-token.outputs.token"), 1)
         self.assertNotIn("secrets.OPENSPEC_SUBMISSION_TOKEN", commands)
 

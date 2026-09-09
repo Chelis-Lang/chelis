@@ -625,11 +625,19 @@ against this repository: `conformance.yml` runs only on `push: [main]` and
 `Hull Conformance Gate (Linux)` and `Changelog` can never appear.
 
 The controller therefore opens the pull request with a short-lived
-installation token, minted per run from the **same GitHub App this
-repository already uses** for cross-repo work -- `vars.CI_APP_ID` and
-`secrets.CI_APP_PRIVATE_KEY`, exactly as `conformance-nightly.yml` and
-`ecosystem-drift.yml` do. No new secret is created and no token is stored:
+installation token, minted per run from **`chelis-openspec`**, a GitHub App
+dedicated to this mechanism -- `vars.OPENSPEC_APP_ID` and
+`secrets.OPENSPEC_APP_PRIVATE_KEY`. No token is stored:
 `actions/create-github-app-token` revokes it when the job ends.
+
+It is deliberately **not** the shared `CI_APP_*` App that
+`conformance-nightly.yml` and `ecosystem-drift.yml` use. Minting from that
+one returned HTTP 422, `The permissions requested are not granted to this
+installation`: its installation grants no pull-request write, and it exists
+for cross-repo reads. Widening it would give pull-request write to every
+workflow that already holds its key in order to fix one call in this one.
+The dedicated App's installation grants `contents: read`, `metadata: read`,
+and `pull requests: write`, and only the controller holds its key.
 
 The token is requested as narrowly as the action allows:
 
@@ -647,20 +655,16 @@ additionally read repository and branch metadata. The **Workflows**
 permission is *not* needed: it governs writing repository content, and this
 credential never pushes.
 
-What remains for a maintainer is to confirm that the App's **installation
-grants `Pull requests: write` on this repository**. That has not been
-verified here: installation permissions are not readable without
-credentials this session does not use, so it is stated as a prerequisite
-rather than as a checked fact. If the grant is missing, the mint step or
-the create call fails, and the controller reports the push blocked and
-writes nothing -- it never falls back to `GITHUB_TOKEN`.
+Both `vars.OPENSPEC_APP_ID` and `secrets.OPENSPEC_APP_PRIVATE_KEY` are
+configured, and the App's installation grants `Pull requests: write` on
+this repository. If that grant is ever removed, the mint step fails with
+HTTP 422 and the controller writes nothing -- it never falls back to
+`GITHUB_TOKEN`.
 
 There is deliberately **no fallback**. A missing or insufficient credential
 is reported, not worked around.
 
-**Other current blockers.** Strict validation runs
-`openspec validate --all`, which fails today on two unrelated active
-changes and blocks every submission until they are fixed. A branch whose
+**Other current blockers.** A branch whose
 `.github`, `scripts`, Devenv, Nix, or toolchain content differs from
 `origin/main` is refused; rebase first.
 

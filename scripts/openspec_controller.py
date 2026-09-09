@@ -110,16 +110,21 @@ SUBMISSION_TOKEN_ENV = "OPENSPEC_SUBMISSION_TOKEN"
 
 MISSING_TOKEN_ADVICE = f"""no submission credential reached this step, so no pull
             request was opened. The workflow mints one per run from the
-            GitHub App this repository already uses for cross-repo work.
-            Check, in order:
-              1. `vars.CI_APP_ID` and `secrets.CI_APP_PRIVATE_KEY` are set
-                 for this repository, as `conformance-nightly.yml` and
-                 `ecosystem-drift.yml` also require.
+            `chelis-openspec` GitHub App, which exists for this mechanism
+            alone. Check, in order:
+              1. `vars.OPENSPEC_APP_ID` and `secrets.OPENSPEC_APP_PRIVATE_KEY`
+                 are set for this repository. These are NOT the shared
+                 `CI_APP_*` credentials: that App's installation grants no
+                 pull-request write, and widening it would give every
+                 workflow holding its key the ability to open pull requests.
               2. The App's installation covers this repository and grants
                  "Pull requests: write" on it. That is the exact and only
                  permission `POST /repos/{{owner}}/{{repo}}/pulls` needs;
                  the mint step requests nothing else.
               3. The mint step ran before this one and produced a token.
+                 A mint failure is reported by that step, not this one:
+                 HTTP 422 "The permissions requested are not granted to
+                 this installation" means item 2 is unsatisfied.
             The credential must not be GITHUB_TOKEN: a pull request opened
             with that token starts none of the required checks. `{SUBMISSION_TOKEN_ENV}`
             is the variable this step reads."""
