@@ -579,11 +579,20 @@ class ControllerWorkflowTests(unittest.TestCase):
             found.append("token-owner-scope")
         if "repositories: ${{ github.event.repository.name }}" not in commands:
             found.append("token-repository-scope")
-        # Exactly one permission, and it is the one the create call needs.
+        # Exactly the two permissions the create call needs, and no others.
+        # `pull-requests: write` performs the write. `contents: read` is
+        # what lets the token RESOLVE the head and base refs: without it
+        # `POST /pulls` cannot see the branch and answers 422 Validation
+        # Failed, which is how the third hosted run failed.
         if "permission-pull-requests: write" not in commands:
             found.append("token-permission")
-        if commands.count("permission-") != 1:
+        if "permission-contents: read" not in commands:
+            found.append("token-contents-read")
+        if commands.count("permission-") != 2:
             found.append("token-extra-permissions")
+        # Read, never write. This credential must never be able to push.
+        if _re.search(r"(?m)^\s+permission-contents: write\s*$", commands):
+            found.append("token-contents-write")
         # Auto-revocation at job end is the action default; keeping the token
         # alive past the job would leave a live credential behind.
         if "skip-token-revoke" in commands:
@@ -842,6 +851,47 @@ class SubmissionCredentialTests(unittest.TestCase):
         source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertNotIn('or os.environ.get("GITHUB_TOKEN")', source)
         self.assertNotIn('or os.environ.get("GH_TOKEN")', source)
+
+
+class CreateFailureDiagnosticTests(unittest.TestCase):
+    """A rejected create must say what GitHub objected to.
+
+    `gh api` prints its one-line status to stderr and the response body,
+    which carries the `errors` array, to stdout. Reporting only the first
+    reduced a hosted failure to `Validation Failed (HTTP 422)` with the
+    reason discarded, and cost a round trip to the hosted runner to learn
+    something the response had already said.
+    """
+
+    class Rejecting(FakeApi):
+        BODY = json.dumps(
+            {
+                "message": "Validation Failed",
+                "errors": [{"resource": "PullRequest", "field": "head"}],
+            }
+        )
+
+        def __call__(self, command, **kwargs: object):
+            if "--method" in command and "POST" in command:
+                self.calls.append(list(command))
+                self.envs.append(dict(kwargs.get("env") or {}))
+                self.cwds.append(str(kwargs.get("cwd")))
+                return _Result(1, self.BODY, "gh: Validation Failed (HTTP 422)")
+            return super().__call__(command, **kwargs)
+
+    def test_the_response_body_reaches_the_report(self) -> None:
+        api = self.Rejecting()
+        status, output = run_controller(api)
+        self.assertEqual(status, controller.FAILED)
+        self.assertIn("Validation Failed", output)
+        # The part that actually identifies the problem.
+        self.assertIn("head", output)
+        self.assertIn("PullRequest", output)
+
+    def test_the_status_line_is_kept_too(self) -> None:
+        api = self.Rejecting()
+        _, output = run_controller(api)
+        self.assertIn("422", output)
 
 
 class RelativeRepositoryPathTests(unittest.TestCase):

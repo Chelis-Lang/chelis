@@ -53,8 +53,10 @@ name: OpenSpec autoland controller
 # asserts both Apps keep their own consumers.
 #
 # The token is scoped as narrowly as the action allows: this owner, this
-# repository, and `permission-pull-requests: write` alone. That is the
-# exact and only permission `POST /repos/{owner}/{repo}/pulls` requires.
+# repository, and two permissions: `pull-requests: write` to perform the
+# write, and `contents: read` so the endpoint can resolve the head and
+# base refs. Without the second, `POST /repos/{owner}/{repo}/pulls`
+# cannot see the branch and answers 422. Neither permits a push.
 #
 # Every read below keeps the ordinary `GITHUB_TOKEN`, whose `permissions:`
 # block deliberately grants `pull-requests: read` and not `write`: the
@@ -134,6 +136,11 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-pull-requests: write
+          # Read, and only read. `POST /pulls` has to resolve the head and
+          # base refs, and a token without contents access cannot see them:
+          # the create answers 422 Validation Failed on `head`, which is how
+          # the third hosted run failed. This never permits a push.
+          permission-contents: read
 
       - name: Classify the push and open or reuse its pull request
         env:
