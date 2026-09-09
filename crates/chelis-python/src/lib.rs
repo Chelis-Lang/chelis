@@ -1,3 +1,6 @@
+mod source_json;
+
+use source_json::SourceJson;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{c_char, c_int, c_void};
@@ -16,8 +19,9 @@ use chelis_compiler_api::compiler::{
     reef_context_hip_unsupported_error,
 };
 use chelis_compiler_api::schema::{
-    CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
-    EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
+    CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DecompileResult, DesugarRequest,
+    EvalRequest, EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
+    ValidateResult,
 };
 use chelis_compiler_api::{CancelToken, install_cancel_token};
 use chelis_compiler_api::{
@@ -288,12 +292,12 @@ struct GpuInputTensor {
     device_id: i32,
 }
 
-#[pyclass(name = "CompiledModel", unsendable)]
+#[::pyo3::pyclass(name = "CompiledModel", unsendable)]
 struct NativeCompiledModel {
     loaded: LoadedArtifact,
 }
 
-#[pyclass(unsendable)]
+#[::pyo3::pyclass(unsendable)]
 struct NativeTensor {
     owner: TensorOwner,
 }
@@ -322,7 +326,7 @@ impl Drop for GpuTensorHandle {
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeTensor {
     #[getter]
     fn shape(&self) -> Vec<usize> {
@@ -367,7 +371,7 @@ fn target_label(target: CompileTarget) -> &'static str {
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeCompiledModel {
     #[getter]
     fn target(&self) -> String {
@@ -566,7 +570,7 @@ unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
     })
 }
 
-#[pyfunction(signature = (source, *, source_kind = "surf"))]
+#[::pyo3::pyfunction(signature = (source, *, source_kind = "surf"))]
 fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String> {
     let request = CheckRequest {
         source_kind: parse_source_kind(source_kind)?,
@@ -575,7 +579,7 @@ fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<Strin
     run_json(py, || compiler::check(request))
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
     let request = DesugarRequest {
         source: source.to_string(),
@@ -583,15 +587,15 @@ fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
     run_json(py, || compiler::desugar(request))
 }
 
-#[pyfunction]
-fn decompile_json(py: Python<'_>, source: &str) -> PyResult<String> {
+#[::pyo3::pyfunction]
+fn decompile_json(py: Python<'_>, source: &str) -> PyResult<SourceJson<DecompileResult>> {
     let request = DecompileRequest {
         source: source.to_string(),
     };
-    run_json(py, || compiler::decompile(request))
+    run_job(py, || compiler::decompile(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
+#[::pyo3::pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
 fn compile_json(
     py: Python<'_>,
     source: &str,
@@ -608,7 +612,7 @@ fn compile_json(
     run_json(py, || compiler::compile(request))
 }
 
-#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
+#[::pyo3::pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
 fn eval_json(
     py: Python<'_>,
     source: &str,
@@ -646,16 +650,16 @@ fn eval_json(
     run_json(py, || compiler::eval(request))
 }
 
-#[pyfunction(signature = (source, *, mode = "surf"))]
-fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String> {
+#[::pyo3::pyfunction(signature = (source, *, mode = "surf"))]
+fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<SourceJson<ValidateResult>> {
     let request = ValidateRequest {
         mode: parse_validate_mode(mode)?,
         source: source.to_string(),
     };
-    run_json(py, || compiler::validate(request))
+    run_job(py, || compiler::validate(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
+#[::pyo3::pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
 #[allow(clippy::too_many_arguments)] // 1:1 with the Python keyword surface
 fn compile_and_load(
     py: Python<'_>,
@@ -687,7 +691,7 @@ fn compile_and_load(
     load_artifact(py, &output.lib_path, output.tempdir)
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel> {
     load_artifact(py, Path::new(path), None)
 }
@@ -722,6 +726,16 @@ const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 fn run_json<T, F>(py: Python<'_>, f: F) -> PyResult<String>
 where
     T: serde::Serialize + Send + 'static,
+    F: FnOnce() -> Result<T, CompilerError> + Send + 'static,
+{
+    let result = run_job(py, f)?;
+    serde_json::to_string(&result)
+        .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
+}
+
+fn run_job<T, F>(py: Python<'_>, f: F) -> PyResult<T>
+where
+    T: Send + 'static,
     F: FnOnce() -> Result<T, CompilerError> + Send + 'static,
 {
     let token = CancelToken::new();
@@ -803,9 +817,7 @@ where
         }
     };
 
-    let result = outcome.map_err(compiler_error)?;
-    serde_json::to_string(&result)
-        .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
+    outcome.map_err(compiler_error)
 }
 
 /// `dlopen` a compiled artifact so that dropping it does not unmap it.
@@ -2264,18 +2276,40 @@ fn hip_free(ptr: *mut c_void) -> Result<(), String> {
     }
 }
 
+/// Exact PyO3 class identities for the registered-surface census.
+/// The census compares this list bijectively with the live module's classes.
+pub fn capacity_census_classes() -> [(&'static str, &'static str, bool); 2] {
+    [
+        capacity_census_class::<NativeCompiledModel>(),
+        capacity_census_class::<NativeTensor>(),
+    ]
+}
+
+fn capacity_census_class<T: pyo3::PyClass>() -> (&'static str, &'static str, bool) {
+    // Read the slots emitted by #[::pyo3::pymethods], rather than assuming an absent
+    // rustdoc method means PyO3's non-instantiable default constructor. Presence
+    // does not identify the Rust function; discovery rejects unproved slots.
+    let has_constructor = <T as pyo3::impl_::pyclass::PyClassImpl>::items_iter()
+        .any(|items| items.slots.iter().any(|slot| slot.slot == ffi::Py_tp_new));
+    (
+        <T as pyo3::PyTypeInfo>::NAME,
+        std::any::type_name::<T>(),
+        has_constructor,
+    )
+}
+
 pub fn register_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ChelisError", module.py().get_type::<ChelisError>())?;
     module.add_class::<NativeCompiledModel>()?;
     module.add_class::<NativeTensor>()?;
-    module.add_function(wrap_pyfunction!(check_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_and_load, module)?)?;
-    module.add_function(wrap_pyfunction!(decompile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(desugar_json, module)?)?;
-    module.add_function(wrap_pyfunction!(eval_json, module)?)?;
-    module.add_function(wrap_pyfunction!(load, module)?)?;
-    module.add_function(wrap_pyfunction!(validate_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(check_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_and_load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(decompile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(desugar_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(eval_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(validate_json, module)?)?;
     Ok(())
 }
 
@@ -2291,6 +2325,38 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[test]
+    fn binding_constructor_metadata_tracks_actual_pyo3_slots() {
+        #[::pyo3::pyclass]
+        struct NoConstructor;
+        #[::pyo3::pyclass]
+        struct HasConstructor {
+            dtype: i32,
+        }
+        impl HasConstructor {
+            fn new() -> Self {
+                Self { dtype: 0 }
+            }
+        }
+        #[::pyo3::pymethods]
+        impl HasConstructor {
+            #[new]
+            fn create(dtype: i32) -> Self {
+                Self { dtype }
+            }
+        }
+        assert!(!capacity_census_class::<NoConstructor>().2);
+        assert!(capacity_census_class::<HasConstructor>().2);
+        assert_eq!(HasConstructor::new().dtype, 0);
+        Python::with_gil(|py| {
+            assert!(py.get_type::<NoConstructor>().call0().is_err());
+            let constructor = py.get_type::<HasConstructor>();
+            let value = constructor.call1((7,)).unwrap();
+            assert_eq!(value.extract::<PyRef<HasConstructor>>().unwrap().dtype, 7);
+            assert!(constructor.call0().is_err());
+        });
+    }
 
     const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
     const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])

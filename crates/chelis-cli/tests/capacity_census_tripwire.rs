@@ -2122,7 +2122,7 @@ fn coverage_manifest() -> CoverageManifest {
                 leg: "binding-raw-dtype-params".to_string(),
                 artifact: "crates/chelis-python/src/lib.rs registered PyO3 callables".to_string(),
                 enumerator:
-                    "live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures"
+                    "live PyO3 signatures; nine final rows require input/return exposure, eight unchanged legacy rows defer it"
                         .to_string(),
                 command: "cargo nextest run -p chelis-python --test capacity_census_bindings"
                     .to_string(),
@@ -2131,6 +2131,8 @@ fn coverage_manifest() -> CoverageManifest {
                         .to_string(),
                 mutations: vec![
                     "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected".to_string(),
+                    "retired_binding_rows_cannot_regain_legacy_admission".to_string(),
+                    "copied_missing_and_duplicate_binding_registrations_fail".to_string(),
                 ],
             },
         ],
