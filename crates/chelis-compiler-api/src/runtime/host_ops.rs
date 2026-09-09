@@ -1352,54 +1352,43 @@ pub(super) fn tensor_permute_host(
     )))
 }
 
-/// 2D matmul: lhs is [m, k], rhs is [k, n], output is [m, n].
+/// Execute matrix multiplication through its typed, rank-generic lowering.
 pub(super) fn tensor_matmul_host(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
 ) -> Result<RuntimeTensorValue, String> {
-    if lhs.value.shape.len() != 2 || rhs.value.shape.len() != 2 {
-        return Err(format!(
-            "matmul host runtime currently supports only rank-2 × rank-2; got ranks {} and {}",
-            lhs.value.shape.len(),
-            rhs.value.shape.len()
-        ));
+    let a = &lhs.value.shape;
+    let b = &rhs.value.shape;
+    if a.len() < 2 || b.len() < 2 {
+        return Err("matmul requires both operand ranks to be at least two".to_string());
     }
-    let m = lhs.value.shape[0];
-    let k_lhs = lhs.value.shape[1];
-    let k_rhs = rhs.value.shape[0];
-    let n = rhs.value.shape[1];
-    if k_lhs != k_rhs {
-        return Err(format!(
-            "matmul shared-axis mismatch: lhs has {k_lhs}, rhs has {k_rhs}"
-        ));
+    if lhs.precision != rhs.precision || !lhs.precision.is_float() {
+        return Err("matmul requires one matching active float dtype".to_string());
     }
-    // #170 (DO NOT "fix" this into the stride-4 cascade): matmul does NOT
-    // take the #163 `sum` cascade, and its f64 accumulator is intentional.
-    // torch's CPU f32 matmul is a BLAS GEMM whose rounding is bit-exact
-    // with a strict-f32 left-fold (verified k=20..257), NOT the cascade
-    // (which is `sum`'s order — applying it here would CREATE a k>=128
-    // divergence). The eval reference deliberately keeps a HIGHER-precision
-    // f64 accumulator: it is the reference, the shipped C backend trades
-    // precision for speed via `cblas_sgemm`, and the matmul eval-vs-C
-    // parity tests use a TOLERANCE (not bit-identity) for exactly this
-    // expected eval(f64)-vs-backend(BLAS) gap. Matching torch's f32-GEMM
-    // bit pattern by downcasting eval to strict-f32 would lower precision,
-    // couple the reference to torch's specific BLAS version, and still not
-    // buy eval-vs-C bit-identity — net worse, no soundness win. So this is
-    // a documented, expected precision characteristic, not a divergence.
-    let a = lhs.value.to_f64_lossy_vec();
-    let b = rhs.value.to_f64_lossy_vec();
-    let mut out = vec![0.0_f64; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0_f64;
-            for kk in 0..k_lhs {
-                acc += a[i * k_lhs + kk] * b[kk * n + j];
-            }
-            out[i * n + j] = acc;
+    if a[a.len() - 1] != b[b.len() - 2] {
+        return Err("matmul shared-axis mismatch".to_string());
+    }
+    for (&a_extent, &b_extent) in a[..a.len() - 2]
+        .iter()
+        .rev()
+        .zip(b[..b.len() - 2].iter().rev())
+    {
+        if a_extent != b_extent && a_extent != 1 && b_extent != 1 {
+            return Err("matmul batch-axis mismatch".to_string());
         }
     }
-    RuntimeTensorValue::from_wide("matmul", lhs.precision, vec![m, n], out)
+    let mut dag = Dag::new();
+    let lhs_ty = tensor_type_for(lhs);
+    let rhs_ty = tensor_type_for(rhs);
+    let lhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
+    let rhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
+    let lhs_id = add_load(&mut dag, lhs_name.clone(), lhs_ty.clone());
+    let rhs_id = add_load(&mut dag, rhs_name.clone(), rhs_ty.clone());
+    let root = tier2::lower_matmul(&mut dag, lhs_id, rhs_id, &lhs_ty, &rhs_ty, None);
+    let mut inputs = UnordMap::new();
+    inputs.insert(lhs_name, lhs.value.clone());
+    inputs.insert(rhs_name, rhs.value.clone());
+    extract_root(&dag, &inputs, root, "matmul")
 }
 
 /// `insert`: replicate a tensor along a NEW axis.
@@ -1923,8 +1912,7 @@ pub(super) fn tensor_softmax_host(
         //     exp mismatch remains) and would only lower the host lane's
         //     precision.
         // (b) torch's softmax is a FUSED kernel; neither the cascade nor an
-        //     f64 fold reliably bit-matches it (same situation as matmul —
-        //     see `tensor_matmul_host`). So softmax is DOCUMENTED, not
+        //     f64 fold reliably bit-matches it. So softmax is DOCUMENTED, not
         //     cascaded; only `sum`/`trace` take the cascade.
         let mut sum_exp = 0.0_f64;
         for k in 0..axis_size {
@@ -2865,14 +2853,9 @@ pub(super) fn tensor_einsum_value(
     };
     let output_total = checked_product(&out_shape, "output")?;
     let reduction_total = checked_product(&reduction_shape, "reduction")?;
-    // #170 (DO NOT "fix" into the cascade): einsum is a contraction sum,
-    // same shape as matmul, and shares matmul's disposition. torch's f32
-    // einsum follows its GEMM order (strict-f32 left-fold), NOT the #163
-    // `sum` cascade. The eval reference keeps the higher-precision f64
-    // accumulator deliberately — same rationale as `tensor_matmul_host`:
-    // the eval(f64)-vs-C(BLAS) gap at large k is an expected, tolerance-
-    // covered precision characteristic, not a divergence. See the comment
-    // in `tensor_matmul_host`.
+    // This legacy host einsum still accumulates in f64. Unlike matmul,
+    // it does not yet delegate to the typed contraction implementation;
+    // #1290 owns alignment with [05-OP-33]'s exact tree and widths.
     let lhs_wide = lhs.value.to_f64_lossy_vec();
     let rhs_wide = rhs.value.to_f64_lossy_vec();
     let mut out = vec![0.0; output_total];

@@ -140,3 +140,133 @@ fn scalar_kernel_inputs_keep_exact_integer_storage() {
         }
     }
 }
+
+#[test]
+fn attention_recipe_has_independent_query_key_and_value_axes() {
+    let source = r#"def attention(q: tensor[2,1,f32], k: tensor[3,1,f32], v: tensor[3,2,f32], mask: tensor[2,3,bool], scale: f32) -> tensor[2,2,f32] = matmul(softmax(where(mask,mul(matmul(q,permute(k,1,0)),insert(insert(scalar_to_tensor(scale),0,2i64),1,3i64)),insert(insert(scalar_to_tensor(div(-1.0f32,0.0f32)),0,2i64),1,3i64)),1),v)
+q: tensor[2,1,f32] = reshape(to_tensor([0.0f32,0.0f32]),[2i64,1i64])
+k: tensor[3,1,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32]),[3i64,1i64])
+v: tensor[3,2,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32]),[3i64,2i64])
+mask: tensor[2,3,bool] = reshape(to_tensor([true,false,false,false,false,true]),[2i64,3i64])
+result = attention(q,k,v,mask,0.5f32)
+"#;
+    for actual in [evaluate(source), build_and_run(source, "attention_axes")] {
+        assert_eq!(parse_tensor_data(&actual, "result"), vec![1., 2., 5., 6.]);
+    }
+}
+
+#[test]
+fn attention_recipe_executes_batched_heads() {
+    let source = r#"def attention(q: tensor[1,2,2,1,f32], k: tensor[1,2,3,1,f32], v: tensor[1,2,3,2,f32], mask: tensor[1,2,2,3,bool], scale: f32) -> tensor[1,2,2,2,f32] = matmul(softmax(where(mask,mul(matmul(q,permute(k,0,1,3,2)),insert(insert(insert(insert(scalar_to_tensor(scale),0,1i64),1,2i64),2,2i64),3,3i64)),insert(insert(insert(insert(scalar_to_tensor(div(-1.0f32,0.0f32)),0,1i64),1,2i64),2,2i64),3,3i64)),3),v)
+q: tensor[1,2,2,1,f32] = reshape(to_tensor([0.0f32,0.0f32,0.0f32,0.0f32]),[1i64,2i64,2i64,1i64])
+k: tensor[1,2,3,1,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32]),[1i64,2i64,3i64,1i64])
+v: tensor[1,2,3,2,f32] = reshape(to_tensor([1.0f32,2.0f32,3.0f32,4.0f32,5.0f32,6.0f32,7.0f32,8.0f32,9.0f32,10.0f32,11.0f32,12.0f32]),[1i64,2i64,3i64,2i64])
+mask: tensor[1,2,2,3,bool] = reshape(to_tensor([true,false,false,false,false,true,false,true,false,true,false,false]),[1i64,2i64,2i64,3i64])
+result = attention(q,k,v,mask,0.5f32)
+"#;
+    for actual in [evaluate(source), build_and_run(source, "attention_batched")] {
+        assert_eq!(
+            parse_tensor_data(&actual, "result"),
+            vec![1., 2., 5., 6., 9., 10., 7., 8.]
+        );
+    }
+}
+
+#[test]
+fn hosted_matmul_broadcasts_batch_axes_at_every_float_width() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        // where keeps the input on the host path; reshape around it checks
+        // the boundary under a DAG-capable parent, as in attention.
+        let source = format!(
+            "def f(a: tensor[2,1,1,2,{dtype}], b: tensor[3,2,1,{dtype}], m: tensor[2,1,1,2,bool]) -> tensor[2,3,1,1,{dtype}] = matmul(reshape(where(m,a,a),[2i64,1i64,1i64,2i64]),b)\na: tensor[2,1,1,2,{dtype}] = reshape(to_tensor([1.0{dtype},2.0{dtype},3.0{dtype},4.0{dtype}]),[2i64,1i64,1i64,2i64])\nb: tensor[3,2,1,{dtype}] = reshape(to_tensor([1.0{dtype},0.0{dtype},0.0{dtype},1.0{dtype},1.0{dtype},1.0{dtype}]),[3i64,2i64,1i64])\nm: tensor[2,1,1,2,bool] = reshape(to_tensor([true,true,true,true]),[2i64,1i64,1i64,2i64])\nresult = f(a,b,m)\n"
+        );
+        for actual in [
+            evaluate(&source),
+            build_and_run(&source, &format!("hosted_matmul_{dtype}")),
+        ] {
+            assert_eq!(
+                parse_tensor_data(&actual, "result"),
+                vec![1., 2., 3., 3., 4., 7.]
+            );
+        }
+    }
+}
+
+#[test]
+fn hosted_matmul_empty_reductions_and_batches_keep_dtype_and_shape() {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for (left, right, output, count, empty) in [
+            ("2,1,0", "0,2", "2,1,2", 0, false),
+            ("0,1,2", "1,2,1", "0,1,1", 2, true),
+        ] {
+            let shape_list = |shape: &str| {
+                shape
+                    .split(',')
+                    .map(|n| format!("{n}i64"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let values = (0..count)
+                .map(|_| format!("1.0{dtype}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let source = format!(
+                "def f(a: tensor[{left},{dtype}], b: tensor[{right},{dtype}], mask: tensor[{left},bool]) -> tensor[{output},{dtype}] = matmul(reshape(where(mask,a,a),[{}]),b)\nxs: List[{dtype}] = []\nys: List[{dtype}] = [{values}]\nms: List[bool] = []\na: tensor[{left},{dtype}] = reshape(to_tensor(xs),[{}])\nb: tensor[{right},{dtype}] = reshape(to_tensor(ys),[{}])\nmask: tensor[{left},bool] = reshape(to_tensor(ms),[{}])\nresult = f(a,b,mask)\n",
+                shape_list(left),
+                shape_list(left),
+                shape_list(right),
+                shape_list(left)
+            );
+            for actual in [
+                evaluate(&source),
+                build_and_run(&source, &format!("matmul_empty_{dtype}_{empty}")),
+            ] {
+                assert!(
+                    actual.contains(&format!(
+                        "result = tensor(shape=[{}],",
+                        output.replace(',', ", ")
+                    )),
+                    "{actual}"
+                );
+                if empty {
+                    assert!(actual.contains("data=[]"), "{actual}");
+                } else {
+                    assert_eq!(parse_tensor_data(&actual, "result"), vec![0.; 4]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn hosted_matmul_evaluator_uses_the_canonical_reduction_tree() {
+    // The old host f64 fold returned one. The adjacent-pair f32 tree is
+    // (large + one) + (-large + one) = zero, as in the typed IR evaluator.
+    let source = "def f(a: tensor[1,4,f32], b: tensor[4,1,f32], m: tensor[1,4,bool]) -> tensor[1,1,f32] = matmul(reshape(where(m,a,a),[1i64,4i64]),b)\na: tensor[1,4,f32] = reshape(to_tensor([1e20f32,1.0f32,-1e20f32,1.0f32]),[1i64,4i64])\nb: tensor[4,1,f32] = reshape(to_tensor([1.0f32,1.0f32,1.0f32,1.0f32]),[4i64,1i64])\nm: tensor[1,4,bool] = reshape(to_tensor([true,true,true,true]),[1i64,4i64])\nresult = f(a,b,m)\n";
+    assert_eq!(parse_tensor_data(&evaluate(source), "result"), vec![0.]);
+}
+
+#[test]
+fn hosted_matmul_evaluates_effectful_operands_once_in_source_order() {
+    let source = r#"def lhs() -> tensor[1,1,f32] ! { IO } = {
+    _ = print("LHS")
+    reshape(to_tensor([2.0f32]),[1i64,1i64])
+}
+def rhs() -> tensor[1,1,f32] ! { IO } = {
+    _ = print("RHS")
+    reshape(to_tensor([3.0f32]),[1i64,1i64])
+}
+result = matmul(lhs(),rhs())
+"#;
+    for actual in [
+        evaluate(source),
+        build_and_run(source, "matmul_operand_order"),
+    ] {
+        let effects: Vec<_> = actual
+            .lines()
+            .filter(|line| *line == "LHS" || *line == "RHS")
+            .collect();
+        assert_eq!(effects, vec!["LHS", "RHS"], "{actual}");
+        assert_eq!(parse_tensor_data(&actual, "result"), vec![6.]);
+    }
+}

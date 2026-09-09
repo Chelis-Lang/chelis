@@ -31,3 +31,5 @@ def convolve_line(data: tensor[1, 1, 4, f32], weights: tensor[1, 1, 2, f32]) -> 
 conv_input: tensor[1, 1, 4, f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), [1i64, 1i64, 4i64])
 conv_kernel: tensor[1, 1, 2, f32] = reshape(to_tensor([10.0f32, 1.0f32]), [1i64, 1i64, 2i64])
 convolved = convolve_line(conv_input, conv_kernel)
+def batched_product(a: tensor[2, 2, f32], b: tensor[2, 2, f32], keep: tensor[2, 2, bool]) -> tensor[2, 2, 2, f32] = matmul(insert(where(keep, a, a), 0, 2i64), b)
+batched_matrices = batched_product(lhs, rhs, mask)

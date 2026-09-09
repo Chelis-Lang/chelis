@@ -11,3 +11,7 @@ recorded as implementation gaps in the dtype plan.
 Require an explicit same-dtype epsilon for `layer_norm`, including its
 adjoint. Correct standard lowering recipes to insert axes explicitly and
 select embeddings and masked values with `gather` and `where`.
+
+Run host `matmul` through the typed rank-generic lowering and preserve a
+tensor boundary for nested host operands in generated C. Batched attention
+and broadcast matrix calls now execute in both lanes.

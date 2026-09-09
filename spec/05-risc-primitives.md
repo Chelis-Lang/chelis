@@ -3547,7 +3547,7 @@ dtype. The mask has the score shape; a shared mask is aligned explicitly
 with `insert` or unit-axis `expand` before this composition.
 
 ```
-1. k_transposed = permute(k, (...batch_axes, last_axis, second_last_axis))
+1. k_transposed = permute(k, ...batch_axes, last_axis, second_last_axis)
 2. raw_scores = matmul(q, k_transposed)
 3. scores = mul(raw_scores, scale_exp)
 4. masked = where(mask, scores, negative_infinity_exp)
@@ -3555,9 +3555,10 @@ with `insert` or unit-axis `expand` before this composition.
 6. output = matmul(weights, v)
 ```
 
-The permutation is an explicit tuple of every axis, exchanging only the
-last two. `scale_exp` and `negative_infinity_exp` insert all score axes into
-rank-zero tensors containing the supplied scale and dtype negative infinity.
+The permutation supplies every axis as a positional int32 argument,
+exchanging only the last two. `scale_exp` and `negative_infinity_exp` insert
+all score axes into rank-zero tensors containing the supplied scale and
+dtype negative infinity.
 `where` selects values with a bool condition under [05-OP-53]; it performs
 no mask-to-number conversion or multiply/add masking. A fully masked row
 follows the ordinary nonfinite softmax graph; it does not acquire a default

@@ -2504,6 +2504,15 @@ binaries; they do not imply full recipe conformance on every backend.
 The nontrailing softmax test executes f64 in the evaluator and asserts the
 existing C `max_reduce` Unimplemented disposition (#729); its other three
 float widths execute in both lanes.
+Attention controls execute both unbatched and batched graphs with distinct
+query/key counts and value widths in evaluation and compiled C. Host matmul
+now delegates to the typed rank-generic graph; host-only descendants in its
+operands cross explicit tensor boundaries before the C matrix helper runs.
+Broadcast and empty-dimension controls cover all four float widths, alongside
+rank, shape, dtype, mask, and permutation rejection controls. The evaluator's
+canonical-tree cancellation control is exact. The existing C vendor-GEMM
+accumulation-order gap remains owned by #1290/#1315; these execution cases do
+not certify full matmul bit conformance.
 
 The same authority audit generalizes [05-OP-57]'s `to_list` to recursively
 nested Lists for every positive tensor rank and [05-OP-38]'s `tensor_scan`

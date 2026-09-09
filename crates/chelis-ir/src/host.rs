@@ -10347,10 +10347,19 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     if kids.is_empty() {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
-    if !kids
-        .iter()
-        .skip(1)
-        .any(should_keep_tensor_expr_in_host_lane)
+    // A host-only descendant beneath a tensor expression still needs a
+    // host boundary: matmul(softmax(where(...)), v) cannot lower as one
+    // kernel. Evaluate both matrix operands once, in source order, then
+    // pass their typed values to the ordinary rank-generic matrix helper.
+    // This also preserves effects in the other operand when only one has
+    // a host-only descendant. Other builtins may carry static axis/list
+    // arguments, so this two-tensor boundary is specific to matmul.
+    let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
+    if !hoist_matmul_operands
+        && !kids
+            .iter()
+            .skip(1)
+            .any(should_keep_tensor_expr_in_host_lane)
     {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
@@ -10364,7 +10373,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     let mut bindings = Vec::new();
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
-        if should_keep_tensor_expr_in_host_lane(arg) {
+        if hoist_matmul_operands || should_keep_tensor_expr_in_host_lane(arg) {
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
