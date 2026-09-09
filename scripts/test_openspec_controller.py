@@ -46,6 +46,11 @@ RUN_ID = 12345
 SUBMISSION_TOKEN = "ghp_submission_credential_value"
 DEFAULT_TOKEN = "ghs_default_actions_token"
 
+# `actions/create-github-app-token` v3, resolved to its commit. The repo's
+# other App workflows use the floating `@v3` tag; this one pins the commit,
+# because the credential it mints is the only write in the whole design.
+APP_TOKEN_SHA = "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+
 
 class FakeApi:
     """Records every `gh` call and answers from a scripted world."""
@@ -539,18 +544,42 @@ class ControllerWorkflowTests(unittest.TestCase):
         # each permission, and prose must not satisfy a permission check.
         if "pull-requests: read" not in commands:
             found.append("cannot-list-pull-requests")
-        if "pull-requests: write" in commands:
+        # A job-level permission entry, not the action's
+        # `permission-pull-requests:` input, which contains the same text.
+        if _re.search(r"(?m)^\s+pull-requests: write\s*$", commands):
             found.append("default-token-can-write-pull-requests")
         # `GET /actions/runs/{id}` is how the push identity is re-derived.
         if "actions: read" not in commands:
             found.append("no-actions-read")
-        if commands.count("secrets.OPENSPEC_SUBMISSION_TOKEN") != 1:
-            found.append("submission-secret")
+        # The credential is a short-lived installation token minted from the
+        # App this repository already configures, not a stored PAT.
+        if "secrets.OPENSPEC_SUBMISSION_TOKEN" in commands:
+            found.append("stored-pat-secret")
+        if f"actions/create-github-app-token@{APP_TOKEN_SHA}" not in commands:
+            found.append("app-token-action")
+        if "app-id: ${{ vars.CI_APP_ID }}" not in commands:
+            found.append("app-id-source")
+        if "private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}" not in commands:
+            found.append("app-private-key-source")
+        # Scoped to this repository only, never the whole installation.
+        if "owner: ${{ github.repository_owner }}" not in commands:
+            found.append("token-owner-scope")
+        if "repositories: ${{ github.event.repository.name }}" not in commands:
+            found.append("token-repository-scope")
+        # Exactly one permission, and it is the one the create call needs.
+        if "permission-pull-requests: write" not in commands:
+            found.append("token-permission")
+        if commands.count("permission-") != 1:
+            found.append("token-extra-permissions")
+        # Auto-revocation at job end is the action default; keeping the token
+        # alive past the job would leave a live credential behind.
+        if "skip-token-revoke" in commands:
+            found.append("token-not-revoked")
         if (
-            "OPENSPEC_SUBMISSION_TOKEN: ${{ secrets.OPENSPEC_SUBMISSION_TOKEN }}"
+            "OPENSPEC_SUBMISSION_TOKEN: ${{ steps.app-token.outputs.token }}"
             not in commands
         ):
-            found.append("submission-secret-env")
+            found.append("submission-token-env")
         if "must NOT be a required status check" not in text:
             found.append("required-check-warning")
         # One decision per branch, and a newer push supersedes an older one.
@@ -613,13 +642,37 @@ class ControllerWorkflowTests(unittest.TestCase):
                 'if [ "$status" -ge 2 ]; then exit "$status"; fi',
                 'exit "$status"',
             ),
-            "submission-secret-removed": (
-                "          OPENSPEC_SUBMISSION_TOKEN: ${{ secrets.OPENSPEC_SUBMISSION_TOKEN }}\n",
+            "submission-token-removed": (
+                "          OPENSPEC_SUBMISSION_TOKEN: ${{ steps.app-token.outputs.token }}\n",
                 "",
             ),
-            "submission-secret-replaced-by-default-token": (
-                "OPENSPEC_SUBMISSION_TOKEN: ${{ secrets.OPENSPEC_SUBMISSION_TOKEN }}",
+            "submission-token-replaced-by-default-token": (
+                "OPENSPEC_SUBMISSION_TOKEN: ${{ steps.app-token.outputs.token }}",
                 "OPENSPEC_SUBMISSION_TOKEN: ${{ github.token }}",
+            ),
+            "stored-pat-reintroduced": (
+                "OPENSPEC_SUBMISSION_TOKEN: ${{ steps.app-token.outputs.token }}",
+                "OPENSPEC_SUBMISSION_TOKEN: ${{ secrets.OPENSPEC_SUBMISSION_TOKEN }}",
+            ),
+            "token-scope-widened-to-owner": (
+                "          repositories: ${{ github.event.repository.name }}\n",
+                "",
+            ),
+            "token-owner-scope-dropped": (
+                "owner: ${{ github.repository_owner }}",
+                "owner: Chelis-Lang",
+            ),
+            "token-permission-widened": (
+                "permission-pull-requests: write",
+                "permission-pull-requests: write\n          permission-contents: write",
+            ),
+            "token-revocation-disabled": (
+                "          permission-pull-requests: write\n",
+                "          permission-pull-requests: write\n          skip-token-revoke: true\n",
+            ),
+            "app-action-unpinned": (
+                f"actions/create-github-app-token@{APP_TOKEN_SHA}",
+                "actions/create-github-app-token@v3",
             ),
             "default-token-regains-write": (
                 "      pull-requests: read",
@@ -696,6 +749,37 @@ class SubmissionCredentialTests(unittest.TestCase):
         self.assertIn("Pull requests", output)
         self.assertIn("write", output)
 
+    def test_the_missing_token_message_points_at_the_configured_app(
+        self,
+    ) -> None:
+        """The credential is a minted App token, not a stored PAT.
+
+        The advice a maintainer reads must match how the workflow actually
+        gets its credential, or it sends them to create a secret that
+        nothing consumes.
+        """
+        api = FakeApi()
+        _, output = run_controller(api, submission_token=None)
+        self.assertIn("CI_APP_ID", output)
+        self.assertIn("CI_APP_PRIVATE_KEY", output)
+        self.assertIn("installation", output.lower())
+        for stale in (
+            "personal access token",
+            "fine-grained",
+            "repository secret OPENSPEC_SUBMISSION_TOKEN",
+        ):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, output)
+
+    def test_the_advice_does_not_claim_the_installation_was_verified(
+        self,
+    ) -> None:
+        """We can read that the App is configured, not what it may do."""
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        for overclaim in ("installation is verified", "permission is verified"):
+            with self.subTest(overclaim=overclaim):
+                self.assertNotIn(overclaim, source)
+
     def test_a_blank_token_counts_as_missing(self) -> None:
         for value in ("", "   ", "\n"):
             with self.subTest(value=repr(value)):
@@ -755,8 +839,8 @@ class CredentialExposureTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-    def test_only_the_controller_workflow_references_the_secret(self) -> None:
-        secret = "OPENSPEC_SUBMISSION_TOKEN"
+    def test_only_the_controller_workflow_references_the_app_key(self) -> None:
+        secret = "CI_APP_PRIVATE_KEY"
         controller_text = self.workflow("openspec-autoland-controller.yml")
         self.assertIn(secret, controller_text)
         for other in (
@@ -765,7 +849,11 @@ class CredentialExposureTests(unittest.TestCase):
             "openspec-autoland.yml",
         ):
             with self.subTest(workflow=other):
-                self.assertNotIn(secret, self.workflow(other))
+                other_text = self.workflow(other)
+                self.assertNotIn(secret, other_text)
+                self.assertNotIn("CI_APP_ID", other_text)
+                self.assertNotIn("create-github-app-token", other_text)
+                self.assertNotIn("OPENSPEC_SUBMISSION_TOKEN", other_text)
 
     def test_no_head_controlled_workflow_can_reach_any_secret(self) -> None:
         """The signal and validator run head-supplied files."""
@@ -775,7 +863,14 @@ class CredentialExposureTests(unittest.TestCase):
 
     def test_the_controller_passes_the_secret_to_exactly_one_step(self) -> None:
         text = self.workflow("openspec-autoland-controller.yml")
-        self.assertEqual(text.count("secrets.OPENSPEC_SUBMISSION_TOKEN"), 1)
+        # Executable lines only: the header comment names the secret while
+        # explaining why it is there, and prose must not count as a use.
+        commands = "\n".join(
+            line for line in text.splitlines() if not line.strip().startswith("#")
+        )
+        self.assertEqual(commands.count("secrets.CI_APP_PRIVATE_KEY"), 1)
+        self.assertEqual(commands.count("steps.app-token.outputs.token"), 1)
+        self.assertNotIn("secrets.OPENSPEC_SUBMISSION_TOKEN", commands)
 
 
 if __name__ == "__main__":

@@ -479,11 +479,15 @@ human approval is involved.
 validates before you push and reports the outcome in your terminal. It is
 not required, and it is not how a change lands.
 
-Autoland needs the `OPENSPEC_SUBMISSION_TOKEN` repository secret, because a
-pull request opened with the built-in `GITHUB_TOKEN` starts none of the
-required checks. Without it the controller reports the push blocked and
-writes nothing -- it never opens a pull request that could not merge. The
-one-time setup recipe and the exact token permission are in `README.md`.
+Autoland opens the pull request with a short-lived installation token,
+minted per run from the GitHub App this repository already uses
+(`vars.CI_APP_ID`, `secrets.CI_APP_PRIVATE_KEY`), scoped to this repository
+and to `Pull requests: write` alone, and revoked when the job ends. The
+built-in `GITHUB_TOKEN` cannot be used, because a pull request opened with
+it starts none of the required checks. If the App is not configured, or its
+installation lacks that permission here, the controller reports the push
+blocked and writes nothing -- it never opens a pull request that could not
+merge. `README.md` has the details.
 
 A push that touches anything outside the document set is classified
 `review`, nothing is written, and the change follows the ordinary path. Do

@@ -32,17 +32,29 @@ name: OpenSpec autoland controller
 # two required contexts could never appear and the pull request could never
 # go green.
 #
-# So the create call -- and only the create call -- uses the
-# `OPENSPEC_SUBMISSION_TOKEN` repository secret. Every read below keeps the
-# ordinary `GITHUB_TOKEN`, whose `permissions:` block deliberately grants
-# `pull-requests: read` and not `write`: the default token is not able to
-# open a pull request even by mistake.
+# So the create call -- and only the create call -- uses a short-lived
+# installation token, minted here from the GitHub App this repository
+# already configures for its cross-repo work (`vars.CI_APP_ID` and
+# `secrets.CI_APP_PRIVATE_KEY`, as `conformance-nightly.yml` and
+# `ecosystem-drift.yml` use). Nothing is stored: the action revokes the
+# token when the job ends, which is its default and is why
+# `skip-token-revoke` is deliberately absent.
 #
-# There is NO fallback. If the secret is absent the controller reports the
-# push blocked, with the setup recipe, and writes nothing. A fallback would
-# open a pull request that can never merge and hide the misconfiguration.
+# The token is scoped as narrowly as the action allows: this owner, this
+# repository, and `permission-pull-requests: write` alone. That is the
+# exact and only permission `POST /repos/{owner}/{repo}/pulls` requires.
 #
-# The secret reaches this workflow only, which runs from the default
+# Every read below keeps the ordinary `GITHUB_TOKEN`, whose `permissions:`
+# block deliberately grants `pull-requests: read` and not `write`: the
+# default token is not able to open a pull request even by mistake.
+#
+# There is NO fallback. If the App is not configured, or its installation
+# lacks pull-request write on this repository, the mint step or the create
+# call fails and the controller reports the push blocked, writing nothing.
+# A fallback to `GITHUB_TOKEN` would open a pull request that can never
+# merge and hide the misconfiguration.
+#
+# The private key reaches this workflow only, which runs from the default
 # branch. `openspec-autoland-signal.yml` and
 # `openspec-autoland-validate.yml` run head-supplied files and reference no
 # secret at all; `scripts/test_openspec_controller.py` asserts that.
@@ -99,13 +111,25 @@ jobs:
         run: |
           git -C base fetch --no-tags --quiet origin "$HEAD_SHA"
 
+      # Scoped to this repository and one permission. Auto-revoked when the
+      # job ends; nothing is stored anywhere.
+      - name: Mint the submission token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+
       - name: Classify the push and open or reuse its pull request
         env:
-          # Reads run under the default token. The submission credential is
+          # Reads run under the default token. The minted credential is
           # handed to the one call that opens the pull request, inside the
           # controller, and to nothing else.
           GH_TOKEN: ${{ github.token }}
-          OPENSPEC_SUBMISSION_TOKEN: ${{ secrets.OPENSPEC_SUBMISSION_TOKEN }}
+          OPENSPEC_SUBMISSION_TOKEN: ${{ steps.app-token.outputs.token }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

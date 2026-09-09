@@ -120,13 +120,15 @@ classifies the pushed commit with default-branch code, opens an internal
 pull request, waits for the required checks on that exact commit, and merges
 it. Nothing is approved and no protection is bypassed.
 
-Two maintainer actions activate it, and neither is performed by the
-automation: the workflow files must be on the default branch, and the
-`OPENSPEC_SUBMISSION_TOKEN` secret must hold a fine-grained token with
-`Pull requests: write` on this repository only. Without that secret the
-controller reports the push blocked and writes nothing, because a pull
-request opened with the built-in token starts none of the required checks
-and could never merge. `README.md` carries the recipe.
+Two conditions activate it, and the automation performs neither: the
+workflow files must be on the default branch, and the GitHub App this
+repository already configures must grant `Pull requests: write` on this
+repository through its installation. No new secret is introduced; the
+controller mints a short-lived, repository-scoped token per run from that
+App and lets it be revoked at job end. Without it the controller reports
+the push blocked and writes nothing, because a pull request opened with the
+built-in token starts none of the required checks and could never merge.
+`README.md` carries the details.
 
 The authorization narrows the earlier rule that implementation waits on a
 *human* review queue, because that rule bought nothing here: an OpenSpec

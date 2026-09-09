@@ -65,31 +65,43 @@ The controller SHALL classify that exact commit with default-branch code before 
 
 ### Requirement: The pull request is opened by a dedicated credential
 
-Chelis SHALL open the internal pull request with a credential held in the `OPENSPEC_SUBMISSION_TOKEN` repository secret, and SHALL NOT open it with the workflow's built-in token. The built-in token SHALL NOT be granted permission to write pull requests.
+Chelis SHALL open the internal pull request with a short-lived installation token minted per run from the GitHub App this repository already configures, and SHALL NOT open it with the workflow's built-in token. The built-in token SHALL NOT be granted permission to write pull requests.
+
+The minted token SHALL be scoped to the current owner and the current repository only, SHALL request `Pull requests: write` and no other permission, and SHALL be revoked when the job ends. No installation token SHALL be stored.
 
 The submission credential SHALL be used for the pull-request creation call and for no other call. Every read SHALL use the built-in token.
 
-When the secret is absent or blank, Chelis SHALL report the push blocked, naming the secret and the exact permission it requires, and SHALL NOT open a pull request. It SHALL NOT fall back to the built-in token.
+When no submission credential reaches the controller, Chelis SHALL report the push blocked, naming the App configuration and the exact installation permission it requires, and SHALL NOT open a pull request. It SHALL NOT fall back to the built-in token.
 
-The secret SHALL be referenced only by the workflow that runs from the default branch. No workflow that runs a file supplied by the pushed branch SHALL reference any secret.
+The App private key SHALL be referenced only by the workflow that runs from the default branch. No workflow that runs a file supplied by the pushed branch SHALL reference any secret, App identifier, or token-minting action.
 
 #### Scenario: The pull request is created by the submission credential
 - **WHEN** the controller opens a pull request
 - **THEN** the creation call SHALL use the submission credential
 - **AND** every read call SHALL use the built-in token
 
-#### Scenario: A missing secret blocks before any write
-- **WHEN** the submission secret is absent or blank
-- **THEN** the controller SHALL report the push blocked and name the secret
+#### Scenario: A missing credential blocks before any write
+- **WHEN** no submission credential reaches the controller
+- **THEN** the controller SHALL report the push blocked and name the App configuration
 - **AND** it SHALL NOT open a pull request with any other credential
 
-#### Scenario: A missing secret does not mask an ineligible push
-- **WHEN** the push is not a document change and the secret is also absent
+#### Scenario: The minted token is scoped to one repository and one permission
+- **WHEN** the workflow mints the submission token
+- **THEN** it SHALL request the current owner and the current repository only
+- **AND** it SHALL request `Pull requests: write` and no other permission
+- **AND** it SHALL leave automatic revocation enabled
+
+#### Scenario: A missing credential does not mask an ineligible push
+- **WHEN** the push is not a document change and the credential is also absent
 - **THEN** the reported reason SHALL be the boundary, not the secret
 
 #### Scenario: Reusing a pull request needs no credential
 - **WHEN** an open pull request already exists for the branch
 - **THEN** the controller SHALL reuse it without the submission credential
+
+#### Scenario: A head-supplied workflow cannot mint a token
+- **WHEN** the push-side signal workflow or the head-run validator runs
+- **THEN** neither SHALL reference the App identifier, its private key, or a token-minting action
 
 #### Scenario: A head-supplied workflow cannot reach the secret
 - **WHEN** the push-side signal workflow or the head-run validator runs

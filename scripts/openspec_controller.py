@@ -40,15 +40,19 @@ and `changelog.yml` on the default branch has only `pull_request`, so
 protection requires all nine contexts, such a pull request could never go
 green.
 
-So the create call -- and only the create call -- uses the
-`OPENSPEC_SUBMISSION_TOKEN` secret. Reads keep the ambient token, and the
-workflow grants that token `pull-requests: read` rather than `write`, so
-the default credential cannot open a pull request even by mistake.
+So the create call -- and only the create call -- uses a short-lived
+installation token, which the workflow mints from the GitHub App this
+repository already configures. It is scoped to this repository and to
+`Pull requests: write` alone, and it is revoked when the job ends; nothing
+is stored. Reads keep the ambient token, and the workflow grants that token
+`pull-requests: read` rather than `write`, so the default credential cannot
+open a pull request even by mistake.
 
-There is no fallback. If the secret is absent this reports the push
-blocked, prints the setup recipe, and writes nothing. Falling back would
-produce a pull request that can never merge and would hide the
-misconfiguration behind something that looks like it worked.
+There is no fallback. If the App is not configured, or its installation
+does not grant pull-request write on this repository, this reports the push
+blocked and writes nothing. Falling back would produce a pull request that
+can never merge and would hide the misconfiguration behind something that
+looks like it worked.
 
 Exit status is `0` when a pull request is open for the commit, `1` when the
 push was refused, and `2` for an operational failure.
@@ -92,25 +96,33 @@ SIGNAL_WORKFLOW = ".github/workflows/openspec-autoland-signal.yml"
 # leading `-` would read as an option.
 MAX_BRANCH_LENGTH = 255
 
-# The repository secret holding the credential that opens the pull request.
+# The environment variable carrying the credential that opens the pull
+# request. The workflow mints it per run from the GitHub App this repository
+# already configures, scoped to this repository and to pull-request write
+# alone, and the action revokes it when the job ends. Nothing is stored.
+#
 # There is deliberately no fallback to `GITHUB_TOKEN`: a pull request opened
 # with it raises no `pull_request` event, so the required checks never run
 # and the pull request can never go green. Falling back would produce
 # exactly the stalled pull request this design exists to avoid, and would
 # hide the misconfiguration behind something that looks like it worked.
-SUBMISSION_TOKEN_SECRET = "OPENSPEC_SUBMISSION_TOKEN"
+SUBMISSION_TOKEN_ENV = "OPENSPEC_SUBMISSION_TOKEN"
 
-MISSING_TOKEN_ADVICE = f"""the {SUBMISSION_TOKEN_SECRET} secret is not set, so no pull
-            request was opened. One-time setup, by a maintainer:
-              1. Create a fine-grained personal access token, scoped to
-                 this repository only.
-              2. Grant exactly one repository permission:
-                 "Pull requests: Read and write". ("Metadata: Read" is
-                 added automatically and is the only other access.)
-                 Do NOT grant Contents, Workflows, or Administration.
-              3. Save it as the repository secret {SUBMISSION_TOKEN_SECRET}.
-            The token must not be GITHUB_TOKEN: a pull request opened with
-            that token starts none of the required checks."""
+MISSING_TOKEN_ADVICE = f"""no submission credential reached this step, so no pull
+            request was opened. The workflow mints one per run from the
+            GitHub App this repository already uses for cross-repo work.
+            Check, in order:
+              1. `vars.CI_APP_ID` and `secrets.CI_APP_PRIVATE_KEY` are set
+                 for this repository, as `conformance-nightly.yml` and
+                 `ecosystem-drift.yml` also require.
+              2. The App's installation covers this repository and grants
+                 "Pull requests: write" on it. That is the exact and only
+                 permission `POST /repos/{{owner}}/{{repo}}/pulls` needs;
+                 the mint step requests nothing else.
+              3. The mint step ran before this one and produced a token.
+            The credential must not be GITHUB_TOKEN: a pull request opened
+            with that token starts none of the required checks. `{SUBMISSION_TOKEN_ENV}`
+            is the variable this step reads."""
 
 # The contexts branch protection required for `main` when this was measured.
 # Used ONLY by the test that proves the credential prerequisite is real; the
@@ -521,7 +533,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id=arguments.run_id,
         default_branch=arguments.default_branch,
         repository_path=Path(arguments.repository_path),
-        submission_token=os.environ.get(SUBMISSION_TOKEN_SECRET),
+        submission_token=os.environ.get(SUBMISSION_TOKEN_ENV),
     )
 
 

@@ -156,6 +156,16 @@
 - [x] 14.9 Assert the secret is absent from every head-supplied workflow and present in exactly one step of the trusted one.
 - [x] 14.10 Document the one-time activation recipe with the exact least-privilege permission, and state plainly why a GitHub App installation token is not what this uses.
 
+## 15. Use the existing GitHub App instead of a stored PAT
+
+- [x] 15.1 Write the contract tests first: exact App variables, repository scope, single permission, revocation left on, no PAT reference, no key in head-supplied workflows.
+- [x] 15.2 Mint the token in the controller workflow with `actions/create-github-app-token`, pinned to its commit.
+- [x] 15.3 Scope it to `github.repository_owner` and `github.event.repository.name`, with `permission-pull-requests: write` only.
+- [x] 15.4 Leave `skip-token-revoke` unset so the action revokes the token at job end.
+- [x] 15.5 Keep every read on the built-in token, which stays `pull-requests: read`.
+- [x] 15.6 Rewrite the blocked diagnostic to name the App configuration and installation permission instead of demanding a PAT.
+- [x] 15.7 Update `README.md`, `AGENTS.md`, and `spec/design/spec_provenance.md`; state the installation permission as an unverified prerequisite.
+
 ## Acceptance oracle
 
 The authoritative completion oracle is task 6.5: one document submission merges on the hosted repository with no human approval, and no code path becomes automatically mergeable.

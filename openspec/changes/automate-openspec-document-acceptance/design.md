@@ -291,7 +291,7 @@ The two requirements only look alike. Branch protection's contexts are skipped *
 
 It was unreachable in practice today only by luck: the validation workflow has exactly one job, so a skipped job makes the whole run conclude `skipped` and the separate `--require-workflow` pin catches it. Adding a second job, a job-level `if`, or a matrix to that file would have silently removed the only thing holding it.
 
-### D20: One secret, one call, and no fallback
+### D20: One credential, one call, and no fallback
 
 The pull request is opened with the `OPENSPEC_SUBMISSION_TOKEN` repository secret. Every read — the workflow run, the branch heads, the existing-pull-request lookup — keeps the ordinary `GITHUB_TOKEN`, and the controller job's `permissions:` grants that token `pull-requests: read`, not `write`. The default token is therefore structurally unable to open a pull request, rather than merely asked not to.
 
