@@ -956,10 +956,9 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
 /// binder; the def reads all three, so each is a kernel input and each later
 /// witness is guarded against the canonical one at entry. `f` is a kernel on
 /// both lanes; a bare-variable body would be host code on both and would
-/// carry no guard on either. The canonical member is the derivation's, not
-/// the signature's first parameter: the compiled kernel for this program
-/// renders `p` as canonical, and the eval lane renders the identical lines
-/// because it reads the same derivation (C2.7).
+/// carry no guard on either. The signature's first parameter `zz` is the
+/// canonical witness on both lanes, as required by section 4.7. Helper
+/// extraction must preserve that order rather than sorting by binding name.
 ///
 /// EVIDENTIARY STATUS: regression test for the rendering. On the tree
 /// without B2h's guard reordering eval reported the symbolic-binding
@@ -977,7 +976,7 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
     assert!(!ok, "the witness `r` disagrees: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 2, r axis 0 = 3"),
+        out.contains("extent `zdim`: zz axis 0 = 2, r axis 0 = 3"),
         "the later witness is compared against the canonical one, as the compiled kernel renders it: {out}"
     );
     let zz_disagrees = format!(
@@ -986,7 +985,7 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
     let (ok, out) = eval_result(&dir, "zz_disagrees.ch", &zz_disagrees);
     assert!(!ok, "the witness `zz` disagrees: {out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 2, zz axis 0 = 3"),
+        out.contains("extent `zdim`: zz axis 0 = 3, p axis 0 = 2"),
         "every non-canonical member is its own guard: {out}"
     );
     let agree = format!(
@@ -1077,7 +1076,7 @@ fn a_class_with_no_movement_bound_consumer_still_guards_on_eval() {
     assert!(!ok, "the witnesses of `zdim` disagree at 2 and 3: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 3, zz axis 0 = 2"),
+        out.contains("extent `zdim`: zz axis 0 = 2, p axis 0 = 3"),
         "section 4.7's context line names the claim, both witnesses and each \
          observed extent: {out}"
     );
@@ -1115,7 +1114,7 @@ fn a_class_with_no_movement_bound_consumer_still_guards_on_c() {
     assert!(!ok, "the binary must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 3, zz axis 0 = 2"),
+        out.contains("extent `zdim`: zz axis 0 = 2, p axis 0 = 3"),
         "byte-identical to the eval twin's line: {out}"
     );
 
@@ -1178,7 +1177,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_eval() {
     assert!(!ok, "the `rows` witnesses disagree at 1 and 2: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `rows`: p axis 0 = 2, zz axis 0 = 1"),
+        out.contains("extent `rows`: zz axis 0 = 1, p axis 0 = 2"),
         "the axis-0 class reports axis 0 of both members: {out}"
     );
     assert!(
@@ -1193,7 +1192,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_eval() {
     );
     assert!(!ok, "the `cols` witnesses disagree at 2 and 3: {out}");
     assert!(
-        out.contains("extent `cols`: p axis 1 = 3, zz axis 1 = 2"),
+        out.contains("extent `cols`: zz axis 1 = 2, p axis 1 = 3"),
         "the axis-1 class is its own guard, naming axis 1 of the same two \
          member nodes: {out}"
     );
@@ -1228,7 +1227,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_c() {
     assert!(!ok, "the binary must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `rows`: p axis 0 = 2, zz axis 0 = 1"),
+        out.contains("extent `rows`: zz axis 0 = 1, p axis 0 = 2"),
         "byte-identical to the eval twin's line: {out}"
     );
     assert!(!out.contains("extent `cols`"), "{out}");
@@ -1241,7 +1240,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_c() {
     assert!(!ok, "the binary must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `cols`: p axis 1 = 3, zz axis 1 = 2"),
+        out.contains("extent `cols`: zz axis 1 = 2, p axis 1 = 3"),
         "byte-identical to the eval twin's line: {out}"
     );
 
