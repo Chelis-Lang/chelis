@@ -74,6 +74,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "the normative [05-OP-49] movement signature assertion, whose expand retains rank and broadcasts an existing unit extent",
     ),
     (
+        "scripts/test_builtin_atom_registry.py",
+        1,
+        "the missing-contract mutant removes that same-rank movement signature to prove cross-references alone cannot supply builtin authority",
+    ),
+    (
         "crates/chelis-types/tests/issue_1294_standard_lowerings.rs",
         2,
         "negative controls reject the obsolete shape-taking expand recipe and an invalid broadcast extent",
