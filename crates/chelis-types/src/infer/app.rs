@@ -16,6 +16,75 @@ pub(super) fn infer_app(
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
 ) -> Type {
+    // Preserve lexical ownership before inference mutates the environment.
+    // This is discovery metadata, not a backend acceptance decision.
+    let kids = children(list);
+    let builtin = kids.first().and_then(|callee| {
+        let (tag, _, parts) = stamped_parts(callee)?;
+        if tag != DeepTag::Var {
+            return None;
+        }
+        let name = parts.first().and_then(symbol_name)?;
+        if env.is_lexically_bound(name) {
+            return None;
+        }
+        builtins::builtin_decl(name)
+    });
+    let checkpoint = errors.checkpoint();
+    let result = infer_app_inner(
+        list,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        expected_result,
+    );
+    if errors.iter_since(checkpoint).next().is_none()
+        && let Some(builtin) = builtin
+    {
+        // Only overload selectors need operand stamps. Axis syntax and other
+        // non-value children must not be re-inferred to discover an identity.
+        let positions: &[usize] = match builtin.name {
+            "len" | "to_string" | "eq" | "neq" => &[0],
+            "concat" => &[0, 1],
+            _ => &[],
+        };
+        let mut arguments = vec![Type::Unit; kids.len().saturating_sub(1)];
+        for &position in positions {
+            if let Some(child) = kids.get(position + 1)
+                && let Some(ty) = product.current_owner_type(child, subst, errors)
+            {
+                arguments[position] = ty;
+            }
+        }
+        if errors.iter_since(checkpoint).next().is_none()
+            && let Err(reason) = builtin.semantic_case(&arguments)
+        {
+            return report(
+                errors,
+                internal_owner_stamp_error(format!(
+                    "accepted builtin {} has no unique semantic case: {reason}",
+                    builtin.name
+                )),
+            );
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_app_inner(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    expected_result: Option<&Type>,
+) -> Type {
     let kids = children(list);
     if kids.is_empty() {
         return malformed_form(list, "app", "a callee expression", errors);

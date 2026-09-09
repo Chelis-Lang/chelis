@@ -831,6 +831,12 @@ pub enum RiscOp {
 /// typed source instead of a Python allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RiscAtomIdentity {
+    ReluAdjoint,
+    Relu,
+    ExtremaAdjoint,
+    Count,
+    MinElem,
+    Sub,
     Add,
     Mul,
     Div,
@@ -882,6 +888,12 @@ pub enum RiscAtomIdentity {
 
 impl RiscAtomIdentity {
     pub const ALL: &[Self] = &[
+        Self::ReluAdjoint,
+        Self::Relu,
+        Self::ExtremaAdjoint,
+        Self::Count,
+        Self::MinElem,
+        Self::Sub,
         Self::Add,
         Self::Mul,
         Self::Div,
@@ -933,6 +945,12 @@ impl RiscAtomIdentity {
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ReluAdjoint => "ReluAdjoint",
+            Self::Relu => "relu",
+            Self::ExtremaAdjoint => "ExtremaAdjoint",
+            Self::Count => "count",
+            Self::MinElem => "min_elem",
+            Self::Sub => "sub",
             Self::Add => "add",
             Self::Mul => "mul",
             Self::Div => "div",
@@ -1000,6 +1018,12 @@ impl RiscOp {
         use RiscAtomIdentity as Id;
 
         match self {
+            Self::ReluAdjoint { .. } => Semantic(Id::ReluAdjoint),
+            Self::Relu => Semantic(Id::Relu),
+            Self::ExtremaAdjoint { .. } => Semantic(Id::ExtremaAdjoint),
+            Self::Count { .. } => Semantic(Id::Count),
+            Self::MinElem => Semantic(Id::MinElem),
+            Self::Sub => Semantic(Id::Sub),
             Self::Add => Semantic(Id::Add),
             Self::Mul => Semantic(Id::Mul),
             Self::Div => Semantic(Id::Div),
@@ -3469,6 +3493,15 @@ mod tests {
 
         let all = one_of_every_risc_op();
         let mut discovery_cases = all.clone();
+        discovery_cases.extend([
+            RiscOp::Sub,
+            RiscOp::MinElem,
+            RiscOp::Count { axes: vec![0] },
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Max,
+                operand: ExtremaOperand::Left,
+            },
+        ]);
         discovery_cases.extend(
             [
                 ReduceWindowKind::Min,
@@ -3494,12 +3527,24 @@ mod tests {
             semantic, expected,
             "the exhaustive RiscOp disposition and canonical semantic identity universe drifted"
         );
-        assert_eq!(
-            all.iter()
-                .filter(|op| matches!(op.atom_disposition(), RiscAtomDisposition::Structural))
-                .count(),
-            9,
-            "only the nine explicit compiler/lifetime representation variants are structural"
-        );
+        for op in discovery_cases {
+            let structural = matches!(
+                op,
+                RiscOp::OneHot { .. }
+                    | RiscOp::Const { .. }
+                    | RiscOp::ConstTensor { .. }
+                    | RiscOp::Load { .. }
+                    | RiscOp::Store { .. }
+                    | RiscOp::Copy
+                    | RiscOp::Drop
+                    | RiscOp::Realize
+                    | RiscOp::FusedElem { .. }
+            );
+            assert_eq!(
+                matches!(op.atom_disposition(), RiscAtomDisposition::Structural),
+                structural,
+                "only the explicit compiler/lifetime representation variants are structural: {op:?}"
+            );
+        }
     }
 }

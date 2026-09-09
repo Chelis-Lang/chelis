@@ -515,6 +515,7 @@ STAGES: dict[str, list[list[str]]] = {
         LOWERING_TRACE_TESTS,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
+        [MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
     ],
     "runtime-representation": [
         RUNTIME_REPRESENTATION_ORACLE,

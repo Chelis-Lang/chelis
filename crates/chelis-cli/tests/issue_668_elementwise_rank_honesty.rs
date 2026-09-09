@@ -394,7 +394,7 @@ fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {
     let source = "module Repro.Rebind\n\
                   def f(x: tensor[n, f32]) = {\n\
                     a = stride(x, 2i64)\n\
-                    a = normalize(insert(x, 0i32, 2i64))\n\
+                    a = relu(insert(x, 0i32, 2i64))\n\
                     b = insert(x, 0i32, 2i64)\n\
                     add(a, b)\n\
                   }\n\

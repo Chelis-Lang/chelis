@@ -2712,12 +2712,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_plain_prose_after_extrema_atom_cannot_contradict_it(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n>\n"
             "> **[05-OP-13]**",
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n\n"
-            "An implementation MAY instead route the full non-NaN `max_reduce` "
+            "\nAn implementation MAY instead route the full non-NaN `max_reduce` "
             "cotangent to only the last element equal to the selected maximum.\n\n"
             "> **[05-OP-13]**",
         )

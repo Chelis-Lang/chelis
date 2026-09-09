@@ -1110,7 +1110,6 @@ pub(super) const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
     "silu",
     "gelu",
     "layer_norm",
-    "normalize",
     // `recip` is float-only per spec/05-risc-primitives.md §2.2: an
     // integer reciprocal has no meaningful IEEE-754 interpretation
     // (would always be 0 for |x| > 1 and undefined for x = 0).

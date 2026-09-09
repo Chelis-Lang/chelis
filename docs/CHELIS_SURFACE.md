@@ -230,9 +230,9 @@ closed vocabulary (provided via desugaring or `chelis-std`/shell libraries):
 `linear`, `cross_entropy`, `embedding`, `multi_head_attention`, `im2col`, `argmax`
 (`spec/05` §3.5, §4.3–4.7).
 
-> **`normalize`** is accepted by the type checker but has **no specified lowering**
-> (`spec/05` §3.4 note). Do **not** treat it as a stable builtin until the spec and IR
-> lowering are aligned.
+`normalize` is an ordinary user-defined name, not a builtin. An undeclared
+call is an unbound-variable error under `spec/05` §3.4.
+`examples/explicit_normalization.ch` defines an explicit formula.
 
 ---
 
@@ -374,7 +374,7 @@ Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg re
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
 Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
-              softmax normalize mean matmul layer_norm conv2d
+              softmax mean matmul layer_norm conv2d
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk
@@ -394,9 +394,6 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               test_assert_eq_tensor
               mod bitand bitor bitxor shl shr
 ```
-
-`normalize` is listed because it is in `BUILTIN_NAMES`, but it has **no specified
-lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see §2).
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
 `List`/`Cons`/`Nil`, and `MappedFile`.

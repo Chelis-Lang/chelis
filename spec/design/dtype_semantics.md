@@ -1552,6 +1552,20 @@ behavior. If your phase needs a frozen contract to change, stop, update
 this document and [#729] first, and say so in the PR - that is the
 protocol, not a failure.
 
+[#1294] adds exact builtin identity incorporation to the existing governing
+operation atoms and authors [05-OP-45..63] for the remaining builtin families.
+The normative identity registry and the six contract fields make their
+signatures, domains, results, failures, adjoints, and accumulators explicit.
+Existing decided behavior remains controlling, including integer rounding
+identities, saved-mask List differentiation, and exact arithmetic widths.
+`to_csv`'s atom explicitly carries its existing text-serialization signature
+and outside-AD rule. Removing the reserved `normalize` binding implements the
+already-decided §3.4 rejection of an undeclared call. These amendments move
+the affected atom/region digests and the Phase 4 handoff digest. The #1294
+oracle supplies per-identity mutations, substantive semantic-clause mutations,
+and checked application/CLI regressions; it does not replace the behavior
+oracles or introduce Phase 4C support cells.
+
 [#1310] adds the root-manifest atoms [05-OBS-7..11], so it deliberately moves
 the tamper-evident complete-file digest for `spec/05-risc-primitives.md`. It
 does not amend a frozen [05-OP] atom, the §C1 semantics table, the capability
@@ -2303,6 +2317,36 @@ later Table-B `Unimplemented` receipt; it never satisfies semantic closure.
 `.venv/bin/python scripts/dtype_builtin_atom_closure_oracle.py`; exit 0 and
 final line `DTYPE BUILTIN ATOM CLOSURE ORACLE: PASS`. The oracle and its
 adversarial mutations must be green and merged before Phase 4C begins.
+
+
+The discovery executable is `chelis-ir`'s `builtin_atom_inventory` example.
+It reads compiled declarations; a Rust AST tripwire independently checks the
+closed case and RISC enumerations. Ordinary application inference checks the
+unique declared case after type checking, using its existing operand stamps
+and lexical ownership. This metadata carries no target support decision.
+
+`spec/registry/builtin_semantic_identities.md` is the normative identity map.
+Its atoms decide signatures, dtype/parameter domains, results, failures,
+adjoints, and accumulator/order rules. The oracle checks exact membership,
+real numbered definitions, signature governance, generated membership, and
+adversarial deletion/duplication/authority mutations. Semantic review remains
+necessary: membership does not prove numerical implementation conformance.
+
+Run the oracle from a clean committed checkout with the managed Python and
+Rust environments. It runs in the integration support stage; changes to the
+normative map or chapter force that stage. Its nested nextest profile is
+`builtin-atom-closure`, so it cannot overwrite workspace JUnit receipts.
+The standalone schema-1 receipt is
+`target/builtin-atom-closure/execution.json`. The #1296 handoff may supply
+`CHELIS_ORACLE_RECEIPT`, `CHELIS_ORACLE_RUN_ID`, `CHELIS_ORACLE_HEAD`, and
+`CHELIS_ORACLE_SOURCE_DIGEST` together. The adapter independently verifies
+committed source bytes before and after execution and records actual selected
+and passed case identities, including negative and mutation obligations.
+A zero-match, skipped, duplicate, stale, or failed execution cannot pass.
+
+This prerequisite's release exit is semantic membership closure. It does not
+certify Table A/B target cells, all builtin behavior across lanes, or the
+composite #1296 release exit; those remain their owning oracles' work.
 
 ### Pre-4C - composite executable gate ([#1296])
 

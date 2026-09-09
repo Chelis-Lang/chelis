@@ -2067,7 +2067,6 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "relu"
                 | "sigmoid"
                 | "softmax"
-                | "normalize"
                 | "mean"
                 | "min_elem"
                 | "sum"

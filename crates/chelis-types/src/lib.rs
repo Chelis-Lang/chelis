@@ -42,6 +42,7 @@ pub mod unsupported;
 
 mod rejection_registry_generated;
 
+pub mod builtin_discovery;
 mod builtins;
 /// Source architecture guard for the `infer` module tree. Test-only: it
 /// inspects source layout, so it has no place in a release build.

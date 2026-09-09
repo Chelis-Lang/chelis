@@ -55,7 +55,6 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "silu",
     "gelu",
     "softmax",
-    "normalize",
     "mean",
     "matmul",
     "min_elem",
@@ -217,12 +216,7 @@ pub enum BuiltinSiblingCaseId {
     TestAssertBool,
     TestAssertEq,
     TestAssertEqTensor,
-    TestAssertEqF32,
-    TestAssertEqInt,
-    TestAssertEqBool,
-    TestAssertEqString,
     TestAssertCloseTensor,
-    TestAssertEqTensorInt64,
     ReadFile,
     WriteFile,
     ReadLines,
@@ -233,20 +227,6 @@ pub enum BuiltinSiblingCaseId {
     MmapRead,
     MmapLen,
     ProcessRun,
-    ParseJson,
-    ToJson,
-    JsonF64,
-    JsonInt,
-    JsonStr,
-    JsonList,
-    JsonF64s,
-    JsonInts,
-    Jnum,
-    Jint,
-    Jstr,
-    Jlist,
-    Jdict,
-    JsonSet,
     ParseCsv,
     ToCsv,
     CsvF64s,
@@ -272,14 +252,18 @@ pub enum BuiltinSiblingCaseId {
     ToStringDict,
     ToStringOption,
     ToStringAdt,
+    ToStringFunction,
     ToInt,
     ToFloat,
     LenList,
+    LenDict,
     IndexList,
     AppendList,
     ConcatList,
+    ConcatTensors,
     TakeList,
     DropList,
+    DropValue,
     ChunkList,
     RangeList,
     MapList,
@@ -371,6 +355,10 @@ const NEQ_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl {
 };
 
 const TO_STRING_CASES: &[BuiltinSiblingCaseDecl] = &[
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringFunction,
+    },
     BuiltinSiblingCaseDecl {
         domain: BuiltinSemanticDomain::Boundary,
         case: BuiltinSiblingCaseId::ToStringUnit,
@@ -507,7 +495,6 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "silu",
     "gelu",
     "softmax",
-    "normalize",
     "min_elem",
     "reduce_window_max",
     "reduce_window_min",
@@ -1064,14 +1051,6 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
-    },
-    BuiltinDecl {
-        name: "normalize",
-        capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mean",
@@ -1650,7 +1629,19 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── List ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
         name: "len",
-        capability: sibling_capability!(CONTAINER_DOMAIN, Container, LenList),
+        capability: BuiltinCapabilityDecl {
+            domains: CONTAINER_DOMAIN,
+            sibling_cases: &[
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::LenList,
+                },
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::LenDict,
+                },
+            ],
+        },
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1674,7 +1665,19 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "concat",
-        capability: sibling_capability!(CONTAINER_DOMAIN, Container, ConcatList),
+        capability: BuiltinCapabilityDecl {
+            domains: CONTAINER_DOMAIN,
+            sibling_cases: &[
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::ConcatList,
+                },
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::ConcatTensors,
+                },
+            ],
+        },
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1690,7 +1693,19 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "drop",
-        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DropList),
+        capability: BuiltinCapabilityDecl {
+            domains: CONTAINER_DOMAIN,
+            sibling_cases: &[
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::DropList,
+                },
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::DropValue,
+                },
+            ],
+        },
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -2602,7 +2617,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("silu", &mut env, &mut vg);
     tensor_unop("gelu", &mut env, &mut vg);
     tensor_reduce("softmax", &mut env, &mut vg);
-    tensor_unop("normalize", &mut env, &mut vg);
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);

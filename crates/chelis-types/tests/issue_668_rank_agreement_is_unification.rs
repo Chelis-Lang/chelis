@@ -538,7 +538,7 @@ fn a_rebinding_does_not_inherit_the_previous_bindings_shape() {
         "module Repro.Rebind\n\
          def f(x: tensor[n, f32]) = {\n\
            a = stride(x, 2i64)\n\
-           a = normalize(insert(x, 0i32, 2i64))\n\
+           a = relu(insert(x, 0i32, 2i64))\n\
            b = insert(x, 0i32, 2i64)\n\
            add(a, b)\n\
          }\n",
