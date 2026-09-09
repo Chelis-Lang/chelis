@@ -6,6 +6,10 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Native immutable views at the actual code-generation boundary; default off.
+emission-observer = []
+
 [dependencies]
 chelis-unord.workspace = true
 chelis-backend-c.workspace = true

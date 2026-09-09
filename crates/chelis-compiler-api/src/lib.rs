@@ -4,6 +4,8 @@ pub(crate) mod cache_envelope;
 pub mod compiler;
 pub mod context;
 pub mod decode;
+#[cfg(feature = "emission-observer")]
+pub mod emission_observer;
 pub mod fragment;
 pub mod layered;
 pub mod library_cache;

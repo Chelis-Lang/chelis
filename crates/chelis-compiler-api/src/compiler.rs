@@ -1524,6 +1524,29 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
     compile_for_execution_impl(request, EntryStrictness::Strict)
 }
 
+/// Opt-in observation of the same strict compilation as [`compile_for_execution`].
+/// The callback sees the actual immutable ownership-verified emission payload.
+/// An observation is not success: later code generation or artifact construction
+/// may still fail. No observer is installed globally or used by ordinary calls.
+#[cfg(feature = "emission-observer")]
+pub fn compile_for_execution_with_observer(
+    request: CompileRequest,
+    observer: &mut dyn FnMut(crate::emission_observer::EmissionObservation<'_>),
+) -> Result<CompiledExecutionArtifact> {
+    let compiled = compile_source_for_target(
+        request.source_kind,
+        &request.source,
+        manifest_target(request.target),
+    )?;
+    execution_artifact_from_compiled_observed(
+        compiled,
+        request.target,
+        request.entry_name.as_deref(),
+        EntryStrictness::Strict,
+        Some(observer),
+    )
+}
+
 fn compile_for_execution_impl(
     request: CompileRequest,
     strictness: EntryStrictness,
@@ -1736,6 +1759,25 @@ fn execution_artifact_from_compiled(
     entry_name: Option<&str>,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
+    execution_artifact_from_compiled_observed(
+        compiled,
+        target,
+        entry_name,
+        strictness,
+        #[cfg(feature = "emission-observer")]
+        None,
+    )
+}
+
+fn execution_artifact_from_compiled_observed(
+    compiled: CompiledSource,
+    target: CompileTarget,
+    entry_name: Option<&str>,
+    strictness: EntryStrictness,
+    #[cfg(feature = "emission-observer")] mut observer: Option<
+        crate::emission_observer::Observer<'_>,
+    >,
+) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let mut host_compiled = chelis_ir::host::try_lower_manifested_program(&compiled.program)
@@ -1881,6 +1923,15 @@ fn execution_artifact_from_compiled(
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
+                #[cfg(feature = "emission-observer")]
+                crate::emission_observer::observe(
+                    &mut observer,
+                    &compiled.program,
+                    crate::emission_observer::SelectedEmission::Dag {
+                        unfused: &entry_dag,
+                        selected: verified.emission(),
+                    },
+                );
                 let result =
                     chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
                         .map_err(unsupported_stage_error)?;
@@ -1974,6 +2025,12 @@ fn execution_artifact_from_compiled(
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
+                #[cfg(feature = "emission-observer")]
+                crate::emission_observer::observe(
+                    &mut observer,
+                    &compiled.program,
+                    crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 // Preserve a more specific host-emitter rejection (for
@@ -2020,6 +2077,15 @@ fn execution_artifact_from_compiled(
             .map_err(|error| {
                 stage_error("ownership", error.to_string(), GeneralKind::CompileError)
             })?;
+            #[cfg(feature = "emission-observer")]
+            crate::emission_observer::observe(
+                &mut observer,
+                &compiled.program,
+                crate::emission_observer::SelectedEmission::Dag {
+                    unfused: &compiled.dag,
+                    selected: verified.emission(),
+                },
+            );
             let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
                 .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
@@ -2098,6 +2164,12 @@ fn execution_artifact_from_compiled(
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
+                #[cfg(feature = "emission-observer")]
+                crate::emission_observer::observe(
+                    &mut observer,
+                    &compiled.program,
+                    crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
@@ -2132,6 +2204,15 @@ fn execution_artifact_from_compiled(
             .map_err(|error| {
                 stage_error("ownership", error.to_string(), GeneralKind::CompileError)
             })?;
+            #[cfg(feature = "emission-observer")]
+            crate::emission_observer::observe(
+                &mut observer,
+                &compiled.program,
+                crate::emission_observer::SelectedEmission::Dag {
+                    unfused: &hip_dag,
+                    selected: verified.emission(),
+                },
+            );
             let result = chelis_backend_hip::codegen_hip(verified, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(

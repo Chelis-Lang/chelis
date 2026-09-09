@@ -947,6 +947,36 @@ library DAG empty. `UnloweredDefinitions` records that boundary; the returned
 library's `lowered_names` table identifies the definitions. An empty trace is
 never evidence that the source program's obligations were discharged.
 
+### Opt-in observation of selected compiler emission
+
+The `chelis-compiler-api/emission-observer` feature supplies
+`compile_for_execution_with_observer`, an observational counterpart of the
+strict `compile_for_execution` API. It shares source checking, entry selection,
+optimization, ownership verification, and code generation with that API.
+The callback receives immutable native views immediately before code generation:
+the checked/manifested source and either the exact verified standalone DAG or
+the exact verified host payload (including its verified nested DAG cursors).
+Standalone DAG observations also retain the selected pre-specialization,
+pre-fusion DAG. A host observation makes no claim to have such a single graph.
+
+This feature changes no default output, public wire schema, CLI, shell pin, or
+language behavior. Ordinary compilation does not invoke an observer, including
+in feature-enabled builds. Views borrow existing tagged compiler carriers; they
+are not a new serialization format. The callback may copy observations for later
+inspection but cannot mutate the verified payload. Observations may precede a
+later compilation failure: only the enclosing API's successful result establishes
+that code generation and artifact construction completed. An observation is not
+an acceptance verdict, and callback failures are the opt-in caller's failures.
+
+The acceptance oracle is `cargo nextest run -p chelis-compiler-api --features
+emission-observer --test emission_observer --test execution_artifact_metadata`.
+It must compare complete artifacts and diagnostics with ordinary compilation,
+check actual selected entry ownership actions rather than the library DAG,
+exercise standalone and host emission, and preserve rejection without treating
+an empty observation as successful certification. Feature-disabled compilation
+is checked separately. This does not yet join the library AD trace to selected
+emission, check fusion or effect erasure, or implement an external certificate.
+
 ## 7. Spec-Driven Test Generation - `Hull.Generate`
 
 Generate random well-typed Deep programs. Naive approach (generate random AST, check if it types) has near-zero hit rate for non-trivial programs. The useful approach is top-down, type-directed generation.

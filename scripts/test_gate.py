@@ -864,9 +864,21 @@ class StageUnionTests(unittest.TestCase):
             partition=None, support_slice=name,
         ) for name in ("frontend", "domain")]
         self.assertEqual(slices[0], [gate.LOWERING_TRACE_TESTS,
+                                    gate.EMISSION_OBSERVER_TESTS,
                                     gate.COMPILER_FRONT_END_PERFORMANCE_ORACLE])
         self.assertEqual(slices[1], [gate.UNREPRESENTABLE_DOMAIN_ORACLE])
         self.assertEqual(slices[0] + slices[1], gate.STAGES["integration"][1:])
+
+    def test_emission_observer_runs_with_its_feature_locally_and_in_ci_support(self):
+        command = ["cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
+                   "emission-observer", "--test", "emission_observer",
+                   "--test", "execution_artifact_metadata"]
+        self.assertEqual(gate.EMISSION_OBSERVER_TESTS, command)
+        self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
+        commands = gate.selected_stage_commands(
+            "integration", tests_only=False, support_only=True, partition=None,
+        )
+        self.assertEqual(commands.count(command), 1)
 
     def test_support_slice_is_rejected_outside_support_only_integration(self):
         for argv in (
