@@ -361,13 +361,18 @@ fn a_failure_before_the_checker_emits_the_same_document() {
     // type, not a display string and not a second producer that happens to
     // agree with the first.
     //
-    // This is NOT [04-FIT-12] satisfied, and must not be read as it. Other
-    // failures bypass the report entirely and still emit a display string:
-    // an unreadable or non-UTF-8 `.ch`, a style-gate rejection, and
-    // directory mode, which puts the display string in the report's own
-    // place. §6.4 keeps its "not fully implemented" caveat for exactly that
-    // reason, and routing those paths through the report is chelis#886's
-    // remaining work rather than this test's claim.
+    // This is NOT [04-FIT-12] satisfied, and must not be read as it. §6.4
+    // keeps its "not fully implemented" caveat.
+    //
+    // The REASON changed after this comment was written, so do not trust an
+    // older reading of it. It used to be that an unreadable or non-UTF-8
+    // `.ch`, a style-gate rejection, and directory mode all bypassed the
+    // report and emitted a display string; chelis#1679 routed every one of
+    // those through it. What survives is one level up: `chelis check <dir>`
+    // on a directory it cannot enumerate fails in `discover_check_files`
+    // before any file is reached, so there is no per-file report to produce.
+    // That is the envelope surface, which spec/04 does not specify, and
+    // chelis#1678 owns both it and the caveat's eventual removal.
     //
     // `check_output` sets `CHELIS_STYLE_GATE_DISABLE=1`, which makes one of
     // the five fixtures below unrepresentative of default CLI behaviour: a
@@ -378,9 +383,9 @@ fn a_failure_before_the_checker_emits_the_same_document() {
     //
     // The `.dp` cases matter on their own: the Deep arm has its own
     // short-circuit sites, and a fix applied only to the Surf arm would
-    // leave them outside the contract. That arm is also stricter than the
-    // Surf one -- it routes an unreadable or non-UTF-8 `.dp` through the
-    // report where the Surf arm bypasses it.
+    // leave them outside the contract. The Deep arm used to be the stricter
+    // of the two -- it reported an unreadable `.dp` while the Surf arm
+    // bypassed -- which is what chelis#1679 converged, so the two now agree.
     for (extension, source, label) in [
         (
             "ch",

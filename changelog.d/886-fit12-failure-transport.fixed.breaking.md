@@ -13,8 +13,17 @@ directory walk failing to enumerate a directory at all still exits `1` with
 no output, which chelis#1678 owns.
 
 The human message is still written to stderr on every one of these paths, and
-is now also written on three that previously failed silently: an unreadable
-`.dp`, a missing file, and a read failure inside a reef package. The
+is now also written where a read failure previously reported silently: an
+unreadable or non-UTF-8 `.dp`, a missing file, and a read failure inside a
+reef package all emitted a report with empty stderr before. The
 directory-mode summary line `one or more files failed to check` is gone,
-replaced by the per-file diagnostics now carried in each entry's report. See
+replaced by the per-file diagnostics now carried in each entry's report.
+
+One machine-facing message changed for failures that already reached the
+report: a missing file, a dangling symlink and a symlink loop now report
+`failed to read <path>: <errno>` where they reported
+`failed to canonicalize <path>: <errno>`, and an unreadable `.dp` gains the
+errno it previously omitted. The diagnostic `kind` and the report `score` are
+unchanged. `chelis build` still says `failed to canonicalize`, so the two
+subcommands word the same condition differently. See
 [#886](https://github.com/Chelis-Lang/chelis/issues/886).

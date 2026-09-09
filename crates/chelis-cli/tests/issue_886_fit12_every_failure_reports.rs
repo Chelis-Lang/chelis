@@ -46,13 +46,21 @@ use tempfile::{TempDir, tempdir};
 /// Deliberately does not set `CHELIS_STYLE_GATE_DISABLE`, because one of the
 /// paths under test IS the style gate.
 ///
-/// Measured rather than assumed: running this suite with that variable set
-/// changes the outcome of exactly one of its six tests, the style-gate one.
-/// The read and non-UTF-8 fixtures fail in `fs::read_to_string` before the
-/// gate is consulted, so the variable is irrelevant to them. An earlier
-/// draft of this comment claimed the sibling suite "cannot see any of this"
-/// because it disables the gate; that overstated the case for five of the
-/// six.
+/// Which tests that matters for, stated structurally rather than as a count.
+/// The two gate-sensitive ones are `a_style_gate_rejection_...`, whose
+/// subject IS the gate, and `a_style_violation_is_still_bypassable_...`,
+/// which asserts the `--allow-style-violations` warning that the env var
+/// suppresses. The read, non-UTF-8 and Deep fixtures fail in
+/// `fs::read_to_string` before the gate is consulted, so the variable is
+/// irrelevant to them, and the clean fixture passes either way.
+///
+/// Two earlier drafts of this comment each carried a number, and both were
+/// wrong: the first claimed the sibling suite "cannot see any of this",
+/// and the second said "exactly one of six" -- measured before the same
+/// commit added the bypass assertion that made a second test
+/// gate-sensitive. A count here depends on the suite's own contents and
+/// goes stale the moment a test is added, so this names the mechanism
+/// instead.
 fn check(path: &std::path::Path) -> (Option<i32>, String, String) {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
