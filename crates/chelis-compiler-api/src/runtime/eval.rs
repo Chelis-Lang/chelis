@@ -71,7 +71,7 @@ mod list_dir_conversion_tests {
             names.push(OsString::from("0-valid"));
             assert_eq!(
                 list_dir_names_to_strings(names, "/dir"),
-                Err(r#"IO trap in list_dir: directory b"/dir", entry b"a\xfe": name is not valid UTF-8"#.to_owned())
+                Err("IO trap in list_dir: directory b\"/dir\", entry b\"a\\xfe\": name is not valid UTF-8".to_owned())
             );
         }
         // Raw order and replacement-string order disagree for these names.
@@ -81,7 +81,7 @@ mod list_dir_conversion_tests {
         ];
         assert_eq!(
             list_dir_names_to_strings(names, "/dir"),
-            Err(r#"IO trap in list_dir: directory b"/dir", entry b"\x80z": name is not valid UTF-8"#.to_owned())
+            Err("IO trap in list_dir: directory b\"/dir\", entry b\"\\x80z\": name is not valid UTF-8".to_owned())
         );
     }
 
@@ -92,7 +92,7 @@ mod list_dir_conversion_tests {
         let names = vec![OsString::from_vec(b"bad\n\r\t\\\"'\xff".to_vec())];
         assert_eq!(
             list_dir_names_to_strings(names, "/d\n\r\t\\\"'é"),
-            Err(r#"IO trap in list_dir: directory b"/d\n\r\t\\\"\'\xc3\xa9", entry b"bad\n\r\t\\\"\'\xff": name is not valid UTF-8"#.to_owned())
+            Err("IO trap in list_dir: directory b\"/d\\n\\r\\t\\\\\\\"\\'\\xc3\\xa9\", entry b\"bad\\n\\r\\t\\\\\\\"\\'\\xff\": name is not valid UTF-8".to_owned())
         );
     }
 }
