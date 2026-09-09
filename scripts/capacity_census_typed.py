@@ -403,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registered", action="append", default=[])
     parser.add_argument("--registered-method", action="append", default=[])
     parser.add_argument("--registered-class", action="append", default=[])
+    parser.add_argument("--registered-provenance", type=Path)
     parser.add_argument("--rustdoc-json", type=Path)
     return parser
 
@@ -461,12 +462,14 @@ def main() -> int:
             rows = discover_bindings(
                 [document, compiler_document], args.registered,
                 args.registered_method, classes,
+                provenance=json.loads(args.registered_provenance.read_text())
+                if args.registered_provenance else None,
             )
             legacy = {row["id"]: row["flags"] for row in binding_rows(
                 document, args.registered, args.registered_method
             )}
             for row in rows:
-                row["legacy_flags"] = legacy[row["id"]]
+                row["legacy_flags"] = legacy.get(row["id"], row["flags"])
         else:
             rows = (
                 wire_rows(document)

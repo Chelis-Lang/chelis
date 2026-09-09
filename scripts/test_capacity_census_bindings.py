@@ -1,6 +1,8 @@
 """Binding exposure controls for spec/11 §1 and dtype_semantics.md §C6."""
 
 import copy
+import hashlib
+from pathlib import Path
 import unittest
 
 from capacity_census_bindings import discover_bindings
@@ -15,10 +17,78 @@ def fixture(output=None, inputs=()):
 
 
 def exposure(a, **kwargs):
-    return discover_bindings([a.doc], ["probe"], [], {}, **kwargs)[0]
+    return discover(a, ["probe"], [], {}, **kwargs)[0]
+
+
+def receipt(a, functions, methods, classes):
+    """Fixture metadata stands in for the independently tested syn registrar."""
+    rows = []
+    for name in functions:
+        rows.append((None, name, "function"))
+    for method in methods:
+        owner, name = method.split("::")
+        rows.append((classes[owner].split("::")[-1], name, "method"))
+    registrations = []
+    for owner, name, kind in rows:
+        found = [item for item in a.doc["index"].values()
+                 if item.get("name") == name and "function" in item.get("inner", {})]
+        if not found:
+            continue
+        for item in found:
+            item["span"] = {"filename": __file__, "begin": [1, 1], "end": [1, 100]}
+        registrations.append(dict(owner=owner, python_name=name, rust_name=name,
+                                  kind=kind, line=1, column=4))
+    return dict(source_path=__file__, source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                registrations=registrations)
+
+
+def discover(a, functions, methods, classes, *, provenance=None, documents=()):
+    if provenance is None:
+        provenance = receipt(a, functions, methods, classes)
+    return discover_bindings([a.doc, *documents], functions, methods, classes, provenance=provenance)
 
 
 class BindingExposure(unittest.TestCase):
+    def test_missing_stale_or_ambiguous_registration_provenance_is_rejected(self):
+        a = fixture(primitive("bool"))
+        with self.assertRaisesRegex(Exception, "provenance"):
+            discover_bindings([a.doc], ["probe"], [], {})
+        proof = receipt(a, ["probe"], [], {})
+        for change in (dict(source_sha256="0" * 64), dict(registrations=[]),
+                       dict(registrations=proof["registrations"] * 2)):
+            with self.subTest(change=change), self.assertRaisesRegex(Exception, "provenance"):
+                discover(a, ["probe"], [], {}, provenance=proof | change)
+        proof["registrations"][0]["line"] = 2
+        with self.assertRaisesRegex(Exception, "provenance"):
+            discover(a, ["probe"], [], {}, provenance=proof)
+
+    def test_registration_renames_select_the_actual_numeric_implementation(self):
+        for kind in ("function", "method", "getter", "setter", "constructor", "classmethod", "staticmethod"):
+            with self.subTest(kind=kind):
+                a = fixture(primitive("bool"))
+                a.add(2, "numeric", {"function": {"sig": {"inputs": [("value", primitive("f64"))],
+                                                           "output": primitive("bool")}}},
+                      path=["chelis_python", "numeric"])
+                if kind == "function":
+                    functions, methods, classes, owner = ["probe"], [], {}, None
+                else:
+                    a.struct(10, "Handle", [])
+                    a.external(40, "pyo3::pyclass::PyClass")
+                    a.add(41, None, {"impl": {"trait": {"id": 40}, "items": []}})
+                    a.add(42, None, {"impl": {"trait": None, "items": [1, 2]}})
+                    a.doc["index"]["10"]["inner"]["struct"]["impls"] += [41, 42]
+                    functions, methods, classes, owner = [], ["Model::probe"], {"Model": "chelis_python::Handle"}, "Handle"
+                proof = receipt(a, functions, methods, classes)
+                a.doc["index"]["2"]["span"] = {"filename": __file__, "begin": [1, 1], "end": [1, 100]}
+                proof["registrations"] = [dict(owner=owner, python_name="probe", rust_name="numeric",
+                                                kind=kind, line=1, column=4)]
+                row = discover(a, functions, methods, classes, provenance=proof)[0]
+                self.assertIn("float-carrier", row["flags"])
+                self.assertIn("value: f64", row["id"])
+                proof["registrations"][0]["rust_name"] = "missing"
+                with self.assertRaisesRegex(Exception, "provenance"):
+                    discover(a, functions, methods, classes, provenance=proof)
+
     def test_float_return_and_parameter_are_both_visible(self):
         for a in (fixture(primitive("f64")), fixture(None, [("value", primitive("f64"))])):
             result = exposure(a)
@@ -90,14 +160,14 @@ class BindingExposure(unittest.TestCase):
         a.add(43, "score", {"function": {"sig": {"inputs": [], "output": primitive("f64")}}})
         a.doc["index"]["10"]["inner"]["struct"]["impls"] += [41, 42]
         classes = {"Model": "chelis_python::NativeModel"}
-        rows = discover_bindings([a.doc], ["probe"], ["Model::score"], classes)
+        rows = discover(a, ["probe"], ["Model::score"], classes)
         self.assertEqual(rows[0]["flags"], [])
         self.assertIn("float-carrier", rows[1]["flags"])
-        with self.assertRaisesRegex(Exception, "constructor provenance"):
-            discover_bindings([a.doc], [], ["Model::__new__"], classes)
+        with self.assertRaisesRegex(Exception, "registration provenance"):
+            discover(a, [], ["Model::__new__"], classes)
         a.doc["index"]["10"]["inner"]["struct"]["impls"].remove(41)
         with self.assertRaisesRegex(Exception, "PyClass"):
-            discover_bindings([a.doc], ["probe"], [], classes)
+            discover(a, ["probe"], [], classes)
 
     def test_constructor_requires_provenance_even_with_an_inherent_new_helper(self):
         a = fixture()
@@ -112,16 +182,16 @@ class BindingExposure(unittest.TestCase):
         classes = {"Handle": "chelis_python::Handle"}
         # An explicitly named method has an exact Rust identity. A Python
         # constructor slot does not reveal which of these functions owns it.
-        result = discover_bindings([a.doc], [], ["Handle::create"], classes)[0]
+        result = discover(a, [], ["Handle::create"], classes)[0]
         self.assertEqual(result["flags"], ["raw-dtype-int"])
-        with self.assertRaisesRegex(Exception, "constructor provenance"):
-            discover_bindings([a.doc], [], ["Handle::__new__"], classes)
+        with self.assertRaisesRegex(Exception, "registration provenance"):
+            discover(a, [], ["Handle::__new__"], classes)
 
     def test_duplicate_or_missing_registered_callables_fail(self):
         a = fixture(primitive("bool"))
         for names in (["probe", "probe"], ["missing"]):
             with self.assertRaisesRegex(Exception, "duplicate|missing"):
-                discover_bindings([a.doc], names, [], {})
+                discover(a, names, [], {})
 
     def test_alias_cycle_fails_and_nominal_recursion_terminates(self):
         a = fixture(reference(10))
@@ -136,7 +206,7 @@ class BindingExposure(unittest.TestCase):
         producer = Artifact("producer")
         producer.struct(1, "Value", [producer.field("score", primitive("f64"))])
         self.assertIn("missing defining artifact", exposure(a)["problem"])
-        result = discover_bindings([a.doc, producer.doc], ["probe"], [], {})[0]
+        result = discover(a, ["probe"], [], {}, documents=[producer.doc])[0]
         self.assertIn("float-carrier", result["flags"])
 
     def test_source_json_requires_its_exact_sealed_result_and_numeric_changes_are_visible(self):

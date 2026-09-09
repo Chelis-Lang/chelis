@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 from capacity_census_graph import GraphError, RustdocGraph
 from capacity_census_typed import FLOAT_PRIMITIVES, INTEGER_PRIMITIVES, canonical_type
@@ -176,48 +177,96 @@ class BindingGraph(RustdocGraph):
         return self.discover("chelis_python", ty if ty is not None else {"tuple": []})
 
 
-def discover_bindings(documents, functions, methods, classes):
-    """Analyze all registered roots; retain explicit unresolved legacy results.
+def registration_roots(graph, functions, methods, classes, provenance):
+    """Join syn-derived registrar roots to live names and exact rustdoc spans.
+
+    Metadata is produced from the compile-time source used by the live census.
+    It is never inferred from a public name or an inherent helper's spelling.
+    Unsupported registration forms are rejected by the source producer.
+    """
+    if not isinstance(provenance, dict) or set(provenance) != {
+        "source_path", "source_sha256", "registrations"
+    }:
+        raise GraphError("missing or malformed registration provenance")
+    source_path = provenance["source_path"]
+    try:
+        source = Path(source_path).read_bytes()
+    except (OSError, TypeError) as error:
+        raise GraphError(f"unreadable registration provenance source: {error}") from error
+    if hashlib.sha256(source).hexdigest() != provenance["source_sha256"]:
+        raise GraphError("stale registration provenance source bytes")
+    if len(set(functions)) != len(functions) or len(set(methods)) != len(methods):
+        raise GraphError("duplicate registered callable")
+    expected = set(functions) | set(methods)
+    seen = {}
+    roots = []
+    inverse = {identity: name for name, identity in classes.items()}
+    for row in provenance["registrations"]:
+        if set(row) != {"owner", "python_name", "rust_name", "kind", "line", "column"}:
+            raise GraphError("malformed registration provenance row")
+        if row["kind"] not in {"function", "method", "getter", "setter", "constructor", "classmethod", "staticmethod"}:
+            raise GraphError("unsupported registration provenance kind")
+        if row["owner"] is None:
+            if row["kind"] != "function":
+                raise GraphError("function registration provenance has a method kind")
+            public = row["python_name"]
+            owner = None
+            identity = "chelis_python::" + row["rust_name"]
+            location = graph.locations.get(identity)
+            found = [] if location is None else [graph._item(*location)]
+        else:
+            if row["kind"] == "function":
+                raise GraphError("method registration provenance has a function kind")
+            owner = "chelis_python::" + row["owner"]
+            if owner not in inverse:
+                raise GraphError("registration provenance owner is not an exact registered class")
+            public = inverse[owner] + "::" + row["python_name"]
+            identity = owner + "::" + row["rust_name"]
+            crate, item_id = graph.locations[owner]
+            item = graph._item(crate, item_id)
+            found = []
+            for impl_id in item["inner"]["struct"].get("impls", []):
+                impl = graph._item(crate, impl_id)["inner"].get("impl", {})
+                if impl.get("trait") is not None:
+                    continue
+                found += [graph._item(crate, method_id) for method_id in impl.get("items", [])
+                          if graph._item(crate, method_id).get("name") == row["rust_name"]
+                          and "function" in graph._item(crate, method_id).get("inner", {})]
+        if public not in expected:
+            raise GraphError(f"registration provenance has no live exposure: {public}")
+        kinds = seen.setdefault(public, set())
+        if row["kind"] in kinds or (kinds and kinds | {row["kind"]} != {"getter", "setter"}):
+            raise GraphError(f"ambiguous registration provenance for {public}")
+        kinds.add(row["kind"])
+        if len(found) != 1:
+            raise GraphError(f"missing or duplicate rustdoc registration provenance: {identity}")
+        item = found[0]
+        span = item.get("span") or {}
+        position = [row["line"], row["column"]]
+        if (span.get("filename") != source_path
+                or not all(type(coordinate) is int and coordinate > 0 for coordinate in position)
+                or not span.get("begin", [0, 0]) <= position < span.get("end", [0, 0])):
+            raise GraphError(f"rustdoc registration provenance span mismatch: {identity}")
+        kind = "binding-pyfunction" if owner is None else "binding-pymethod"
+        proof = ("registration", provenance["source_sha256"], identity, row["kind"], public,
+                 row["line"], row["column"])
+        roots.append((kind, "chelis_python::" + public, item, owner, proof))
+    if set(seen) != expected:
+        raise GraphError(f"missing registration provenance: {sorted(expected - set(seen))}")
+    return roots
+
+
+def discover_bindings(documents, functions, methods, classes, *, provenance=None):
+    """Analyze exactly registered implementations; retain unresolved legacy types.
 
     The caller must reject a problem on every final/new row. Only the Rust
     tripwire owns the exact unchanged frozen remainder. This function neither
     knows that cohort nor grants nonnumeric or transport authority.
     """
     graph = BindingGraph(documents, classes)
-    if len(set(functions)) != len(functions) or len(set(methods)) != len(methods):
-        raise GraphError("duplicate registered callable")
-    roots = []
-    for name in functions:
-        location = graph.locations.get("chelis_python::" + name)
-        if location is None:
-            raise GraphError(f"missing registered function {name}")
-        roots.append(("binding-pyfunction", "chelis_python::" + name, graph._item(*location), None))
-    for registered in methods:
-        owner, separator, name = registered.partition("::")
-        if not separator or owner not in classes:
-            raise GraphError(f"missing registered class for method {registered}")
-        if name == "__new__":
-            # PyO3 permits #[new] on any Rust method name. The compiled slot
-            # census establishes its presence, but rustdoc cannot tie that
-            # slot to the original function. An inherent `new` is no evidence.
-            raise GraphError(f"unproved registered constructor provenance: {registered}")
-        identity = classes[owner]
-        crate, item_id = graph.locations[identity]
-        item = graph._item(crate, item_id)
-        found = []
-        for impl_id in item["inner"]["struct"].get("impls", []):
-            impl = graph._item(crate, impl_id)["inner"].get("impl", {})
-            if impl.get("trait") is not None:
-                continue
-            for method_id in impl.get("items", []):
-                method = graph._item(crate, method_id)
-                if method.get("name") == name and "function" in method.get("inner", {}):
-                    found.append(method)
-        if len(found) != 1:
-            raise GraphError(f"missing or duplicate registered method {registered}")
-        roots.append(("binding-pymethod", f"chelis_python::{owner}::{name}", found[0], identity))
+    roots = registration_roots(graph, functions, methods, classes, provenance)
     results = []
-    for kind, name, item, owner in roots:
+    for kind, name, item, owner, proof in roots:
         signature = item.get("inner", {}).get("function", {}).get("sig")
         if signature is None:
             raise GraphError(f"missing typed signature for {name}")
@@ -225,8 +274,9 @@ def discover_bindings(documents, functions, methods, classes):
         output = signature.get("output")
         rendered = ", ".join(f"{label}: {canonical_type(ty)}" for label, ty in inputs)
         result = {"kind": kind, "id": f"{name}({rendered}) -> {canonical_type(output)}",
+                  "implementation": f"{proof[2]}#{proof[3]}",
                   "flags": [], "leaves": [], "identity": None, "problem": None}
-        identities, flags, leaves = [], set(), []
+        identities, flags, leaves = [proof], set(), []
         try:
             for direction, label, ty in [("input", label, ty) for label, ty in inputs] + [("output", "$return", output)]:
                 discovered = graph.exposure(ty, owner)

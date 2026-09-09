@@ -292,12 +292,12 @@ struct GpuInputTensor {
     device_id: i32,
 }
 
-#[pyclass(name = "CompiledModel", unsendable)]
+#[::pyo3::pyclass(name = "CompiledModel", unsendable)]
 struct NativeCompiledModel {
     loaded: LoadedArtifact,
 }
 
-#[pyclass(unsendable)]
+#[::pyo3::pyclass(unsendable)]
 struct NativeTensor {
     owner: TensorOwner,
 }
@@ -326,7 +326,7 @@ impl Drop for GpuTensorHandle {
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeTensor {
     #[getter]
     fn shape(&self) -> Vec<usize> {
@@ -371,7 +371,7 @@ fn target_label(target: CompileTarget) -> &'static str {
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeCompiledModel {
     #[getter]
     fn target(&self) -> String {
@@ -570,7 +570,7 @@ unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
     })
 }
 
-#[pyfunction(signature = (source, *, source_kind = "surf"))]
+#[::pyo3::pyfunction(signature = (source, *, source_kind = "surf"))]
 fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String> {
     let request = CheckRequest {
         source_kind: parse_source_kind(source_kind)?,
@@ -579,7 +579,7 @@ fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<Strin
     run_json(py, || compiler::check(request))
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
     let request = DesugarRequest {
         source: source.to_string(),
@@ -587,7 +587,7 @@ fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
     run_json(py, || compiler::desugar(request))
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn decompile_json(py: Python<'_>, source: &str) -> PyResult<SourceJson<DecompileResult>> {
     let request = DecompileRequest {
         source: source.to_string(),
@@ -595,7 +595,7 @@ fn decompile_json(py: Python<'_>, source: &str) -> PyResult<SourceJson<Decompile
     run_job(py, || compiler::decompile(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
+#[::pyo3::pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
 fn compile_json(
     py: Python<'_>,
     source: &str,
@@ -612,7 +612,7 @@ fn compile_json(
     run_json(py, || compiler::compile(request))
 }
 
-#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
+#[::pyo3::pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
 fn eval_json(
     py: Python<'_>,
     source: &str,
@@ -650,7 +650,7 @@ fn eval_json(
     run_json(py, || compiler::eval(request))
 }
 
-#[pyfunction(signature = (source, *, mode = "surf"))]
+#[::pyo3::pyfunction(signature = (source, *, mode = "surf"))]
 fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<SourceJson<ValidateResult>> {
     let request = ValidateRequest {
         mode: parse_validate_mode(mode)?,
@@ -659,7 +659,7 @@ fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<SourceJso
     run_job(py, || compiler::validate(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
+#[::pyo3::pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
 #[allow(clippy::too_many_arguments)] // 1:1 with the Python keyword surface
 fn compile_and_load(
     py: Python<'_>,
@@ -691,7 +691,7 @@ fn compile_and_load(
     load_artifact(py, &output.lib_path, output.tempdir)
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel> {
     load_artifact(py, Path::new(path), None)
 }
@@ -2286,7 +2286,7 @@ pub fn capacity_census_classes() -> [(&'static str, &'static str, bool); 2] {
 }
 
 fn capacity_census_class<T: pyo3::PyClass>() -> (&'static str, &'static str, bool) {
-    // Read the slots emitted by #[pymethods], rather than assuming an absent
+    // Read the slots emitted by #[::pyo3::pymethods], rather than assuming an absent
     // rustdoc method means PyO3's non-instantiable default constructor. Presence
     // does not identify the Rust function; discovery rejects unproved slots.
     let has_constructor = <T as pyo3::impl_::pyclass::PyClassImpl>::items_iter()
@@ -2302,14 +2302,14 @@ pub fn register_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ChelisError", module.py().get_type::<ChelisError>())?;
     module.add_class::<NativeCompiledModel>()?;
     module.add_class::<NativeTensor>()?;
-    module.add_function(wrap_pyfunction!(check_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_and_load, module)?)?;
-    module.add_function(wrap_pyfunction!(decompile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(desugar_json, module)?)?;
-    module.add_function(wrap_pyfunction!(eval_json, module)?)?;
-    module.add_function(wrap_pyfunction!(load, module)?)?;
-    module.add_function(wrap_pyfunction!(validate_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(check_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_and_load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(decompile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(desugar_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(eval_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(validate_json, module)?)?;
     Ok(())
 }
 
@@ -2328,9 +2328,9 @@ mod tests {
 
     #[test]
     fn binding_constructor_metadata_tracks_actual_pyo3_slots() {
-        #[pyclass]
+        #[::pyo3::pyclass]
         struct NoConstructor;
-        #[pyclass]
+        #[::pyo3::pyclass]
         struct HasConstructor {
             dtype: i32,
         }
@@ -2339,7 +2339,7 @@ mod tests {
                 Self { dtype: 0 }
             }
         }
-        #[pymethods]
+        #[::pyo3::pymethods]
         impl HasConstructor {
             #[new]
             fn create(dtype: i32) -> Self {

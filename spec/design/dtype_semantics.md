@@ -1603,9 +1603,15 @@ the actual typed result and serializes it once. Their error paths raise string
 exceptions rather than serialized result payloads. The other seven structural
 signatures expose source/path/name/vocabulary strings or opaque registered
 pyclass handles. Each handle's published methods remain separate census roots.
-Compiled constructor-slot presence does not identify the implementing Rust
-function. A registered constructor fails discovery until that provenance is
-proved; an inherent method named `new` cannot stand in for it. Source JSON
+Python attribute names and constructor slots do not identify the implementing
+Rust function. The census parses the compiled source's direct PyO3 registrar
+and attributes, joins each registration to the live descriptor kind and exact
+Rustdoc owner/function/span, and binds the source bytes into final identities.
+Renamed getters, setters, functions and methods keep their implementing Rust
+identity; an unrelated same-named helper cannot supply it. Conditional,
+macro-generated or dynamic registration forms fail closed until their
+provenance is implemented. The unchanged legacy rows also retain their exact
+Rust implementation and callable kind. Source JSON
 authority applies only to its typed payload subtree, including through aliases
 and generic containers; sibling text results require their own contract.
 
