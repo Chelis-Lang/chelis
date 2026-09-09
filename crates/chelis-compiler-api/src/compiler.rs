@@ -2791,6 +2791,11 @@ fn eval_compiled(
         .copied()
         .enumerate()
         .map(|(index, entry)| {
+            // An executed root's failure is already the runtime diagnostic.
+            // Wrapping it as missing output corrupts the required trap line.
+            if let Some(error) = host_outcome.host_root_errors.get(entry.def_name.as_str()) {
+                return Err(eval_stage_error(error.clone()));
+            }
             // A host-lane *zero-argument fn* root is the result of applying
             // the callable, never the closure stored in `host_bindings` when
             // another root resolved that declaration. Prefer the applied
@@ -4871,7 +4876,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                 ));
             }
-            RiscOp::Shape { .. } => {
+            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not support the runtime `shape` \
@@ -5909,6 +5914,20 @@ fn wire_dag(dag: &Dag) -> WireDag {
 
 fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireDagNode {
     WireDagNode {
+        shape_deps: node
+            .shape_deps
+            .iter()
+            .map(|id| {
+                chelis_types::scalar_from_i64(
+                    "load",
+                    chelis_types::types::Prim::Int64,
+                    i64::try_from(id.0).expect("node id fits int64"),
+                )
+                .expect("int64 node reference")
+            })
+            .collect(),
+        span_id: node.span_id.clone(),
+        merged_spans: node.merged_spans.clone(),
         id: node.id.0,
         op: wire_op(&node.op),
         inputs: node.inputs.iter().map(|id| id.0).collect(),
@@ -6077,6 +6096,15 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
         RiscOp::ConstTensor { data } => WireRiscOp::ConstTensor { data: data.clone() },
         RiscOp::Shape { axis } => WireRiscOp::Shape { axis: *axis },
+        RiscOp::ExtentWitness {
+            parameter,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+            requirements,
+        } => WireRiscOp::ExtentWitness {
+            parameter: parameter.clone(),
+            axis: WireRtAxis::Lit { value: *axis },
+            requirements: requirements.clone(),
+        },
         RiscOp::Load { name } => WireRiscOp::Load {
             name: name.as_str().to_string(),
         },

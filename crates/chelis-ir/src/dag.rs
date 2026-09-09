@@ -700,6 +700,15 @@ pub enum RiscOp {
     Shape {
         axis: usize,
     },
+    /// A call's shape-only witness. Requirements are tagged int64 literals,
+    /// distinct from the actual input axis read by this scalar operation.
+    /// The node is created at call entry, before the callee body, and
+    /// its enclosing invocation retains required checks through `shape_deps`.
+    ExtentWitness {
+        parameter: String,
+        axis: RtAxis,
+        requirements: Vec<chelis_types::ScalarValue>,
+    },
 
     // --- Memory ---
     /// A scalar constant carried as a SEALED finalized value (the
@@ -1073,7 +1082,12 @@ impl RiscOp {
             Self::ScatterAdd { .. } => Semantic(Id::Scatter),
             Self::Scatter { .. } => Semantic(Id::ScatterReplace),
             Self::ScatterElements { .. } => Semantic(Id::ScatterElements),
-            Self::OneHot { .. }
+            // ExtentWitness is the compiler's call-boundary requirement
+            // carrier under [04-NUM-9], not a callable Table-A operation.
+            // Its tagged requirements and shape-only dependency are checked
+            // by the IR verifier and the runtime-extent oracle.
+            Self::ExtentWitness { .. }
+            | Self::OneHot { .. }
             | Self::Const { .. }
             | Self::ConstTensor { .. }
             | Self::Load { .. }
@@ -1415,7 +1429,7 @@ impl RiscOp {
             // input's real-valued data (its output is constant w.r.t. the
             // element values). Like the arg-reductions it is outside the
             // real-valued forward-bound story (chelis#513 / chelis#558).
-            RiscOp::Shape { .. } => false,
+            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => false,
 
             // Sparse gather/scatter index data movement; no real-valued
             // transformer is pinned, and `Scatter` / `ScatterElements`
@@ -3494,6 +3508,11 @@ mod tests {
         let all = one_of_every_risc_op();
         let mut discovery_cases = all.clone();
         discovery_cases.extend([
+            RiscOp::ExtentWitness {
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 4).unwrap()],
+            },
             RiscOp::Sub,
             RiscOp::MinElem,
             RiscOp::Count { axes: vec![0] },
@@ -3530,7 +3549,8 @@ mod tests {
         for op in discovery_cases {
             let structural = matches!(
                 op,
-                RiscOp::OneHot { .. }
+                RiscOp::ExtentWitness { .. }
+                    | RiscOp::OneHot { .. }
                     | RiscOp::Const { .. }
                     | RiscOp::ConstTensor { .. }
                     | RiscOp::Load { .. }

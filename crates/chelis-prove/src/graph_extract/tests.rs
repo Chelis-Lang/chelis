@@ -247,6 +247,9 @@ fn future_version_wire_dag() -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION + 1,
         nodes: vec![WireDagNode {
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
             id: 0,
             op: WireRiscOp::Load {
                 name: "x".to_string(),
@@ -287,6 +290,9 @@ fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![WireDagNode {
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
             id: 0,
             op: WireRiscOp::Load {
                 name: "x".to_string(),
@@ -318,6 +324,9 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![
             WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 0,
                 op: WireRiscOp::Load {
                     name: "x".to_string(),
@@ -329,6 +338,9 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
                 },
             },
             WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 1,
                 op: WireRiscOp::Count { axes: vec![0] },
                 inputs: vec![0],
@@ -428,6 +440,9 @@ fn single_op_dag(op: WireRiscOp) -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![WireDagNode {
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
             id: 0,
             op,
             inputs: vec![],

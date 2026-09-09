@@ -376,6 +376,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Shrink { .. } => "shrink",
         RiscOp::Stride { .. } => "stride",
         RiscOp::Shape { .. } => "shape",
+        RiscOp::ExtentWitness { .. } => "extent_witness",
         RiscOp::Const { .. } => "const",
         RiscOp::ConstTensor { .. } => "const_tensor",
         RiscOp::Load { .. } => "load",
@@ -1792,7 +1793,7 @@ fn compute_adjoints(
         }
 
         // --- Shape query ---
-        RiscOp::Shape { .. } => {
+        RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
             // `shape(x, axis)` reads only the input's shape metadata, not
             // its element values, so its output is constant w.r.t. those
             // values: the cotangent to the input tensor is exactly zero

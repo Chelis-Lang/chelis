@@ -463,8 +463,8 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.literal_claim.inlined_root.c",
             "lane_divergent",
-            "lane_divergent",
-            "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c",
+            EXECUTES,
+            "literal_claim.literal_result_claim_contract",
         ),
         # B2h: the eval twin of the driven row. The value-binding form applies
         # `f` through the kernel the C lane emits for it, and the literal input
@@ -485,8 +485,8 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.literal_claim.inlined_root.eval",
             "lane_divergent",
-            "lane_divergent",
-            "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard_on_eval",
+            EXECUTES,
+            "literal_claim.literal_result_claim_contract",
         ),
         _row(
             "expand.named_claim.cross_tensor_read.c",
@@ -678,6 +678,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "silent_unguarded",
             EXECUTES,
             "exec_c.numeric_local_extent_claims_execute_exactly",
+        ),
+        _row(
+            "claim.literal.nested_and_unused.eval_c",
+            "silent_unguarded",
+            EXECUTES,
+            "literal_claim.literal_claim_transport_survives_nested_and_unused_calls",
         ),
         _row(
             "guard.local.declaration_order.eval_c",
@@ -947,6 +953,14 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "every_rebuild_pass_preserves_the_derived_classes",
             ),
             ("every_rebuild_pass_preserves_the_derived_classes",),
+        ),
+        TestTarget(
+            "literal_claim",
+            (
+                "cargo", "test", "-p", "chelis-cli", "--test",
+                "runtime_extent_claim_preparation", "literal_", "--", "--nocapture",
+            ),
+            ("literal_claim_transport_survives_nested_and_unused_calls", "literal_result_claim_contract"),
         ),
         TestTarget(
             "cli_broadcast",

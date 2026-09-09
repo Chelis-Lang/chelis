@@ -460,6 +460,11 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_literal_extent_claim() {
+    drive_parity(&examples_root().join("literal_extent_claim.ch"), true);
+}
+
+#[test]
 fn parity_recursive_generic() {
     // chelis#1158: recursive generic host calls compile via bounded
     // memoized monomorphization; both lanes print the same value.
@@ -576,6 +581,7 @@ fn parity_corpus_is_complete() {
         "kinded_nominal_dimensions.ch",
         "linreg.ch",
         "list_foundation.ch",
+        "literal_extent_claim.ch",
         "mnist.ch",
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",

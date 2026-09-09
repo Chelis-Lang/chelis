@@ -2385,6 +2385,34 @@ where
                 })?;
                 finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
             }
+            RiscOp::ExtentWitness {
+                parameter,
+                axis,
+                requirements,
+            } => {
+                let crate::dag::RtAxis::Lit(axis) = axis;
+                let input = &values[&node.inputs[0]];
+                let observed = *input
+                    .shape
+                    .get(*axis as usize)
+                    .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
+                for required in requirements {
+                    let required = required
+                        .as_i64_exact()
+                        .ok_or_else(|| "extent witness requires int64".to_string())?;
+                    if i64::try_from(observed).ok() != Some(required) {
+                        return Err(format!(
+                            "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in load at int64"
+                        ));
+                    }
+                }
+                finalize_wide_int(
+                    "shape",
+                    out_prim,
+                    vec![],
+                    vec![i64::try_from(observed).map_err(|_| "extent exceeds int64")?],
+                )?
+            }
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
                 Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
                 None if strict_loads => return Err(format!("missing required input `{name}`")),

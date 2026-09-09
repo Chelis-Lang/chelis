@@ -94,7 +94,7 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// nothing is deferred, so a V12 entry carries two fields where the
 /// following ones are now expected.
 // Opaque producer annotations use an explicit data wire variant.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 14;
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 15;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -548,19 +548,19 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 14);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 15);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 14);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 15);
     }
 
     #[test]
     fn preceding_payload_version_is_a_clean_cache_miss() {
         let decls = sample_decls("preceding_version");
         let current_key = stdlib_cache_key(&decls, TEST_SOURCE_DIGEST);
-        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 13);
+        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 14);
         assert_ne!(current_key, preceding_key);
 
         let dir = tempfile::tempdir().expect("tempdir");

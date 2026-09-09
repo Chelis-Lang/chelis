@@ -22,6 +22,33 @@ use std::process::Command;
 /// Files that may still contain `expand` program text, with the exact count and
 /// the reason the sites are there.
 const ALLOWED: &[(&str, usize, &str)] = &[
+    (
+        "examples/checked_reshape.ch",
+        1,
+        "the checked C metadata example broadcasts tensor[1, 2, int64] to tensor[3, 2, int64] at its unit axis, retaining rank 2",
+    ),
+    // These spell the checked C metadata API, not a Chelis program call.
+    // Keep exact counts so additions still require classification.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        1,
+        "the generated C target-validation call supports the verified same-rank and inserted-axis IR forms",
+    ),
+    (
+        "crates/chelis-backend-c/tests/checked_c_movement.rs",
+        2,
+        "the adoption guard and removed-validation mutant name that exact C API",
+    ),
+    (
+        "crates/chelis-backend-c/tests/exec_compile.rs",
+        1,
+        "the native allocation-order control locates that exact C API call",
+    ),
+    (
+        "scripts/dtype_phase4b_oracle.py",
+        1,
+        "the frozen normative registry reproduces that exact public C declaration",
+    ),
     // The vendored Hull conformance corpus. Hull is the upstream type and
     // effect REFERENCE, and this corpus is a frozen snapshot pinned to Hull
     // commit 653be94e with its verdicts recorded per program. Renaming these

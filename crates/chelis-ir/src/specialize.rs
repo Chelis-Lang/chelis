@@ -800,6 +800,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         // never matrix data, so it is not a contiguous-matrix-slice source
         // (chelis#513/#558).
         | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
         | RiscOp::Count { .. } => false,
     }
 }

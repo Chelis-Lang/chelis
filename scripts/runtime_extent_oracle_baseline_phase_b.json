@@ -1,7 +1,13 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "ae567a22209c51775b9b8de447f2d9155549095a87e2872fbbaa17b2255b420b",
+  "corpus_sha256": "b52f63382ed185b8728c619536cdfcb6b4042ff8aaf31fd141617d9aa0614b3e",
   "rows": [
+    {
+      "baseline": "silent_unguarded",
+      "id": "claim.literal.nested_and_unused.eval_c",
+      "phase_b": "executes_exactly",
+      "receipt": "literal_claim.literal_claim_transport_survives_nested_and_unused_calls"
+    },
     {
       "baseline": "silent_unguarded",
       "id": "class.load_load.c",
@@ -143,14 +149,14 @@
     {
       "baseline": "lane_divergent",
       "id": "expand.literal_claim.inlined_root.c",
-      "phase_b": "lane_divergent",
-      "receipt": "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c"
+      "phase_b": "executes_exactly",
+      "receipt": "literal_claim.literal_result_claim_contract"
     },
     {
       "baseline": "lane_divergent",
       "id": "expand.literal_claim.inlined_root.eval",
-      "phase_b": "lane_divergent",
-      "receipt": "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard_on_eval"
+      "phase_b": "executes_exactly",
+      "receipt": "literal_claim.literal_result_claim_contract"
     },
     {
       "baseline": "silent_unguarded",

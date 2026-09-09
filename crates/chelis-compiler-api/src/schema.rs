@@ -2059,7 +2059,9 @@ pub struct WireRecordPatternField {
 ///   display string to `WireRtDim`, and `WireRtDim` gained the structural
 ///   `InputAxis` metadata read. Chelis#1313 added the dedicated `Relu` and
 ///   `ReluAdjoint` identities to this unreleased exact schema.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;
+/// - `8`: literal call witnesses and explicit invocation dependencies and
+///   provenance. Requirement and dependency payloads use sealed int64 values.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 8;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2235,6 +2237,53 @@ impl WireDag {
     /// Validate fields whose exact encoding depends on surrounding DAG shape.
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
         for (index, node) in self.nodes.iter().enumerate() {
+            for dep in &node.shape_deps {
+                if dep.prim() != Prim::Int64
+                    || dep
+                        .as_i64_exact()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .is_none_or(|value| value >= index || self.nodes[value].id != value)
+                {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag node {} shape dependency must be an int64 reference to an earlier node",
+                        node.id
+                    )));
+                }
+            }
+            if let WireRiscOp::ExtentWitness {
+                axis: WireRtAxis::Lit { value: axis },
+                requirements,
+                ..
+            } = &node.op
+            {
+                let input = (node.inputs.len() == 1)
+                    .then(|| node.inputs[0])
+                    .and_then(|id| {
+                        self.nodes
+                            .get(id)
+                            .filter(|input| input.id == id && id < index)
+                    });
+                if input.is_none_or(|input| {
+                    usize::try_from(*axis).map_or(true, |axis| axis >= input.output_type.dims.len())
+                }) {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ExtentWitness node {} requires one earlier tensor and an in-range axis",
+                        node.id
+                    )));
+                }
+                if !node.output_type.dims.is_empty()
+                    || node.output_type.precision != "int64"
+                    || requirements.iter().any(|value| {
+                        value.prim() != Prim::Int64
+                            || value.as_i64_exact().is_none_or(|value| value < 0)
+                    })
+                {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ExtentWitness node {} requires a scalar int64 output and nonnegative int64 requirements",
+                        node.id
+                    )));
+                }
+            }
             match &node.op {
                 WireRiscOp::Expand { size, .. } => {
                     validate_wire_rt_dim(&self.nodes, index, node, size, false, true, "Expand")?;
@@ -2692,10 +2741,21 @@ impl std::error::Error for WireDagDecodeError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireDagNode {
+    /// Tagged int64 references to earlier shape-only dependencies.
+    pub shape_deps: Vec<chelis_types::ScalarValue>,
+    #[serde(deserialize_with = "require_explicit_span")]
+    pub span_id: Option<String>,
+    pub merged_spans: Vec<String>,
     pub id: usize,
     pub op: WireRiscOp,
     pub inputs: Vec<usize>,
     pub output_type: WireTensorType,
+}
+
+fn require_explicit_span<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2925,6 +2985,11 @@ pub enum WireRiscOp {
     Shape {
         axis: usize,
     },
+    ExtentWitness {
+        parameter: String,
+        axis: WireRtAxis,
+        requirements: Vec<chelis_types::ScalarValue>,
+    },
     Load {
         name: String,
     },
@@ -3037,6 +3102,23 @@ mod tests {
         // The combined consume path accepts it too.
         let validated = WireDag::from_validated_json(&json).expect("validated decode");
         assert_eq!(validated.schema_version, WIRE_DAG_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn extent_witness_wire_requires_claims_and_roundtrips_exactly() {
+        let witness = WireRiscOp::ExtentWitness {
+            parameter: "x".into(),
+            axis: WireRtAxis::Lit { value: 0 },
+            requirements: vec![
+                chelis_types::scalar_from_i64("load", chelis_types::types::Prim::Int64, 4).unwrap(),
+            ],
+        };
+        let json = serde_json::to_value(&witness).unwrap();
+        let back: WireRiscOp = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(back).unwrap(), json);
+        let mut missing = json;
+        missing.as_object_mut().unwrap().remove("requirements");
+        assert!(serde_json::from_value::<WireRiscOp>(missing).is_err());
     }
 
     #[test]
@@ -3203,6 +3285,9 @@ mod tests {
         let dag = WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
             nodes: vec![WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 0,
                 op: WireRiscOp::Pad {
                     padding: vec![],
@@ -3355,6 +3440,9 @@ mod tests {
             precision: precision.to_string(),
         };
         let load = |id, precision: &str, size| WireDagNode {
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
             id,
             op: WireRiscOp::Load {
                 name: format!("input_{id}"),
@@ -3369,6 +3457,9 @@ mod tests {
                     load(0, "f32", 4),
                     load(1, "f32", 4),
                     WireDagNode {
+                        shape_deps: vec![],
+                        span_id: None,
+                        merged_spans: vec![],
                         id: 2,
                         op,
                         inputs,

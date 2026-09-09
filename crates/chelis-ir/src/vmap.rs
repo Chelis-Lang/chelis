@@ -86,6 +86,15 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                     .collect(),
             },
             RiscOp::Shape { axis } if shared => RiscOp::Shape { axis: axis + 1 },
+            RiscOp::ExtentWitness {
+                parameter,
+                axis: RtAxis::Lit(axis),
+                requirements,
+            } => RiscOp::ExtentWitness {
+                parameter: parameter.clone(),
+                axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
+                requirements: requirements.clone(),
+            },
             RiscOp::Load { name } => RiscOp::Load { name: name.clone() },
             other => other.clone(),
         };
@@ -250,6 +259,9 @@ fn bound_input_slots(op: &RiscOp) -> UnordSet<usize> {
 fn shared_bound_nodes(dag: &Dag) -> Result<UnordSet<NodeId>, String> {
     let mut shared = UnordSet::new();
     for owner in dag.nodes() {
+        if matches!(owner.op, RiscOp::ExtentWitness { .. }) {
+            shared.insert(owner.id);
+        }
         // Operand-slot order is the IR's canonical order for this dependency walk.
         for slot in bound_input_slots(&owner.op).into_sorted() {
             let Some(source) = owner.inputs.get(slot).copied() else {
@@ -322,7 +334,10 @@ fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut UnordSet<NodeId>) -> Re
     }
 
     match &node.op {
-        RiscOp::Shape { .. } | RiscOp::Const { .. } | RiscOp::Load { .. } => {}
+        RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::Const { .. }
+        | RiscOp::Load { .. } => {}
         RiscOp::Cast { .. }
         | RiscOp::CastTrunc { .. }
         | RiscOp::Copy

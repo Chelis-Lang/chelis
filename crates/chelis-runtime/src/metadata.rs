@@ -230,8 +230,17 @@ impl ShapeMetadata {
                 "index rank does not match tensor rank".into(),
             ));
         }
+        self.flat_index_by(|axis| indices[axis])
+    }
+    /// Decode foreign coordinates without allocating a second coordinate array.
+    /// The callback supplies values, never strides or an unchecked offset.
+    pub(crate) fn flat_index_by(
+        &self,
+        mut coordinate: impl FnMut(usize) -> i64,
+    ) -> Result<usize, MetadataError> {
         let mut flat = 0_i64;
-        for ((&index, &extent), &stride) in indices.iter().zip(&self.shape).zip(self.strides()) {
+        for (axis, (&extent, &stride)) in self.shape.iter().zip(self.strides()).enumerate() {
+            let index = coordinate(axis);
             if index < 0 || index >= extent {
                 return Err(MetadataError::Domain("tensor index outside shape".into()));
             }
@@ -245,6 +254,82 @@ impl ShapeMetadata {
     }
     pub(crate) fn unravel(&self, linear: i64, out: &mut [i64]) -> Result<(), MetadataError> {
         unravel(&self.shape, self.elements, linear, out)
+    }
+    pub(crate) fn unravel_into(
+        &self,
+        linear: i64,
+        write: impl FnMut(usize, i64),
+    ) -> Result<(), MetadataError> {
+        unravel_into(&self.shape, self.elements, linear, write)
+    }
+    pub(crate) fn require_permutation(
+        &self,
+        target: &Self,
+        axes: &[i64],
+    ) -> Result<(), MetadataError> {
+        if self.rank != target.rank || axes.len() != self.shape.len() || self.dtype != target.dtype
+        {
+            return Err(MetadataError::Domain(
+                "permutation rank or representation mismatch".into(),
+            ));
+        }
+        for (out_axis, &axis) in axes.iter().enumerate() {
+            let axis = self.normalize_axis(axis)?;
+            for &previous in &axes[..out_axis] {
+                if self.normalize_axis(previous)? == axis {
+                    return Err(MetadataError::Domain(
+                        "permutation axes are not a bijection".into(),
+                    ));
+                }
+            }
+            if target.shape[out_axis] != self.shape[axis] {
+                return Err(MetadataError::Domain(
+                    "permutation target extent mismatch".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn require_expansion(&self, target: &Self, axis: i32) -> Result<(), MetadataError> {
+        let inserted = i64::from(target.rank) == i64::from(self.rank) + 1;
+        if (!inserted && target.rank != self.rank) || target.dtype != self.dtype {
+            return Err(MetadataError::Domain(
+                "expansion rank or representation mismatch".into(),
+            ));
+        }
+        let axis = target.normalize_axis(i64::from(axis))?;
+        if !inserted && self.shape[axis] != 1 {
+            return Err(MetadataError::Domain(
+                "expansion replacement axis is not unit".into(),
+            ));
+        }
+        for (out_axis, &extent) in target.shape.iter().enumerate() {
+            if out_axis == axis {
+                continue;
+            }
+            let input_axis = if inserted && out_axis > axis {
+                out_axis - 1
+            } else {
+                out_axis
+            };
+            if extent != self.shape[input_axis] {
+                return Err(MetadataError::Domain(
+                    "expansion bystander extent mismatch".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn normalize_axis(&self, axis: i64) -> Result<usize, MetadataError> {
+        let axis = if axis < 0 {
+            axis + i64::from(self.rank)
+        } else {
+            axis
+        };
+        if axis < 0 || axis >= i64::from(self.rank) {
+            return Err(MetadataError::Domain("axis outside tensor rank".into()));
+        }
+        usize::try_from(axis).map_err(|_| MetadataError::Overflow("axis exceeds usize"))
     }
     pub(crate) fn byte_offset(&self, linear: i64) -> Result<AllocationBytes, MetadataError> {
         self.require_index(linear)?;
@@ -343,7 +428,7 @@ impl AxisDecomposition {
 fn unravel(
     shape: &[i64],
     elements: ElementCount,
-    mut linear: i64,
+    linear: i64,
     out: &mut [i64],
 ) -> Result<(), MetadataError> {
     if out.len() != shape.len() {
@@ -351,14 +436,23 @@ fn unravel(
             "index rank does not match tensor rank".into(),
         ));
     }
+    unravel_into(shape, elements, linear, |axis, index| out[axis] = index)
+}
+
+fn unravel_into(
+    shape: &[i64],
+    elements: ElementCount,
+    mut linear: i64,
+    mut write: impl FnMut(usize, i64),
+) -> Result<(), MetadataError> {
     if linear < 0 || linear >= elements.0 {
         return Err(MetadataError::Domain(
             "tensor index outside element count".into(),
         ));
     }
     // The checked nonempty range proves every divisor positive.
-    for (index, &extent) in out.iter_mut().zip(shape).rev() {
-        *index = linear % extent;
+    for (axis, &extent) in shape.iter().enumerate().rev() {
+        write(axis, linear % extent);
         linear /= extent;
     }
     Ok(())

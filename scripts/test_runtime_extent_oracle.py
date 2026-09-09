@@ -142,6 +142,7 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "guard_order.effect_after.eval",
             "guard.local.numeric_carriers.eval_c",
             "guard.local.declaration_order.eval_c",
+            "claim.literal.nested_and_unused.eval_c",
             "guard_order.effect_before.eval",
             "guard_order.trap_after.c",
             "guard_order.trap_after.eval",
