@@ -688,6 +688,18 @@ class ControllerWorkflowTests(unittest.TestCase):
                 "permission-pull-requests: write",
                 "permission-pull-requests: write\n          permission-contents: write",
             ),
+            # Dropping it does not fail loudly: the mint succeeds and the
+            # create answers 422, which reads as a validation problem with
+            # the request rather than a missing permission.
+            "token-contents-read-dropped": (
+                "          permission-contents: read\n",
+                "",
+            ),
+            # The credential must never be able to push.
+            "token-contents-escalated-to-write": (
+                "permission-contents: read",
+                "permission-contents: write",
+            ),
             "token-revocation-disabled": (
                 "          permission-pull-requests: write\n",
                 "          permission-pull-requests: write\n          skip-token-revoke: true\n",
