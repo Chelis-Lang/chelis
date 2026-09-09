@@ -46,7 +46,7 @@ type Expr =
   | ESqrt(Expr)
   | ESin(Expr)
   | ECast(Expr, Type)               -- Deep `(cast {} expr target-type)`; target is a full type
-  | ESum(Expr, Dim)
+  | ESum(Expr, int64)             -- positional axis; int64 is model storage, Deep uses int32
   | EGather(Expr, Expr, int64)
   | EScatter(Expr, Expr, Expr, ScatterMode)
   | EMatmul(Expr, Expr)
@@ -224,14 +224,14 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     ESqrt(e1) -> check_unary_tensor_op(ctx, e1)
     ESin(e1) -> check_unary_tensor_op(ctx, e1)
 
-    -- T-Sum (LaCaDiLE Section 3, Figure 4)
-    -- Reduces one dimension from the tensor type
-    ESum(e1, dim) -> {
+    -- T-Sum: remove exactly one position, not every equal dimension.
+    ESum(e1, axis) -> {
       (t1, effs) = type_check(ctx, e1)?
       match t1 {
         TTensor(dims, elem) ->
-          if member(dim, dims)
-            then Some((TTensor(remove(dims, dim), elem), effs))
+          k = if axis < 0 then length(dims) + axis else axis
+          if is_int32(axis) and 0 <= k and k < length(dims) and numeric(elem)
+            then Some((TTensor(remove_at(dims, k), elem), effs))
             else None
         _ -> None
       }
@@ -633,6 +633,35 @@ def eval_to_value(e: Expr, max_steps: int64) -> (Expr, int64) = {
 The evaluator is intentionally simple and slow. Tensors are nested lists of scalars. Operations are element-by-element loops. This is the reference semantics - what programs MEAN - not a practical execution engine. The real compiler's evaluator and code generators must agree with this reference on every well-typed program.
 
 ### 4.1 Pinned evaluator decisions for v0.1.0
+
+**Ordered reduction repair (2026-09-09; Hull implementation acceptance pending).**
+The modeled single-axis `sum` uses the `ESum(operand, axis)` representation above.
+The parser/emitter use an integer literal expression at the axis port, not a
+`Dim` node. Negative indices normalize against operand rank; invalid indices,
+rank-zero operands and boolean tensors fail checking. Equal literal extents at
+different positions remain distinct axes. Type checking removes only the chosen
+position and preserves the other names, extents, element type and operand effects.
+This changes Hull's constructor API, not Chelis syntax, behavior or shell pins.
+
+For the existing f32-buffer evaluator, each output coordinate gathers the input
+slice along that position in increasing coordinate order. Its sum uses the
+adjacent-pair balanced tree of `[05-OP-30]`, carrying an odd tail unchanged; an
+empty slice returns positive zero. Remove only that axis from the result shape.
+Validate the concrete input buffer's element count, nonnegative extents, and
+axis before indexing. Never replace a per-axis result with the whole-buffer
+total. Term equality must distinguish reduction axes. The generator chooses an
+insertion position and records that position as the reduction axis; repeated
+extents do not require inventing a unique dimension.
+
+This repair does not add named-axis expression resolution, multi-axis sums,
+explicit accumulators, exact integer evaluation, or new dtype transport. Those
+remain Hull's dated model-alignment work; the int64 element type may be checked
+but is not thereby given an exact numerical evaluator. Acceptance requires
+coordinate-distinct 2-by-3 and equal-extent 2-by-2 cases, rank-three middle axes,
+negative indices, singleton/empty axes, invalid axes/buffers, canonical Deep text
+and constructed round trips, plus the standing 10,000-check/1,000-eval campaign.
+Until those gates pass, this paragraph states the repair contract, not a completed
+alignment or an AD theorem.
 
 - **Tensor representation: nested-lists-of-scalars.** A `TTensor(dims, elem)` value is a
   nested `List` of scalars whose nesting depth equals the rank and whose shape equals
