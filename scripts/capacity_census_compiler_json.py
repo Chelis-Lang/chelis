@@ -317,6 +317,7 @@ class VerifiedCompilerJsonBindings:
     def execution_report(self):
         self.validate()
         return {"source_sha256": self.source_sha256, "wire_graph_identity": self.wire.graph_identity,
+                "wire": self.wire.execution_report(),
                 "ownership": self.ownership, "registration": self.registration,
                 "execution": asdict(self.execution), "compiler": self.compiler_evidence,
                 "native_registration_binary": self.binary, "native_test_binary": self.native_binary,
