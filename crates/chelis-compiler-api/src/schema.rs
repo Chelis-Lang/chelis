@@ -1107,6 +1107,41 @@ pub struct CheckResult {
     pub untyped_nodes: usize,
     pub total_nodes: usize,
     pub unresolved_names: Vec<String>,
+    /// The inferred-signature tree, present only when the caller asked for
+    /// it (chelis#886, [04-FIT-13]).
+    ///
+    /// A member of the report's type rather than a JSON fragment spliced
+    /// into a `format!` template.
+    ///
+    /// The ROW is `serde_json::Value` and not a struct-per-field: the CLI
+    /// already builds these rows with `serde_json::json!`, so there is no
+    /// parallel Rust type here for the document to drift against. Typing
+    /// the row shape is real work, and a different defect from the one this
+    /// field closes.
+    ///
+    /// The SEQUENCE is a `Vec`, not a bare `Value`. §6.4 calls this a
+    /// structured signature tree and the document has always carried an
+    /// array, so a `Value` here would let a caller set an object and get a
+    /// document the report's own formatter renders across several lines
+    /// where every shipped one is a single line. `Vec` makes that
+    /// unrepresentable instead of merely unreached.
+    ///
+    /// A note on the wire census, since the absence of a row here is easy to
+    /// misread: `numeric_primitives` recurses for primitive float and
+    /// integer spellings and finds none inside a `Value`, so this field
+    /// classifies as non-numeric. That is the census being unable to see
+    /// through the type, not proof that no number crosses here. Numbers do:
+    /// `WireInferredDim::Lit`'s `size`, a param's `index`, and
+    /// `WireInferredType::Var`'s `id` all reach the wire through these rows.
+    ///
+    /// What makes that acceptable is narrower than "no numbers" and
+    /// narrower than "no `f64`": none of them is a bare `f64`/`double` or a
+    /// raw dtype id, which is what Numeric Surface Discipline forbids, and
+    /// every one of them already shipped through the `format!` template
+    /// this field replaces. The census gains no row because it never had
+    /// one for this channel, not because the channel is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_signatures: Option<Vec<serde_json::Value>>,
     pub errors: Vec<Diagnostic>,
 }
 
@@ -1119,6 +1154,8 @@ pub struct WireCheckResult {
     pub untyped_nodes: usize,
     pub total_nodes: usize,
     pub unresolved_names: Vec<String>,
+    #[serde(default)]
+    pub inferred_signatures: Option<Vec<serde_json::Value>>,
     pub errors: Vec<WireDiagnostic>,
 }
 
