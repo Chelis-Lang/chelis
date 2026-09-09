@@ -234,6 +234,11 @@ impl<'a> VerifiedDagView<'a> {
             .collect()
     }
 
+    /// Individual interface checks, shared with Eval and already scheduled.
+    pub fn entry_extent_guards(self) -> Vec<crate::axis_sources::EntryExtentGuard> {
+        crate::axis_sources::entry_extent_guards(self.dag)
+    }
+
     /// The unit-extent claims whose guard section 4.7 places at entry.
     ///
     /// The sibling of [`Self::entry_dim_classes`], filtered by the same

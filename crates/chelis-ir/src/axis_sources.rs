@@ -1371,8 +1371,8 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             },
         ));
     }
-    // Classes run in their canonical members' order, so an all-interface
-    // class's entry guards fire in assigned-slot order.
+    // Class order preserves canonical witness identity. Individual entry
+    // comparisons are scheduled separately by `entry_extent_guards`.
     classes.sort_by_key(|(order, _)| *order);
     classes.into_iter().map(|(_, class)| class).collect()
 }
@@ -1506,6 +1506,101 @@ pub fn derive_unit_extent_claims(dag: &Dag) -> Vec<UnitExtentClaim> {
         });
     }
     claims
+}
+
+/// One interface comparison, independent of the class that established its
+/// witnesses. Both host lanes consume this schedule without regrouping it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryExtentGuard {
+    /// Compare two actual input axes from the same scoped claim.
+    Named {
+        claim: String,
+        canonical: (NodeId, usize),
+        observed: (NodeId, usize),
+    },
+    /// Compare an actual input axis with its literal claim or unit precondition.
+    Literal {
+        required: usize,
+        observed: (NodeId, usize),
+    },
+}
+
+/// Section 4.7's individual entry checks in assigned input-slot/axis order.
+/// A named check becomes due at the later of its two witnesses; its canonical
+/// witness remains the declaring one even when that declaration is later.
+/// Literal and unit checks become due at the observed input. Equal-position
+/// checks retain derivation order. Exact duplicate comparisons are emitted once.
+pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
+    let position = |(load, axis)| {
+        (
+            abi_input_slot(dag, load).expect("entry witness is an input"),
+            axis,
+        )
+    };
+    let mut guards = Vec::new();
+    // This is the same interface projection used by symbolic bindings: local
+    // members do not prevent two input witnesses from disagreeing at entry.
+    for class in derive_dim_witnesses(dag) {
+        let DimClaim::Name(claim) = class.claim else {
+            continue;
+        };
+        let mut reads = class
+            .members
+            .iter()
+            .filter_map(|member| member_load_axis(dag, member));
+        let Some(canonical) = reads.next() else {
+            continue;
+        };
+        for observed in reads {
+            if position(canonical) != position(observed) {
+                guards.push(EntryExtentGuard::Named {
+                    claim: claim.clone(),
+                    canonical,
+                    observed,
+                });
+            }
+        }
+    }
+    for class in derive_runtime_dim_classes(dag) {
+        if class.placement(dag) != GuardPlacement::Entry {
+            continue;
+        }
+        let DimClaim::Literal(required) = class.claim else {
+            continue;
+        };
+        for observed in class
+            .members
+            .iter()
+            .filter_map(|member| member_load_axis(dag, member))
+        {
+            guards.push(EntryExtentGuard::Literal { required, observed });
+        }
+    }
+    for claim in derive_unit_extent_claims(dag) {
+        if claim.placement(dag) == GuardPlacement::Entry
+            && let Some(observed) = member_load_axis(dag, &claim.member())
+        {
+            guards.push(EntryExtentGuard::Literal {
+                required: 1,
+                observed,
+            });
+        }
+    }
+    guards.sort_by_key(|guard| match guard {
+        EntryExtentGuard::Named {
+            canonical,
+            observed,
+            ..
+        } => position(*canonical).max(position(*observed)),
+        EntryExtentGuard::Literal { observed, .. } => position(*observed),
+    });
+    let mut unique = Vec::new();
+    for guard in guards {
+        if !unique.contains(&guard) {
+            unique.push(guard);
+        }
+    }
+    unique
 }
 
 /// A local guard's position: the node that introduces the extent, and the
