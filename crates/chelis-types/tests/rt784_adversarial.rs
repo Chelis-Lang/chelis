@@ -309,7 +309,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
 #[test]
 fn layer_norm_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver(g: tensor[4, f32], b: tensor[4, f32]) -> f32 = {\n  y = layer_norm(missing_x, g, b)\n  cast(0.0, f32)\n}\n",
+        "def driver(g: tensor[4, f32], b: tensor[4, f32]) -> f32 = {\n  y = layer_norm(missing_x, g, b, 0.00001f32)\n  cast(0.0, f32)\n}\n",
         "missing_x",
         "layer_norm main-pass",
     );

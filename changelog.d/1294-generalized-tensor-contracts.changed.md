@@ -15,3 +15,9 @@ select embeddings and masked values with `gather` and `where`.
 Run host `matmul` through the typed rank-generic lowering and preserve a
 tensor boundary for nested host operands in generated C. Batched attention
 and broadcast matrix calls now execute in both lanes.
+
+Preserve canonical contraction trees during C selection instead of implicitly
+substituting vendor GEMM, including generated convolution and hosted matmul.
+Remove derived BLAS helper/wrapper shortcuts before binding C ownership.
+Ordinary sum now uses the canonical adjacent-pair tree in evaluation and
+generated C, preserving odd tails, signed zero, and checked integer overflow.

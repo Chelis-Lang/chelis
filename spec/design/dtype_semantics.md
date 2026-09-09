@@ -2509,10 +2509,24 @@ query/key counts and value widths in evaluation and compiled C. Host matmul
 now delegates to the typed rank-generic graph; host-only descendants in its
 operands cross explicit tensor boundaries before the C matrix helper runs.
 Broadcast and empty-dimension controls cover all four float widths, alongside
-rank, shape, dtype, mask, and permutation rejection controls. The evaluator's
-canonical-tree cancellation control is exact. The existing C vendor-GEMM
-accumulation-order gap remains owned by #1290/#1315; these execution cases do
-not certify full matmul bit conformance.
+rank, shape, dtype, mask, and permutation rejection controls. Independent
+cancellation controls execute the canonical tree in evaluation and C for
+hosted matmul at all four float widths and for f32/f64 generalized convolution.
+Four- and eight-leaf witnesses distinguish vendor contraction, a left fold,
+and the former stride-four cascade; odd-tail and signed-zero controls pin
+identity handling. Ordinary Sum now uses the existing adjacent-pair fold in
+the typed evaluator and one shared C tree for materialized and fused inputs,
+with native-width leaf loads, explicit accumulator width, and checked integer
+pairs. Paired int32/int64 controls require the canonical overflow to trap and
+the cascade-only overflow to succeed. Window/product reduction and runtime
+SIMD entry points remain outside this repair's execution claims.
+C entry preparation retains primitive contractions while applying structural rewrites; it does
+not replace them with vendor GEMM. Shape-derived BLAS helper and wrapper
+summaries are discarded before ownership lowering binds the selected graph.
+This may cost execution time and intermediate storage compared with vendor
+GEMM; preserving the decided arithmetic takes precedence. Explicit backend
+nodes and accelerator selection retain their separate #1290/#1315 obligations;
+these bounded controls do not certify every target cell or contraction case.
 
 The same authority audit generalizes [05-OP-57]'s `to_list` to recursively
 nested Lists for every positive tensor rank and [05-OP-38]'s `tensor_scan`

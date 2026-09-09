@@ -1,32 +1,10 @@
-//! Host-emit elementwise code-generation dtype-dispatch pin.
+//! Host-emit dtype dispatch and exact scalar transport.
 //!
-//! W2 PR 3 of the 0.7.8 compiler cleanup workstream
-//! (`CRuntime-F32Coupling`). Locks the invariant that the six
-//! `host_emit.rs` code-generation sites listed below emit C code
-//! that accesses the opaque tensor's guarded/read view through dtype-typed
-//! pointers (e.g. `((double*)view.data)[i]`) rather than a public descriptor
-//! field. The legacy untyped form was a 4-byte float load
-//! regardless of dtype against the public `float *data` declaration
-//! in `crates/chelis-runtime/include/chelis_runtime.h`, mirroring
-//! the bug class closed by PR #64 (CastMemcpy), PR #67
-//! (ReshapeMemcpy), and PR #72 (PrintTensorF64).
-//!
-//! Migrated sites (line numbers in `crates/chelis-backend-c/src/host_emit.rs`):
-//!   * L1587 elementwise binary operator (`add`, `sub`, `mul`, `div`).
-//!   * L1623 elementwise binary func (direct extrema selectors).
-//!   * L1649 elementwise unary operator (`neg`, `not`).
-//!   * L1675 elementwise unary func (`expf`, `logf`, `sinf`, ...).
-//!   * L1749/L1753/L1757 scalar-to-tensor coercion arms for int64,
-//!     bool, and f32 helper-call inputs respectively.
-//!
-//! Each fixture builds a tiny `HostProgram` whose body forces the
-//! emitter through one of the six sites, then asserts the generated
-//! C source contains the expected typed-pointer pattern (the new
-//! shape) and does NOT contain the unmigrated bare-data pattern.
-//!
-//! Diagnosis: `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`.
-//! Spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2.
-//! §5 entry: `docs/gap_synthesis.md` `CRuntime-F32Coupling`.
+//! Elementwise operations use dtype-typed guarded/read views. Scalar inputs
+//! to tensor helpers use the tagged scalar carrier and its exact constructor,
+//! preserving the dtype and stored bits without hand-written buffer packing.
+//! Source checks lock those ABI boundaries; CLI standard-lowering tests also
+//! execute bool, signed-integer, and float scalar inputs through generated C.
 
 use std::fs;
 use std::process::Command;
@@ -647,15 +625,9 @@ fn unary_func_int32_arm_aborts_without_binary32_conversion() {
     );
 }
 
-// ---- L1749/L1753/L1757 scalar-to-tensor coercion -----------------------
-//
-// `assign_tensor_call` handles the case where a host helper takes a
-// scalar argument; the emitter allocates a rank-0 tensor and writes
-// the scalar through a guarded write view. Three arms today: int64
-// (already typed via `(int64_t*)` cast), bool, and the f32-default
-// fallback. The bool and f32 arms must cast the view data to a typed
-// pointer.  Sites 5 and 6 are exercised together by a single fixture
-// that constructs a TensorCall taking a scalar arg of each type.
+// ---- Exact scalar-to-tensor helper arguments -------------------------
+// `assign_tensor_call` transports a scalar through chelis_scalar, then
+// constructs the rank-zero tensor with the same dtype and stored bits.
 
 fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -> HostProgram {
     // The host-side fallback path uses `HostExprKind::TensorCall` to
@@ -765,70 +737,52 @@ fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
 }
 
 #[test]
-fn scalar_to_tensor_coercion_bool_uses_typed_pointer() {
+fn scalar_to_tensor_coercion_bool_uses_exact_tagged_carrier() {
     let program =
         make_tensor_call_with_scalar_arg(HostType::Bool, HostExpr::new(HostExprKind::Bool(true)));
     let src = emit_host_program(&program, "scalar_bool").unwrap();
-    // [05-OP-31] fixes Bool tensor storage at one canonical byte. The host
-    // scalar bridge must therefore write through uint8_t and preserve only
-    // the two valid Bool8 bit patterns.
     assert!(
-        src.contains("((uint8_t*)")
-            && src.contains("_write.data)[0]")
-            && src.contains("? UINT8_C(1) : UINT8_C(0)"),
-        "bool scalar-to-tensor coercion must write canonical Bool8 bytes; got:\n{src}"
+        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL,")
+            && src.contains("__tensor_scalar0_0 ? 1 : 0"),
+        "bool helper input must use the exact tagged Bool8 carrier:\n{src}"
     );
     assert!(
         !src.lines().any(|line| line.contains("? 1.0f : 0.0f")),
-        "bool scalar-to-tensor coercion must not retain four-byte float storage; got:\n{src}"
+        "bool helper input must not use four-byte float storage:\n{src}"
     );
 }
 
 #[test]
-fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
-    // #381: a captured f64 scalar fed to a tensor helper must pack into a
-    // CHELIS_DTYPE_F64 rank-0 tensor written through a `(double*)`. The pre-fix
-    // code packed an f64 scalar into a CHELIS_DTYPE_F32 tensor via `(float)value`
-    // (only 4 bytes), so the f64 kernel read garbage and the value collapsed
-    // to ~0. The dtype tag and the typed-pointer width must match the f64
-    // operand.
+fn scalar_to_tensor_coercion_f64_preserves_tag_and_bits() {
     let program = make_tensor_call_with_scalar_arg(
         HostType::Float64,
         HostExpr::new(HostExprKind::Float(7.5)),
     );
     let src = emit_host_program(&program, "scalar_f64").unwrap();
     assert!(
-        src.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F64)"),
-        "f64 scalar-to-tensor coercion must allocate a CHELIS_DTYPE_F64 rank-0 tensor (#381); got:\n{src}"
+        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits(__tensor_scalar0_0)))"),
+        "f64 helper input must retain its F64 tag and bits (#381):\n{src}"
     );
-    assert!(
-        src.contains("(double*)") && src.contains("_write.data"),
-        "f64 scalar-to-tensor coercion must cast guarded view data to a `(double*)` (#381); got:\n{src}"
-    );
-    // Must NOT pack an f64 scalar through the f32 path (the pre-fix bug).
     assert!(
         !src.lines()
-            .any(|l| l.contains("_write.data)[0] = (float)(") && !l.contains("(double*)")),
-        "f64 scalar-to-tensor coercion must not pack through the f32 `(float)(...)` path (#381); got:\n{src}"
+            .any(|line| line.contains("_write.data)[0] = (float)(")),
+        "f64 helper input must not narrow through a hand-packed f32 buffer:\n{src}"
     );
 }
 
-// Note: the host lane classifies every float literal as `Float64`
-// (`host_type(HostExprKind::Float)` is coarse per issue #308), so a bare
-// f32 scalar arg cannot be synthesized through `make_tensor_call_with_scalar_arg`;
-// the f32 packing arm is exercised end-to-end by the eval-vs-C parity test
-// `ws2b_numeric_identifier_divergence` (f32 captured-scalar programs) instead.
-
 #[test]
-fn scalar_to_tensor_coercion_int64_keeps_typed_pointer() {
-    // Already-typed today: `((int64_t*)tensor_name_write.data)[0] =
-    // value;`.  Locks the invariant that this arm's typed cast
-    // survives the host_emit migration.
-    let program =
-        make_tensor_call_with_scalar_arg(HostType::Int64, HostExpr::new(HostExprKind::Int(42)));
+fn scalar_to_tensor_coercion_int64_preserves_tag_and_integer_bits() {
+    let program = make_tensor_call_with_scalar_arg(
+        HostType::Int64,
+        HostExpr::new(HostExprKind::Int(9_007_199_254_740_993)),
+    );
     let src = emit_host_program(&program, "scalar_i64").unwrap();
     assert!(
-        src.contains("(int64_t*)") && src.contains("_write.data"),
-        "int64 scalar-to-tensor coercion must use `(int64_t*)` cast; got:\n{src}"
+        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)__tensor_scalar0_0))"),
+        "int64 helper input must preserve its tag and all integer bits:\n{src}"
+    );
+    assert!(
+        !src.contains("chelis_host_f64_bits(__tensor_scalar0_0)"),
+        "int64 helper input must not round-trip through f64:\n{src}"
     );
 }

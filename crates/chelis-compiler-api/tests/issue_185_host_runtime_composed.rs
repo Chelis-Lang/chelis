@@ -135,7 +135,7 @@ fn issue185_layer_norm_runs_and_matches_ir_eval() {
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0]], 0.0)
 g = to_tensor([1.0, 1.0, 1.0, 1.0])
 b = to_tensor([0.0, 0.0, 0.0, 0.0])
-out = layer_norm(&x, &g, &b)
+out = layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
@@ -220,7 +220,7 @@ fn issue185_mean_rejects_string_input() {
 #[test]
 fn issue185_layer_norm_rejects_string_input() {
     check_rejects(
-        r#"out = layer_norm("nope", "nope", "nope")"#,
+        r#"out = layer_norm("nope", "nope", "nope", 0.00001f32)"#,
         "layer_norm string input",
     );
 }

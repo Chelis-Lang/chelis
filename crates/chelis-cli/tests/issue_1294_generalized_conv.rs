@@ -178,3 +178,37 @@ fn kernel_adjoint_sums_corresponding_window_entries() {
         vec![6., 9.]
     );
 }
+
+#[test]
+fn generalized_convolution_preserves_the_canonical_reduction_tree() {
+    for dtype in ["f32", "f64"] {
+        for n in [4, 8, 9] {
+            let mut values = vec!["1e20", "1.0", "-1e20", "1.0"];
+            if n >= 8 {
+                values.extend(["-1e20", "1.0", "1e20", "1.0"]);
+            }
+            if n == 9 {
+                values.push("3.0");
+            }
+            let lhs = values
+                .iter()
+                .map(|v| format!("{v}{dtype}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let rhs = vec![format!("1.0{dtype}"); n].join(",");
+            let source = format!(
+                "def f(a: tensor[1,1,{n},{dtype}], b: tensor[1,1,{n},{dtype}]) -> tensor[1,1,1,{dtype}] = conv(a,b,[1i64],[(0i64,0i64)])\na: tensor[1,1,{n},{dtype}] = reshape(to_tensor([{lhs}]),[1i64,1i64,{n}i64])\nb: tensor[1,1,{n},{dtype}] = reshape(to_tensor([{rhs}]),[1i64,1i64,{n}i64])\nresult = f(a,b)\n"
+            );
+            for actual in [
+                evaluate(&source),
+                build_and_run(&source, "conv_canonical_tree"),
+            ] {
+                assert_eq!(
+                    parse_tensor_data(&actual, "result"),
+                    vec![if n == 9 { 3.0 } else { 0.0 }],
+                    "{dtype} n={n}: {actual}"
+                );
+            }
+        }
+    }
+}

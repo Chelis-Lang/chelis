@@ -1911,7 +1911,8 @@ fn execution_artifact_from_compiled_observed(
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
                 reject_unsized_named_dims(&entry_dag, "c")?;
-                let specialized = chelis_ir::specialize::specialize_for_blas(&entry_dag);
+                let specialized =
+                    chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 let options = chelis_backend_c::CodegenOptions {
                     use_blas: true,
@@ -2065,7 +2066,7 @@ fn execution_artifact_from_compiled_observed(
             reject_symbolic_windowed_reduce(&compiled.dag, BuildTarget::C)?;
             reject_unsupported_reduce_window_precision(&compiled.dag, BuildTarget::C)?;
             reject_unsized_named_dims(&compiled.dag, "c")?;
-            let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
+            let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&compiled.dag);
             let fused = chelis_ir::fuse::fuse(&specialized);
             let options = chelis_backend_c::CodegenOptions {
                 use_blas: true,

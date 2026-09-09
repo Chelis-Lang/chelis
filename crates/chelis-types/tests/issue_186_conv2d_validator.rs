@@ -163,14 +163,14 @@ def call_mean(x: tensor[32, n, f32]) -> tensor[32, f32] = mean(&x, 1)
     );
 }
 
-/// EXPECT (sibling sweep, `layer_norm` arm): a `layer_norm(&x, &g, &b)`
+/// EXPECT (sibling sweep, `layer_norm` arm): a `layer_norm(&x, &g, &b, 0.00001f32)`
 /// call whose normalized axis is non-concrete is still rejected. Same
 /// borrow-blindness root cause as the mean arm above.
 #[test]
 fn issue186_surf_layer_norm_borrowed_nonconcrete_axis_rejected() {
     let src = r#"
 def call_ln(x: tensor[32, n, f32], g: tensor[n, f32], b: tensor[n, f32]) -> tensor[32, n, f32] =
-  layer_norm(&x, &g, &b)
+  layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);

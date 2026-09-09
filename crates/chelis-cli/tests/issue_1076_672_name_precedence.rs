@@ -48,7 +48,7 @@ out = apply_sum(3.0f64)
 const SHAPE_SENSITIVE_LOCAL: &str = "\
 def call_local(x: f64) -> f64 = {
   conv = fn (a: f64, b: f64, c: f64, d: f64) -> add(add(a, b), add(c, d))
-  conv(x, 2.0f64, [3.0f64, 3.0f64], [(4.0f64, 4.0f64), (4.0f64, 4.0f64)])
+  conv(x, 2.0f64, 3.0f64, 4.0f64)
 }
 out = call_local(1.0f64)
 ";
