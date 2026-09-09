@@ -502,7 +502,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "dc52d3a736f9c95199695e75dfb3abd8b9bdd076358e4b6ed690f267f95aa874",
+        "1180c1cd77a450a149e5b17b000b1dd01f9992e6980a8104712eed1ab605159b",
     ),
     "capability schema": (
         "spec/design/capability_table.md",
@@ -520,7 +520,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "f69a32bd091b6e88cc36f95ea1dae7a8e2df850bfdf35ef894f82ffb1c51e4b8",
+        "084ce808491c7bbca5bee126697a0093992c1ea81a0d0f36e6fde7fd7f017626",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",

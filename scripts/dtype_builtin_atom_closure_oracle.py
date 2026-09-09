@@ -27,7 +27,8 @@ from scripts import builtin_atom_semantic_contracts as semantics  # noqa: E402
 PASS_LINE = "DTYPE BUILTIN ATOM CLOSURE ORACLE: PASS"
 PROFILE = "builtin-atom-closure"
 FILTER = ('binary(builtin_atom_discovery) + binary(issue_1294_normalize) '
-          '+ test(every_risc_op_has_an_exact_pre_phase4c_atom_disposition)')
+          '+ test(every_risc_op_has_an_exact_pre_phase4c_atom_disposition) '
+          '+ test(builtin_atom_discovery_)')
 CARGO_TESTS = ["-p", "chelis-types", "-p", "chelis-ir", "-p", "chelis-cli", "--lib", "--test",
                "builtin_atom_discovery", "--test", "issue_1294_normalize",
                "-E", FILTER]

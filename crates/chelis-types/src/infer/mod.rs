@@ -140,4 +140,7 @@ pub(crate) use program::{
 };
 
 #[cfg(test)]
+pub(crate) use program::builtin_selection_probe;
+
+#[cfg(test)]
 mod tests;

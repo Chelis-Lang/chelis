@@ -59,16 +59,23 @@ pub(super) fn infer_app(
                 arguments[position] = ty;
             }
         }
-        if errors.iter_since(checkpoint).next().is_none()
-            && let Err(reason) = builtin.semantic_case(&arguments)
-        {
-            return report(
-                errors,
-                internal_owner_stamp_error(format!(
-                    "accepted builtin {} has no unique semantic case: {reason}",
-                    builtin.name
-                )),
-            );
+        if errors.iter_since(checkpoint).next().is_none() {
+            match builtin.semantic_selection(&arguments, subst) {
+                Ok(selection) => product.record_builtin_selection(selection),
+                Err(reason) => {
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!(
+                                "{} operand has no declared semantic case: {reason}",
+                                builtin.name
+                            ),
+                            vec![],
+                        ),
+                    );
+                }
+            }
         }
     }
     result

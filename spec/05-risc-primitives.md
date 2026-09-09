@@ -3003,11 +3003,13 @@ path even though bare `round` under `grad` remains a structural
 >
 > Result: The result has the input dtype and shape. And/or/xor operate on
 > the exact w-bit two's-complement representation. Left shift discards bits
-> beyond w; right shift is arithmetic, extending the sign bit. The
-> shift-count domain is 0 <= y < w; there is no implicit mask of a count
-> outside that domain.
+> beyond w; right shift is arithmetic, extending the sign bit. As
+> [04-NUM-13] requires, nonnegative counts at or above w yield zero for
+> `shl`; `shr` yields zero for nonnegative x and -1 for negative x. Counts
+> are never implicitly masked.
 >
-> Failure: An out-of-domain shift count traps Domain. Bitwise results
+> Failure: A negative shift count traps with
+> `shift amount must be non-negative, got N` per [04-NUM-13]. Bitwise results
 > preserve exactly w bits and do not trap merely because their signed
 > interpretation differs from an unbounded arithmetic result.
 >

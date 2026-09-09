@@ -258,3 +258,88 @@ fn checked_applications_and_lexical_shadows_remain_distinct() {
         );
     }
 }
+
+#[test]
+fn symbolic_observation_preserves_legal_applications_and_rejects_wrong_bounds() {
+    use chelis_surf::{desugar::desugar_program, parser::parse_str};
+    for source in [
+        "result = map(fn(x) -> to_string(x), [1.0])",
+        "sig render[p: Float]: p -> string\ndef render(x) = to_string(x)\nresult = render(1.0f32)",
+        "sig render[p: Int]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
+        "sig render[p: Numeric]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
+        "def equal(x,y) = eq(x,y)\na = equal(1,1)\nb = equal([1],[1])",
+    ] {
+        let deep = desugar_program(&parse_str(source).unwrap());
+        assert!(chelis_types::check_typed_program(&deep).is_ok(), "{source}");
+    }
+    for source in [
+        "sig render[p: Float]: p -> string\ndef render(x) = to_string(x)\nresult = render(1i64)",
+        "sig render[p: Int]: p -> string\ndef render(x) = to_string(x)\nresult = render(1.0f32)",
+        "result = map(fn(x) -> len(x), [1.0])",
+        "sig size[p: Int]: p -> int64\ndef size(x) = len(x)\nresult = size(1i64)",
+        "def equal(x,y) = eq(x,y)\nresult = equal(1,[1])",
+    ] {
+        let deep = desugar_program(&parse_str(source).unwrap());
+        let errors = chelis_types::check_typed_program(&deep).unwrap_err();
+        assert!(!errors.errors.is_empty(), "{source}");
+        assert!(
+            errors
+                .errors
+                .iter()
+                .all(|e| !e.message.contains("owner-stamp")),
+            "{source}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn symbolic_selection_resolves_each_instantiation_without_a_default_case() {
+    use chelis_types::builtin_discovery::BuiltinCaseSelection;
+    use chelis_types::types::TypeVar;
+    use chelis_types::unify::Subst;
+    let variable = TypeVar(9000);
+    for name in ["eq", "neq", "to_string"] {
+        let decl = builtin_decl(name).unwrap();
+        let selection = decl
+            .semantic_selection(&[Type::Var(variable)], &Subst::new())
+            .unwrap();
+        assert!(matches!(&selection, BuiltinCaseSelection::ByOperand(_)));
+        assert!(decl.semantic_case(&[Type::Var(variable)]).is_err());
+        for (ty, expected) in [
+            (
+                Type::Prim(Prim::F32),
+                if name == "to_string" {
+                    "Boundary:to_string:ToStringScalar".into()
+                } else {
+                    format!("Numeric:{name}:TableA")
+                },
+            ),
+            (
+                Type::Adt("List".into(), vec![Type::Prim(Prim::F32)]),
+                match name {
+                    "eq" => "Container:eq:EqRecursive",
+                    "neq" => "Container:neq:NeqRecursive",
+                    _ => "Boundary:to_string:ToStringList",
+                }
+                .into(),
+            ),
+        ] {
+            let mut subst = Subst::new();
+            subst.insert_type(variable, ty).unwrap();
+            assert_eq!(
+                selection.resolve(&subst).unwrap(),
+                BuiltinCaseSelection::Resolved(expected)
+            );
+        }
+    }
+    // A symbolic len is an obligation, not permission to skip its selector.
+    let decl = builtin_decl("len").unwrap();
+    let selection = decl
+        .semantic_selection(&[Type::Var(variable)], &Subst::new())
+        .unwrap();
+    let mut invalid = Subst::new();
+    invalid
+        .insert_type(variable, Type::Prim(Prim::F32))
+        .unwrap();
+    assert!(selection.resolve(&invalid).is_err());
+}

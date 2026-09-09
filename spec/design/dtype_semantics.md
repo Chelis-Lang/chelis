@@ -2321,9 +2321,15 @@ adversarial mutations must be green and merged before Phase 4C begins.
 
 The discovery executable is `chelis-ir`'s `builtin_atom_inventory` example.
 It reads compiled declarations; a Rust AST tripwire independently checks the
-closed case and RISC enumerations. Ordinary application inference checks the
-unique declared case after type checking, using its existing operand stamps
-and lexical ownership. This metadata carries no target support decision.
+closed case and RISC enumerations. Ordinary application inference constructs
+an exact semantic selection using its existing operand stamps, dtype bounds,
+and lexical ownership. Enclosing-call substitution resolves concrete operands
+before the inference root finishes. A generic template retains an exhaustive,
+disjoint finite selection indexed by its checked operand type and constraints;
+substitution resolves each concrete instantiation to one declared case.
+`BuiltinCaseSelection::resolve` applies that same selection to the owner's
+substituted operand type. Symbolic selection is not a default case or a backend
+support disposition. This metadata carries no target support decision.
 
 `spec/registry/builtin_semantic_identities.md` is the normative identity map.
 Its atoms decide signatures, dtype/parameter domains, results, failures,

@@ -296,6 +296,8 @@ pub(super) struct InferenceProduct {
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
+    pub(super) builtin_selections: Vec<crate::builtin_discovery::BuiltinCaseSelection>,
+    pending_builtin_selections: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -711,7 +713,49 @@ impl InferenceProduct {
         }
     }
 
+    pub(super) fn record_builtin_selection(
+        &mut self,
+        selection: crate::builtin_discovery::BuiltinCaseSelection,
+    ) {
+        if matches!(
+            &selection,
+            crate::builtin_discovery::BuiltinCaseSelection::ByOperand(_)
+        ) {
+            self.pending_builtin_selections
+                .push(self.builtin_selections.len());
+        }
+        self.builtin_selections.push(selection);
+    }
+
+    /// Resolve after enclosing calls have unified their operands. Generic
+    /// bodies preserve a type-indexed selection; they do not pick a sibling
+    /// until their existing owner type is instantiated.
+    fn resolve_builtin_selections(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+        for index in std::mem::take(&mut self.pending_builtin_selections) {
+            let selection = &mut self.builtin_selections[index];
+            match selection.resolve(subst) {
+                Ok(resolved) => {
+                    if matches!(
+                        &resolved,
+                        crate::builtin_discovery::BuiltinCaseSelection::ByOperand(_)
+                    ) {
+                        self.pending_builtin_selections.push(index);
+                    }
+                    *selection = resolved;
+                }
+                Err(reason) => errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("builtin operand has no declared semantic case: {reason}"),
+                    vec![],
+                )),
+            }
+        }
+    }
+
     pub(super) fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {
+        if errors.is_empty() {
+            self.resolve_builtin_selections(subst, errors);
+        }
         let Some(epoch) = self.active_epoch.take() else {
             errors.push(internal_owner_stamp_error(
                 "attempted to finish a type-stamp epoch that was not active".to_string(),
