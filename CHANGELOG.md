@@ -8,15 +8,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **BREAKING (chelis#1294): remove the reserved `normalize` builtin.**
-  An undeclared call now reports an unbound variable. Define an ordinary
-  function with an explicit normalization formula, as in
-  `examples/explicit_normalization.ch`.
-- Builtin declarations and canonical RISC operations now have exhaustive
-  semantic identities, each bound to a numbered operation contract in
-  `spec/registry/builtin_semantic_identities.md`. The #1294 closure oracle
-  validates that membership with compiled discovery and execution receipts.
-
 - **ReLU now retains its dedicated [05-OP-43] identity and adjoint
   (chelis#1313).** Reverse-mode AD returns the complete incoming cotangent
   only where `0 < x`, and exact positive zero at both signed zeros and NaN;
