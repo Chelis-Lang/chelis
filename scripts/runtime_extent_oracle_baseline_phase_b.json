@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "3bdd2484f1fa873377562c2d79699e1849b83310f04ab812103f5ce9e05931cd",
+  "corpus_sha256": "f582b85bd73c591ffb63efbb7cc8f987cff52e67b95a9dbc94ecd7edfaf5bd7d",
   "rows": [
     {
       "baseline": "silent_unguarded",
@@ -205,6 +205,12 @@
       "id": "expand.positional.replacement.non_unit_source_traps.eval",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval"
+    },
+    {
+      "baseline": "lane_divergent",
+      "id": "expand.positional.replacement.shape_size.eval_c",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_broadcast.singleton_broadcast_contract"
     },
     {
       "baseline": "silent_unguarded",

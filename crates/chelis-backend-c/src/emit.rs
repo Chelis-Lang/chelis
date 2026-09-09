@@ -621,7 +621,55 @@ impl CEmitter {
                     continue;
                 }
                 let mut new_ty = node.output_type.clone();
-                if let RiscOp::Gather { axis } = &node.op
+                if matches!(node.op, RiscOp::Expand { .. }) {
+                    // [05-MOV-1], #1619: the replaced/inserted axis reads
+                    // the size carrier; kept axes read their own operand
+                    // positions. Rank equality does not prove pass-through.
+                    // Only anonymous axes need completion: an explicit
+                    // result claim remains independent of its size source.
+                    let sources = chelis_ir::output_axis_sources(&out, id);
+                    for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
+                        if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {
+                            continue;
+                        }
+                        if let DimInfo::Named(_, Some(required)) = dim {
+                            // Anonymous spelling supplies no binder, but a
+                            // required number is still a literal claim.
+                            *dim = DimInfo::Lit(*required);
+                            continue;
+                        }
+                        use chelis_ir::AxisSource;
+                        let observed = match sources.get(axis) {
+                            Some(AxisSource::Literal { value }) => {
+                                usize::try_from(*value).ok().map(DimInfo::Lit)
+                            }
+                            Some(AxisSource::InputAxis {
+                                input,
+                                axis: RtAxis::Lit(source_axis),
+                            }) => node
+                                .inputs
+                                .get(*input)
+                                .and_then(|input| out.get(*input))
+                                .and_then(|input| {
+                                    input
+                                        .output_type
+                                        .dims
+                                        .get(usize::try_from(*source_axis).ok()?)
+                                })
+                                .cloned(),
+                            // A scalar size is read at execution. Give
+                            // that output its own symbol.
+                            Some(
+                                AxisSource::ScalarInput { .. }
+                                | AxisSource::OpComputed { .. }
+                                | AxisSource::ClassSupplied { .. }
+                                | AxisSource::ExternalAxis { .. },
+                            )
+                            | None => None,
+                        };
+                        *dim = observed.unwrap_or_else(|| rewrite_dim(id, axis, dim));
+                    }
+                } else if let RiscOp::Gather { axis } = &node.op
                     && node.inputs.len() == 2
                     && let (Some(values), Some(indices)) =
                         (out.get(node.inputs[0]), out.get(node.inputs[1]))

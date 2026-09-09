@@ -698,6 +698,63 @@ fn claimed_extent_contract() {
     );
 }
 
+/// #1619's executable exit: original comparison witnesses, exported calls,
+/// top-level bindings, an inlined main, and a refuted runtime unit operand.
+#[test]
+fn singleton_broadcast_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures: Vec<_> = cases()
+        .into_iter()
+        .filter(|case| case.issue == 1619)
+        .collect();
+    call_matrix(
+        &mut fixtures,
+        "broadcast.call",
+        1619,
+        "def f(xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(to_tensor([5.0f32]), 0i32, shape(xs, 0i32)))",
+        "(tensor[d0, f32]) -> tensor[d0, f32]",
+        vec![vector(3)],
+        Expected::Tensor(vec![3], vec![5.0, 10.0, 15.0]),
+    );
+    // Unit-claim preservation after inlining is B2b-1's transport obligation.
+    // These calls exercise the runtime parameter before that transformation.
+    for good in [true, false] {
+        let b = Input {
+            dims: vec![if good { 1 } else { 2 }],
+            values: if good { vec![5.0] } else { vec![5.0, 6.0] },
+        };
+        let def = "def f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
+        for exported in [true, false] {
+            fixtures.push(Case {
+                id: format!(
+                    "broadcast.unit.{}.{}",
+                    if exported { "export" } else { "binding" },
+                    if good { "satisfied" } else { "mismatch" }
+                ),
+                issue: 1619,
+                source: if exported {
+                    def.to_string()
+                } else {
+                    format!("{def}\nout = f({}, {})\n", literal(&b), literal(&vector(3)))
+                },
+                signature: Some("(tensor[unit, f32], tensor[d0, f32]) -> tensor[d0, f32]"),
+                expected: if good {
+                    Expected::Tensor(vec![3], vec![5.0, 10.0, 15.0])
+                } else {
+                    Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"])
+                },
+                exported: exported.then(|| vec![b.clone(), vector(3)]),
+            });
+        }
+    }
+    assert_eq!(fixtures.len(), 11);
+    let mut failures = Vec::new();
+    for fixture in fixtures {
+        failures.extend(contract_failures(&fixture, &observe(&fixture)));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn acceptance_cannot_be_satisfied_by_equal_wrong_answers_or_missing_roots() {
     let case = Case {

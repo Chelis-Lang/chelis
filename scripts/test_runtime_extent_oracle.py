@@ -133,6 +133,7 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "expand.positional.replacement.non_unit_source_static",
             "expand.positional.replacement.non_unit_source_traps.c",
             "expand.positional.replacement.non_unit_source_traps.eval",
+            "expand.positional.replacement.shape_size.eval_c",
             "expand.positional.replacement_zero.c",
             "expand.positional.replacement_zero.eval",
             "expand.record_projection.size",
