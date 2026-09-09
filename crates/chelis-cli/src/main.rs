@@ -2170,21 +2170,41 @@ const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 /// supplied message; the rest of the report shape mirrors a zero-
 /// node program with score 0.
 fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn std::error::Error>> {
+    synthetic_check_report_with_errors(std::slice::from_ref(&message.to_string()))
+}
+
+/// The same synthetic report, carrying one diagnostic per message.
+///
+/// The style gate is the caller that needs more than one: it reports a
+/// formatting difference and each lint violation as separate issues, and
+/// `spec/01` § Style Gate calls that "a one-issue-per-line diagnostic".
+/// Collapsing them into a single `message` would put a multi-line terminal
+/// transcript into a machine-facing field -- the shape chelis#886 exists to
+/// remove -- and would make `errors.len()` disagree with the number of
+/// problems found.
+fn synthetic_check_report_with_errors(
+    messages: &[String],
+) -> Result<String, Box<dyn std::error::Error>> {
     // chelis#886 [04-FIT-12]: the early-failure path is not a second
     // producer. It builds the same `CheckResult` the checker's path builds
     // and renders it through the same serializer, so a failure that
     // short-circuits the pipeline is transported by the report's type
     // rather than by a template that happens to agree with it.
-    let error = chelis_types::errors::CheckError {
-        kind: chelis_types::errors::CheckErrorKind::Other,
-        message: message.to_string(),
-        severity: 0.5,
-        expected: None,
-        got: None,
-        span_offset: None,
-        span_id: None,
-        suggestions: Vec::new(),
-    };
+    let errors: Vec<Diagnostic> = messages
+        .iter()
+        .map(|message| {
+            Diagnostic::from_check_error(&chelis_types::errors::CheckError {
+                kind: chelis_types::errors::CheckErrorKind::Other,
+                message: message.clone(),
+                severity: 0.5,
+                expected: None,
+                got: None,
+                span_offset: None,
+                span_id: None,
+                suggestions: Vec::new(),
+            })
+        })
+        .collect();
     let result = CheckResult {
         score: 0.0,
         components: chelis_compiler_api::schema::FitnessComponents {
@@ -2198,7 +2218,7 @@ fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn st
         total_nodes: 0,
         unresolved_names: Vec::new(),
         inferred_signatures: None,
-        errors: vec![Diagnostic::from_check_error(&error)],
+        errors,
     };
     // Propagated rather than absorbed into a fallback string. A fallback
     // would be a second producer of the document -- the exact thing
@@ -2412,11 +2432,29 @@ fn cmd_check_one_on_grown_stack(
         }
     };
     if let Err(error) = style_gate::enforce_style_gate(file, &source, allow_style_violations) {
-        // `enforce_style_gate` already printed the one-issue-per-line detail;
-        // this is the summary line `main`'s error arm used to print.
-        let message = error.to_string();
-        eprintln!("error: {message}");
-        let json = synthetic_check_report_with_error(&message)?;
+        // stderr keeps the whole human report unchanged: the joined issue
+        // lines plus the "pass `--allow-style-violations` to bypass" advice.
+        eprintln!("error: {error}");
+        // The REPORT does not get that string. It is a terminal transcript --
+        // embedded newlines, an "N issue(s)" plural placeholder, CLI
+        // remediation advice, and the word "build" on a `check` surface --
+        // and putting it in a machine-facing `message` is the shape
+        // chelis#886 removes, not one to reintroduce while closing it. The
+        // gate already exposes a structured outcome; this uses it, one
+        // diagnostic per issue, so `errors.len()` is the number of problems.
+        let outcome = style_gate::run_gate(file, &source);
+        let mut messages: Vec<String> = Vec::new();
+        if let Some(diff) = &outcome.fmt_diff {
+            messages.push(format!(
+                "{}: not canonically formatted; run `chelis fmt --inplace {}` to fix",
+                diff.path.display(),
+                file.display()
+            ));
+        }
+        for violation in &outcome.lint_violations {
+            messages.push(violation.to_string());
+        }
+        let json = synthetic_check_report_with_errors(&messages)?;
         return Ok((json, true));
     }
     emit_advisory_lint_warnings_for_file(file);

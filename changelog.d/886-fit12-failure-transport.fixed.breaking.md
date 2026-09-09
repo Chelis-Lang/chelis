@@ -3,7 +3,10 @@ through the same JSON report as every other failure, instead of writing a
 message to stderr and leaving stdout empty. An unreadable or non-UTF-8 file,
 a style-gate rejection and a preparation failure all emit a report whose
 `errors` array names the problem, so a consumer can no longer confuse "no
-diagnostics" with "the diagnostics were not transported".
+diagnostics" with "the diagnostics were not transported". A style-gate
+rejection reports one diagnostic per issue, so `errors` has one entry per
+formatting or lint problem rather than a single entry holding the joined
+terminal text.
 
 **These paths now exit `2` rather than `1`**, matching every other non-empty
 error list, and directory mode exits `2` rather than `1` when a file in the

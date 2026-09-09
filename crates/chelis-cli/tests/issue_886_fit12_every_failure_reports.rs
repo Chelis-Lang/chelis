@@ -219,3 +219,77 @@ fn a_style_violation_is_still_bypassable_by_the_documented_flag() {
         "the documented bypass warns on stderr; got {stderr:?}"
     );
 }
+
+#[test]
+fn a_transported_message_is_a_machine_value_not_a_terminal_transcript() {
+    // The defect this pins is a class, not a spelling. Routing the style
+    // gate through the report first put its *stderr* text into the wire
+    // `message` verbatim: embedded newlines, an "N issue(s)" plural
+    // placeholder, the word "build" on a `check` surface, and the advice
+    // "pass `--allow-style-violations` to bypass (CI must not)". All of
+    // that is correct for a terminal and wrong for a machine-facing field
+    // -- it is the shape chelis#886 exists to remove, so reintroducing it
+    // while closing chelis#886 would be self-defeating.
+    //
+    // stderr keeps every bit of it. Only the report is constrained.
+    let dir = tempdir().expect("tempdir");
+
+    // Two lint violations in one file: the multi-issue case, which is the
+    // one a single joined string would have collapsed.
+    let path = write(
+        &dir,
+        "two.ch",
+        b"def BadName(x:f32)->f32=add(x,x)\ndef AlsoBad(y:f32)->f32=add(y,y)\n",
+    );
+    let (code, stdout, stderr) = check(&path);
+    let report: WireCheckResult =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}; {stdout}"));
+
+    assert_eq!(
+        report.errors.len(),
+        2,
+        "one diagnostic per issue, so the array length is the number of \
+         problems found; got {stdout}"
+    );
+    assert_eq!(code, Some(2));
+
+    for diagnostic in &report.errors {
+        assert!(
+            !diagnostic.message.contains('\n'),
+            "a transported message is one line; got {:?}",
+            diagnostic.message
+        );
+        for terminal_only in [
+            "issue(s)",
+            "--allow-style-violations",
+            "blocked the build",
+            "CI must not",
+        ] {
+            assert!(
+                !diagnostic.message.contains(terminal_only),
+                "{terminal_only:?} is terminal advice and belongs on stderr, \
+                 not in a machine-facing message; got {:?}",
+                diagnostic.message
+            );
+        }
+    }
+
+    // The negative half: stderr still carries the whole human report,
+    // including exactly the strings the wire must not.
+    assert!(
+        stderr.contains("2 issue(s)") && stderr.contains("--allow-style-violations"),
+        "the terminal keeps its summary and its advice; got {stderr:?}"
+    );
+
+    // And the single-issue case still produces exactly one.
+    let single = write(&dir, "ugly.ch", b"def  f(x:f32)->f32=add(x,x)\n");
+    let (_, stdout, _) = check(&single);
+    let report: WireCheckResult =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}; {stdout}"));
+    assert_eq!(
+        report.errors.len(),
+        1,
+        "one issue, one diagnostic: {stdout}"
+    );
+    assert!(!report.errors[0].message.contains('\n'));
+}
