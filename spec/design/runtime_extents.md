@@ -15,7 +15,7 @@ language rule and does not relax the numbered specs to match a baseline.
 
 ## Current state and remaining work
 
-The reference implementation state for the merged inventory is `a4c026870`.
+The reference implementation state for the merged inventory is `3fbc1df49`.
 The following are merged mechanisms, not a claim of complete class coverage.
 
 | delivery | merged PR | established behavior |
@@ -28,6 +28,7 @@ The following are merged mechanisms, not a claim of complete class coverage.
 | expand/insert decision and implementation | #1532, #1547, #1590 (`c8a5f1a75`) | one meaning per primitive; same-rank unit-extent guards; the lowering override is removed |
 | S2c | #1605 (`42ce46cdc`) | deferral recorder, stores, executor, settlement registry, and source-ordinal index removed |
 | B2b-0 | #1616 (`f6cfd2d72`) | seven existing phase-B rows receive passing receipts; no guard mechanism changes |
+| B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case #1619 exit passes |
 
 The extent carrier is no longer a display name, and sources/classes already
 exist. What remains is preservation of a claim and its caller witnesses,
@@ -63,7 +64,7 @@ Current failure boundaries:
   variables have other origins. The remaining early-return validation audit
   is open; neither the old census nor four `sum` probes closes it.
 
-B2b-0b's broadcast preparation repair addresses #1619: for `Expand` outputs
+B2b-0b's merged broadcast preparation repair addresses #1619: for `Expand` outputs
 without explicit named dimensions, C's anonymous-axis rewrite uses
 `output_axis_sources`, filling anonymous axes from their own size/kept-axis
 sources. Literal result claims survive, and an anonymous resolved number
@@ -76,7 +77,7 @@ the name without its unread declaring witness can newly execute a wrong
 shape. B2b-1 owns preservation and enforcement of those scoped claims.
 
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
-Literal inlining guards, op-computed local guards, and scoped claim transport
+Literal call/inlining obligations, op-computed local guards, and scoped claim transport
 remain separate obligations below. In particular, an inlined call with a
 non-unit argument still loses its runtime unit guard; repairing #1619's
 anonymous-output rewrite does not establish claim preservation through calls.
@@ -316,9 +317,8 @@ cardinality check. Recheck the current sigmoid/silu/gelu witnesses; the ReLU
 mechanism was removed by #1313.
 
 Record projection also needs an executable lowering route: the preparation
-alias fixture passes checking, but eval refuses runtime record `access` and
-C reaches #1619's wrong-source guard. Binding the field to a local is therefore
-only a checker control on this head. B2b-2 owns materializing the field's tensor
+alias fixture passes checking and C execution after #1658, but eval still
+refuses runtime record `access`. B2b-2 owns materializing the field's tensor
 as the actual shape input on that runtime-record route; #1266 requires both
 spelling variants to execute, not merely that the provenance error disappear.
 
@@ -340,7 +340,7 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
-The recorded phase-B corpus has 54 rows: 33 at exit,
+The recorded phase-B corpus has 55 rows: 34 at exit,
 21 short. This is baseline metadata, not a fresh execution receipt. The final
 command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
@@ -382,6 +382,38 @@ failure context. Phase B registers this execution receipt as
 baseline changes only the two #1619 C results and #1266's record-alias C
 result: all three now execute with their expected values. The record-alias
 Eval failure and direct-field failures remain; #1266 is still open.
+
+The next bounded B2b-0b kernel repair compares literal and resolved named
+claims against independent nonnegative runtime sizes at live `Expand` and
+`Reshape` nodes. A number in result metadata is a requirement, not a proof
+about the carrier. Both lanes consume the shared local sites, and C checks
+reshape claims before its legacy size-mismatch failure. Its acceptance command is:
+
+```sh
+cargo test -p chelis-backend-c --test exec_compile \
+  numeric_local_extent_claims_execute_exactly -- --exact --nocapture
+```
+
+The matrix executes 32 lane cases: literal/resolved-name claims, expand/reshape,
+computed scalar/computed tensor-axis carriers, and matching/mismatching sizes,
+on Eval and C. Positive cases assert exact shape and values; negative cases
+require the Domain trap, claimed value and observed node/axis value. Phase B
+registers it as `guard.local.numeric_carriers.eval_c`. This receipt does not
+cover claim formation from anonymous resolved metadata, negative-extent
+rendering, op-computed sources without carriers, or preservation through
+calls, inlining and dead-code elimination.
+
+The separate six-case #1377 prerequisite runner remains intentionally red:
+
+```sh
+cargo test -p chelis-cli --test runtime_extent_claim_preparation \
+  literal_result_claim_contract -- --ignored --exact --nocapture
+```
+
+It asserts the declared result and exact execution or required failure on
+exported calls, top-level bindings and inlined main. B2b-1 owns its complete
+exit; a passing kernel matrix cannot supply its missing declaration or call
+attribution.
 
 The suite's rows distinguish:
 
@@ -435,8 +467,8 @@ All are Slice B work under #1277 unless expressly separated.
 
 | owner | entry | deliverable and exit |
 |---|---|---|
-| B2b-0b: remaining local guards | merged B2r/S2b and the broadcast preparation repair above | literal-claim mismatches including #1377; op-computed local extents; exact positive/negative C/Eval rows |
-| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566 and #1397's declaration-erasure half |
+| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
+| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, and #1377's complete call/inlined-root exit |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
@@ -445,6 +477,11 @@ All are Slice B work under #1277 unless expressly separated.
 B2b-0b and B2b-1 can be developed as separate changes, but their shared local
 site integration must preserve both claim kinds. Claim transport is not an
 out-of-scope caller problem: it is precisely B2b-1's closure requirement.
+The six #1377 preparation fixtures expose this dependency: the reported
+literal result type is erased on every route, and the inlined mismatch loses
+its obligation. B2b-0b supplies the local guard consumer; B2b-1 retains the
+declaration, witness and call attribution that let that consumer enforce the
+public contract. Kernel guard tests alone cannot close #1377.
 B2b-root is separately bounded within #1397 so a declaration fix cannot
 silently close its broader root failure. #1378 stays open until the public
 witness executes; its typed Slice A mechanism need not be reimplemented.

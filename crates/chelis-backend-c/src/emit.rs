@@ -6671,7 +6671,7 @@ impl CEmitter {
         // equality-guarded) under the axis's symbolic dim name so the
         // `shape_literal` allocation below references a real C variable.
         for (axis, dim) in new_shape.iter().enumerate() {
-            if dim.node_input().is_none() {
+            if !matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }) {
                 continue;
             }
             let extent = Self::bound_c_expr(dim, inputs, a, axis, dag);
@@ -6679,8 +6679,8 @@ impl CEmitter {
                 "if (({extent}) < 0) {{ fprintf(stderr, \"chelis: runtime reshape target \
                  must be non-negative at node {id} axis {axis}\\n\"); abort(); }}"
             ));
-            self.emit_static_dim_guard(id, axis, &extent, ty.dims.get(axis));
             self.emit_runtime_dim_site(id, axis, &extent);
+            self.emit_static_dim_guard(id, axis, &extent, ty.dims.get(axis));
         }
         // The runtime's checked metadata owner validates this exact target
         // before either allocation or capacity-proven repurpose can occur.

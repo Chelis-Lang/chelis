@@ -140,6 +140,7 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "expand.shape_derived.declared_result_survives.c",
             "expand.shape_derived.declared_result_survives.eval",
             "guard_order.effect_after.eval",
+            "guard.local.numeric_carriers.eval_c",
             "guard_order.effect_before.eval",
             "guard_order.trap_after.c",
             "guard_order.trap_after.eval",
